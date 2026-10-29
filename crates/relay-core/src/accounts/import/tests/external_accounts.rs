@@ -1,6 +1,78 @@
 use super::*;
 
 #[test]
+fn siwc_token_hints_cannot_be_imported_as_legacy_codex() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    for claims in [
+        serde_json::json!({"scope":"openid chatgpt.tokens.use.direct"}),
+        serde_json::json!({"client_id":"oaiapp_synthetic"}),
+        serde_json::json!({"aud":["oaiapp_synthetic"]}),
+    ] {
+        let token = format!(
+            "e30.{}.synthetic",
+            URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        let parsed = parse_import(
+            &serde_json::json!({"access_token":token}).to_string(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(parsed.items.is_empty());
+        assert_eq!(
+            parsed.preview.rows[0].error.as_ref().unwrap().code,
+            ImportIssueCode::UnsupportedValue
+        );
+    }
+}
+
+#[test]
+fn import_accepts_free_native_and_bps_alongside_paid_or_unknown_plans() {
+    let input = serde_json::json!([
+        {"oauth_client_kind":"codex","access_token":"synthetic-native","plan_type":"free"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-free","plan_type":"Free"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-alias","plan_type":"chatgpt_free_tier"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-paid","plan_type":"plus"},
+        {"oauth_client_kind":"excel_bps","access_token":"synthetic-bps-unknown"}
+    ]);
+    let parsed = parse_import(&input.to_string(), None, &[]).unwrap();
+    assert_eq!(parsed.preview.rows.len(), 5);
+    assert_eq!(parsed.items.len(), 5);
+    for row in &parsed.preview.rows {
+        assert_ne!(row.status, ImportPreviewStatus::Invalid);
+        assert!(row.error.is_none());
+    }
+}
+
+#[test]
+fn import_does_not_reject_a_free_bps_token_claim_with_paid_metadata() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let token = format!(
+        "e30.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "client_id": crate::providers::chatgpt::BASIS_POINTS_OAUTH_CLIENT_ID,
+                "https://api.openai.com/auth": {"chatgpt_plan_type":"free"}
+            })
+            .to_string()
+        )
+    );
+    let parsed = parse_import(
+        &serde_json::json!({
+            "oauth_client_kind":"excel_bps",
+            "plan_type":"plus",
+            "access_token":token
+        })
+        .to_string(),
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(parsed.items.len(), 1);
+    assert!(parsed.preview.rows[0].error.is_none());
+}
+
+#[test]
 fn parses_sub2api_agent_identity_accounts() {
     let input = serde_json::json!({
         "type": "sub2api-data",
@@ -84,10 +156,12 @@ fn parses_cockpit_and_sub2api_nested_credential_shapes() {
         Some("user-nested")
     );
     assert!(nested_identity.items[0].account_is_fedramp);
-    assert!(nested_identity.items[0]
-        .secrets()
-        .agent_private_key()
-        .is_some());
+    assert!(
+        nested_identity.items[0]
+            .secrets()
+            .agent_private_key()
+            .is_some()
+    );
 
     let cockpit_tokens = parse_import(
         &format!(
@@ -130,10 +204,12 @@ fn parses_cockpit_and_sub2api_nested_credential_shapes() {
         Some("plus")
     );
     assert_eq!(cockpit_profile.preview.rows[0].label, "Cockpit profile");
-    assert!(!cockpit_profile.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::UnknownAuthMode));
+    assert!(
+        !cockpit_profile.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::UnknownAuthMode)
+    );
 }
 
 #[test]
@@ -154,10 +230,12 @@ fn imports_bounded_cockpit_tags_without_leaking_secrets() {
         BTreeSet::from(["team".to_string(), "work".to_string()])
     );
     assert_eq!(parsed.preview.rows[0].label, "Named account");
-    assert!(parsed.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::InvalidMetadataIgnored));
+    assert!(
+        parsed.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::InvalidMetadataIgnored)
+    );
 
     let debug = format!("{:?}", parsed.items[0]);
     assert!(debug.contains("tag_count"));

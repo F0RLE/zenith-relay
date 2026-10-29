@@ -2,18 +2,18 @@ use super::super::authority::{
     ProcessAccountGuard, ProcessAccountLocks, ProcessLockConfig, ProcessLockError,
 };
 use super::super::import_orchestrator::credential_local_error;
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::exports::normalize_account_ids;
 use crate::local_pool::accounts::proxy::ProxyPool;
-use crate::local_pool::accounts::NativeSecretBackend;
-use crate::local_pool::commands::{
-    fail_closed, fence_runtime_candidates, refresh_active_codex_catalog_in_background,
-};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot,
 };
 use crate::local_pool::profiles::codex;
+use crate::local_pool::runtime::{
+    fail_closed, fence_runtime_candidates, refresh_active_codex_catalog_in_background,
+};
 use crate::local_pool::state::DesktopState;
 use tauri::{AppHandle, State};
 
@@ -21,14 +21,16 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 
 mod cleanup;
 mod prepare;
+pub(crate) mod trash;
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use prepare::PreparedAccountDelete;
 pub(in crate::local_pool::accounts) use prepare::ensure_accounts_exist;
+#[cfg(test)]
+use prepare::rollback_prepared_delete;
 use prepare::{
     acquire_delete_credential_guards, delete_local_account_inner,
-    ensure_accounts_not_in_ownership_operation, ensure_delete_rollback_or_fail_closed,
-    prepare_delete_local_account, rollback_batch_delete,
+    ensure_delete_rollback_or_fail_closed, prepare_delete_local_account, rollback_batch_delete,
 };
-#[cfg(test)]
-use prepare::{rollback_prepared_delete, PreparedAccountDelete};
 
 pub(in crate::local_pool::accounts) use cleanup::{
     prune_account_task_selectors, restore_bound_account_profiles,
@@ -42,7 +44,6 @@ pub async fn delete_local_account(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, std::slice::from_ref(&account_id))?;
     delete_local_account_inner(&account_id, &state).await?;
     let snapshot = state.snapshot().await?;
     drop(_mutation);
@@ -58,13 +59,12 @@ pub async fn delete_local_accounts(
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
-    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     let existing_accounts = state.store()?.accounts().to_vec();
     ensure_accounts_exist(&existing_accounts, &account_ids)?;
     let runtime = state.gateway.runtime().await;
     let _dispatch_fences = fence_runtime_candidates(runtime.as_deref(), &account_ids, &[]);
-    let ids = account_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let _credential_guards = acquire_delete_credential_guards(&state, &ids).await?;
+    let account_id_refs = account_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let _credential_guards = acquire_delete_credential_guards(&state, &account_id_refs).await?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let initial_wake = state.wake_snapshot()?;
     let initial_automations = state.store()?.automations().clone();

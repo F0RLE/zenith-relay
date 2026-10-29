@@ -50,6 +50,7 @@ fn failed_automatic_discovery_keeps_the_source_without_advertising_models() {
         api_key: "secret".into(),
         wire_api: WireApi::Responses,
         models: Vec::new(),
+        proxy_url: None,
     };
     let configured = vec![SourceProtocolBinding {
         wire_api: WireApi::Responses,
@@ -77,6 +78,7 @@ fn detected_prices_follow_the_source_upstream() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         },
     );
     let base_url = source.base_url.clone();
@@ -89,12 +91,10 @@ fn detected_prices_follow_the_source_upstream() {
         detected_prices_for_upstream(&source, " https://provider.test/v1 ", &source.wire_api),
         source.detected_model_prices
     );
-    assert!(detected_prices_for_upstream(
-        &source,
-        "https://other-provider.test/v1",
-        &source.wire_api
-    )
-    .is_empty());
+    assert!(
+        detected_prices_for_upstream(&source, "https://other-provider.test/v1", &source.wire_api)
+            .is_empty()
+    );
     assert!(detected_prices_for_upstream(&source, &base_url, &WireApi::ChatCompletions).is_empty());
 }
 
@@ -142,25 +142,29 @@ fn mixed_binding_normalization_keeps_the_legacy_protocol_default_stable() {
     source.validate_protocol_bindings().unwrap();
 
     assert_eq!(source.wire_api, WireApi::Responses);
-    assert!(!source
-        .models_for_wire_api(WireApi::Responses)
-        .unwrap()
-        .is_empty());
-    assert!(!source
-        .models_for_wire_api(WireApi::Messages)
-        .unwrap()
-        .is_empty());
+    assert!(
+        !source
+            .models_for_wire_api(WireApi::Responses)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !source
+            .models_for_wire_api(WireApi::Messages)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
-fn source_probe_rejects_configuration_changes_but_ignores_runtime_status() {
+fn source_dispatch_fence_rejects_model_changes_but_ignores_runtime_status() {
     let before = source_record();
     let mut current = before.clone();
     current.last_test_status = Some("ok".into());
-    assert!(source_probe_matches(&before, &current));
+    assert!(!source_dispatch_configuration_changed(&before, &current));
 
     current.models.push("model-b".into());
-    assert!(!source_probe_matches(&before, &current));
+    assert!(source_dispatch_configuration_changed(&before, &current));
 }
 
 #[test]

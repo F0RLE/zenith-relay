@@ -4,6 +4,7 @@ mod members;
 pub use members::{account_member_key, source_member_key};
 mod ownership;
 mod projection;
+mod rate_limits;
 mod recovery;
 mod registry;
 mod reservations;
@@ -31,8 +32,8 @@ use crate::WireApi;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub use snapshot::{
-    ActiveModelRuntime, CandidateRuntimeSnapshot, ModelRetryRuntime, RoutingDiagnostics,
-    SelectionReason,
+    ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
+    ModelRetryRuntime, RequestTiming, RoutingDiagnostics, SelectionReason,
 };
 
 // Keep response ownership across busy personal pools without allowing an
@@ -72,7 +73,9 @@ pub struct Selection {
 #[derive(Clone, Debug)]
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
+    quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
     cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
+    shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
     activity: SchedulerActivity,
@@ -107,7 +110,9 @@ impl PoolScheduler {
     pub fn new() -> Self {
         Self {
             candidates: BTreeMap::new(),
+            quota_references: BTreeMap::new(),
             cooldown_reasons: BTreeMap::new(),
+            shared_rate_limits: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
                 RESPONSE_AFFINITY_TTL_MS,
@@ -162,15 +167,22 @@ impl PoolScheduler {
     ) -> Option<Selection> {
         let mut rotation_request = self.prepare_rotation_request(&request, operation)?;
         if let Some(allowed) = &mut rotation_request.allowed_candidates {
-            allowed.retain(|id| self.lane_allows(&self.candidates[id], lane));
+            allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
         }
         let owner = rotation_request.owner.clone();
         let selected = self.rotation.select(&rotation_request, request.now_ms)?;
         let reason = if owner.is_none()
             && !selected.recovery
             && self.rotation.mode() == RotationMode::Automatic
-            && selected.reason != super::rotation::RotationSelectionReason::QuotaHeadroom
-            && rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
+            && !matches!(
+                selected.reason,
+                super::rotation::RotationSelectionReason::QuotaHeadroom
+                    | super::rotation::RotationSelectionReason::ProviderCredits
+            )
+            && (rotation_request.preferred.as_deref() == Some(selected.candidate_id.as_str())
+                || rotation_request
+                    .warm_fallbacks
+                    .contains(&selected.candidate_id))
         {
             SelectionReason::PromptCacheAffinity
         } else {
@@ -184,7 +196,10 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::QuotaHeadroom => {
                     SelectionReason::QuotaHeadroom
                 }
-                super::rotation::RotationSelectionReason::PrimaryFirst => {
+                super::rotation::RotationSelectionReason::ProviderCredits => {
+                    SelectionReason::ProviderCredits
+                }
+                super::rotation::RotationSelectionReason::ManualPriority => {
                     SelectionReason::ManualPriority
                 }
                 super::rotation::RotationSelectionReason::WeightedRotation => {
@@ -199,12 +214,38 @@ impl PoolScheduler {
                 }
             }
         };
-        let diagnostics = self.diagnostics(
+        let mut diagnostics = self.diagnostics(
             &selected.candidate_id,
             reason,
             usize::try_from(selected.eligible_candidates).unwrap_or(usize::MAX),
             lane,
         )?;
+        if let Some(key) = request.prompt_affinity_key {
+            let preferred = rotation_request
+                .preferred
+                .as_deref()
+                .or_else(|| self.prompt_affinity.get(key, request.now_ms));
+            diagnostics.cache_affinity = self
+                .rotation
+                .cache_affinity_diagnostics(
+                    &rotation_request,
+                    preferred,
+                    &selected.candidate_id,
+                    request.now_ms,
+                )
+                .map(|mut evidence| {
+                    // Projection removes tried members from the allowed set;
+                    // preserve that known exclusion without changing admission.
+                    if evidence.owner_block_reason
+                        == Some(super::rotation::CandidateBlockReason::NotAllowed)
+                        && preferred.is_some_and(|id| request.tried.contains(id))
+                    {
+                        evidence.owner_block_reason =
+                            Some(super::rotation::CandidateBlockReason::AlreadyTried);
+                    }
+                    evidence
+                });
+        }
         Some(Selection {
             candidate_id: selected.candidate_id,
             response_affinity_hit: owner.is_some(),

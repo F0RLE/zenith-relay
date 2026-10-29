@@ -10,13 +10,18 @@ import type {
 } from "./activity";
 import type { PoolRoutingSnapshot } from "./pool";
 
+export type CodexMemoryStage = "extraction" | "consolidation";
+
+export type ModelCatalogIdentity = Pick<ModelSummary, "catalogProvider" | "catalogFamily"> & {
+  /** Position across complete member inventories, including saved rules and prices. */
+  catalogOrder?: number | null;
+};
+
 export type RuntimeSnapshot = {
   schemaVersion: number;
-  configurationRevision?: string | null;
-  runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
+  weeklyCapacityRevision?: number;
   gateway: {
     toolPolicy?: ToolPolicy;
-    basisPointsEnabled?: boolean;
     poolRouting?: PoolRoutingSnapshot;
     running: boolean;
     baseUrl: string;
@@ -26,7 +31,7 @@ export type RuntimeSnapshot = {
     defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
     /** Display metadata for the complete inventory, independent of routing rules. */
-    modelCatalog?: Record<string, Pick<ModelSummary, "catalogProvider" | "catalogFamily">>;
+    modelCatalog?: Record<string, ModelCatalogIdentity>;
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
     commonProxyId?: string | null;
@@ -34,16 +39,23 @@ export type RuntimeSnapshot = {
     quotaRequestTimeoutSeconds?: number;
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     codexBackgroundTasksEnabled?: boolean;
+    codexMemoryExtractionEnabled?: boolean;
+    codexMemoryConsolidationEnabled?: boolean;
     codexWebsocketsEnabled?: boolean;
     chatgptRetryUntilAvailable?: boolean;
     blockDegradedRoutesEnabled?: boolean;
+    codexTextModelsEnabled?: boolean;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
   capabilities: {
     features: string[];
-    supportedWireApis?: Array<"responses" | "chat_completions" | "messages" | "gemini">;
-    [key: string]: unknown;
+    accountConnectors?: Array<{
+      id: string;
+      providerFamily: "openai" | "anthropic" | "google" | "moonshot" | "xai" | "meta" | "cognition";
+      oauthClientKind?: "codex" | "siwc" | "excel_bps";
+      signInFlow: "authorization_code_pkce" | "dynamic_client_pkce" | "device_authorization";
+    }>;
   };
   sources: SourceSummary[];
   accounts: AccountSummary[];

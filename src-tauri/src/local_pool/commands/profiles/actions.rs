@@ -1,45 +1,8 @@
 use super::*;
 
 mod support;
-pub(in crate::local_pool::commands) use support::verify_remote_profile_binding;
-use support::{activate_account_profile, resolve_profile_dir};
-pub(super) use support::{
-    append_profile_rollback_error, append_remote_cleanup_error, profile_rotation_commit_state,
-    set_runtime_pool_interface_reserve,
-};
-
-#[tauri::command]
-pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    let profile_dir = default_codex_home();
-    if codex::credential_kind(&profile_dir, &state.profile_backup_root())?.is_none() {
-        return Ok(());
-    }
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-    let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = (|| {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-        } else {
-            None
-        };
-        let result = codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
-        rollback_history_on_error(&state, history_backup.as_deref(), result)
-    })();
-    if result.is_ok() {
-        set_runtime_pool_interface_reserve(&state, None, 0).await;
-    }
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
-}
-
-pub(crate) async fn prepare_ready_api_profile(state: &DesktopState) -> Result<bool, CommandError> {
-    let _mutation = state.setup_guard().await;
-    // Detach and attach belong to the same profile transaction, not a
-    // preparatory UI call that can discard the active connection on failure.
-    stop_codex_and_sync_account(state).await
-}
+use support::activate_account_profile;
+pub(super) use support::set_runtime_pool_interface_reserve;
 
 #[tauri::command]
 pub async fn stop_managed_codex_profile(
@@ -56,26 +19,15 @@ pub async fn launch_managed_codex_profile(
     let _mutation = state.setup_guard().await;
     // Catalog overrides are loaded by Codex on startup. Finish deferred
     // updates before launching; do not rescan or rewrite conversation history.
-    if is_codex_running() {
-        return Ok(());
-    }
     process::launch_after_catalog_refresh(
-        state.catalog_refresh_warning().is_some(),
+        !is_codex_running() && state.catalog_refresh_warning().is_some(),
         catalog::refresh_active_codex_catalog(&state),
-        |result| super::super::record_catalog_refresh_result(&state, result),
+        |catalog_refresh_result| {
+            super::super::record_catalog_refresh_result(&state, catalog_refresh_result)
+        },
         launch_codex_with_profile,
     )
     .await
-}
-
-#[tauri::command]
-pub async fn attach_codex_to_account(
-    account_id: String,
-    profile_dir: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<ProfileActivation, CommandError> {
-    let _mutation = state.setup_guard().await;
-    activate_account_profile(&account_id, profile_dir, &state).await
 }
 
 #[tauri::command]
@@ -84,7 +36,7 @@ pub async fn launch_codex_account(
     state: State<'_, DesktopState>,
 ) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    activate_account_profile(&account_id, None, &state).await
+    activate_account_profile(&account_id, &state).await
 }
 
 #[tauri::command]
@@ -93,15 +45,15 @@ pub async fn launch_codex_source(
     state: State<'_, DesktopState>,
 ) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    let source = state
+    let source_record = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    let response_models = validate_direct_source(&source)?;
+    let response_models = validate_direct_source(&source_record)?;
     let api_key = load_direct_source_api_key(
-        &source.base_url,
-        &source.secret_ref,
+        &source_record.base_url,
+        &source_record.secret_ref,
         secret_store::load,
         load_api_key_for_launch,
         secret_store::save,
@@ -119,76 +71,46 @@ pub async fn launch_codex_source(
         )
         .into());
     }
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
+    let catalog = match catalog {
+        Some(catalog) => Some(super::catalog::context_catalog(&state, &catalog)?),
+        None => None,
+    };
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = (|| {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(
-                &state,
-                &profile_dir,
-                CodexHistoryProvider::LocalGateway,
-            )?
-        } else {
-            None
-        };
-        let result = codex::attach_with_catalog(
+    let attach_result = with_chatgpt_context(&state, &profile_dir, || {
+        let history_backup = synchronize_history_for_command(
+            &state,
+            &profile_dir,
+            CodexHistoryProvider::LocalGateway,
+        )?;
+        let profile_attach_result = codex::attach_with_catalog(
             &profile_dir,
             &state.profile_backup_root(),
-            &source.id,
-            &source.base_url,
+            &source_record.id,
+            &source_record.base_url,
             &api_key,
             catalog.as_deref().expect("validated direct source catalog"),
         )
         .map(|binding| ProfileActivation { binding })
         .map_err(Into::into);
-        rollback_history_on_error(&state, history_backup.as_deref(), result)
-    })();
-    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
-    if result.is_ok() {
+        rollback_history_on_error(&state, history_backup.as_deref(), profile_attach_result)
+    });
+    let activation_result =
+        restart_codex_after_failed_change(stopped, attach_result, launch_codex_with_profile);
+    if activation_result.is_ok() {
         set_runtime_pool_interface_reserve(&state, None, 0).await;
         state.record_catalog_refresh_result(None);
     }
-    result
+    activation_result
 }
 
 #[tauri::command]
-pub fn list_codex_account_bindings(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<codex::ProfileBinding>, CommandError> {
-    codex::profile_bindings(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn restore_codex_account_profile(
-    profile_dir: Option<String>,
-    state: State<'_, DesktopState>,
-) -> Result<Option<codex::ProfileBinding>, CommandError> {
-    let _mutation = state.setup_guard().await;
-    let profile_dir = resolve_profile_dir(profile_dir)?;
-    let sync_history =
-        history_provider_changed(&state, &profile_dir, CodexHistoryProvider::ChatGpt)
-            .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-    let stopped = stop_codex_and_sync_account_at(&state, &profile_dir).await?;
-    let result = (|| {
-        let history_backup = if sync_history {
-            synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::ChatGpt)?
-        } else {
-            None
-        };
-        let result = codex::restore_account_profile(&profile_dir, &state.profile_backup_root())
-            .map_err(Into::into);
-        rollback_history_on_error(&state, history_backup.as_deref(), result)
-    })();
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
-}
-
-#[tauri::command]
-pub fn list_codex_profile_snapshots(
+pub async fn list_codex_profile_snapshots(
     state: State<'_, DesktopState>,
 ) -> Result<snapshots::ProfileSnapshotList, CommandError> {
-    snapshots::list(&state.profile_backup_root()).map_err(Into::into)
+    let backup_root = state.profile_backup_root();
+    super::super::run_blocking(move || snapshots::list(&backup_root))
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -198,9 +120,10 @@ pub async fn create_codex_profile_snapshot(
 ) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
     let _mutation = state.setup_guard().await;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
-        .map_err(Into::into);
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
+    let snapshot_create_result =
+        snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
+            .map_err(Into::into);
+    restart_codex_after_restore(stopped, snapshot_create_result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -210,13 +133,13 @@ pub async fn restore_full_codex_profile_snapshot(
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result = snapshots::restore_full(
+    let snapshot_restore_result = snapshots::restore_full(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
     )
     .map_err(Into::into);
-    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
+    restart_codex_after_restore(stopped, snapshot_restore_result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -239,7 +162,7 @@ pub(crate) async fn restore_managed_profiles_before_reset(
     }
 
     let stopped = stop_codex_for_profile_change()?;
-    let result: Result<(), CommandError> = async {
+    let restore_all_result: Result<(), CommandError> = async {
         let mut account_ids = bindings
             .iter()
             .filter(|binding| binding.credential_kind == codex::ProfileCredentialKind::OAuthAccount)
@@ -263,23 +186,18 @@ pub(crate) async fn restore_managed_profiles_before_reset(
         }
         for binding in bindings {
             let profile = Path::new(&binding.profile_dir);
-            let sync_history =
-                history_provider_changed(state, profile, CodexHistoryProvider::ChatGpt)
-                    .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
-            let history_backup = if sync_history {
-                synchronize_history_for_command(state, profile, CodexHistoryProvider::ChatGpt)?
-            } else {
-                None
-            };
+            let history_backup =
+                synchronize_history_for_command(state, profile, CodexHistoryProvider::ChatGpt)?;
             let restored = codex::restore(profile, &backup_root).map_err(Into::into);
             rollback_history_on_error(state, history_backup.as_deref(), restored)?;
         }
         Ok(())
     }
     .await;
-    let result = restart_codex_after_restore(stopped, result, launch_codex_with_profile);
-    if result.is_ok() {
+    let restart_result =
+        restart_codex_after_restore(stopped, restore_all_result, launch_codex_with_profile);
+    if restart_result.is_ok() {
         set_runtime_pool_interface_reserve(state, None, 0).await;
     }
-    result
+    restart_result
 }

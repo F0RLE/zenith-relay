@@ -9,7 +9,7 @@ mod catalog;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub(crate) use catalog::catalog_stats;
+pub(crate) use catalog::{catalog_stats, catalog_stats_with_sizes, serialized_bytes};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,28 +58,12 @@ impl<'de> Deserialize<'de> for ToolPolicy {
             _legacy_automatic_schema_bytes_threshold: Option<serde::de::IgnoredAny>,
         }
 
-        let raw = RawToolPolicy::deserialize(deserializer)?;
+        let raw_policy = RawToolPolicy::deserialize(deserializer)?;
         let defaults = Self::default();
         Ok(Self {
-            mode: raw.mode.unwrap_or(defaults.mode),
+            mode: raw_policy.mode.unwrap_or(defaults.mode),
         })
     }
-}
-
-impl ToolPolicy {
-    pub fn normalized(self) -> Result<Self, &'static str> {
-        // Retired count/size thresholds are accepted only by the deserializer
-        // for compatibility and are not part of the current policy.
-        Ok(self)
-    }
-}
-
-/// Compare-and-set contract shared by desktop IPC and remote management.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ToolPolicyUpdate {
-    pub policy: ToolPolicy,
-    pub expected_policy: ToolPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -101,22 +85,25 @@ pub enum ToolPolicyOutcome {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CatalogStats {
     pub count: u16,
-    /// Compact JSON bytes for catalog arrays, not a token/billing estimate.
+    /// Compact JSON size of catalog arrays, in bytes.
     pub bytes: u64,
+    pub deferred_search: bool,
 }
 
 pub(crate) struct ToolPolicyResult {
     pub before: CatalogStats,
     pub after: CatalogStats,
     pub outcome: ToolPolicyOutcome,
+    pub context: Option<crate::usage::RequestContextSize>,
 }
 
-/// Records catalog size. The request itself is never rewritten.
+/// Records policy counters and optional sizes without rewriting the request.
 pub(crate) fn apply_tool_policy(
-    request: &mut Value,
+    request: &Value,
     policy: &ToolPolicy,
+    diagnostics_enabled: bool,
 ) -> Result<ToolPolicyResult, &'static str> {
-    let stats = catalog_stats(request);
+    let stats = catalog::catalog_stats_with_sizes(request, diagnostics_enabled);
     let outcome = match policy.mode {
         ToolPolicyMode::PassThrough => ToolPolicyOutcome::PassThrough,
         ToolPolicyMode::Automatic => ToolPolicyOutcome::Unchanged,
@@ -125,6 +112,9 @@ pub(crate) fn apply_tool_policy(
         before: stats,
         after: stats,
         outcome,
+        context: diagnostics_enabled.then(|| {
+            crate::usage::RequestContextSize::capture_with_catalog_bytes(request, stats.bytes)
+        }),
     })
 }
 

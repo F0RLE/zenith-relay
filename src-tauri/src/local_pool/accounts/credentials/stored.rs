@@ -1,15 +1,16 @@
-use super::error::{bearer_authorization, CredentialError, CredentialErrorCode};
+use super::error::{CredentialError, CredentialErrorCode, bearer_authorization};
 use super::wire::{
-    mask_email, validate_local_account_id, validate_optional, validate_token, AgentIdentityWire,
-    CredentialWire, CREDENTIAL_VERSION, MAX_EMAIL_BYTES, MAX_ID_BYTES, MAX_PLAN_BYTES,
-    MAX_TOKEN_BYTES,
+    AgentIdentityWire, CREDENTIAL_VERSION, CredentialWire, MAX_EMAIL_BYTES, MAX_ID_BYTES,
+    MAX_PLAN_BYTES, MAX_TOKEN_BYTES, mask_email, validate_local_account_id, validate_optional,
+    validate_token,
 };
+use crate::local_pool::accounts::oauth::OAuthClientKind;
 use reqwest::header::HeaderValue;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use zenith_relay_core::accounts::access_token_is_usable;
 use zenith_relay_core::omit_blank;
-use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, BasisPointsCapturedHeaders};
 
 mod login;
 mod refresh;
@@ -18,9 +19,18 @@ mod tokens;
 
 pub use refresh::CredentialRefresh;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(in crate::local_pool::accounts::credentials) struct RefreshRetry {
+    failures: u8,
+    failed_at_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct StoredCodexCredentials {
     version: u32,
+    oauth_client_kind: OAuthClientKind,
+    siwc: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
     local_account_id: String,
     access_token: String,
     refresh_token: Option<String>,
@@ -28,6 +38,7 @@ pub struct StoredCodexCredentials {
     expires_at_ms: Option<u64>,
     issued_at_ms: u64,
     generation: u64,
+    refresh_retry: Option<RefreshRetry>,
     email: Option<String>,
     phone: Option<String>,
     password: Option<String>,
@@ -40,6 +51,7 @@ pub struct StoredCodexCredentials {
     proxy_url: Option<String>,
     bypass_common_proxy: bool,
     agent_identity: Option<AgentIdentityCredential>,
+    basis_points_headers: Option<BasisPointsCapturedHeaders>,
 }
 
 impl StoredCodexCredentials {
@@ -68,8 +80,15 @@ impl StoredCodexCredentials {
         validate_optional(provider_user_id.as_deref(), MAX_ID_BYTES)?;
         validate_optional(organization_id.as_deref(), MAX_ID_BYTES)?;
         validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
+        let expires_at_ms = expires_at_ms.or_else(|| {
+            let claims: serde_json::Value =
+                zenith_relay_core::accounts::decode_unverified_jwt_payload(&access_token)?;
+            claims.get("exp")?.as_u64()?.checked_mul(1_000)
+        });
         Ok(Self {
             version: CREDENTIAL_VERSION,
+            oauth_client_kind: OAuthClientKind::Codex,
+            siwc: None,
             local_account_id: local_account_id.to_string(),
             access_token,
             refresh_token: omit_blank(refresh_token),
@@ -77,6 +96,7 @@ impl StoredCodexCredentials {
             expires_at_ms,
             issued_at_ms,
             generation,
+            refresh_retry: None,
             email: omit_blank(email),
             phone: None,
             password: None,
@@ -89,6 +109,7 @@ impl StoredCodexCredentials {
             proxy_url: None,
             bypass_common_proxy: false,
             agent_identity: None,
+            basis_points_headers: None,
         })
     }
 
@@ -113,6 +134,8 @@ impl StoredCodexCredentials {
         validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
         Ok(Self {
             version: CREDENTIAL_VERSION,
+            oauth_client_kind: OAuthClientKind::Codex,
+            siwc: None,
             local_account_id: local_account_id.to_string(),
             access_token: String::new(),
             refresh_token: None,
@@ -120,6 +143,7 @@ impl StoredCodexCredentials {
             expires_at_ms: None,
             issued_at_ms,
             generation,
+            refresh_retry: None,
             email: omit_blank(email),
             phone: None,
             password: None,
@@ -132,11 +156,49 @@ impl StoredCodexCredentials {
             proxy_url: None,
             bypass_common_proxy: false,
             agent_identity: Some(agent_identity),
+            basis_points_headers: None,
         })
     }
 
     pub fn local_account_id(&self) -> &str {
         &self.local_account_id
+    }
+
+    pub fn oauth_client_kind(&self) -> OAuthClientKind {
+        self.oauth_client_kind
+    }
+
+    pub fn siwc_registration(
+        &self,
+    ) -> Option<&crate::local_pool::accounts::oauth::siwc::SiwcRegistration> {
+        self.siwc.as_ref()
+    }
+
+    pub fn with_siwc_registration(
+        mut self,
+        registration: Option<crate::local_pool::accounts::oauth::siwc::SiwcRegistration>,
+    ) -> Result<Self, CredentialError> {
+        if (self.oauth_client_kind == OAuthClientKind::Siwc) != registration.is_some()
+            || registration.as_ref().is_some_and(|r| {
+                r.validate().is_err()
+                    || self.agent_identity.is_some()
+                    || self.basis_points_headers.is_some()
+                    || self.provider_account_id.as_deref() != Some(r.identity_key().as_str())
+                    || self.provider_user_id.as_deref() != Some(r.subject.as_str())
+            })
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "SIWC registration does not match the stored connection",
+            ));
+        }
+        self.siwc = registration;
+        Ok(self)
+    }
+
+    pub fn with_oauth_client_kind(mut self, kind: OAuthClientKind) -> Self {
+        self.oauth_client_kind = kind;
+        self
     }
 
     pub fn access_token(&self) -> &str {
@@ -173,11 +235,41 @@ impl StoredCodexCredentials {
         self.agent_identity.is_some()
     }
 
+    pub fn basis_points_headers(&self) -> Option<&BasisPointsCapturedHeaders> {
+        self.basis_points_headers.as_ref()
+    }
+
+    pub fn with_basis_points_headers(
+        mut self,
+        headers: Option<BasisPointsCapturedHeaders>,
+    ) -> Result<Self, CredentialError> {
+        if let Some(headers) = headers.as_ref() {
+            headers.validate().map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored Basis Points headers are invalid",
+                )
+            })?;
+        }
+        self.basis_points_headers = headers;
+        Ok(self)
+    }
+
     pub fn has_oauth(&self) -> bool {
         !self.access_token.is_empty()
     }
 
     pub fn authorization(&self, now_ms: u64) -> Result<HeaderValue, CredentialError> {
+        if self
+            .siwc
+            .as_ref()
+            .is_some_and(|r| r.requires_reauthentication)
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "Imported SIWC registrations require sign-in before use",
+            ));
+        }
         if let Some(agent) = self.agent_identity.as_ref() {
             return agent.authorization(now_ms).map_err(|_| {
                 CredentialError::new(
@@ -246,6 +338,11 @@ impl StoredCodexCredentials {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
+        let refresh_skew_ms = if self.refresh_token.is_some() {
+            refresh_skew_ms
+        } else {
+            0
+        };
         access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 }
@@ -255,6 +352,7 @@ impl fmt::Debug for StoredCodexCredentials {
         formatter
             .debug_struct("StoredCodexCredentials")
             .field("version", &self.version)
+            .field("oauth_client_kind", &self.oauth_client_kind)
             .field("local_account_id", &self.local_account_id)
             .field("access_token", &"[redacted]")
             .field(
@@ -289,33 +387,40 @@ impl fmt::Debug for StoredCodexCredentials {
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[redacted]"))
             .field("bypass_common_proxy", &self.bypass_common_proxy)
             .field("agent_identity", &self.agent_identity)
+            .field(
+                "basis_points_headers",
+                &self.basis_points_headers.as_ref().map(|_| "[redacted]"),
+            )
             .finish()
     }
 }
 
 impl From<&StoredCodexCredentials> for CredentialWire {
-    fn from(value: &StoredCodexCredentials) -> Self {
+    fn from(credentials: &StoredCodexCredentials) -> Self {
         Self {
-            version: value.version,
-            local_account_id: value.local_account_id.clone(),
-            access_token: value.access_token.clone(),
-            refresh_token: value.refresh_token.clone(),
-            id_token: value.id_token.clone(),
-            expires_at_ms: value.expires_at_ms,
-            issued_at_ms: value.issued_at_ms,
-            generation: value.generation,
-            email: value.email.clone(),
-            phone: value.phone.clone(),
-            password: value.password.clone(),
-            totp_secret: value.totp_secret.clone(),
-            provider_account_id: value.provider_account_id.clone(),
-            provider_user_id: value.provider_user_id.clone(),
-            organization_id: value.organization_id.clone(),
-            plan_type: value.plan_type.clone(),
-            account_is_fedramp: value.account_is_fedramp,
-            proxy_url: value.proxy_url.clone(),
-            bypass_common_proxy: value.bypass_common_proxy,
-            agent_identity: value
+            version: credentials.version,
+            oauth_client_kind: credentials.oauth_client_kind,
+            siwc: credentials.siwc.clone(),
+            local_account_id: credentials.local_account_id.clone(),
+            access_token: credentials.access_token.clone(),
+            refresh_token: credentials.refresh_token.clone(),
+            id_token: credentials.id_token.clone(),
+            expires_at_ms: credentials.expires_at_ms,
+            issued_at_ms: credentials.issued_at_ms,
+            generation: credentials.generation,
+            refresh_retry: credentials.refresh_retry,
+            email: credentials.email.clone(),
+            phone: credentials.phone.clone(),
+            password: credentials.password.clone(),
+            totp_secret: credentials.totp_secret.clone(),
+            provider_account_id: credentials.provider_account_id.clone(),
+            provider_user_id: credentials.provider_user_id.clone(),
+            organization_id: credentials.organization_id.clone(),
+            plan_type: credentials.plan_type.clone(),
+            account_is_fedramp: credentials.account_is_fedramp,
+            proxy_url: credentials.proxy_url.clone(),
+            bypass_common_proxy: credentials.bypass_common_proxy,
+            agent_identity: credentials
                 .agent_identity
                 .as_ref()
                 .map(|agent| AgentIdentityWire {
@@ -323,6 +428,7 @@ impl From<&StoredCodexCredentials> for CredentialWire {
                     runtime_id: agent.runtime_id().to_string(),
                     task_id: agent.task_id().map(str::to_string),
                 }),
+            basis_points_headers: credentials.basis_points_headers.clone(),
         }
     }
 }
@@ -348,7 +454,7 @@ impl StoredCodexCredentials {
             ));
         }
         self.proxy_url = proxy_url
-            .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+            .map(|proxy_url| zenith_relay_core::normalize_proxy_url(&proxy_url))
             .transpose()
             .map_err(|_| {
                 CredentialError::new(
@@ -372,6 +478,8 @@ impl StoredCodexCredentials {
     /// rotation for the same local account.
     pub fn matches_snapshot(&self, other: &Self) -> bool {
         self.version == other.version
+            && self.oauth_client_kind == other.oauth_client_kind
+            && self.siwc == other.siwc
             && self.local_account_id == other.local_account_id
             && self.access_token == other.access_token
             && self.refresh_token == other.refresh_token
@@ -379,6 +487,7 @@ impl StoredCodexCredentials {
             && self.expires_at_ms == other.expires_at_ms
             && self.issued_at_ms == other.issued_at_ms
             && self.generation == other.generation
+            && self.refresh_retry == other.refresh_retry
             && self.email == other.email
             && self.phone == other.phone
             && self.password == other.password
@@ -390,6 +499,7 @@ impl StoredCodexCredentials {
             && self.account_is_fedramp == other.account_is_fedramp
             && self.proxy_url == other.proxy_url
             && self.bypass_common_proxy == other.bypass_common_proxy
+            && self.basis_points_headers == other.basis_points_headers
             && match (&self.agent_identity, &other.agent_identity) {
                 (None, None) => true,
                 (Some(left), Some(right)) => {
@@ -401,9 +511,26 @@ impl StoredCodexCredentials {
             }
     }
 
-    pub fn snapshots_match(current: Option<&Self>, expected: Option<&Self>) -> bool {
-        match (current, expected) {
-            (Some(current), Some(expected)) => current.matches_snapshot(expected),
+    pub(in crate::local_pool::accounts) fn matches_siwc_grant(&self, other: &Self) -> bool {
+        self.siwc.is_some() && self.matches_refresh_grant(other)
+    }
+
+    pub(in crate::local_pool::accounts) fn matches_refresh_grant(&self, other: &Self) -> bool {
+        self.siwc == other.siwc
+            && self.local_account_id == other.local_account_id
+            && self.oauth_client_kind == other.oauth_client_kind
+            && self.provider_account_id == other.provider_account_id
+            && self.provider_user_id == other.provider_user_id
+            && self.generation == other.generation
+            && self.issued_at_ms == other.issued_at_ms
+            && self.access_token == other.access_token
+            && self.refresh_token == other.refresh_token
+            && self.id_token == other.id_token
+    }
+
+    pub fn snapshots_match(stored: Option<&Self>, expected: Option<&Self>) -> bool {
+        match (stored, expected) {
+            (Some(stored), Some(expected)) => stored.matches_snapshot(expected),
             (None, None) => true,
             _ => false,
         }
@@ -412,6 +539,7 @@ impl StoredCodexCredentials {
     pub fn snapshot(&self) -> StoredCredentialSnapshot {
         StoredCredentialSnapshot {
             version: self.version,
+            oauth_client_kind: self.oauth_client_kind,
             local_account_id: self.local_account_id.clone(),
             identity: self.email.as_deref().map(mask_email),
             has_refresh_token: self.refresh_token.is_some(),
@@ -432,6 +560,7 @@ impl StoredCodexCredentials {
 #[serde(rename_all = "camelCase")]
 pub struct StoredCredentialSnapshot {
     pub version: u32,
+    pub oauth_client_kind: OAuthClientKind,
     pub local_account_id: String,
     pub identity: Option<String>,
     pub has_refresh_token: bool,

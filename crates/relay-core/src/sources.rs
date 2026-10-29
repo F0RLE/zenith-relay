@@ -3,31 +3,33 @@ mod connector;
 mod discovery;
 mod observations;
 mod probe;
+mod services;
 pub use observations::SourceRead;
 mod stats;
 
 pub use probe::{
-    probe_source_generation, probe_source_generation_with_scope, SourceProbeInput,
-    SourceProbeResult,
+    SourceProbeInput, SourceProbeResult, probe_source_generation,
+    probe_source_generation_with_scope,
 };
 
 pub use capabilities::{
-    endpoint_url_protocol, service_protocol, CapabilityOrigin, CapabilityStatus,
-    ModelEndpointCapability, ProtocolFeature, SourceProtocolConfig, SourceProtocolResolution,
+    CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ModelTokenLimits, ProtocolFeature,
+    SourceProtocolConfig, SourceProtocolResolution, endpoint_url_protocol, service_protocol,
 };
 pub use connector::SourceConnector;
 pub(crate) use discovery::discover_models_with_client;
 pub use discovery::{
-    discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
-    discover_source_with_protocol_config_with_scope, read_source_models,
-    read_source_models_with_scope, source_catalog_changed, SourceCatalogEvidence,
-    SourceCatalogRecord, SourceDiscovery,
+    SourceCatalogEvidence, SourceCatalogRecord, SourceDiscovery, discover_source_models,
+    discover_source_models_and_protocol_bindings, discover_source_models_for_protocol_bindings,
+    discover_source_with_protocol_config, discover_source_with_protocol_config_with_scope,
+    read_source_models, read_source_models_with_scope, source_catalog_changed,
 };
 pub use stats::{
-    fetch_source_provider_stats, read_source_provider_stats, read_source_provider_stats_with_scope,
     SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,
-    SourceStatsProvider, SourceStatsStatus,
+    SourceStatsProvider, SourceStatsStatus, fetch_source_provider_stats,
+    fetch_source_provider_stats_with_proxy, read_source_provider_stats,
+    read_source_provider_stats_with_proxy, read_source_provider_stats_with_scope,
+    read_source_provider_stats_with_scope_and_proxy,
 };
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
@@ -43,15 +45,15 @@ mod provider;
 mod wire;
 
 pub use binding::{
-    cache_write_model_ids, normalize_source_protocol_bindings,
-    runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
-    runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
-    runtime_source_supports_any_wire_api, runtime_source_supports_wire_api,
-    source_models_for_wire_api, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceProtocolBinding, SourceProtocolBindingKey, cache_write_model_ids,
+    normalize_source_protocol_bindings, runtime_source_models_for_any_wire_api,
+    runtime_source_models_for_wire_api, runtime_source_models_with_cache_write_pricing,
+    runtime_source_protocol_bindings, runtime_source_supports_any_wire_api,
+    runtime_source_supports_wire_api, source_models_for_wire_api,
 };
 pub use provider::{
-    is_http_endpoint, is_loopback_url, source_points_to_gateway, url_has_userinfo, LocalGatewayKey,
-    ProviderSource,
+    LocalGatewayKey, ProviderSource, is_http_endpoint, is_loopback_url, source_points_to_gateway,
+    url_has_userinfo,
 };
 pub(crate) use provider::{normalized_base_url, redact_url};
 pub use wire::{CacheWriteTtl, WireApi};
@@ -66,6 +68,7 @@ pub struct SourceTransportIdentity<'a> {
     pub id: &'a str,
     pub base_url: &'a str,
     pub secret_ref: &'a str,
+    pub proxy_id: Option<&'a str>,
     pub wire_api: WireApi,
     pub protocol_bindings: &'a [SourceProtocolBinding],
     pub protocol_config: &'a SourceProtocolConfig,
@@ -85,15 +88,27 @@ impl SourceTransportRecord for SourceTransportIdentity<'_> {
 
 /// A hot policy update is safe only when every source keeps the same runtime.
 pub fn source_runtime_policy_compatible<T: SourceTransportRecord>(
-    previous: &[T],
-    next: &[T],
+    previous_sources: &[T],
+    updated_sources: &[T],
 ) -> bool {
-    previous.len() == next.len()
-        && previous.iter().all(|source| {
-            let source = source.transport_identity();
-            next.iter()
-                .any(|candidate| candidate.transport_identity() == source)
-        })
+    if previous_sources.len() != updated_sources.len() {
+        return false;
+    }
+    // A keyed snapshot avoids quadratic rescanning on large inventories and
+    // refuses ambiguous duplicate identities instead of matching one twice.
+    let mut updated = BTreeMap::new();
+    for source in updated_sources {
+        let identity = source.transport_identity();
+        if updated.insert(identity.id, identity).is_some() {
+            return false;
+        }
+    }
+    previous_sources.iter().all(|source| {
+        let identity = source.transport_identity();
+        updated
+            .remove(identity.id)
+            .is_some_and(|candidate| candidate == identity)
+    })
 }
 
 /// Writes operator priorities onto existing sources.

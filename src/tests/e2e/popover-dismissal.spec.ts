@@ -64,7 +64,7 @@ test("transient menus close when the user clicks outside", async ({ page }) => {
   await modeTrigger.click();
   const modeMenu = page.getByRole("menu");
   await expect(modeMenu).toBeVisible();
-  await page.mouse.click(420, 120);
+  await page.locator(".titlebar strong").click();
   await expect(modeMenu).toBeHidden();
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -107,7 +107,7 @@ test("context menu closes outside and keeps its keyboard contract", async ({ pag
   });
   const menu = page.getByRole("menu", { name: "Context menu" });
   await expect(menu).toBeVisible();
-  await page.mouse.click(420, 120);
+  await page.locator(".titlebar strong").click();
   await expect(menu).toBeHidden();
 
   await search.evaluate((element) => {
@@ -129,15 +129,15 @@ test("mobile help contents and usage hint close outside", async ({ page }) => {
   const contentsToggle = page.locator(".help-contents-toggle");
   await contentsToggle.click();
   await expect(contentsToggle).toHaveAttribute("aria-expanded", "true");
-  await page.mouse.click(16, 720);
+  await page.locator(".titlebar strong").click();
   await expect(contentsToggle).toHaveAttribute("aria-expanded", "false");
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await page.locator(".usage-account-menu").getByRole("button").click();
+  await page.getByRole("button", { name: /^Pool member:/ }).click();
   await page.getByRole("option", { name: "Personal Plus", exact: true }).click();
   const accountSummary = page.locator(".usage-account-value");
   await accountSummary.locator("summary").click();
   await expect(accountSummary.locator("details")).toHaveAttribute("open", "");
-  await page.mouse.click(16, 720);
+  await page.locator(".titlebar strong").click();
   await expect(accountSummary.locator("details")).not.toHaveAttribute("open", "");
 });

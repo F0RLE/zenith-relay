@@ -2,12 +2,20 @@ use super::*;
 use std::sync::Arc;
 use zenith_relay_core::{GatewayRuntime, LocalGatewayKey, ProviderSource, WireApi};
 
+#[test]
+fn revoked_provider_grant_cannot_be_reopened_by_local_rollback() {
+    assert!(prepare::ensure_provider_rollback_possible(false).is_ok());
+    assert_eq!(
+        prepare::ensure_provider_rollback_possible(true)
+            .unwrap_err()
+            .code,
+        ErrorCode::RecoveryRequired
+    );
+}
+
 #[tokio::test]
 async fn incomplete_delete_rollback_closes_the_old_gateway() {
-    let root = std::env::temp_dir().join(format!(
-        "relay-delete-fail-closed-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("relay-delete-fail-closed");
     let state = DesktopState::open(root.clone()).unwrap();
     let runtime = Arc::new(
         GatewayRuntime::new(
@@ -18,6 +26,7 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
                 api_key: "synthetic-upstream".into(),
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-test".into()],
+                proxy_url: None,
             },
             LocalGatewayKey {
                 id: "synthetic-key".into(),
@@ -34,7 +43,7 @@ async fn incomplete_delete_rollback_closes_the_old_gateway() {
     assert!(!_dispatch_fences.is_empty());
 
     let deleted = PreparedAccountDelete {
-        account_id: "synthetic-account".into(),
+        provider_revoked: false,
         old_credential: None,
         previous_wake: state.wake_snapshot().unwrap(),
         old_automations: state.store().unwrap().automations().clone(),
@@ -77,10 +86,7 @@ async fn delete_waits_for_the_same_credential_lock_as_refresh() {
     use futures_util::poll;
     use std::task::Poll;
 
-    let root = std::env::temp_dir().join(format!(
-        "relay-delete-credential-lock-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("relay-delete-credential-lock");
     let state = DesktopState::open(root.clone()).unwrap();
     let locks =
         ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())

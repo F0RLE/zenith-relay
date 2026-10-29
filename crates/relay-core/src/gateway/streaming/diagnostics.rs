@@ -1,9 +1,47 @@
 use crate::{error_codes, usage::UpstreamErrorDetails};
 use serde_json::json;
 
+pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> UpstreamErrorDetails {
+    let mut source = Some(error);
+    let mut timeout = false;
+    let mut body = false;
+    let mut decode = false;
+    let mut io = "unknown";
+    // Error Display strings and URLs may contain credentials or provider data.
+    // Inspect a bounded source chain for fixed transport categories only.
+    for _ in 0..8 {
+        let Some(current) = source else { break };
+        if let Some(error) = current.downcast_ref::<reqwest::Error>() {
+            timeout |= error.is_timeout();
+            body |= error.is_body();
+            decode |= error.is_decode();
+        }
+        if let Some(error) = current.downcast_ref::<std::io::Error>() {
+            timeout |= error.kind() == std::io::ErrorKind::TimedOut;
+            io = match error.kind() {
+                std::io::ErrorKind::TimedOut => "timed_out",
+                std::io::ErrorKind::ConnectionReset => "connection_reset",
+                std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+                std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+                std::io::ErrorKind::BrokenPipe => "broken_pipe",
+                _ => "other",
+            };
+        }
+        source = current.source();
+    }
+    UpstreamErrorDetails::from_value(
+        None,
+        &json!({
+            "code": error_codes::UPSTREAM_STREAM,
+            "type": "relay_stream_transport",
+            "message": format!("Relay stream transport: timeout={timeout}; body={body}; decode={decode}; io={io}"),
+        }),
+    )
+}
+
 pub(super) fn invalid_event(
     frame: &[u8],
-    data: &[u8],
+    sse_data: &[u8],
     error: &serde_json::Error,
 ) -> UpstreamErrorDetails {
     let mut data_lines = 0;
@@ -18,7 +56,7 @@ pub(super) fn invalid_event(
         .enumerate()
         .filter(|(index, byte)| **byte == b'\r' && frame.get(index + 1) != Some(&b'\n'))
         .count();
-    let kind = match data.trim_ascii().first() {
+    let data_kind = match sse_data.trim_ascii().first() {
         Some(b'{') => "object",
         Some(b'[') => "array_or_marker",
         Some(b'<') => "markup",
@@ -27,9 +65,13 @@ pub(super) fn invalid_event(
     // serde's Display and the upstream event name can contain arbitrary data.
     // Persist only fixed labels, counts and positions, never payload fragments.
     let message = format!(
-        "Relay SSE parser: invalid JSON; category={:?}; line={}; column={}; frame_bytes={}; data_bytes={}; data_lines={data_lines}; event_field={event_field}; utf8={}; kind={kind}; event_fields={event_fields}; cr_only={cr_only}",
-        error.classify(), error.line(), error.column(), frame.len(), data.len(),
-        std::str::from_utf8(data).is_ok(),
+        "Relay SSE parser: invalid JSON; category={:?}; line={}; column={}; frame_bytes={}; data_bytes={}; data_lines={data_lines}; event_field={event_field}; utf8={}; kind={data_kind}; event_fields={event_fields}; cr_only={cr_only}",
+        error.classify(),
+        error.line(),
+        error.column(),
+        frame.len(),
+        sse_data.len(),
+        std::str::from_utf8(sse_data).is_ok(),
     );
     UpstreamErrorDetails::from_value(
         None,
@@ -45,6 +87,35 @@ pub(super) fn invalid_event(
 mod tests {
     use super::super::parse_sse_event;
     use super::*;
+
+    #[test]
+    fn transport_diagnostics_keep_categories_without_error_text() {
+        for (kind, label) in [
+            (std::io::ErrorKind::ConnectionReset, "connection_reset"),
+            (std::io::ErrorKind::UnexpectedEof, "unexpected_eof"),
+            (std::io::ErrorKind::TimedOut, "timed_out"),
+        ] {
+            let error = std::io::Error::new(kind, "synthetic-private-url-and-body");
+            let details = transport_error(&error);
+            assert_eq!(details.code.as_deref(), Some(error_codes::UPSTREAM_STREAM));
+            assert_eq!(
+                details.error_type.as_deref(),
+                Some("relay_stream_transport")
+            );
+            assert!(
+                details
+                    .message
+                    .as_ref()
+                    .unwrap()
+                    .contains(&format!("io={label}"))
+            );
+            assert!(
+                !serde_json::to_string(&details)
+                    .unwrap()
+                    .contains("synthetic-private")
+            );
+        }
+    }
 
     #[test]
     fn malformed_frames_record_structure_without_payload_or_event_names() {
@@ -77,12 +148,14 @@ mod tests {
         assert!(message.contains("category=Syntax; line=2; column=1"));
         assert!(message.contains("data_lines=2; event_field=false"));
         let event = parse_sse_event(b"data: {\"text\":\"\xff\"}\n\n");
-        assert!(event
-            .upstream_error
-            .unwrap()
-            .message
-            .unwrap()
-            .contains("utf8=false"));
+        assert!(
+            event
+                .upstream_error
+                .unwrap()
+                .message
+                .unwrap()
+                .contains("utf8=false")
+        );
     }
 
     #[test]

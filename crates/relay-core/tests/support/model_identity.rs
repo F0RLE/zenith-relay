@@ -9,7 +9,9 @@ async fn model_identity_http_rotates_only_before_generated_output() {
                 json!({"model": "different-model", "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]}),
             )
         } else {
-            Reply::Stream(vec![StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"model\":\"different-model\"}}\n\n")])
+            Reply::Stream(vec![StreamChunk::Data(
+                "data: {\"type\":\"response.created\",\"response\":{\"model\":\"different-model\"}}\n\n",
+            )])
         };
         let (first, first_state) = spawn_upstream(vec![reply]).await;
         let (second, second_state) = spawn_upstream(vec![success_reply("correct-response")]).await;
@@ -54,14 +56,23 @@ async fn model_identity_http_rotates_only_before_generated_output() {
 
 #[tokio::test]
 async fn model_identity_websocket_rotates_before_output_and_rejects_reused_socket() {
+    for rejection in [
+        json!({"type": "response.created", "response": {"model": "different-model", "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}}),
+        json!({"type": "response.output_text.delta", "delta": "must not forward", "model": "different-model", "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}),
+    ] {
+        assert_websocket_rejects_changed_model(rejection).await;
+    }
+}
+
+async fn assert_websocket_rejects_changed_model(rejection: Value) {
     let (first, first_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
             json!({"type": "response.created", "response": {"model": "different-model"}}),
         ])))
         .await;
     let (second, second_state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from([
-        vec![json!({"type": "response.completed", "response": {"id": "correct-response", "model": MODEL, "output": []}})],
-        vec![json!({"type": "response.created", "response": {"model": "different-model", "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}})],
+        vec![json!({"type": "response.completed", "response": {"id": "correct-response","status":"completed", "model": MODEL, "output": []}})],
+        vec![rejection],
     ]))))).await;
     let authority = ready_authority("first", "synthetic-first").await;
     register_ready(&authority, "second", "synthetic-second").await;

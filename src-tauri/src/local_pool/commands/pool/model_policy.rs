@@ -3,9 +3,8 @@ use crate::local_pool::{
     models::{LocalAccountRecord, ProviderSourceRecord},
     state::DesktopState,
 };
-use std::collections::BTreeSet;
 use zenith_relay_core::protocol::{
-    canonical_pool_model_id, configured_source_model_ids, ModelPolicyError,
+    ModelPolicyError, canonical_pool_model_id, configured_source_model_ids,
 };
 
 /// Resolve a user-facing model id to the canonical casing used by the pool.
@@ -14,7 +13,11 @@ use zenith_relay_core::protocol::{
 pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
     let store = state.store()?;
     canonical_pool_model_id(
-        configured_pool_model_ids(store.sources(), store.accounts()),
+        configured_pool_model_ids(
+            store.sources(),
+            store.accounts(),
+            store.gateway().codex_text_models_enabled,
+        ),
         model_id,
     )
     .map(str::to_owned)
@@ -26,6 +29,7 @@ pub(crate) fn canonical_pool_model(state: &DesktopState, model_id: &str) -> Loca
 pub(super) fn configured_pool_model_ids<'a>(
     sources: &'a [ProviderSourceRecord],
     accounts: &'a [LocalAccountRecord],
+    codex_text_models_enabled: bool,
 ) -> impl Iterator<Item = &'a String> {
     let source_models = sources
         .iter()
@@ -34,7 +38,7 @@ pub(super) fn configured_pool_model_ids<'a>(
     let account_models = accounts
         .iter()
         .filter(|account| account.account.in_pool)
-        .flat_map(LocalAccountRecord::effective_models);
+        .flat_map(move |account| account.pool_models(codex_text_models_enabled));
     source_models.chain(account_models)
 }
 
@@ -46,27 +50,4 @@ pub(super) fn model_policy_error(error: ModelPolicyError) -> LocalPoolError {
         }
     };
     LocalPoolError::new(code, error.to_string())
-}
-
-/// Return configured pool members without consulting live scheduler health.
-/// Availability is intentionally a runtime concern and is applied later.
-pub(crate) fn local_pool_member_ids(
-    sources: &[ProviderSourceRecord],
-    accounts: &[LocalAccountRecord],
-) -> LocalResult<(BTreeSet<String>, BTreeSet<String>)> {
-    let mut source_ids = BTreeSet::new();
-    for source in sources.iter().filter(|source| source.in_pool) {
-        // A damaged legacy binding is an unavailable candidate, not a reason
-        // to reject the complete local key scope. Runtime admission records a
-        // stable source error and keeps the remaining pool routes usable.
-        if source.supports_any_wire_api().unwrap_or(false) {
-            source_ids.insert(source.id.clone());
-        }
-    }
-    let account_ids = accounts
-        .iter()
-        .filter(|account| account.account.in_pool && account.remote_location.is_none())
-        .map(|account| account.account.id.clone())
-        .collect();
-    Ok((source_ids, account_ids))
 }

@@ -17,25 +17,79 @@ where
         }
     }
 
+    pub fn report_diagnostic(&self, login_id: &str, diagnostic: OAuthFlowDiagnostic) {
+        let _mutation = lock(&self.inner.mutation);
+        // Progress is advisory; canceled/expired/completed attempts cannot emit it.
+        let Ok(snapshot) = read_snapshot(&self.inner.root, login_id) else {
+            return;
+        };
+        if snapshot.pending.expires_at_ms() <= now_ms() {
+            return;
+        }
+        self.inner.events.emit(OAuthFlowEvent {
+            login_id: login_id.to_string(),
+            status: snapshot.status,
+            diagnostic: Some(diagnostic),
+        });
+    }
+
+    pub fn advance_diagnostic(
+        &self,
+        login_id: &str,
+        progress: &mut OAuthFlowProgress,
+        stage: OAuthFlowStage,
+    ) {
+        self.report_diagnostic(login_id, progress.diagnostic(None));
+        progress.advance(stage);
+        self.report_diagnostic(login_id, progress.diagnostic(None));
+    }
+
     pub async fn start_for_account(
         &self,
         oauth: &CodexOAuthClient,
         target_account_id: Option<&str>,
         sign_in_proxy_id: Option<&str>,
     ) -> Result<OAuthFlowStart, OAuthFlowError> {
+        self.start_for_account_with_notes(oauth, target_account_id, sign_in_proxy_id, None)
+            .await
+    }
+
+    pub async fn start_for_account_with_notes(
+        &self,
+        oauth: &CodexOAuthClient,
+        target_account_id: Option<&str>,
+        sign_in_proxy_id: Option<&str>,
+        notes_account_id: Option<&str>,
+    ) -> Result<OAuthFlowStart, OAuthFlowError> {
         let now_ms = now_ms();
+        let client_kind = oauth.kind();
         for mut snapshot in load_snapshots(&self.inner.root)? {
             if snapshot.target_account_id.as_deref() != target_account_id {
+                continue;
+            }
+            if snapshot.notes_account_id.as_deref() != notes_account_id {
+                continue;
+            }
+            if snapshot.pending.client_kind() != client_kind {
+                continue;
+            }
+            if !matches!(
+                snapshot.status,
+                OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
+            ) {
+                self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
             if snapshot.pending.expires_at_ms() <= now_ms {
                 self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
-            let port = callback_port(&snapshot.pending)?;
-            if !CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
-                self.inner.cleanup(&snapshot.login_id)?;
-                continue;
+            if client_kind == super::super::oauth::OAuthClientKind::Codex {
+                let port = callback_port(&snapshot.pending)?;
+                if !super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
+                    self.inner.cleanup(&snapshot.login_id)?;
+                    continue;
+                }
             }
             if align_sign_in_proxy(&mut snapshot, sign_in_proxy_id) {
                 write_snapshot(&self.inner.root, &snapshot)?;
@@ -46,24 +100,43 @@ where
             if lock(&self.inner.listeners).contains_key(&snapshot.login_id) {
                 return Ok(snapshot.start());
             }
-            if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
-                self.spawn_listener(listener, snapshot.clone(), now_ms);
-                self.inner
-                    .emit(&snapshot.login_id, OAuthFlowStatus::Pending);
+            if client_kind.is_local_callback() {
+                let port = callback_port(&snapshot.pending)?;
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+                    self.spawn_listener(listener, snapshot.clone(), now_ms);
+                    self.inner
+                        .emit(&snapshot.login_id, OAuthFlowStatus::Pending);
+                    return Ok(snapshot.start());
+                }
+            } else {
                 return Ok(snapshot.start());
             }
         }
 
-        let listener = bind_callback_listener().await?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| {
-                OAuthFlowError::new(
-                    OAuthFlowErrorCode::ListenerUnavailable,
-                    "OAuth callback listener address is unavailable",
-                )
-            })?
-            .port();
+        let (listener, port) = if client_kind.is_local_callback() {
+            let listener = if client_kind == super::super::oauth::OAuthClientKind::Siwc {
+                TcpListener::bind(("127.0.0.1", 0)).await.map_err(|_| {
+                    OAuthFlowError::new(
+                        OAuthFlowErrorCode::ListenerUnavailable,
+                        "SIWC loopback listener is unavailable",
+                    )
+                })?
+            } else {
+                bind_callback_listener().await?
+            };
+            let port = listener
+                .local_addr()
+                .map_err(|_| {
+                    OAuthFlowError::new(
+                        OAuthFlowErrorCode::ListenerUnavailable,
+                        "OAuth callback listener address is unavailable",
+                    )
+                })?
+                .port();
+            (Some(listener), port)
+        } else {
+            (None, 0)
+        };
         let login_id = Uuid::new_v4().hyphenated().to_string();
         let start = oauth.begin(port, now_ms).map_err(|_| {
             OAuthFlowError::new(
@@ -78,11 +151,14 @@ where
             callback_secret_ref: callback_secret_ref(&login_id),
             status: OAuthFlowStatus::Pending,
             target_account_id: target_account_id.map(str::to_string),
+            notes_account_id: notes_account_id.map(str::to_string),
             sign_in_proxy_id: sign_in_proxy_id.map(str::to_string),
             pending: start.into_pending(),
         };
         write_snapshot(&self.inner.root, &snapshot)?;
-        self.spawn_listener(listener, snapshot.clone(), now_ms);
+        if let Some(listener) = listener {
+            self.spawn_listener(listener, snapshot.clone(), now_ms);
+        }
         self.inner.emit(&login_id, OAuthFlowStatus::Pending);
         Ok(snapshot.start())
     }
@@ -102,18 +178,22 @@ where
                     .for_login(&login_id),
             );
         }
-        let port = callback_port(&snapshot.pending)?;
-        if !CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
-            self.inner.cleanup(&login_id)?;
-            return Err(OAuthFlowError::new(
-                OAuthFlowErrorCode::Expired,
-                "OAuth login must be restarted",
-            )
-            .for_login(&login_id));
+        if snapshot.pending.client_kind() == super::super::oauth::OAuthClientKind::Codex {
+            let port = callback_port(&snapshot.pending)?;
+            if !super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
+                self.inner.cleanup(&login_id)?;
+                return Err(OAuthFlowError::new(
+                    OAuthFlowErrorCode::Expired,
+                    "OAuth login must be restarted",
+                )
+                .for_login(&login_id));
+            }
         }
-        if snapshot.status == OAuthFlowStatus::Pending
+        if snapshot.pending.client_kind().is_local_callback()
+            && snapshot.status == OAuthFlowStatus::Pending
             && !lock(&self.inner.listeners).contains_key(&login_id)
         {
+            let port = callback_port(&snapshot.pending)?;
             let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|_| {
                 OAuthFlowError::new(
                     OAuthFlowErrorCode::CallbackPortUnavailable,

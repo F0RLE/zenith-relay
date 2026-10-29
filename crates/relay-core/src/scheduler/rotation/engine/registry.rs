@@ -58,6 +58,10 @@ impl RotationEngine {
 
     pub fn upsert(&mut self, mut candidate: RotationCandidate) -> Result<(), &'static str> {
         candidate.validate()?;
+        let routes_changed = self
+            .candidates
+            .get(&candidate.id)
+            .is_some_and(|runtime| runtime.candidate.routes != candidate.routes);
         let capacity_key = candidate.capacity_key.clone();
         let previous_capacity_key = self
             .candidates
@@ -71,6 +75,10 @@ impl RotationEngine {
             candidate.quota = runtime.candidate.quota;
             candidate.quota_remaining_basis_points = runtime.candidate.quota_remaining_basis_points;
             candidate.quota_observed_at_ms = runtime.candidate.quota_observed_at_ms;
+            candidate.provider_credits_micro_units = runtime.candidate.provider_credits_micro_units;
+            candidate.provider_credits_unlimited = runtime.candidate.provider_credits_unlimited;
+            candidate.provider_credits_observed_at_ms =
+                runtime.candidate.provider_credits_observed_at_ms;
             candidate.rate = runtime.candidate.rate;
             candidate.route_rates = runtime
                 .candidate
@@ -87,7 +95,7 @@ impl RotationEngine {
             }
             if candidate.weight != runtime.candidate.weight
                 || candidate.capacity_key != runtime.candidate.capacity_key
-                || candidate.routes != runtime.candidate.routes
+                || routes_changed
             {
                 self.rotation_credit.clear();
             }
@@ -95,6 +103,8 @@ impl RotationEngine {
                 id != &candidate_id
                     || candidate.routes.get(key) == runtime.candidate.routes.get(key)
             });
+            self.health
+                .retain(|(id, key), _| id != &candidate_id || candidate.routes.contains_key(key));
             runtime.candidate = candidate;
         } else {
             let generation = self
@@ -113,10 +123,13 @@ impl RotationEngine {
             );
         }
         self.recompute_capacity_limit(&capacity_key);
-        if let Some(previous_capacity_key) = previous_capacity_key {
-            if previous_capacity_key != capacity_key {
-                self.recompute_capacity_limit(&previous_capacity_key);
-            }
+        if let Some(previous_capacity_key) = previous_capacity_key
+            && previous_capacity_key != capacity_key
+        {
+            self.recompute_capacity_limit(&previous_capacity_key);
+        }
+        if routes_changed {
+            self.prune_round_robin_cursors();
         }
         Ok(())
     }
@@ -201,10 +214,22 @@ impl RotationEngine {
         self.quota_revisions.remove(candidate_id);
         self.circuits
             .retain(|(candidate, _), _| candidate != candidate_id);
+        self.health
+            .retain(|(candidate, _), _| candidate != candidate_id);
         let capacity_key = runtime.candidate.capacity_key.clone();
         self.recompute_capacity_limit(&capacity_key);
         self.rotation_credit.clear();
+        self.prune_round_robin_cursors();
         Some(runtime.candidate)
+    }
+
+    fn prune_round_robin_cursors(&mut self) {
+        let candidates = &self.candidates;
+        self.round_robin_cursor.retain(|route, _| {
+            candidates
+                .values()
+                .any(|runtime| runtime.candidate.routes.contains_key(route))
+        });
     }
 
     pub(super) fn recompute_capacity_limit(&mut self, capacity_key: &str) {
@@ -269,12 +294,12 @@ impl RotationEngine {
         quota: QuotaState,
         revision: u64,
     ) -> bool {
-        let current = self
+        let stored_revision = self
             .quota_revisions
             .get(candidate_id)
             .copied()
             .unwrap_or_default();
-        if revision <= current {
+        if revision <= stored_revision {
             return false;
         }
         let Some(runtime) = self.candidates.get_mut(candidate_id) else {
@@ -302,6 +327,22 @@ impl RotationEngine {
         let remaining = remaining_basis_points.filter(|remaining| *remaining > 0);
         runtime.candidate.quota_remaining_basis_points = remaining;
         runtime.candidate.quota_observed_at_ms = observed_at_ms.filter(|_| remaining.is_some());
+        true
+    }
+
+    pub fn set_provider_credits(
+        &mut self,
+        candidate_id: &str,
+        credits_micro_units: Option<u64>,
+        unlimited: bool,
+        observed_at_ms: Option<u64>,
+    ) -> bool {
+        let Some(runtime) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        runtime.candidate.provider_credits_micro_units = credits_micro_units;
+        runtime.candidate.provider_credits_unlimited = unlimited;
+        runtime.candidate.provider_credits_observed_at_ms = observed_at_ms;
         true
     }
 

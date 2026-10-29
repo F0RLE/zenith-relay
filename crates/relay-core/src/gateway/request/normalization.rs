@@ -1,5 +1,6 @@
-use crate::{runtime::DefaultServiceTier, GatewayRuntime, WireApi};
+use crate::{GatewayRuntime, WireApi, runtime::DefaultServiceTier};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 mod schema;
 mod shape;
@@ -7,6 +8,32 @@ pub(in crate::gateway) use shape::coerce_responses_input_array;
 use shape::normalize_account_request_common;
 
 const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
+
+/// Managed account transports accept cache keys, unlike arbitrary API sources.
+/// Keep a missing client key stable per local key, model and identified context.
+pub(in crate::gateway) fn apply_account_prompt_cache_key(
+    fields: &mut Map<String, Value>,
+    local_key_id: &str,
+    model: &str,
+    client_context_id: Option<&str>,
+) {
+    if fields.contains_key("prompt_cache_key") {
+        return;
+    }
+    let Some(context) = client_context_id.filter(|context| !context.is_empty()) else {
+        return;
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"relay-prompt-cache-v1");
+    for part in [local_key_id, model, context] {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    fields.insert(
+        "prompt_cache_key".into(),
+        Value::String(format!("relay_{}", hex::encode(digest.finalize()))),
+    );
+}
 
 /// Owns the service-tier field for one routed request.
 ///
@@ -17,6 +44,7 @@ const CODEX_TOOL_CONST_UNION_THRESHOLD: usize = 8;
 pub(in crate::gateway) struct ServiceTierPolicy {
     owner: ServiceTierOwner,
     client_tier: Option<Value>,
+    pool_default: DefaultServiceTier,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,8 +59,9 @@ impl ServiceTierPolicy {
             owner: ServiceTierOwner::Client,
             client_tier: request
                 .as_object()
-                .and_then(|object| object.get("service_tier"))
+                .and_then(|request_fields| request_fields.get("service_tier"))
                 .cloned(),
+            pool_default: DefaultServiceTier::Standard,
         }
     }
 
@@ -43,13 +72,28 @@ impl ServiceTierPolicy {
         }
     }
 
-    pub(in crate::gateway) fn select_for_model(
-        &self,
+    /// Capture the preference once after model resolution. The key's configured
+    /// transports may narrow the reference modes; health and retries do not
+    /// change the captured selection.
+    pub(in crate::gateway) fn capture_pool_default(
+        &mut self,
         runtime: &GatewayRuntime,
         model: &str,
-    ) -> DefaultServiceTier {
+        supported: &[DefaultServiceTier],
+    ) {
+        if self.owner == ServiceTierOwner::Pool && self.client_tier.is_none() {
+            let preferred = runtime.model_effective_service_tier(model);
+            self.pool_default = if supported.contains(&preferred) {
+                preferred
+            } else {
+                DefaultServiceTier::Standard
+            };
+        }
+    }
+
+    pub(in crate::gateway) fn selected_tier(&self) -> DefaultServiceTier {
         self.client_tier.as_ref().map_or_else(
-            || runtime.model_effective_service_tier(model),
+            || self.pool_default,
             |tier| DefaultServiceTier::from_storage_value(tier.as_str().unwrap_or_default()),
         )
     }
@@ -110,51 +154,51 @@ impl ServiceTierPolicy {
 }
 
 pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServiceTier {
-    match request.get("service_tier").and_then(Value::as_str) {
-        Some(tier) if tier.eq_ignore_ascii_case("ultrafast") => DefaultServiceTier::Ultrafast,
-        Some(tier)
-            if tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast") =>
-        {
-            DefaultServiceTier::Fast
-        }
-        _ => DefaultServiceTier::Standard,
-    }
+    DefaultServiceTier::from_storage_value(
+        request
+            .get("service_tier")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    )
 }
 
 /// Apply the pool's speed setting after the request owner has removed any tier
 /// it does not control.
 ///
 /// `priority` is the upstream OpenAI spelling for Fast. Standard deliberately
-/// remains implicit, matching the Codex/Cockpit behavior and preserving
+/// remains implicit, matching native Codex behavior and preserving
 /// arbitrary client-owned values such as `flex`.
 pub(in crate::gateway) fn apply_default_service_tier_if_missing(
     request: &mut Value,
     default: DefaultServiceTier,
 ) {
-    let Some(object) = request.as_object_mut() else {
+    let Some(request_fields) = request.as_object_mut() else {
         return;
     };
-    if object.contains_key("service_tier") {
+    if request_fields.contains_key("service_tier") {
         return;
     }
-    let value = match default {
+    let service_tier = match default {
         DefaultServiceTier::Standard => return,
         DefaultServiceTier::Fast => "priority",
         DefaultServiceTier::Ultrafast => "ultrafast",
     };
-    object.insert("service_tier".to_string(), Value::String(value.to_string()));
+    request_fields.insert(
+        "service_tier".to_string(),
+        Value::String(service_tier.to_string()),
+    );
 }
 
 pub(in crate::gateway) fn normalize_account_request(
-    object: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
     // This transport normalization preserves native account settings. The
     // request execution layer applies Relay's pool speed policy later, while
     // Responses Lite alone requires `context=all_turns` here.
-    object.insert("store".to_string(), Value::Bool(false));
-    object.insert("stream".to_string(), Value::Bool(true));
-    normalize_account_request_common(object, responses_lite);
+    request_fields.insert("store".to_string(), Value::Bool(false));
+    request_fields.insert("stream".to_string(), Value::Bool(true));
+    normalize_account_request_common(request_fields, responses_lite);
 }
 
 /// Normalize the legacy non-streaming account compaction contract.
@@ -166,18 +210,15 @@ pub(in crate::gateway) fn normalize_account_request(
 /// endpoint. All other request fields remain client-owned so newly introduced
 /// Codex options are not silently discarded.
 pub(in crate::gateway) fn normalize_compact_account_request(
-    object: &mut Map<String, Value>,
+    request_fields: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
-    object.remove("store");
-    object.remove("stream");
-    normalize_account_request_common(object, responses_lite);
+    request_fields.remove("store");
+    request_fields.remove("stream");
+    normalize_account_request_common(request_fields, responses_lite);
 }
 
-pub(in crate::gateway) use shape::{
-    normalize_basis_points_request, normalize_responses_lite_request,
-    responses_lite_parallel_tool_calls_valid,
-};
+pub(in crate::gateway) use shape::responses_lite_parallel_tool_calls_valid;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,153 @@
 import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 
+for (const appearance of [
+  { locale: "ru", theme: "dark", width: 1160 },
+  { locale: "en", theme: "light", width: 1160 },
+  { locale: "ru", theme: "light", width: 360 },
+  { locale: "en", theme: "dark", width: 360 },
+] as const) {
+  test(`Codex text opt-in waits for consent: ${appearance.locale}/${appearance.theme}/${appearance.width}`, async ({ page }) => {
+    const ru = appearance.locale === "ru";
+    await page.clock.install();
+    await installTauriMock(page, { ...appearance, mode: "local", populated: true });
+    await page.setViewportSize({ width: appearance.width, height: 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: ru ? "Настройки" : "Settings", exact: true }).click();
+    const toggle = page.getByRole("checkbox", { name: ru ? "Текстовые модели через вход Codex" : "Text models through Codex sign-in", exact: true });
+    await expect(toggle).not.toBeChecked();
+    await toggle.click();
+    const dialog = page.getByRole("dialog", { name: ru ? "Разрешить текстовые модели через Codex?" : "Allow text models through Codex?" });
+    const confirm = dialog.getByRole("button", { name: ru ? /Понимаю риски/ : /Accept risks/ });
+    await expect(confirm).toBeDisabled();
+    await expect(confirm).toHaveClass(/danger/);
+    await expect(dialog.getByRole("heading")).toHaveCount(1);
+    await expect(dialog.locator("header h2 svg")).toHaveCount(1);
+    expect(await dialog.locator("header h2").evaluate((heading) => {
+      const title = heading.getBoundingClientRect();
+      const icon = heading.querySelector("svg")!.getBoundingClientRect();
+      return Math.abs(icon.top + icon.height / 2 - title.top - title.height / 2);
+    })).toBeLessThanOrEqual(1);
+    await expect(dialog.locator(".codex-text-risk-copy strong")).toHaveCount(0);
+    expect(await confirm.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+    await expect(toggle).not.toBeChecked();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    await dialog.screenshot({ path: `output/playwright/codex-text-risk-${appearance.locale}-${appearance.theme}-${appearance.width}.png` });
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+    const box = await dialog.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(appearance.width);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(760);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+    // A cancelled dialog never writes, even when its original timer expires.
+    await page.clock.fastForward(11_000);
+    const invocations = () => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string; args: unknown }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_codex_text_models"));
+    expect(await invocations()).toHaveLength(0);
+    await toggle.click();
+    await expect(confirm).toBeDisabled();
+    await page.clock.fastForward(8_000);
+    await expect(confirm).toBeDisabled();
+    await page.clock.fastForward(2_200);
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).toBeChecked();
+    expect(await invocations()).toEqual([{ command: "set_local_codex_text_models", args: { input: { enabled: true, expectedEnabled: false, riskAccepted: true } } }]);
+    await toggle.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(toggle).not.toBeChecked();
+    expect((await invocations()).at(-1)?.args).toEqual({ input: { enabled: false, expectedEnabled: true, riskAccepted: false } });
+    expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__
+      .filter((call) => call.command === "set_local_block_degraded_routes" || call.command === "set_local_pool_membership"))).toHaveLength(0);
+  });
+}
+
+test("Codex text opt-in remains off after save failure and blocks duplicate confirmation", async ({ page }) => {
+  await page.clock.install();
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, codexTextModelsFailure: true, codexTextModelsSaveDelayMs: 2_000 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true });
+  await toggle.click();
+  const dialog = page.getByRole("dialog", { name: "Allow text models through Codex?" });
+  const confirm = dialog.getByRole("button", { name: /Accept risks/ });
+  await page.clock.fastForward(10_200);
+  await confirm.click();
+  await expect(confirm).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await page.clock.fastForward(2_500);
+  await expect(confirm).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__
+    .filter((call) => call.command === "set_local_codex_text_models"))).toHaveLength(1);
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(toggle).not.toBeChecked();
+});
+
+test("Codex text opt-in respects saved state and leaves image-only badges consistent", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountOAuthClientKind: "codex", poolMembers: true, codexTextModelsEnabled: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByText("Images only", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const toggle = page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByText("Images only", { exact: true }).first()).toBeVisible();
+});
+
+test("Codex text opt-in cannot run on a backend without the capability", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, codexTextModelsUnavailable: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Text models through Codex sign-in", exact: true })).toBeDisabled();
+});
+
+for (const appearance of [
+  { locale: "ru", theme: "dark", width: 1160 },
+  { locale: "en", theme: "light", width: 1160 },
+  { locale: "ru", theme: "light", width: 360 },
+  { locale: "en", theme: "dark", width: 360 },
+] as const) {
+  test(`diagnostics are log-only: ${appearance.locale}/${appearance.theme}/${appearance.width}`, async ({ page }) => {
+    await page.clock.install();
+    await installTauriMock(page, { ...appearance, mode: "local", populated: true, diagnosticDebug: true });
+    await page.setViewportSize({ width: appearance.width, height: 760 });
+    await page.goto("/");
+    const ru = appearance.locale === "ru";
+    await page.getByRole("button", { name: ru ? "Настройки" : "Settings", exact: true }).click();
+    const reads = () => page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_memory_diagnostics").length);
+    expect(await reads()).toBe(0);
+    const diagnostics = page.locator(".settings-group").filter({ has: page.getByRole("heading", { name: ru ? "Диагностика" : "Diagnostics", exact: true }) });
+    await expect(diagnostics.getByRole("heading", { name: ru ? "Мониторинг" : "Monitoring", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: ru ? "Измерить" : "Measure", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(diagnostics.getByRole("button")).toHaveCount(4);
+    const labelsFit = await diagnostics.locator(".settings-path-row strong").evaluateAll((labels) =>
+      labels.every((label) => label.scrollWidth <= label.clientWidth));
+    expect(labelsFit).toBe(true);
+    await page.clock.fastForward(60_000);
+    expect(await reads()).toBe(0);
+    const operations = diagnostics.getByRole("button", { name: ru ? "Открыть операции" : "Open operations", exact: true });
+    await operations.click();
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: unknown }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "open_relay_folder").at(-1)?.args)).toEqual({ folder: "operation_logs" });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await diagnostics.screenshot({ path: `output/playwright/diagnostics-logs-${appearance.locale}-${appearance.theme}-${appearance.width}.png` });
+  });
+}
+
 for (const theme of ["light", "dark"] as const) {
   for (const viewport of [{ width: 1344, height: 900 }, { width: 1160, height: 760 }, { width: 840, height: 560 }] as const) {
     test(`settings layout ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
@@ -19,6 +166,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(debugToggle).not.toBeChecked();
       const diagnostics = groups.filter({ hasText: "Диагностика" });
       await expect(diagnostics).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
       const poolData = groups.filter({ hasText: "Данные пула" });
       await expect(poolData.locator(".settings-debug-section")).toHaveCount(1);
       await expect(poolData.locator(".settings-control-row").last()).toHaveClass(/settings-danger-row/);
@@ -29,8 +177,9 @@ for (const theme of ["light", "dark"] as const) {
       expect(pageBox).not.toBeNull();
       expect(headerBox).not.toBeNull();
       expect(groupsBox).not.toBeNull();
-      expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
-      expect(groupsBox!.width).toBeGreaterThan(pageBox!.width - 80);
+      expect(Math.abs(groupsBox!.x - headerBox!.x)).toBeLessThanOrEqual(1);
+      expect(groupsBox!.width).toBeLessThanOrEqual(1040);
+      expect(Math.abs(groupsBox!.width - Math.min(1040, headerBox!.width))).toBeLessThanOrEqual(1);
       const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
       expect(topGap).toBeGreaterThanOrEqual(-1);
       expect(topGap).toBeLessThanOrEqual(4);
@@ -54,10 +203,18 @@ for (const theme of ["light", "dark"] as const) {
       await expect(diagnostics.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs\\operations", { exact: true })).toBeVisible();
       await expect(groups).toHaveCount(4);
       await expect(groups.last()).toContainText("Диагностика");
+      await expect(poolData.getByText("Память приложения", { exact: true })).toHaveCount(0);
+      await expect(diagnostics.getByRole("heading", { name: "Мониторинг", exact: true })).toHaveCount(0);
+      await expect(diagnostics.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
+      expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "get_memory_diagnostics"))).toHaveLength(0);
+      await diagnostics.screenshot({ path: `output/playwright/settings-logs-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await debugToggle.scrollIntoViewIfNeeded();
       const debugLayout = await poolData.evaluate((item) => ({ overflow: item.scrollWidth - item.clientWidth }));
       expect(debugLayout.overflow).toBe(0);
       await poolData.screenshot({ path: `output/playwright/settings-debug-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await debugToggle.uncheck();
+      await expect(diagnostics).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Измерить", exact: true })).toHaveCount(0);
     });
   }
 }
@@ -123,9 +280,13 @@ test("sparse reference tables stay compact and centered in a wide window", async
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  const sourceBoxes = await page.locator(".relay-page[data-view='sources'] > .relay-compact-content").evaluateAll((items) => items.map((item) => item.getBoundingClientRect().toJSON()));
-  expect(sourceBoxes).toHaveLength(2);
-  expect(sourceBoxes.every((box) => box.width <= 1080 && Math.abs(box.x + box.width / 2 - (pageBox!.x + pageBox!.width / 2)) <= 1)).toBe(true);
+  const sources = page.locator(".sources-workspace");
+  await expect(sources.locator(".source-card")).toHaveCount(1);
+  const sourceBox = await sources.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(sourceBox!.width).toBeLessThanOrEqual(pageBox!.width);
+  expect(Math.abs(sourceBox!.x + sourceBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(1);
+  expect(await sources.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
@@ -145,7 +306,7 @@ test("source prices are grouped by provider and Messages models expose cache TTL
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await dialog.getByRole("tab", { name: "Цены" }).click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
@@ -177,7 +338,7 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator('[role="tablist"]').first().getByRole("tab")).toHaveText(["General", "Pricing"]);
   await expect(dialog.getByLabel("Name", { exact: true })).toBeVisible();
@@ -196,37 +357,60 @@ test("source editor keeps discovery compact and routing controls internal", asyn
   await page.screenshot({ path: "output/playwright/source-discovery-pricing.png" });
 });
 
-test("reasoning modes stay balanced with the full backend level set", async ({ page }) => {
-  await installTauriMock(page, {
-    locale: "en",
-    mode: "local",
-    theme: "dark",
-    populated: true,
-    mixedModels: true,
-    modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+for (const theme of ["light", "dark"] as const) {
+  test(`reasoning modes stay balanced with the full backend level set ${theme}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: "ru",
+      mode: "local",
+      theme,
+      populated: true,
+      mixedModels: true,
+      modelReasoning: { "claude-opus-4-8": ["none", "low", "medium", "high", "xhigh", "max"] },
+    });
+    await page.setViewportSize({ width: 1160, height: 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    await page.getByRole("tab", { name: "Правила моделей", exact: true }).click();
+    const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+    await model.locator("[data-model-reasoning-edit]").click();
+
+    const dialog = page.getByRole("dialog", { name: "Режимы размышления" });
+    const options = dialog.locator(".model-reasoning-options button");
+    await expect(options).toHaveCount(6);
+    await expect(dialog.locator("footer")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Закрыть", exact: true })).toHaveCount(1);
+    const max = dialog.getByRole("checkbox", { name: "Максимальное", exact: true });
+    const primaryBackground = theme === "dark" ? "rgb(128, 180, 154)" : "rgb(21, 100, 77)";
+    await expect(max).toHaveCSS("background-color", primaryBackground);
+    await expect(max).toHaveCSS("color", theme === "dark" ? "rgb(16, 32, 24)" : "rgb(255, 254, 250)");
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(3);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-1160x760.png` });
+
+    await page.setViewportSize({ width: 520, height: 620 });
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-520x620.png` });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await dialog.locator(".model-reasoning-options").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length)).toBe(2);
+    expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(3);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-reasoning-dialog-ru-${theme}-390x844.png` });
+    await max.hover();
+    await expect(max).toHaveCSS("background-color", theme === "dark" ? "rgb(160, 204, 179)" : "rgb(16, 76, 59)");
+    await max.click();
+    await expect(max).toHaveAttribute("aria-checked", "false");
+    await expect(max).not.toHaveCSS("background-color", primaryBackground);
   });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Model Rules" }).click();
-  const model = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
-  await model.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
-
-  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
-  const options = dialog.locator(".model-reasoning-options button");
-  await expect(options).toHaveCount(6);
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(1);
-  expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-1160x760.png" });
-
-  await page.setViewportSize({ width: 520, height: 620 });
-  expect(await options.evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size)).toBe(2);
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
-  })).toBe(true);
-  await page.screenshot({ path: "output/playwright/model-reasoning-dialog-ru-dark-520x620.png" });
-});
+}
 
 test("prompt cache policy fits the Russian dark source editor", async ({ page }) => {
   await installTauriMock(page, {
@@ -246,7 +430,7 @@ test("prompt cache policy fits the Russian dark source editor", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   expect(await dialog.evaluate((element) => {

@@ -3,6 +3,51 @@ use std::collections::BTreeMap;
 use url::Url;
 
 #[test]
+fn changing_the_source_proxy_changes_the_transport_identity() {
+    let config = SourceProtocolConfig::default();
+    let identity = |proxy_id| SourceTransportIdentity {
+        id: "source",
+        base_url: "https://api.example/v1",
+        secret_ref: "source:secret",
+        proxy_id,
+        wire_api: WireApi::Responses,
+        protocol_bindings: &[],
+        protocol_config: &config,
+        models: &[],
+    };
+
+    assert_eq!(identity(Some("proxy_a")), identity(Some("proxy_a")));
+    assert_ne!(identity(Some("proxy_a")), identity(Some("proxy_b")));
+    assert_ne!(identity(None), identity(Some("proxy_a")));
+    assert!(!source_runtime_policy_compatible(
+        &[identity(Some("proxy_a"))],
+        &[identity(Some("proxy_b"))]
+    ));
+}
+
+#[test]
+fn policy_reload_is_order_independent_but_rejects_duplicate_source_ids() {
+    let config = SourceProtocolConfig::default();
+    let source = |id| SourceTransportIdentity {
+        id,
+        base_url: "https://api.example/v1",
+        secret_ref: "synthetic:secret",
+        proxy_id: None,
+        wire_api: WireApi::Responses,
+        protocol_bindings: &[],
+        protocol_config: &config,
+        models: &[],
+    };
+    let a = source("a");
+    let b = source("b");
+    assert!(source_runtime_policy_compatible(&[a, b], &[b, a]));
+    assert!(!source_runtime_policy_compatible(&[a, a], &[a, b]));
+    assert!(!source_runtime_policy_compatible(&[a, b], &[a, a]));
+    assert!(!source_runtime_policy_compatible(&[a, a], &[a, a]));
+    assert!(!source_runtime_policy_compatible(&[a], &[a, b]));
+}
+
+#[test]
 fn url_userinfo_includes_a_username_or_a_password() {
     assert!(!url_has_userinfo(
         &Url::parse("https://api.example/v1").unwrap()
@@ -266,9 +311,11 @@ fn bridge_binding_is_responses_only_and_reasoning_is_bridge_only() {
         &["claude-test".to_string()],
     )
     .unwrap_err();
-    assert!(invalid_protocol
-        .to_string()
-        .contains("cannot serve this client protocol"));
+    assert!(
+        invalid_protocol
+            .to_string()
+            .contains("cannot serve this client protocol")
+    );
 
     let legacy_reasoning = normalize_source_protocol_bindings(
         vec![SourceProtocolBinding {
@@ -356,6 +403,7 @@ fn source_validation_rejects_unsafe_urls_and_redacts_secrets() {
         api_key: "upstream-secret".to_string(),
         wire_api: WireApi::Responses,
         models: vec!["model-1".to_string()],
+        proxy_url: None,
     };
     assert!(source.validate().is_err());
 
@@ -414,13 +462,15 @@ fn source_protocol_helpers_preserve_canonical_models_and_loopback_rules() {
             .unwrap(),
         ["gpt-test", "claude-test"]
     );
-    assert!(runtime_source_supports_wire_api(
-        &bindings,
-        WireApi::Responses,
-        &source_models,
-        WireApi::Responses,
-    )
-    .unwrap());
+    assert!(
+        runtime_source_supports_wire_api(
+            &bindings,
+            WireApi::Responses,
+            &source_models,
+            WireApi::Responses,
+        )
+        .unwrap()
+    );
     assert!(
         runtime_source_supports_any_wire_api(&bindings, WireApi::Responses, &source_models,)
             .unwrap()
@@ -451,6 +501,22 @@ fn base_url_normalization_removes_copied_terminal_api_endpoints() {
             "https://api.example.test/v1/chat/completions",
             "https://api.example.test/v1/",
         ),
+        (
+            "https://api.kimi.ai/coding",
+            "https://api.kimi.ai/coding/v1/",
+        ),
+        (
+            "https://api.kimi.com/coding/v1/messages",
+            "https://api.kimi.com/coding/v1/",
+        ),
+        (
+            "https://api.minimax.io/anthropic",
+            "https://api.minimax.io/anthropic/v1/",
+        ),
+        (
+            "https://api.kimi.ai.example.test/coding",
+            "https://api.kimi.ai.example.test/coding/",
+        ),
     ] {
         assert_eq!(normalized_base_url(input).unwrap().as_str(), expected);
     }
@@ -474,7 +540,8 @@ fn reasoning_effort_never_claims_support_from_a_disabled_bridge() {
     assert!(native.supports_reasoning_effort("provider-defined"));
     assert!(!disabled_bridge.supports_reasoning_effort("high"));
     assert!(adaptive_bridge.supports_reasoning_effort("high"));
-    assert!(!adaptive_bridge.supports_reasoning_effort("very_high"));
+    assert!(adaptive_bridge.supports_reasoning_effort("very_high"));
+    assert!(!adaptive_bridge.supports_reasoning_effort("provider-defined"));
 }
 
 #[test]
@@ -561,6 +628,7 @@ fn source_runtime_keeps_policy_edits_and_rebuilds_catalog_evidence() {
         id: "source",
         base_url: "https://example.test/v1",
         secret_ref: "source:source",
+        proxy_id: None,
         wire_api: WireApi::Responses,
         protocol_bindings: &[],
         protocol_config: &config,
@@ -568,11 +636,14 @@ fn source_runtime_keeps_policy_edits_and_rebuilds_catalog_evidence() {
     };
     let same = previous;
     assert!(source_runtime_policy_compatible(&[previous], &[same],));
-    let next = SourceTransportIdentity {
+    let changed_source_identity = SourceTransportIdentity {
         protocol_config: &changed,
         ..previous
     };
-    assert!(!source_runtime_policy_compatible(&[previous], &[next],));
+    assert!(!source_runtime_policy_compatible(
+        &[previous],
+        &[changed_source_identity],
+    ));
 }
 
 #[test]

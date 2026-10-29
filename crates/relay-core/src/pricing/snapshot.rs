@@ -1,12 +1,12 @@
 use super::catalog::validate_litellm_payload;
-use super::{ImageModelPrice, ImageRequestPrice, TokenPrice, MAX_CACHE_STRING_LENGTH};
+use super::{ImageModelPrice, ImageRequestPrice, MAX_CACHE_STRING_LENGTH, TokenPrice};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock},
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct CatalogEntry {
     pub model_id: String,
     pub provider: Option<String>,
@@ -46,9 +46,10 @@ pub struct PricingCatalog {
     pub revision: Option<String>,
     pub fetched_at_ms: Option<u64>,
     pub stale: bool,
-    pub entries: BTreeMap<String, CatalogEntry>,
-    pub conflicts: BTreeSet<String>,
-    pub(super) unique: BTreeMap<String, CatalogEntry>,
+    pub entries: Arc<BTreeMap<String, CatalogEntry>>,
+    pub conflicts: Arc<BTreeSet<String>>,
+    pub(super) unique: Arc<BTreeMap<String, String>>,
+    pub(super) lookup: Arc<super::lookup::CatalogLookup>,
 }
 
 impl PricingCatalog {
@@ -57,57 +58,71 @@ impl PricingCatalog {
             revision: None,
             fetched_at_ms: None,
             stale: false,
-            entries: BTreeMap::new(),
-            conflicts: BTreeSet::new(),
-            unique: BTreeMap::new(),
+            entries: Arc::default(),
+            conflicts: Arc::default(),
+            unique: Arc::default(),
+            lookup: Default::default(),
         }
     }
 
-    pub fn from_litellm_json(raw: &str) -> Result<Self, PricingError> {
-        let payload = serde_json::from_str(raw).map_err(|_| PricingError::InvalidCatalog)?;
-        Self::from_litellm_payload(&payload, None, None, false)
+    pub fn from_litellm_json(json_text: &str) -> Result<Self, PricingError> {
+        let catalog_payload =
+            serde_json::from_str(json_text).map_err(|_| PricingError::InvalidCatalog)?;
+        Self::from_litellm_payload(&catalog_payload, None, None, false)
     }
 
     pub fn from_litellm_payload(
-        payload: &Value,
+        pricing_payload: &Value,
         revision: Option<String>,
         fetched_at_ms: Option<u64>,
         stale: bool,
     ) -> Result<Self, PricingError> {
-        let object = validate_litellm_payload(payload)?;
-        let mut entries = BTreeMap::<String, CatalogEntry>::new();
-        let mut unique = BTreeMap::<String, CatalogEntry>::new();
+        let pricing_records = validate_litellm_payload(pricing_payload)?;
+        // Bulk-build the immutable tree so its spare slots do not retain many
+        // large rate schedules. Temporary positions preserve source alias order.
+        let mut catalog_entries = Vec::<(String, CatalogEntry)>::new();
+        let mut unique = BTreeMap::<String, usize>::new();
         let mut conflicts = BTreeSet::<String>::new();
-        for (model_id, value) in object {
+        for (model_id, pricing_value) in pricing_records {
             if model_id.len() > MAX_CACHE_STRING_LENGTH {
                 continue;
             }
             // LiteLLM is an external, evolving catalog. One malformed record
             // must not discard every valid model in the snapshot.
-            let Some(entry) = (match super::litellm_parser::parse_entry(model_id, value) {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            }) else {
+            let Some(pricing_entry) =
+                (match super::litellm_parser::parse_entry(model_id, pricing_value) {
+                    Ok(pricing_entry) => pricing_entry,
+                    Err(_) => continue,
+                })
+            else {
                 continue;
             };
             let key = super::normalize(model_id);
-            if let Some(existing) = unique.get(&key) {
-                if !existing.equivalent_pricing(&entry) {
+            if let Some(&index) = unique.get(&key) {
+                let existing = &catalog_entries[index].1;
+                if !existing.equivalent_pricing(&pricing_entry) {
                     conflicts.insert(key.clone());
                     unique.remove(&key);
                 }
             } else if !conflicts.contains(&key) {
-                unique.insert(key.clone(), entry.clone());
+                unique.insert(key.clone(), catalog_entries.len());
             }
-            entries.insert(model_id.clone(), entry);
+            catalog_entries.push((model_id.clone(), pricing_entry));
         }
+        let unique = unique
+            .into_iter()
+            .map(|(alias, index)| (alias, catalog_entries[index].0.clone()))
+            .collect();
+        let catalog_entries = catalog_entries.into_iter().collect();
+        let lookup = super::lookup::CatalogLookup::build(&catalog_entries, &conflicts);
         Ok(Self {
             revision,
             fetched_at_ms,
             stale,
-            entries,
-            conflicts,
-            unique,
+            entries: Arc::new(catalog_entries),
+            conflicts: Arc::new(conflicts),
+            unique: Arc::new(unique),
+            lookup: Arc::new(lookup),
         })
     }
 
@@ -115,20 +130,7 @@ impl PricingCatalog {
     /// publishes one generic image tariff without quality/size dimensions;
     /// those dimensions are represented as `default` rather than guessed.
     pub fn image_request_prices(&self, model: &str) -> Vec<ImageRequestPrice> {
-        let normalized = super::normalize(model);
-        let Some(entry) = self
-            .entries
-            .values()
-            .filter(|entry| {
-                !self.conflicts.contains(&super::normalize(&entry.model_id))
-                    && (super::normalize(&entry.model_id) == normalized
-                        || super::unqualified(&entry.model_id) == normalized)
-            })
-            .find(|entry| entry.image.is_some())
-        else {
-            return Vec::new();
-        };
-        let Some(image) = entry.image else {
+        let Some(image) = self.lookup.image(model) else {
             return Vec::new();
         };
         let mut rows = Vec::with_capacity(2);
@@ -158,18 +160,6 @@ impl PricingCatalog {
         self.resolve_account(model, Some(provider_family)).quote
     }
 
-    /// Returns whether at least one non-conflicting token record matches the
-    /// model. It is useful for capability checks where provenance is not
-    /// needed.
-    pub fn has_token_price(&self, model: &str) -> bool {
-        self.entries.values().any(|entry| {
-            entry.token.is_some()
-                && !self.conflicts.contains(&super::normalize(&entry.model_id))
-                && (super::normalize(&entry.model_id) == super::normalize(model)
-                    || super::unqualified(&entry.model_id) == super::normalize(model))
-        })
-    }
-
     pub fn handle(self) -> PricingCatalogHandle {
         PricingCatalogHandle::new(self)
     }
@@ -177,25 +167,28 @@ impl PricingCatalog {
 
 #[derive(Clone, Debug)]
 pub struct PricingCatalogHandle {
-    current: Arc<RwLock<Arc<PricingCatalog>>>,
+    active_catalog: Arc<RwLock<Arc<PricingCatalog>>>,
 }
 
 impl PricingCatalogHandle {
     pub fn new(catalog: PricingCatalog) -> Self {
         Self {
-            current: Arc::new(RwLock::new(Arc::new(catalog))),
+            active_catalog: Arc::new(RwLock::new(Arc::new(catalog))),
         }
     }
 
     pub fn snapshot(&self) -> Arc<PricingCatalog> {
-        self.current
+        self.active_catalog
             .read()
             .expect("pricing catalog lock poisoned")
             .clone()
     }
 
     pub fn replace(&self, catalog: PricingCatalog) {
-        *self.current.write().expect("pricing catalog lock poisoned") = Arc::new(catalog);
+        *self
+            .active_catalog
+            .write()
+            .expect("pricing catalog lock poisoned") = Arc::new(catalog);
     }
 }
 
@@ -224,7 +217,7 @@ impl std::fmt::Display for PricingError {
             Self::Io => "pricing cache I/O failed",
             Self::Network => "pricing catalog refresh failed",
             Self::HttpStatus(status) => {
-                return write!(formatter, "pricing catalog returned HTTP {status}")
+                return write!(formatter, "pricing catalog returned HTTP {status}");
             }
         })
     }

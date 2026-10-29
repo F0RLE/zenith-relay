@@ -4,25 +4,55 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RelayMode, SourceSummary } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
-import { SecretField, Button, Dialog, ErrorDetailsDialog, Tabs } from "../../components/Ui";
+import { SecretField, Button, Dialog, ErrorDetailsDialog, OptionMenu, Tabs } from "../../components/Ui";
 import { SourcePriceEditor } from "../../components/SourcePriceEditor";
 import { parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/sourcePriceEditorModel";
 import { updatePoolMembership } from "../../poolMembership";
 import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
+import { selectApiProvider } from "../../components/apiProviderModel";
+import { useProxyPool } from "../../hooks/useProxyPool";
 
 type SourceEditTab = "main" | "prices";
+
+function SourceProxyField({ proxyId, onChange }: { proxyId: string | null; onChange: (proxyId: string | null) => void }) {
+  const { t } = useTranslation();
+  const { pool } = useProxyPool();
+  const entries = pool?.entries ?? [];
+  if (!pool || (!entries.length && !proxyId)) return null;
+  const options = [
+    { value: "", label: t("sources.proxyNone") },
+    ...(proxyId != null && !entries.some((entry) => entry.id === proxyId) ? [{ value: proxyId, label: t("sources.proxyMissing") }] : []),
+    ...entries.map((entry) => ({ value: entry.id, label: entry.endpoint })),
+  ];
+  return (
+    <div className="relay-field source-proxy-field">
+      <span>{t("sources.proxy")}</span>
+      <OptionMenu
+        className="field-option-menu"
+        label={t("sources.proxy")}
+        value={proxyId ?? ""}
+        align="start"
+        options={options}
+        onChange={(value) => onChange(value || null)}
+      />
+      <small>{t("sources.proxyHint")}</small>
+    </div>
+  );
+}
+
 export function SourceDialog({ source: initialSource, onClose, addToPool = false, modeOverride, onCreated }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean; modeOverride?: RelayMode; onCreated?: () => void }) {
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
-  const mode = modeOverride ?? currentMode;
+  const relayMode = modeOverride ?? currentMode;
   const [savedSource, setSavedSource] = useState(initialSource);
   const createdSourceId = useRef<string | null>(null);
-  const source = mode === currentMode ? runtime?.sources.find((value) => value.id === savedSource?.id) ?? savedSource : savedSource;
-  const [provider, setProvider] = useState(defaultApiProviderValue);
+  const source = relayMode === currentMode ? runtime?.sources.find((sourceOption) => sourceOption.id === savedSource?.id) ?? savedSource : savedSource;
+  const [provider, setProvider] = useState(() => selectApiProvider(defaultApiProviderValue(), "custom"));
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [proxyId, setProxyId] = useState<string | null>(source?.proxyId ?? null);
   const [priceDrafts, setPriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(source?.modelPriceOverrides ?? {}));
   const [activeTab, setActiveTab] = useState<SourceEditTab>("main");
   const [operationError, setOperationError] = useState<{ error: FeedbackError; messageKey: string } | null>(null);
@@ -39,25 +69,25 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
     const ok = await perform("source-save", async () => {
       if (!source) {
         if (!createdSourceId.current) {
-          const payload = apiProviderSourceInput(provider);
-          const created = mode !== "remote"
-            ? await relayCommands.createSource(payload) as { id: string }
-            : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string };
+          const sourceInput = apiProviderSourceInput(provider);
+          const proxyInput = proxyId ? { proxyId } : {};
+          const created = await relayCommands.createSource({ ...sourceInput, ...proxyInput }) as { id: string };
           // Creation has committed even if the following snapshot or membership
           // operation fails. A retry must continue with this source's identity.
           createdSourceId.current = created.id;
         }
-        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === createdSourceId.current);
-        if (latest) {
-          setSavedSource(latest);
-          setName(latest.name);
-          setBaseUrl(latest.baseUrl);
-          setPriceDrafts(sourcePriceDrafts(latest.modelPriceOverrides ?? {}));
+        const latestSource = (await relayCommands.localState()).sources.find((sourceOption) => sourceOption.id === createdSourceId.current);
+        if (latestSource) {
+          setSavedSource(latestSource);
+          setName(latestSource.name);
+          setBaseUrl(latestSource.baseUrl);
+          setProxyId(latestSource.proxyId ?? null);
+          setPriceDrafts(sourcePriceDrafts(latestSource.modelPriceOverrides ?? {}));
           setProvider(defaultApiProviderValue());
         }
         // Membership depends on the saved source, not generation evidence.
-        if (addToPool && !latest?.inPool) {
-          await updatePoolMembership(mode, { accountIds: [], sourceIds: [createdSourceId.current], inPool: true });
+        if (addToPool && !latestSource?.inPool) {
+          await updatePoolMembership(relayMode, { accountIds: [], sourceIds: [createdSourceId.current], inPool: true });
         }
         return;
       }
@@ -77,16 +107,12 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         recoveryDelaySeconds: source.recoveryDelaySeconds,
         modelPriceOverrides,
       };
-      if (mode !== "remote") {
-        await relayCommands.updateSource({ sourceId: source.id, ...update });
-        if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
-      } else {
-        await relayCommands.remoteAction({ type: "update_source", id: source.id }, { ...update, ...(apiKey ? { apiKey } : {}) });
-      }
+      await relayCommands.updateSource({ sourceId: source.id, ...update, proxyId });
+      if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
       if (addToPool && !initialSource && !source.inPool) {
-        const latest = (mode !== "remote" ? await relayCommands.localState() : await relayCommands.remoteState())?.sources.find((value) => value.id === source.id);
-        if (latest && !latest.inPool) {
-          await updatePoolMembership(mode, { accountIds: [], sourceIds: [source.id], inPool: true });
+        const latestSource = (await relayCommands.localState()).sources.find((sourceOption) => sourceOption.id === source.id);
+        if (latestSource && !latestSource.inPool) {
+          await updatePoolMembership(relayMode, { accountIds: [], sourceIds: [source.id], inPool: true });
         }
       }
     }, source ? "feedback.saved" : "feedback.sourceAdded", {
@@ -99,18 +125,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
       onClose();
     }
   };
-  const dialogClassName = source ? `source-edit-dialog connection-dialog${activeTab === "prices" ? " source-prices-dialog" : ""}` : "source-add-dialog";
+  const dialogClassName = source ? "source-edit-dialog connection-dialog" : "source-add-dialog";
   const submitSourceForm = () => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit();
   const footer = (
     <>
-      <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
       <Button
         variant="primary"
         busy={busy === "source-save"}
         disabled={source ? !modelPriceOverrides : !apiProviderReady(provider)}
         onClick={submitSourceForm}
       >
-        {t("common.save")}
+        {t(source ? "common.save" : "sources.add")}
       </Button>
     </>
   );
@@ -121,14 +146,17 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
         className={dialogClassName}
         title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")}
         onClose={onClose}
-        footer={footer}
+        footer={source || provider.kind ? footer : undefined}
       >
         <form id="source-form" className="relay-form source-form" onSubmit={submit}>
           {source ? (
             <>
-              <div className="connection-dialog-context">
-                <Link2 aria-hidden />
-                <strong>{source.name}</strong>
+              <div className="connection-dialog-context source-editor-context">
+                <div className="source-editor-icon"><Link2 aria-hidden /></div>
+                <div className="source-editor-identity">
+                  <strong>{source.name}</strong>
+                  <small>{source.baseUrl}</small>
+                </div>
                 <span>{t("sources.groupModelsCount", { count: source.models.length })}</span>
               </div>
               <Tabs value={activeTab} items={sourceEditTabs} onChange={(tab) => setActiveTab(tab as SourceEditTab)} label={t("sources.editorTabsLabel")} />
@@ -143,6 +171,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
                       <SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} />
                       <p className="form-note">{t("sources.keepKeyHint")}</p>
                     </div>
+                    <SourceProxyField proxyId={proxyId} onChange={setProxyId} />
                   </section>
                 </section>
               ) : null}
@@ -153,7 +182,10 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
               ) : null}
             </>
           ) : (
-            <ApiProviderForm value={provider} onChange={setProvider} />
+            <>
+              <ApiProviderForm value={provider} onChange={setProvider} />
+              {provider.kind ? <SourceProxyField proxyId={proxyId} onChange={setProxyId} /> : null}
+            </>
           )}
         </form>
       </Dialog>

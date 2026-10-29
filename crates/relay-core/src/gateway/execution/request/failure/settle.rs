@@ -9,12 +9,11 @@ pub(super) fn settle_collected_rejection(
         runtime,
         lease,
         route,
-        source_model,
         request_id,
         key,
         carry:
             super::RejectionCarry {
-                wire_api,
+                client_wire_api,
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
@@ -43,8 +42,7 @@ pub(super) fn settle_collected_rejection(
 ) -> FailureStep {
     let native_replay_attempted = &mut repairs.native_replay;
     let cache_write_rejected = prompt_cache_write_rejected(&bytes);
-    let rejection_state =
-        settle_attempt_failure(runtime, lease, source_model, &failure, response_headers);
+    let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
     let response_missing = previous_response_not_found(&bytes);
     let affinity_miss = recoverable_response_affinity_miss(
         status,
@@ -58,13 +56,14 @@ pub(super) fn settle_collected_rejection(
     // successful turn before selecting another candidate.  This is
     // the safe hand-off path: the new candidate receives the
     // materialized conversation, never a foreign opaque response id.
-    if wire_api == WireApi::Responses
+    if client_wire_api == WireApi::Responses
+        && failure.execution.certainty == ExecutionCertainty::NotSent
         && adapter_is_passthrough
         && has_previous_response_id
         && response_affinity_hit
         && *requires_affinity_owner
         && !*native_replay_attempted
-        && (retryable_failure(status, failure.category, has_previous_response_id)
+        && (retryable_route_failure(route, status, failure.category, has_previous_response_id)
             || (affinity_miss && response_missing))
     {
         match replay_native_tool_continuation(
@@ -76,8 +75,7 @@ pub(super) fn settle_collected_rejection(
             native_replay_attempted,
         ) {
             Ok(true) => {
-                clear_materialized_continuation(
-                    response_affinity_key,
+                retain_materialized_continuation_owner(
                     requires_affinity_owner,
                     has_unpaired_tool_output,
                 );
@@ -89,36 +87,45 @@ pub(super) fn settle_collected_rejection(
                     lease.allow_rotation_repair();
                     event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
                 } else {
-                    let state = rejection_state.clone();
-                    apply_failure_state(event, state);
+                    let failure_state = rejection_state.clone();
+                    apply_failure_state(event, failure_state);
                 }
                 // A retryable transport/availability failure leaves
                 // the owner in `tried`: replay has materialized the
                 // conversation specifically so the next attempt can
                 // be handed to a different slot.
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+                }
                 emit_usage(runtime, event.clone());
                 *last_failure = Some(failure);
                 *last_failure_origin = selected_error_origin;
                 return FailureStep::Continue;
             }
             Ok(false) => {}
-            Err(error) => return FailureStep::Respond(adapter_error_response(error)),
+            Err(error) => {
+                return FailureStep::Respond(adapter_error_response(error, Some(request_id)));
+            }
         }
     }
     if cache_write_rejected {
-        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref());
+        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
-    if affinity_miss
-        || cache_write_rejected
-        || retryable_failure(status, failure.category, has_previous_response_id)
+    if failure.execution.certainty == ExecutionCertainty::NotSent
+        && (affinity_miss
+            || (cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
+            || retryable_route_failure(route, status, failure.category, has_previous_response_id))
     {
         if affinity_miss {
             *confirmed_response_missing |= response_missing;
             runtime.invalidate_response_affinity(response_affinity_key.as_deref());
             event.error_category = Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
         } else {
-            let state = rejection_state.clone();
-            apply_failure_state(event, state);
+            let failure_state = rejection_state.clone();
+            apply_failure_state(event, failure_state);
+        }
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
         }
         emit_usage(runtime, event.clone());
         *last_failure = Some(failure);
@@ -139,16 +146,17 @@ pub(super) fn settle_collected_rejection(
     }
     populate_tokens(event, &bytes);
     emit_usage(runtime, event.clone());
-    let mut response = proxy_error_response(
+    let origin = selected_error_origin.for_category(failure.category);
+    let mut error_response = proxy_error_response(
         status,
         response_headers,
-        Body::from(bytes),
-        selected_error_origin,
+        &bytes,
+        origin,
         failure.category,
         Some(request_id),
     );
     if account_route && adapter_is_passthrough {
-        relay_account_response_header(forwarded_headers, response_headers, &mut response);
+        relay_account_response_header(forwarded_headers, response_headers, &mut error_response);
     }
-    FailureStep::Respond(response)
+    FailureStep::Respond(error_response)
 }

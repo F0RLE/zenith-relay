@@ -3,6 +3,7 @@
 //! observations. No queue snapshots, per-caller settlement or polling scans.
 
 mod automations;
+pub(crate) mod proxies;
 pub(crate) mod sources;
 
 mod account;
@@ -12,18 +13,18 @@ pub(in crate::local_pool) use account::{request_authorization, request_authoriza
 
 use super::{
     accounts::quota_refresh::{AccountQuotaRefreshResponse, PreparedAccountAuthorization},
-    commands::current_time_ms,
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
+    runtime::current_time_ms,
     state::DesktopState,
 };
 use std::{
     collections::BTreeSet,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 use zenith_relay_core::scheduler::{
     account_member_key,
-    refresh::{service::RefreshWaitError, RefreshKind},
+    refresh::{RefreshKind, service::RefreshWaitError},
 };
 
 #[derive(Clone, Debug)]
@@ -36,6 +37,7 @@ pub(crate) enum RefreshRead {
     Authorization(Box<PreparedAccountAuthorization>),
     SourceModels(Box<super::models::ProviderSourceRecord>),
     SourceStats(zenith_relay_core::scheduler::refresh::SourceStatsObservation),
+    Proxy(Box<super::accounts::proxy::check::ProxyCheckResult>),
 }
 
 impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
@@ -51,8 +53,8 @@ impl zenith_relay_core::scheduler::refresh::SourceStatsRead for RefreshRead {
 
 pub(crate) type RefreshReadResult = Result<RefreshRead>;
 
-pub(crate) fn cache_observation(value: &RefreshReadResult) -> bool {
-    matches!(value, Ok(read) if !matches!(read, RefreshRead::Authorization(_)))
+pub(crate) fn cache_observation(refresh_result: &RefreshReadResult) -> bool {
+    matches!(refresh_result, Ok(read) if !matches!(read, RefreshRead::Authorization(_) | RefreshRead::Proxy(_)))
 }
 
 impl DesktopState {
@@ -84,6 +86,14 @@ impl DesktopState {
                 if let Err(error) = account::reconcile(&state).await {
                     crate::diagnostics::record_error(
                         "refresh",
+                        Some("reconcile_failed"),
+                        &error.message,
+                        &[],
+                    );
+                }
+                if let Err(error) = proxies::reconcile(&state).await {
+                    crate::diagnostics::record_error(
+                        "proxy-refresh",
                         Some("reconcile_failed"),
                         &error.message,
                         &[],
@@ -140,11 +150,11 @@ impl DesktopState {
 }
 
 fn automatic_eligible(account: &LocalAccountRecord) -> bool {
-    account.remote_location.is_none() && account.account.is_automatic_quota_monitoring_eligible()
+    account.recovery.is_none() && account.account.is_automatic_quota_monitoring_eligible()
 }
 
 async fn active_members(state: &DesktopState) -> BTreeSet<String> {
-    state
+    let mut activity = state
         .gateway
         .runtime()
         .await
@@ -154,7 +164,31 @@ async fn active_members(state: &DesktopState) -> BTreeSet<String> {
                 zenith_relay_core::scheduler::refresh::RECENT_ACTIVITY_WINDOW_MS,
             )
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(store) = state.store() {
+        include_linked_account_activity(&mut activity, &store.gateway().account_routes);
+    }
+    activity
+}
+
+fn include_linked_account_activity(
+    activity: &mut BTreeSet<String>,
+    groups: &[crate::local_pool::models::AccountRouteGroup],
+) {
+    for group in groups {
+        if group
+            .account_ids
+            .iter()
+            .any(|id| activity.contains(&zenith_relay_core::scheduler::account_member_key(id)))
+        {
+            activity.extend(
+                group
+                    .account_ids
+                    .iter()
+                    .map(|id| zenith_relay_core::scheduler::account_member_key(id)),
+            );
+        }
+    }
 }
 
 fn recently_used(at: Option<u64>) -> bool {

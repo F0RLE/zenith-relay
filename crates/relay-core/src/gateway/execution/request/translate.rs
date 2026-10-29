@@ -31,11 +31,10 @@ pub(super) struct CompletedBasisPointsResponse {
 pub(super) fn translate_basis_points_completed(
     adapter_request: PreparedAdapterRequest,
     upstream_bytes: &[u8],
-    responses_request: &Value,
+    responses_request: &super::super::basis_points::PreparedClientRequest,
     stream: bool,
 ) -> Result<CompletedBasisPointsResponse, AdapterError> {
-    let responses_bytes =
-        super::super::basis_points::translate_response(upstream_bytes, responses_request)?;
+    let responses_bytes = responses_request.translate_bytes(upstream_bytes)?;
     if !stream {
         let (bytes, response) = translate_completed_response(adapter_request, responses_bytes)?;
         return Ok(CompletedBasisPointsResponse {

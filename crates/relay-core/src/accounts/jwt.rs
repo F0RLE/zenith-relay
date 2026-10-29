@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
 const MAX_UNVERIFIED_JWT_BYTES: usize = 64 * 1024;
@@ -13,25 +13,25 @@ pub fn decode_unverified_jwt_payload<T: for<'de> Deserialize<'de>>(token: &str) 
         return None;
     }
     let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(signature), None) =
+    let (Some(header), Some(encoded_payload), Some(signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return None;
     };
-    if header.is_empty() || payload.is_empty() || signature.is_empty() {
+    if header.is_empty() || encoded_payload.is_empty() || signature.is_empty() {
         return None;
     }
-    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    if payload.len() > MAX_UNVERIFIED_JWT_PAYLOAD_BYTES {
+    let payload_bytes = URL_SAFE_NO_PAD.decode(encoded_payload).ok()?;
+    if payload_bytes.len() > MAX_UNVERIFIED_JWT_PAYLOAD_BYTES {
         return None;
     }
-    serde_json::from_slice(&payload).ok()
+    serde_json::from_slice(&payload_bytes).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn token(payload: Value) -> String {
         format!(
@@ -53,9 +53,11 @@ mod tests {
             decode_unverified_jwt_payload::<Value>(&"x".repeat(MAX_UNVERIFIED_JWT_BYTES + 1))
                 .is_none()
         );
-        assert!(decode_unverified_jwt_payload::<Value>(&token(json!({
-            "padding": "x".repeat(MAX_UNVERIFIED_JWT_PAYLOAD_BYTES + 1)
-        })))
-        .is_none());
+        assert!(
+            decode_unverified_jwt_payload::<Value>(&token(json!({
+                "padding": "x".repeat(MAX_UNVERIFIED_JWT_PAYLOAD_BYTES + 1)
+            })))
+            .is_none()
+        );
     }
 }

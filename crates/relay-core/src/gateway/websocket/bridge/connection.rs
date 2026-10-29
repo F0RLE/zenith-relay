@@ -1,4 +1,4 @@
-use super::super::upstream::{connect_upstream_while_client_connected, Connected};
+use super::super::upstream::{Connected, connect_upstream_while_client_connected};
 use super::super::*;
 use super::events::handle_initial_messages;
 use super::terminal::clear_transient_response_affinity;
@@ -28,7 +28,7 @@ pub(super) async fn retry_upstream_connection(
                 bridge.upstream,
                 bridge.runtime,
                 bridge.key,
-                bridge.state,
+                bridge.bridge_state,
                 connected,
             )
             .await
@@ -48,17 +48,12 @@ pub(super) async fn retry_upstream_connection(
 
 pub(in crate::gateway::websocket) async fn send_request(
     upstream: &mut UpstreamWebSocket,
-    payload: String,
+    request_payload: String,
     origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
-    let send = async {
-        upstream.send(UpstreamMessage::Text(payload)).await?;
-        upstream.flush().await
-    };
-    match timeout(UPSTREAM_CONNECT_TIMEOUT, send).await {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(GatewayFailure::transport(origin)),
-    }
+    send_message(upstream, UpstreamMessage::Text(request_payload))
+        .await
+        .map_err(|_| GatewayFailure::transport(origin))
 }
 
 pub(super) async fn install_connected(
@@ -76,16 +71,20 @@ pub(super) async fn install_connected(
         initial_messages,
         route,
         request,
+        reasoning_effort,
+        tool_use,
         lease,
         attempt,
         started,
     } = connected;
-    let _ = upstream
-        .send(UpstreamMessage::Close {
+    let _ = send_message(
+        upstream,
+        UpstreamMessage::Close {
             code: UpstreamCloseCode::Normal,
             reason: String::new(),
-        })
-        .await;
+        },
+    )
+    .await;
     *upstream = next_upstream;
     install_in_flight(
         runtime,
@@ -96,6 +95,8 @@ pub(super) async fn install_connected(
             authorization_incarnation,
             request,
             route,
+            reasoning_effort,
+            tool_use,
             lease,
             attempt,
             started,
@@ -109,6 +110,8 @@ pub(super) struct InFlightInstall {
     pub(super) authorization_incarnation: AuthorizationIncarnation,
     pub(super) request: ClientRequest,
     pub(super) route: ExecutorRoute,
+    pub(super) reasoning_effort: crate::usage::ReasoningEffortDiagnostics,
+    pub(super) tool_use: crate::ToolUseDiagnostics,
     pub(super) lease: CandidateLease,
     pub(super) attempt: u16,
     pub(super) started: Instant,
@@ -125,6 +128,8 @@ pub(super) fn install_in_flight(
         authorization_incarnation,
         request,
         route,
+        reasoning_effort,
+        tool_use,
         lease,
         attempt,
         started,
@@ -135,9 +140,9 @@ pub(super) fn install_in_flight(
             attempt,
             local_key_id: &key.id,
             route: &route,
-            reasoning_effort: Some(&request.reasoning_effort_for(&route)),
+            reasoning_effort: Some(&reasoning_effort),
             requested_model: &request.requested_model,
-            tool_use: request.tool_use_for(&route),
+            tool_use,
         },
         true,
         StatusCode::OK.as_u16(),
@@ -147,6 +152,8 @@ pub(super) fn install_in_flight(
     clear_transient_response_affinity(runtime, state);
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_responses_lite = route.account_id.is_some() && request.responses_lite;
+    state.upstream_route = route.clone();
     state.credential_fingerprint = credential_fingerprint;
     state.authorization_incarnation = authorization_incarnation;
     state.upstream_origin = route_error_origin(&route);
@@ -155,11 +162,13 @@ pub(super) fn install_in_flight(
         request: request.clone(),
         route,
         event,
+        usage_snapshot: None,
         started,
         response_id: None,
         prompt_affinity_key: request.prompt_affinity_key,
         client_visible_output: false,
         legacy_call_id_repair_attempted: false,
+        tool_call_capture: Default::default(),
         native_replay_capture: NativeReplayCapture::default(),
     });
 }

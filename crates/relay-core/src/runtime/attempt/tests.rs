@@ -1,6 +1,6 @@
 use super::*;
-use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 use crate::scheduler::CooldownReason;
+use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 use crate::{
     CandidateHealth, CandidateQuota, PoolMemberKind, PoolRoutingMember, PoolRoutingMode,
     PoolRoutingPolicy,
@@ -23,6 +23,7 @@ fn runtime() -> Arc<GatewayRuntime> {
                         api_key: "synthetic-source-key".into(),
                         wire_api: WireApi::Responses,
                         models: vec!["model-a".into(), "model-b".into()],
+                        proxy_url: None,
                     })
                 })
                 .collect(),
@@ -71,6 +72,33 @@ async fn reserve(
             "model-a",
             &[protocol],
             &HashSet::new(),
+            (None, None),
+            crate::unix_time_ms(),
+            budget,
+        )
+        .await
+        .unwrap()
+        .1
+}
+
+async fn reserve_from(
+    runtime: &GatewayRuntime,
+    budget: &SharedRequestBudget,
+    protocol: WireApi,
+    candidate_id: &str,
+) -> CandidateLease {
+    let tried = runtime
+        .lock_scheduler()
+        .candidates()
+        .filter(|candidate| candidate.id != candidate_id)
+        .map(|candidate| candidate.id.clone())
+        .collect::<HashSet<_>>();
+    runtime
+        .select_and_reserve_with_budget(
+            &key(runtime),
+            "model-a",
+            &[protocol],
+            &tried,
             (None, None),
             crate::unix_time_ms(),
             budget,

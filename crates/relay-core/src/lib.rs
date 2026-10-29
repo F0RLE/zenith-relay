@@ -15,6 +15,8 @@ macro_rules! define_usage_request_contract {
             pub effective_reasoning_effort: Option<String>,
             pub wire_api: WireApi,
             #[serde(default)]
+            pub transport: crate::usage::UsageTransport,
+            #[serde(default)]
             pub service_tier: DefaultServiceTier,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub applied_service_tier: Option<ObservedServiceTier>,
@@ -23,6 +25,8 @@ macro_rules! define_usage_request_contract {
             pub error_category: Option<String>,
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub upstream_error: Option<crate::usage::UpstreamErrorDetails>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub image_usage: Option<crate::usage::ImageUsage>,
             $($fields)*
         }
     };
@@ -36,6 +40,8 @@ mod error;
 pub mod error_codes;
 pub mod gateway;
 mod ids;
+mod json_fingerprint;
+mod json_size;
 pub mod model_metadata;
 mod paths;
 pub mod poison;
@@ -43,63 +49,70 @@ pub mod pricing;
 pub mod protocol;
 pub mod providers;
 pub mod proxy;
+pub mod quality;
 pub mod quota;
 mod record_impl;
+pub mod request_timezone;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
+#[cfg(test)]
+mod test_support;
 mod time;
 pub mod tool_policy;
 mod transport;
 pub mod usage;
 
 pub use catalog::{
-    apply_codex_ultra_from_official_model, canonicalize_reasoning_levels,
-    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, codex_model_is_picker_eligible_for, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, is_degraded_route_model, is_valid_model_id,
-    is_valid_model_token, merge_model_display_order, model_id_key, normalize_bounded_model_ids,
-    normalize_codex_catalog_priorities, normalize_model_ids,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH, MAX_MODEL_LIST_LEN, ModelContextPolicy,
+    ModelIdListError, ModelRegistry, ModelRules, apply_codex_ultra_from_official_model,
+    canonicalize_reasoning_levels, claude_desktop_model_alias,
+    claude_desktop_reasoning_model_alias, codex_catalog_entry_is_compatible, codex_model_alias,
+    codex_model_display_name, codex_model_is_picker_eligible, codex_model_is_picker_eligible_for,
+    decode_codex_model_alias, deserialize_model_reasoning_allowed_levels, is_degraded_route_model,
+    is_valid_model_id, is_valid_model_token, merge_model_display_order, model_id_key,
+    normalize_bounded_model_ids, normalize_codex_catalog_priorities,
+    normalize_model_context_policies, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, publish_routed_codex_context, reasoning_level_rank,
     reasoning_policy_key, reasoning_policy_levels, routed_codex_catalog_entry,
-    source_model_declares_image_input, source_row_declares_reasoning, ModelIdListError,
-    ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
-    MAX_MODEL_LIST_LEN,
+    source_model_declares_image_input, source_row_declares_reasoning,
 };
-pub use error::{normalize_error_code, Error, Result};
+pub use error::{Error, Result, normalize_error_code};
 pub use ids::{is_ascii_ref, is_ascii_token};
 pub use paths::path_with_suffix;
 pub use pricing::{
+    CACHE_FORMAT, CACHE_SCHEMA_VERSION, CatalogEntry, CatalogRefreshDeadline, CatalogRefreshKind,
+    ImageModelPrice, ImageRequestPrice, InvalidPricingIdentity, LITELLM_SOURCE_URL,
+    MAX_CACHE_BYTES, MAX_CACHE_RECORDS, MAX_CACHE_STRING_LENGTH, PRICING_REFRESH_INTERVAL_SECONDS,
+    PRICING_REFRESH_JITTER_MAX_SECONDS, PriceEvidence, PriceSource, PricingCacheEnvelope,
+    PricingCatalog, PricingCatalogHandle, PricingContext, PricingError, PricingMetadata,
+    PricingSourceSummary, ResolvedPrice, SourcePricingMetadata, TokenPrice,
     normalize_pricing_identity, pricing_refresh_delay, pricing_refresh_jitter_seconds,
     usd_per_request_to_micro_usd, usd_per_token_to_micro_usd_per_million, usd_to_micro,
-    CatalogEntry, CatalogRefreshDeadline, CatalogRefreshKind, ImageModelPrice, ImageRequestPrice,
-    InvalidPricingIdentity, PriceEvidence, PriceSource, PricingCacheEnvelope, PricingCatalog,
-    PricingCatalogHandle, PricingContext, PricingError, PricingMetadata, PricingSourceSummary,
-    ResolvedPrice, SourcePricingMetadata, TokenPrice, CACHE_FORMAT, CACHE_SCHEMA_VERSION,
-    LITELLM_SOURCE_URL, MAX_CACHE_BYTES, MAX_CACHE_RECORDS, MAX_CACHE_STRING_LENGTH,
-    PRICING_REFRESH_INTERVAL_SECONDS, PRICING_REFRESH_JITTER_MAX_SECONDS,
 };
 pub use protocol::{
+    AdapterContinuationState, AdapterContinuationStore, AdapterError, AdapterRequestContext,
+    AdapterResponse, AdapterResult, AdapterStreamBridge, MessagesReasoningMode,
+    NativeResponsesReplayState, NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter,
+    TranslatedResponse, TranslationRequest, TranslationStream, UpstreamProtocol,
     bridged_response_id_scoped, merge_configuration_preset_settings,
     normalize_configuration_preset, prepare_responses_to_messages_scoped,
-    validate_resolved_configuration_preset_members, AdapterError, AdapterRequestContext,
-    AdapterResponse, AdapterResult, AdapterStreamBridge, GeminiBridgeRequest, GeminiBridgeResponse,
-    GeminiStreamBridge, MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState,
-    MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter, UpstreamProtocol,
+    validate_resolved_configuration_preset_members,
 };
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
-pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
+pub use proxy::{ProxyConfig, normalize_proxy_url, proxy_reference_id};
+pub use request_timezone::{is_valid_timezone, normalize_timezone};
 pub use runtime::{
+    DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions, IMAGE_API_MODEL,
+    PoolAccess, PoolParticipant, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
+    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
+    RESPONSE_AFFINITY_UPSERT_SQL, ResponseAffinityBinding, ResponseAffinityStore,
+    RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeContinuationStores, RuntimeLocalKey,
+    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
     changed_runtime_source_policy_updates, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
-    pool_dispatch_permission_changed, DefaultServiceTier, ExecutionFence, GatewayRuntime,
-    GatewayRuntimeOptions, PoolAccess, PoolParticipant, ResponseAffinityBinding,
-    ResponseAffinityStore, RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
-    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    pool_dispatch_permission_changed,
 };
 pub use scheduler::refresh::{
     RefreshCompletion, RefreshCoordinator, RefreshIdentity, RefreshJob, RefreshJobId, RefreshKind,
@@ -125,49 +138,52 @@ pub use scheduler::rotation::{
     RotationSelectionReason, RotationSettlement, SettlementError as RotationSettlementError,
 };
 pub use scheduler::{
-    account_candidate_health, resolve_pool_routing, ActiveModelRuntime, CandidateHealth,
-    CandidateKind, CandidateQuota, CandidateQuotaState, CandidateRuntimeSnapshot, CandidateScope,
-    ModelRetryRuntime, PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
-    PoolScheduler, RoutingDiagnostics, RuntimeCandidate, Selection, SelectionReason,
-    SelectionRequest, PROMPT_AFFINITY_TTL_MS, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    ActiveModelRuntime, AttemptOutcome, CandidateHealth, CandidateKind, CandidateQuota,
+    CandidateQuotaReference, CandidateQuotaState, CandidateResourceHeadroom,
+    CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS,
+    PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, PoolScheduler,
+    QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS, RoutingDiagnostics, RuntimeCandidate,
+    Selection, SelectionReason, SelectionRequest, account_candidate_health, resolve_pool_routing,
 };
 pub use sources::{
-    apply_source_priorities, cache_write_model_ids, discover_source_models,
-    discover_source_models_and_protocol_bindings, discover_source_models_for_protocol_bindings,
-    discover_source_with_protocol_config, discover_source_with_protocol_config_with_scope,
-    endpoint_url_protocol, fetch_source_provider_stats, is_http_endpoint, is_loopback_url,
+    CacheWriteTtl, CapabilityOrigin, CapabilityStatus, LocalGatewayKey,
+    MAX_SOURCE_RECOVERY_DELAY_SECONDS, ModelEndpointCapability, ModelTokenLimits, ProtocolFeature,
+    ProviderSource, SourceBalanceKind, SourceCatalogEvidence, SourceCatalogRecord, SourceConnector,
+    SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceProtocolConfig, SourceProtocolResolution, SourceProviderStats,
+    SourceRead, SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,
+    SourceTransportIdentity, SourceTransportRecord, WireApi, apply_source_priorities,
+    cache_write_model_ids, discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    discover_source_with_protocol_config_with_scope, endpoint_url_protocol,
+    fetch_source_provider_stats, is_http_endpoint, is_loopback_url,
     normalize_source_protocol_bindings, probe_source_generation,
     probe_source_generation_with_scope, read_source_models, read_source_models_with_scope,
-    read_source_provider_stats, read_source_provider_stats_with_scope,
+    read_source_provider_stats, read_source_provider_stats_with_proxy,
+    read_source_provider_stats_with_scope, read_source_provider_stats_with_scope_and_proxy,
     runtime_source_models_for_any_wire_api, runtime_source_models_for_wire_api,
     runtime_source_models_with_cache_write_pricing, runtime_source_protocol_bindings,
     runtime_source_supports_any_wire_api, runtime_source_supports_wire_api, service_protocol,
     source_catalog_changed, source_models_for_wire_api, source_points_to_gateway,
-    source_runtime_policy_compatible, url_has_userinfo, CacheWriteTtl, CapabilityOrigin,
-    CapabilityStatus, LocalGatewayKey, ModelEndpointCapability, ProtocolFeature, ProviderSource,
-    SourceBalanceKind, SourceCatalogEvidence, SourceCatalogRecord, SourceConnector,
-    SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProtocolConfig, SourceProtocolResolution, SourceProviderStats,
-    SourceRead, SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,
-    SourceTransportIdentity, SourceTransportRecord, WireApi, MAX_SOURCE_RECOVERY_DELAY_SECONDS,
+    source_runtime_policy_compatible, url_has_userinfo,
 };
 pub use time::{unix_time_ms, unix_time_ms_at, unix_time_ms_from_rfc3339};
-pub use tool_policy::{ToolPolicy, ToolPolicyMode, ToolPolicyOutcome, ToolPolicyUpdate};
+pub use tool_policy::{ToolPolicy, ToolPolicyMode, ToolPolicyOutcome};
 pub use transport::collect_limited;
 pub use usage::{
-    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
-    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
-    normalize_observed_service_tier, normalize_reasoning_effort, resolve_candidate_price,
-    sql_like_contains_pattern, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
-    ApiModelPriceSources, CandidatePriceQuery, CatalogPriceResolver, ErrorOrigin,
-    ObservedServiceTier, ObservedUsageSums, SourceModelPriceOverrides, TerminalOutputKind,
-    ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
+    CandidatePriceQuery, CatalogPriceResolver, ErrorOrigin, ObservedServiceTier, ObservedUsageSums,
+    SourceModelPriceOverrides, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
+    UsageCallback, UsageEvent, UsageTransport, UsageValue, estimate_api_equivalent_with_catalog,
+    estimate_api_equivalent_with_token_price, estimate_candidate_api_equivalent_with_catalog,
+    normalize_model_price_overrides, normalize_observed_service_tier, normalize_reasoning_effort,
+    resolve_candidate_price, sql_like_contains_pattern,
 };
 
 /// Drops optional text that is empty or only whitespace.
 /// Any other value keeps its original spelling.
-pub fn omit_blank<T: AsRef<str>>(value: Option<T>) -> Option<T> {
-    value.filter(|value| !value.as_ref().trim().is_empty())
+pub fn omit_blank<T: AsRef<str>>(optional_text: Option<T>) -> Option<T> {
+    optional_text.filter(|text| !text.as_ref().trim().is_empty())
 }
 
 #[cfg(test)]

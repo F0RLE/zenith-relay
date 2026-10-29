@@ -37,8 +37,8 @@ body,
 }
 
 ::selection {
-  background: var(--relay-accent-soft);
-  color: var(--relay-text);
+  background: var(--relay-selection-background);
+  color: var(--relay-selection-text);
 }
 
 button,

@@ -1,30 +1,30 @@
 use super::super::{
+    NativeSecretBackend,
     credentials::CredentialStore,
     import_orchestrator::credential_local_error,
     quota_refresh::{
-        ensure_local_agent_identity_task, prepare_account_request_authorization,
-        recover_account_authorization, PreparedAccountAuthorization,
+        PreparedAccountAuthorization, ensure_local_agent_identity_task,
+        prepare_account_request_authorization, recover_account_authorization,
     },
-    NativeSecretBackend,
 };
 use super::snapshot::parse_snapshot;
 use super::{
-    ResetCreditsSnapshot, ResetHttpResponse, CHATGPT_WEB_USER_AGENT,
-    MAX_RESET_CREDITS_RESPONSE_BYTES, RESET_CREDITS_CONSUME_URL, RESET_CREDITS_URL,
+    CHATGPT_WEB_USER_AGENT, MAX_RESET_CREDITS_RESPONSE_BYTES, RESET_CREDITS_CONSUME_URL,
+    RESET_CREDITS_URL, ResetCreditsSnapshot, ResetHttpResponse,
 };
 use crate::local_pool::{
-    commands::current_time_ms,
     error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result as LocalResult},
+    runtime::current_time_ms,
     state::DesktopState,
 };
 use reqwest::{
-    header::{HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, REFERER, USER_AGENT},
-    redirect::Policy,
     StatusCode,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, REFERER, USER_AGENT},
+    redirect::Policy,
 };
 use serde_json::Value;
 use std::time::Duration;
-use zenith_relay_core::scheduler::refresh::http::{management_http_gate, HttpClass};
+use zenith_relay_core::scheduler::refresh::http::{HttpClass, management_http_gate};
 
 pub(super) async fn fetch_reset_snapshot_with_retry(
     state: &DesktopState,
@@ -32,13 +32,13 @@ pub(super) async fn fetch_reset_snapshot_with_retry(
     prepared: &mut PreparedAccountAuthorization,
     retry_unauthorized: bool,
 ) -> LocalResult<ResetCreditsSnapshot> {
-    let response = get_reset_credits(prepared).await?;
-    if response.status == StatusCode::UNAUTHORIZED && retry_unauthorized {
+    let reset_response = get_reset_credits(prepared).await?;
+    if reset_response.status == StatusCode::UNAUTHORIZED && retry_unauthorized {
         *prepared = retry_authorization(state, account_id, prepared).await?;
-        let retry = get_reset_credits(prepared).await?;
-        return parse_reset_response(retry);
+        let retry_response = get_reset_credits(prepared).await?;
+        return parse_reset_response(retry_response);
     }
-    parse_reset_response(response)
+    parse_reset_response(reset_response)
 }
 
 pub(super) async fn retry_authorization(
@@ -81,12 +81,12 @@ pub(super) async fn post_reset_credit(
     prepared: &PreparedAccountAuthorization,
     redeem_request_id: &str,
 ) -> LocalResult<ResetHttpResponse> {
-    let body = serde_json::json!({ "redeem_request_id": redeem_request_id });
+    let redeem_request_body = serde_json::json!({ "redeem_request_id": redeem_request_id });
     send_reset_request(
         prepared,
         reqwest::Method::POST,
         RESET_CREDITS_CONSUME_URL,
-        Some(&body),
+        Some(&redeem_request_body),
     )
     .await
 }
@@ -95,7 +95,7 @@ async fn send_reset_request(
     prepared: &PreparedAccountAuthorization,
     method: reqwest::Method,
     endpoint: &str,
-    body: Option<&Value>,
+    request_body: Option<&Value>,
 ) -> LocalResult<ResetHttpResponse> {
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
@@ -118,7 +118,7 @@ async fn send_reset_request(
             LocalPoolError::new(ErrorCode::InvalidState, "account provider id is invalid")
         })?;
     account_header.set_sensitive(true);
-    let mut request = client
+    let mut reset_request = client
         .request(method, endpoint)
         .header(AUTHORIZATION, prepared.authorization.clone())
         .header("ChatGPT-Account-Id", account_header)
@@ -133,11 +133,11 @@ async fn send_reset_request(
         .header("sec-fetch-dest", "empty")
         .header("priority", "u=4, i")
         .header("originator", "Codex Desktop");
-    if let Some(body) = body {
-        request = request.json(body);
+    if let Some(request_body) = request_body {
+        reset_request = reset_request.json(request_body);
     }
-    let (response, permit) = management_http_gate()
-        .send(&client, request, HttpClass::Ordinary)
+    let (reset_response, permit) = management_http_gate()
+        .send(&client, reset_request, HttpClass::Ordinary)
         .await
         .map_err(|_| {
             LocalPoolError::new(
@@ -145,33 +145,42 @@ async fn send_reset_request(
                 "reset credits request failed",
             )
         })?;
-    let status = response.status();
-    let body = super::super::collect_limited(response, MAX_RESET_CREDITS_RESPONSE_BYTES)
-        .await
+    let status = reset_response.status();
+    let response_body =
+        super::super::collect_limited(reset_response, MAX_RESET_CREDITS_RESPONSE_BYTES)
+            .await
+            .map_err(|_| {
+                LocalPoolError::new(
+                    ErrorCode::GatewayUnavailable,
+                    "reset credits response could not be read",
+                )
+            })?;
+    drop(permit);
+    Ok(ResetHttpResponse {
+        status,
+        response_body,
+    })
+}
+
+fn parse_reset_response(reset_response: ResetHttpResponse) -> LocalResult<ResetCreditsSnapshot> {
+    if !reset_response.status.is_success() {
+        return Err(reset_http_error(reset_response.status));
+    }
+    if reset_response
+        .response_body
+        .iter()
+        .all(|byte| byte.is_ascii_whitespace())
+    {
+        return Ok(ResetCreditsSnapshot::default());
+    }
+    let reset_response_payload: Value = serde_json::from_slice(&reset_response.response_body)
         .map_err(|_| {
             LocalPoolError::new(
                 ErrorCode::GatewayUnavailable,
-                "reset credits response could not be read",
+                "reset credits response was not valid JSON",
             )
         })?;
-    drop(permit);
-    Ok(ResetHttpResponse { status, body })
-}
-
-fn parse_reset_response(response: ResetHttpResponse) -> LocalResult<ResetCreditsSnapshot> {
-    if !response.status.is_success() {
-        return Err(reset_http_error(response.status));
-    }
-    if response.body.iter().all(|byte| byte.is_ascii_whitespace()) {
-        return Ok(ResetCreditsSnapshot::default());
-    }
-    let payload: Value = serde_json::from_slice(&response.body).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            "reset credits response was not valid JSON",
-        )
-    })?;
-    Ok(parse_snapshot(&payload))
+    Ok(parse_snapshot(&reset_response_payload))
 }
 
 pub(super) fn ensure_reset_success(response: ResetHttpResponse) -> LocalResult<()> {

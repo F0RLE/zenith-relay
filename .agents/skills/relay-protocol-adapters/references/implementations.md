@@ -1,0 +1,119 @@
+# Adapter implementation references
+
+Current file pointers and separately pinned historical comparisons. They do not
+define Relay's contract or prove model quality. Use [official contracts](contracts.md)
+first; check file-specific licensing and attribution before copying code.
+
+Default-branch revisions, listed files and repository license declarations were
+rechecked on **2026-10-23**. The new heads below are a refreshed source index,
+not a claim that every upstream behavior or compatibility change was accepted.
+Earlier comparison revisions remain explicit so past evidence is not silently
+attributed to different code.
+
+| Repository | Rechecked revision | Earlier comparison | License | Rechecked paths |
+| --- | --- | --- | --- | --- |
+| QuantumNous/new-api | `33c61a24234aa20cb10e8a644304322c476361de` | `ba0e478e061ee0c824922d89c05620de878103cf` | AGPL-3.0 | `relaykit/relayconvert/{request_registry,response_registry}.go`, `relaykit/dto/reasoning_state.go` |
+| router-for-me/CLIProxyAPI | `d946c4fba6fc9a5cfbca1f3d85184d62ad2fb683` | `091ff27f31285ec4fd1dd5823b44f7f51fb8f48b` | MIT | `sdk/translator/registry.go` |
+| router-for-me/EasyCLIProxyAPI | `1d5198eb672a0e0e3257a275bd2b9e42951dbdeb` | `74ef3e16ab347161c7dbb7bddb531b0a3b950770` | MIT | `src-tauri/src/core_runtime.rs` |
+| lidge-jun/opencodex | `3d9ba72aa5b04b4bbea5a2871a181942afa720e7` | `33b321853aff76045617824793cc7cbc1d4084e7` | MIT | `src/responses/reasoning-envelope.ts`, `src/adapters/openai-chat/tool-name-registry.ts` |
+| zyycn/codex-proxy-rs | `e033e21994d08e86d4df71cf5c72e374a7a09987` | `1280c437b4376518130455bcc63e844c845f8852` | Apache-2.0 | `backend/crates/providers/openai/src/{request_identity.rs,transport/headers.rs}` |
+| ranxi2001/sub2api | `7c6851cae25518f6e8e2541fc5394aad7c3c426c` | `05fa22f8f977b3c591712a2cecec09e42308f724` | LGPL-3.0 | `backend/internal/service/basispoints/{tool_images,history_messages,stream,structured_output}.go` |
+| vercel/ai | `1bf6d85bfc0b395194e1a7aa79d0057b0c74a75a` | `ba05943b69ad070558bb5bc912da99ec66d7d263` | Apache-2.0 | `packages/openai/src/responses/convert-to-openai-responses-input.ts` |
+| IuCC123/CLIProxyAPI-Rust | `b07936ba6b1a9faf557af44575f7d982f38636b0` | `7a3c8c2e017fafe9a3dc9a72dba5697feffcb992` | Unlicense | `src/{ir,sse}.rs`, `src/formats/claude.rs` |
+| jeremychone/rust-genai | `7f221f150bcf4d8063f654e70ecf64cb5fbfe13a` | `092bc0ff53c203454f23393cac5825cfb1943a06` | MIT OR Apache-2.0 in Cargo.toml | `src/chat/{tool/tool_call,chat_request}.rs` |
+
+## Additional inspected revisions
+
+Official `openai/codex` at `970111f6cb62cc02fe36a82ea7d71b37a2889c97`
+(2026-10-23 main snapshot, not a released-feature assertion) informed the local
+optimization boundaries: `codex-rs/core/src/context/world_state/top_level_tools.rs`,
+`codex-rs/codex-api/src/common.rs`, `codex-rs/core/src/client.rs`, and
+`codex-rs/core/tests/suite/request_compression.rs`. Its incremental catalog
+behavior is Responses-Lite-specific; its request compression is Codex-backend-
+specific, not a generic public API capability. Relay implements its own bounded
+presentation cache, stable transport prefix, payload telemetry and scoped
+compression; no Codex source is copied. See the pinned
+[client implementation](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/core/src/client.rs).
+
+The same pinned snapshot also informed bounded acknowledged persistence
+(`codex-rs/rollout/src/recorder.rs`), prepared-image reuse
+(`codex-rs/utils/image/src/lib.rs`), catalog-version signals
+(`codex-rs/models-manager/src/manager.rs` and
+`codex-rs/codex-api/src/sse/responses.rs`), and optional backend timing
+(`codex-rs/otel/src/events/session_telemetry.rs`). Relay retains its own SQLite
+commit contract and fenced refresh scheduler, caches only attachment digests/IDs
+rather than image bytes, and does not copy image-resizing policy. Native account
+headers/timing events remain observed backend behavior, not a guarantee for BPS,
+SIWC or public API-compatible sources. The local implementation is independent;
+no Codex source is copied.
+
+Historical behavior comparisons below retain their original revisions and
+release labels. They are not a list of the newest releases.
+
+CLIProxyAPI at `8289ec4c71ad914d0612c2776352b76ba3d355a6` (MIT) was inspected
+on 2026-10-24 for translator regressions/benchmarks (`internal/translator/`),
+session hints (`sdk/cliproxy/session/`), Interactions handlers
+(`sdk/api/handlers/gemini/interactions_handlers.go`), and executor/watcher
+extension points (`sdk/cliproxy/{service_executors,watcher}.go`). Relay implements
+the selected scenarios independently in its existing Rust owners: bounded soft
+opening-prefix affinity rather than a separate LCP/Merkle history store,
+native-only Interactions against Google's official contract, and existing
+runtime publication rather than external plugin loading. Foreign account
+connectors remain metadata-only and paused; no upstream Go modules are copied.
+
+codex-proxy-rs `v3.30.2` at `76291f448cdf1d1da2027da32b7c949deb998c7a`
+(Apache-2.0) was inspected for local diagnostics, bounded retention and optional
+WebSocket setup fallback: `frontend/src/views/usage/components/DiagnosticsDownloadButton.vue`,
+`backend/crates/gateway-host/src/retention.rs`, and
+`backend/crates/gateway-host/src/outbound/websocket.rs`. Relay implements these
+concepts through its existing Desktop telemetry, IPC and execution owners;
+no upstream modules or server/key-owner features are imported. Relay's strict
+pre-execution fallback and report privacy contracts take precedence.
+
+Sub2API `production` at `974a47f2ed722798566727a342df1eab3140dc94`
+(LGPL-3.0) supplied comparison scenarios in
+`openai_gateway_chat_completions.go`, `openai_upstream_session_error.go`,
+`openai_http_phase_guard.go` and `basispoints/unknown_tool_repair.go` under
+`backend/internal/service/`. Relay independently implements bounded declarations,
+diagnostic labels and an opt-in response-header bound in Rust. It does not copy
+the Go implementation, replay executable tools, import SIWC, or claim a separate
+network upload-completion signal from reqwest.
+
+| Source | Revision or digest | Files / reason |
+| --- | --- | --- |
+| Sub2API (`v2.17.0`, LGPL-3.0) | `7c6851cae25518f6e8e2541fc5394aad7c3c426c` | `backend/internal/service/basispoints/{history_messages,request,tools}.go`, `openai_request_scoped_403.go`, `ratelimit_service.go`: observed Codex chat-handoff shape, internal WS refusal and Cloudflare 1010 evidence. Relay implements narrow Rust lowering/classification independently, rejects extra handoff fields, ignores echoed input, and retains its own retry/credential policy. No Go code, hosted moderation, persistent prompt capture or cluster ownership is imported. |
+| Sub2API (`v2.16.0`, LGPL-3.0) | `5f779474d89a37953bda6e15f3df5a59921a0f21` | `backend/internal/service/priority_error_rate.go`: compared account/model/endpoint isolation. Relay retains its existing route-scoped health/circuit owner, with independent peer-cancellation and route-isolation regressions rather than an additional scoring engine. |
+| Sub2API (`v2.15.0`, LGPL-3.0) | `8b36fe7d647c28e8189147c6bfce52a41b6e26db` | `backend/internal/service/{ratelimit_service,openai_siwc_errors,openai_encrypted_content_locator}.go`: compared forwarded subscription quota ownership, structured eligibility refusals and unique ciphertext locators. Relay independently implements these behaviors in its existing Rust policy/repair owners; no Go code, Redis lifecycle or retry-after-uncertain-execution policy is imported. |
+| Sub2API (`v2.14.0`, LGPL-3.0) | `f3f72fa9893b7cc7ba76b32a59748ef84ee1004c` | `backend/internal/service/{openai_gateway_upstream_errors,openai_upstream_session_error,openai_siwc}.go`, `backend/internal/service/basispoints/structured_output.go`, `docs/responses-stream-keepalive.md`: compared error scope, opaque SIWC metadata, local schema validation and waiting-stage heartbeats. No Go code, retry policy or login changes copied; Relay retains token-rate failover and request-scoped policy handling, and does not substitute prompt-only validation for native strict output. |
+| Sub2API (`v2.12.3`, LGPL-3.0) | `7cf8892c1d20cab786736e524cba983d80938fe8` | `docs/gateway-transport-diagnostics.md`, `backend/internal/service/basispoints/tool_schema_diagnostics.go`: separate ingress/egress observations and safe schema-error categories. Relay implements these independently in its existing routing JSON and adapter errors; no Go code or retry policy is copied. Credential/proxy regressions reuse Relay's existing authority and synthetic endpoints. |
+| Sub2API (`production`, LGPL-3.0) | `6bc2eb2ffe858c60f1bd600c53683b66ae3cc1c6` | `backend/internal/service/basispoints/catalog.go`, `docs/bps-{compact,dynamic}-tool-catalog.md`: compact schema presentation and current-over-history catalogs; no native deferred search. Relay independently implements its own renderer and bounded local discovery, not copied Go code. |
+| New API | `09109ec315a5086366f94bcce00f177ec831dbe1` | `relay/channel/openai/relay_responses.go`, `relay/helper/stream_scanner.go`: terminal and usage observation |
+| New API | `d032204733db31208f10bac118b6e683aab3bf29` | `relaykit/relayconvert/internal/claude_messages/to_oai_responses_req.go`, `relaykit/dto/claude.go`, Responses-to-Messages JSON/SSE converters: history, metadata, thinking, deferred tools |
+| JaxsonWang/cpa-plugin-oai-basispoints | `a5f698da41ed4d33eb1fe532116a96383e1df821` | `internal/basispoints/protocol.go`: metadata comparison, not an official BPS contract |
+| Public BPS frontend | SHA-256 `87e120bee63d76f1204afd0a1b28b0e22adf6859aca716ecd917df2707b35fe8` | `assets/x-square-CXmFY5vk.js`: transport-owned metadata; historical observation only |
+
+## Relay decisions
+
+- Keep Relay's shared codecs and bounded volatile continuation store. Do not
+  import another converter runtime, persistence layer, or host/model-specific
+  repair policy.
+- Native transport keeps wire fidelity. Reference SSE/WebSocket fixtures help
+  test framing and numbers, but do not justify weaker terminal validation.
+- Preserve provider-owned reasoning and original tool identities. Never replace
+  missing signatures with sentinels, disable thinking to hide lost state, turn
+  orphan results into user text, or weaken schemas and forced tool choice.
+- BPS uses Relay's own envelope, attachment validation, metadata, and atomic
+  tool release. Generic metadata forwarding, remote image fetching, or another
+  project's public Responses converter is not a BPS specification.
+- Client-selected deferred tools are expanded through the validated catalog;
+  hosted search is not emulated. Original provider state stays separate from
+  the client-visible thinking summary.
+- Reference serializers and outbound SDKs are not four-protocol server
+  replacements. Their warning/omission paths need review before reuse.
+- No listed project establishes model-quality equivalence. Do not adopt paid
+  external judging, identity spoofing, TLS camouflage, credential mixing, or
+  retries after unknown execution as an anti-degradation feature.
+
+Implementation contracts belong in
+[PLANNING.md](../../../../docs/project/PLANNING.md#protocol-adapters);
+conversation checks belong in [acceptance.md](acceptance.md).

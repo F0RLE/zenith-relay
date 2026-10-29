@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(target_os = "windows")]
@@ -21,7 +21,16 @@ const CODEX_STOP_STABLE_WINDOW: Duration = Duration::from_millis(750);
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 mod identity;
+use identity::claude_desktop_pids;
+#[cfg(target_os = "windows")]
+use identity::claude_desktop_pids_for;
+pub(super) use identity::is_claude_desktop_process;
+#[cfg(test)]
+pub(super) use identity::is_claude_desktop_process_identity;
 pub(crate) use identity::is_codex_process;
+pub(super) use identity::is_codex_process_identity;
+#[cfg(all(test, target_os = "windows"))]
+pub(super) use identity::is_opencode_process_identity;
 #[cfg(any(target_os = "windows", test))]
 pub(super) use identity::process_stop_is_stable;
 #[cfg(test)]
@@ -33,8 +42,6 @@ pub(super) use identity::wait_for_pids_exit;
 pub(super) use identity::{codex_process_pids, codex_process_system};
 #[cfg(target_os = "windows")]
 use identity::{codex_process_pids_for, opencode_process_pids_for};
-#[cfg(all(test, target_os = "windows"))]
-pub(super) use identity::{is_codex_process_identity, is_opencode_process_identity};
 use identity::{is_opencode_process, opencode_process_pids};
 
 pub(super) fn is_codex_running() -> bool {
@@ -61,6 +68,43 @@ pub(super) fn stop_codex_and_wait() -> Result<bool, String> {
             Ok(true)
         } else {
             Err("ChatGPT did not exit before the profile switch timeout".to_string())
+        }
+    }
+}
+
+const CLAUDE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
+    let pids = claude_desktop_pids();
+    if pids.is_empty() {
+        return Ok(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        stop_windows_processes(
+            &pids,
+            CLAUDE_STOP_TIMEOUT,
+            claude_desktop_pids_for,
+            "Claude Desktop",
+        )?;
+        Ok(true)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let system = codex_process_system();
+        for process in system
+            .processes()
+            .values()
+            .filter(|process| pids.contains(&process.pid().as_u32()))
+        {
+            let _ = process.kill();
+        }
+        if wait_for_pids_exit(&pids, CLAUDE_STOP_TIMEOUT) {
+            Ok(true)
+        } else {
+            Err("Claude Desktop did not exit before the restart timeout".to_string())
         }
     }
 }
@@ -133,9 +177,12 @@ fn stop_windows_processes(
     let mut signaled = Vec::new();
     let mut forced = Vec::new();
     let mut empty_since = None;
+    let mut last_signal_failure = None;
 
     for pid in initial_pids {
-        signal_windows_process(*pid, false);
+        if let Some(failure) = signal_windows_process(*pid, false) {
+            last_signal_failure = Some(failure);
+        }
         signaled.push(*pid);
     }
 
@@ -150,7 +197,18 @@ fn stop_windows_processes(
         let now = Instant::now();
         let elapsed = now.duration_since(started);
         if elapsed >= timeout {
-            return Err(format!("{product} did not exit before the restart timeout"));
+            let message = format!("{product} did not exit before the restart timeout");
+            let mut details = vec![("product", product.to_string())];
+            if let Some(failure) = last_signal_failure {
+                details.push(("last_signal_failure", failure));
+            }
+            crate::diagnostics::record_error(
+                "launcher-stop",
+                Some("process_stop_timeout"),
+                &message,
+                &details,
+            );
+            return Err(message);
         }
         if process_stop_is_stable(
             !running.is_empty(),
@@ -165,7 +223,9 @@ fn stop_windows_processes(
         for pid in running {
             let attempted = if force { &mut forced } else { &mut signaled };
             if !attempted.contains(&pid) {
-                signal_windows_process(pid, force);
+                if let Some(failure) = signal_windows_process(pid, force) {
+                    last_signal_failure = Some(failure);
+                }
                 attempted.push(pid);
             }
         }
@@ -174,10 +234,29 @@ fn stop_windows_processes(
 }
 
 #[cfg(target_os = "windows")]
-fn signal_windows_process(pid: u32, force: bool) {
+fn signal_windows_process(pid: u32, force: bool) -> Option<String> {
     let mut command = windows_hidden_command("taskkill");
     command.args(windows_taskkill_arguments(pid, force));
-    let _ = command.status();
+    // taskkill uses localized console output that is not necessarily UTF-8.
+    // Capture both streams without decoding them; the stop loop still checks
+    // process identity and exit, so a rejected graceful signal is not fatal.
+    windows_taskkill_failure(command.output())
+        .map(|failure| format!("PID {pid}, force={force}: {failure}"))
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn windows_taskkill_failure(
+    result: std::io::Result<std::process::Output>,
+) -> Option<String> {
+    match result {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!("taskkill exit code: {:?}", output.status.code())),
+        Err(error) => Some(format!(
+            "taskkill I/O error: {:?} (OS code: {:?})",
+            error.kind(),
+            error.raw_os_error()
+        )),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -190,11 +269,16 @@ pub(super) fn windows_taskkill_arguments(pid: u32, force: bool) -> Vec<String> {
 }
 
 pub(super) fn launch_codex_checked() -> Result<(), String> {
+    let executable = super::settings::configured_path(super::settings::Application::Chatgpt)?;
     // Opening an already running desktop app is a no-op. Besides avoiding a
     // duplicate process, this prevents Chromium from reinitializing its
     // profile and touching the large on-disk cache on every click.
     if is_codex_running() {
         return Ok(());
+    }
+
+    if let Some(executable) = executable {
+        return launch_configured_chatgpt(&executable);
     }
 
     #[cfg(target_os = "windows")]
@@ -213,30 +297,117 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
                 return Ok(());
             }
         }
-        Err("ChatGPT/Codex desktop was not found. Install the desktop app; the terminal CLI cannot be opened from Relay without a terminal".to_string())
+        Err("ChatGPT desktop was not found. Install the desktop app; the terminal CLI cannot be opened from Relay without a terminal".to_string())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Err("Codex desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
+        Err("ChatGPT desktop launch is unavailable on this platform. Open a supported desktop app manually; Relay will not start the terminal CLI in the background".to_string())
     }
 }
 
-pub(super) fn find_command_on_path(name: &str) -> Option<PathBuf> {
-    let paths = env::var_os("PATH").or_else(|| env::var_os("Path"))?;
+fn launch_configured_chatgpt(executable: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_hidden_command(executable)
+            .spawn()
+            .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?;
+        if wait_for_codex_state(true, CODEX_START_TIMEOUT) {
+            Ok(())
+        } else {
+            Err("The selected ChatGPT desktop application did not start".to_string())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = executable
+            .ancestors()
+            .nth(3)
+            .ok_or("Invalid ChatGPT application path")?;
+        Command::new("open")
+            .arg("-a")
+            .arg(bundle)
+            .status()
+            .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?
+            .success()
+            .then_some(())
+            .ok_or_else(|| "The selected ChatGPT desktop application did not start".to_string())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = executable;
+        Err("ChatGPT desktop launch is unavailable on this platform".to_string())
+    }
+}
+
+pub(super) fn detected_chatgpt_launch_path() -> Option<String> {
+    if let Some(path) = codex_process_system()
+        .processes()
+        .values()
+        .filter(|process| is_codex_process(process))
+        .find_map(|process| process.exe())
+    {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_chatgpt_launch_targets().into_iter().next()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut roots = vec![PathBuf::from("/Applications")];
+        if let Some(home) = env::var_os("HOME") {
+            roots.push(PathBuf::from(home).join("Applications"));
+        }
+        roots
+            .into_iter()
+            .flat_map(|root| {
+                ["ChatGPT", "Codex"]
+                    .map(|name| root.join(format!("{name}.app/Contents/MacOS/{name}")))
+            })
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+pub(super) fn find_commands_on_path(paths: &std::ffi::OsStr, command_name: &str) -> Vec<PathBuf> {
     let names = if cfg!(target_os = "windows") {
         vec![
-            name.to_string(),
-            format!("{name}.exe"),
-            format!("{name}.cmd"),
-            format!("{name}.bat"),
+            command_name.to_string(),
+            format!("{command_name}.exe"),
+            format!("{command_name}.cmd"),
+            format!("{command_name}.bat"),
         ]
     } else {
-        vec![name.to_string()]
+        vec![command_name.to_string()]
     };
-    env::split_paths(&paths)
+    env::split_paths(paths)
         .flat_map(|directory| names.iter().map(move |entry| directory.join(entry)))
-        .find(|candidate| candidate.is_file())
+        .filter(|candidate| candidate.is_file())
+        .collect()
+}
+
+pub(super) fn wait_for_application_start(
+    mut running: impl FnMut() -> bool,
+    timeout: Duration,
+    product: &str,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if running() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{product} did not start before the launch timeout; the saved profile was kept"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -256,7 +427,7 @@ fn launch_codex_desktop() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn windows_chatgpt_launch_targets() -> Vec<String> {
-    let output = windows_hidden_command("powershell.exe")
+    let command_result = windows_hidden_command("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -265,22 +436,24 @@ fn windows_chatgpt_launch_targets() -> Vec<String> {
         ])
         .output()
         .ok();
-    output
-        .filter(|output| output.status.success())
-        .map(|output| parse_windows_start_apps_output(&String::from_utf8_lossy(&output.stdout)))
+    command_result
+        .filter(|command_result| command_result.status.success())
+        .map(|command_result| {
+            parse_windows_start_apps_output(&String::from_utf8_lossy(&command_result.stdout))
+        })
         .unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn parse_windows_start_apps_output(output: &str) -> Vec<String> {
-    let mut targets = output
+pub(super) fn parse_windows_start_apps_output(command_output: &str) -> Vec<String> {
+    let mut targets = command_output
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .filter_map(|(name, app_id)| {
-            let name = name.trim();
+        .filter_map(|(display_name, app_id)| {
+            let display_name = display_name.trim();
             let app_id = app_id.trim();
-            let valid_name =
-                name.eq_ignore_ascii_case("ChatGPT") || name.eq_ignore_ascii_case("Codex");
+            let valid_name = display_name.eq_ignore_ascii_case("ChatGPT")
+                || display_name.eq_ignore_ascii_case("Codex");
             let valid_id = app_id.len() <= 256
                 && app_id.starts_with("OpenAI.")
                 && app_id.contains('!')
@@ -289,7 +462,7 @@ pub(super) fn parse_windows_start_apps_output(output: &str) -> Vec<String> {
                 });
             (valid_name && valid_id).then(|| {
                 (
-                    !name.eq_ignore_ascii_case("ChatGPT"),
+                    !display_name.eq_ignore_ascii_case("ChatGPT"),
                     format!(r"shell:AppsFolder\{app_id}"),
                 )
             })

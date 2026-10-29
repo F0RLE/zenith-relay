@@ -29,10 +29,9 @@ fn registration_events_exclude_usage_but_include_auth_eligibility_and_bulk_repla
         .unwrap();
     account.account.auth_state = AccountAuthState::Active;
     store
-        .replace_accounts_keys_and_ownership_operation(
+        .replace_accounts_and_keys(
             vec![account, store.account("account-b").unwrap().clone()],
             Vec::new(),
-            None,
         )
         .unwrap();
     assert!(changes.has_changed().unwrap());
@@ -77,27 +76,22 @@ fn account_refresh_revisions_survive_reopen_and_do_not_contain_credentials() {
 
 #[test]
 fn account_scope_changes_retire_reads_even_if_the_record_is_restored() {
-    let changes: [fn(&mut LocalAccountRecord); 7] = [
+    let account_mutations: [fn(&mut LocalAccountRecord); 7] = [
         |account| account.account.enabled = false,
         |account| account.account.source_id = "different-source".into(),
         |account| account.account.identity = account_record("other").account.identity,
         |account| account.account.auth_mode = AccountAuthMode::ImportedToken,
         |account| account.account.secret_refs = vec!["different-secret-ref".into()],
         |account| account.account.created_at_ms += 1,
-        |account| {
-            account.remote_location = Some(zenith_relay_core::protocol::RemoteAccountLocation {
-                server_id: "test-server".into(),
-                remote_account_id: "test-remote-account".into(),
-            })
-        },
+        |account| account.recovery = Some(serde_json::json!({ "reason": "recovery_required" })),
     ];
-    for change in changes {
+    for mutate_account in account_mutations {
         let (root, mut store) = seeded();
         let (original, fence) = store.account_refresh_scope("account-a").unwrap();
         let (_, unrelated) = store.account_refresh_scope("account-b").unwrap();
-        let mut changed = original.clone();
-        change(&mut changed);
-        store.upsert_account(changed).unwrap();
+        let mut updated_account = original.clone();
+        mutate_account(&mut updated_account);
+        store.upsert_account(updated_account).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
         store.upsert_account(original).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
@@ -134,7 +128,7 @@ fn quota_models_usage_and_token_rotation_do_not_change_the_scope() {
             Ok(())
         })
         .unwrap();
-    assert_eq!(applied.previous, account);
+    assert_eq!(applied.previous_account, account);
     assert_eq!(applied.account.account.label, "Renamed");
     assert_eq!(applied.account.weight, 9);
     assert_eq!(applied.account.account.token_generation, 2);
@@ -166,10 +160,10 @@ fn ownership_transaction_and_reset_invalidate_account_reads() {
     let (root, mut store) = seeded();
     let (account, fence) = store.account_refresh_scope("account-a").unwrap();
     store
-        .replace_accounts_keys_and_ownership_operation(Vec::new(), Vec::new(), None)
+        .replace_accounts_and_keys(Vec::new(), Vec::new())
         .unwrap();
     store
-        .replace_accounts_keys_and_ownership_operation(vec![account.clone()], Vec::new(), None)
+        .replace_accounts_and_keys(vec![account.clone()], Vec::new())
         .unwrap();
     assert!(store.ensure_account_refresh_current(&fence).is_err());
     let (_, next) = store.account_refresh_scope("account-a").unwrap();
@@ -182,18 +176,18 @@ fn ownership_transaction_and_reset_invalidate_account_reads() {
 
 #[test]
 fn relevant_gateway_changes_and_secret_backed_proxy_changes_retire_reads() {
-    let changes: [fn(&mut GatewaySettings); 3] = [
+    let gateway_mutations: [fn(&mut GatewaySettings); 3] = [
         |gateway| gateway.common_proxy_configured = true,
         |gateway| gateway.account_proxy_required = true,
         |gateway| gateway.quota_request_timeout_seconds = 10,
     ];
-    for change in changes {
+    for mutate_gateway in gateway_mutations {
         let (root, mut store) = seeded();
         let (_, fence) = store.account_refresh_scope("account-a").unwrap();
         let original = store.gateway().clone();
-        let mut changed = original.clone();
-        change(&mut changed);
-        store.replace_gateway(changed).unwrap();
+        let mut updated_gateway = original.clone();
+        mutate_gateway(&mut updated_gateway);
+        store.replace_gateway(updated_gateway).unwrap();
         store.replace_gateway(original).unwrap();
         assert!(store.ensure_account_refresh_current(&fence).is_err());
         let (_, next) = store.account_refresh_scope("account-a").unwrap();
@@ -243,18 +237,22 @@ fn account_and_revision_changes_commit_or_fail_together() {
 fn refresh_callbacks_cannot_change_account_configuration() {
     let (root, mut store) = seeded();
     let (original, fence) = store.account_refresh_scope("account-a").unwrap();
-    assert!(store
-        .apply_account_refresh(&fence, |account| {
-            account.account.enabled = false;
-            Ok(())
-        })
-        .is_err());
-    assert!(store
-        .apply_account_refresh(&fence, |account| {
-            account.account.id = "replacement".into();
-            Ok(())
-        })
-        .is_err());
+    assert!(
+        store
+            .apply_account_refresh(&fence, |account| {
+                account.account.enabled = false;
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(
+        store
+            .apply_account_refresh(&fence, |account| {
+                account.account.id = "replacement".into();
+                Ok(())
+            })
+            .is_err()
+    );
     assert_eq!(store.account("account-a"), Some(&original));
     drop(store);
     fs::remove_dir_all(root).unwrap();

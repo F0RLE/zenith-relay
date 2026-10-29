@@ -3,27 +3,58 @@
 use super::*;
 
 impl PoolScheduler {
+    pub fn invalidate_quota_reference_source(&mut self, account_id: &str) -> bool {
+        let previous = self.quota_references.len();
+        self.quota_references
+            .retain(|_, reference| reference.source_account_id != account_id);
+        self.quota_references.len() != previous
+    }
+
+    pub fn set_quota_references(
+        &mut self,
+        mut references: BTreeMap<String, crate::CandidateQuotaReference>,
+    ) -> bool {
+        references.retain(|id, reference| {
+            id != &reference.source_account_id
+                && self.candidates.get(id).is_some_and(|candidate| {
+                    candidate.kind == CandidateKind::OAuthAccount
+                        && !self.retired_candidates.contains(id)
+                })
+        });
+        if self.quota_references == references {
+            return false;
+        }
+        self.quota_references = references;
+        true
+    }
+
     pub fn set_quota_stale_after_ms(&mut self, stale_after_ms: u64) {
         self.quota_stale_after_ms = stale_after_ms.max(1);
     }
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
-        if self.candidates.get(&candidate_id).is_some_and(|previous| {
-            previous.enabled != candidate.enabled
-                || previous.draining != candidate.draining
-                || previous.secret_available != candidate.secret_available
-                || previous.kind != candidate.kind
-                || previous.source_id != candidate.source_id
-                || previous.account_id != candidate.account_id
-                || previous.protocol != candidate.protocol
-                || previous.model_rules != candidate.model_rules
-                || previous
-                    .models
-                    .difference(&candidate.models)
-                    .next()
-                    .is_some()
-        }) {
+        if self
+            .candidates
+            .get(&candidate_id)
+            .is_some_and(|previous_candidate| {
+                previous_candidate.enabled != candidate.enabled
+                    || previous_candidate.draining != candidate.draining
+                    || previous_candidate.secret_available != candidate.secret_available
+                    || previous_candidate.kind != candidate.kind
+                    || previous_candidate.source_id != candidate.source_id
+                    || previous_candidate.account_id != candidate.account_id
+                    || previous_candidate.protocol != candidate.protocol
+                    || previous_candidate.model_protocols != candidate.model_protocols
+                    || previous_candidate.model_rules != candidate.model_rules
+                    || previous_candidate
+                        .models
+                        .difference(&candidate.models)
+                        .next()
+                        .is_some()
+            })
+        {
+            self.forget_shared_rate_limits(&candidate_id);
             let revision = self
                 .candidate_permission_revisions
                 .entry(candidate_id.clone())
@@ -46,6 +77,10 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        self.forget_shared_rate_limits(candidate_id);
+        self.quota_references.retain(|id, reference| {
+            id != candidate_id && reference.source_account_id != candidate_id
+        });
         let existing = self.candidates.get(candidate_id).cloned()?;
         // The rotation engine retains old leases itself. Retire its identity now,
         // not after drain, so a same-id re-add cannot inherit a late outcome.
@@ -191,31 +226,19 @@ impl PoolScheduler {
         };
         candidate.enabled = enabled;
         candidate.health = health;
-        candidate.quota = quota_state.quota;
-        candidate.quota_updated_at_ms = quota_state.updated_at_ms;
-        candidate.quota_reset_at_ms = quota_state.reset_at_ms;
-        candidate.provider_credits_micro_units = quota_state.provider_credits_micro_units;
-        candidate.provider_credits_unlimited = quota_state.provider_credits_unlimited;
+        candidate.set_quota_state(quota_state);
         true
     }
 
     pub fn update_candidate_quota_at(
         &mut self,
         candidate_id: &str,
-        quota: CandidateQuota,
-        quota_updated_at_ms: Option<u64>,
-        quota_reset_at_ms: Option<u64>,
-        provider_credits_micro_units: Option<u64>,
-        provider_credits_unlimited: bool,
+        quota_state: CandidateQuotaState,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
-        candidate.quota = quota;
-        candidate.quota_updated_at_ms = quota_updated_at_ms;
-        candidate.quota_reset_at_ms = quota_reset_at_ms;
-        candidate.provider_credits_micro_units = provider_credits_micro_units;
-        candidate.provider_credits_unlimited = provider_credits_unlimited;
+        candidate.set_quota_state(quota_state);
         true
     }
 
@@ -273,10 +296,10 @@ impl PoolScheduler {
     }
 
     pub fn clear_capability_blocks(&mut self, candidate_id: &str) -> bool {
-        let previous = self.capability_blocks.len();
+        let previous_block_count = self.capability_blocks.len();
         self.capability_blocks
             .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
-        self.capability_blocks.len() != previous
+        self.capability_blocks.len() != previous_block_count
     }
 
     pub fn set_candidate_health(&mut self, candidate_id: &str, health: CandidateHealth) -> bool {
@@ -295,13 +318,24 @@ impl PoolScheduler {
         else {
             return true;
         };
-        if matches!(candidate.quota, CandidateQuota::Available(_))
-            && candidate.quota_updated_at_ms.is_some_and(|updated_at_ms| {
-                now_ms.saturating_sub(updated_at_ms) > self.quota_stale_after_ms
-            })
-        {
-            return false;
+        match candidate.quota {
+            CandidateQuota::Available(remaining) => {
+                remaining > *reserve
+                    && crate::quota::observation_is_fresh(
+                        candidate.quota_updated_at_ms,
+                        now_ms,
+                        self.quota_stale_after_ms,
+                    )
+            }
+            CandidateQuota::CreditFallback => {
+                *reserve == 0
+                    && crate::quota::observation_is_fresh(
+                        candidate.provider_credits_observed_at_ms,
+                        now_ms,
+                        self.quota_stale_after_ms,
+                    )
+            }
+            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => false,
         }
-        matches!(candidate.quota, CandidateQuota::Available(remaining) if remaining > *reserve)
     }
 }

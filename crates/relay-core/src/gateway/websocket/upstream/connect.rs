@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use super::super::super::execution::AttemptRepairs;
 use super::super::*;
-use super::drive::{drive_selected_candidate, DriveCandidateInput, DrivenConnect};
-use super::selection_gap::{recover_without_candidate, GapAction, SelectionGap};
-use super::Connected;
+use super::ConnectedTransport;
+use super::drive::{DriveCandidateInput, DrivenConnect, drive_selected_candidate};
+use super::selection_gap::{GapAction, SelectionGap, recover_without_candidate};
 
 pub(super) async fn connect_upstream(
     runtime: &GatewayRuntime,
@@ -13,7 +13,7 @@ pub(super) async fn connect_upstream(
     mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
-) -> Result<Connected, GatewayFailure> {
+) -> Result<ConnectedTransport, GatewayFailure> {
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
     let mut confirmed_response_missing = false;
@@ -36,25 +36,28 @@ pub(super) async fn connect_upstream(
         let wait_for_candidate_availability = runtime.route_recovery_enabled();
         if !repairs.quota_yield {
             repairs.quota_yield = true;
-            if let Some(affinity_key) = request.response_affinity_key.clone() {
-                if runtime.automatic_response_owner_should_yield_for_quota(
+            if let Some(affinity_key) = request.response_affinity_key.clone()
+                && runtime.automatic_response_owner_should_yield(
                     key,
                     &affinity_key,
                     &request.resolved_model,
                     WEBSOCKET_PROTOCOLS,
                     &tried,
                     now_ms(),
-                ) {
-                    let _ = request.drop_previous_response_id(runtime, &key.id);
-                }
+                )
+            {
+                request.yield_response_owner(runtime, &key.id);
             }
         }
+        let (incompatible, mut admitted) = request.compatible_routes(runtime, key)?;
+        let mut selection_exclusions = tried.clone();
+        selection_exclusions.extend(incompatible.iter().cloned());
         let selected = runtime
             .select_and_reserve_with_budget(
                 key,
                 &request.resolved_model,
                 WEBSOCKET_PROTOCOLS,
-                &tried,
+                &selection_exclusions,
                 (
                     request.response_affinity_key.as_deref(),
                     request.prompt_affinity_key.as_deref(),
@@ -67,8 +70,9 @@ pub(super) async fn connect_upstream(
             let mut gap = SelectionGap {
                 runtime,
                 key,
-                request: &mut request,
+                client_request: &mut request,
                 tried: &mut tried,
+                incompatible: &incompatible,
                 last_failure: &last_failure,
                 http_fallback_origin: &websocket_http_fallback_origin,
                 allow_previous_response_reset,
@@ -82,8 +86,12 @@ pub(super) async fn connect_upstream(
                 GapAction::Fail(failure) => return Err(failure),
             }
         };
+        let route = admitted
+            .remove(&selected.candidate_id)
+            .ok_or_else(GatewayFailure::unavailable)?;
         match drive_selected_candidate(DriveCandidateInput {
             selected,
+            route,
             lease,
             request,
             runtime,
@@ -105,7 +113,10 @@ pub(super) async fn connect_upstream(
                 request = returned;
                 break;
             }
-            DrivenConnect::Ready(connected) => return Ok(connected),
+            DrivenConnect::Ready(connected) => {
+                return Ok(ConnectedTransport::Websocket(Box::new(connected)));
+            }
+            DrivenConnect::Http(fallback) => return Ok(ConnectedTransport::Http(fallback)),
         }
     }
 
@@ -141,11 +152,12 @@ pub(super) async fn connect_upstream(
     if let Some(origin) = websocket_http_fallback_origin {
         return Err(GatewayFailure::websocket_http_fallback(origin));
     }
+    let incompatible = request.service_tier_exclusions(runtime, key)?;
     if let Some(retry_at_ms) = runtime.earliest_retry_at(
         key,
         &request.resolved_model,
         WEBSOCKET_PROTOCOLS,
-        &HashSet::new(),
+        &incompatible,
         request.response_affinity_key.as_deref(),
         now_ms(),
         crate::scheduler::rotation::RotationOperation::Text,
@@ -162,7 +174,7 @@ pub(super) fn upstream_headers(
     request_id: &str,
 ) -> HeaderMap {
     let mut headers = forwarded_codex_headers(client_headers, request_id);
-    headers.insert(AUTHORIZATION, prepared.authorization.clone());
+    headers.insert(prepared.header_name.clone(), prepared.authorization.clone());
     if let Some(identity) = prepared.identity.as_ref() {
         let identity = codex_client_version(client_headers)
             .and_then(|version| identity.with_client_version(version).ok())
@@ -180,13 +192,16 @@ pub(super) fn upstream_headers(
 }
 
 fn ensure_websocket_beta(headers: &mut HeaderMap) {
-    let name = HeaderName::from_static("openai-beta");
+    let header_name = HeaderName::from_static("openai-beta");
     let present = headers
-        .get_all(&name)
+        .get_all(&header_name)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .any(|value| value.contains("responses_websockets="));
+        .filter_map(|header_value| header_value.to_str().ok())
+        .any(|header_value| header_value.contains("responses_websockets="));
     if !present {
-        headers.append(name, HeaderValue::from_static(RESPONSES_WEBSOCKET_BETA));
+        headers.append(
+            header_name,
+            HeaderValue::from_static(RESPONSES_WEBSOCKET_BETA),
+        );
     }
 }

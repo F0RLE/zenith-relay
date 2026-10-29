@@ -1,5 +1,5 @@
 use super::*;
-use tokio::time::{sleep_until, Instant};
+use tokio::time::{Instant, sleep_until};
 
 impl GatewayRuntime {
     pub(in crate::runtime) async fn admit(
@@ -18,7 +18,10 @@ impl GatewayRuntime {
             let turn_changed = self.admission_changed.notified();
             tokio::pin!(turn_changed);
             turn_changed.as_mut().enable();
-            let deadline = self.admission_deadline(&request.budget).ok()?;
+            let deadline = earliest(
+                self.admission_deadline(&request.budget).ok()?,
+                request.budget.rate_limit_deadline(),
+            );
             if !request.budget.can_dispatch() {
                 return None;
             }
@@ -55,7 +58,9 @@ impl GatewayRuntime {
                 };
                 let (reserved, busy) = if let Some(busy) = saturated_busy {
                     (None, busy)
-                } else if turn.is_none_or(|id| id == request.budget.request_id()) {
+                } else if turn
+                    .is_none_or(|turn_request_id| turn_request_id == request.budget.request_id())
+                {
                     self.try_reserve_admission(&request, now_ms)
                 } else {
                     let scope = request.key.scope_read();
@@ -135,6 +140,7 @@ impl GatewayRuntime {
         let Ok(queue_deadline) = self.admission_deadline(budget) else {
             return false;
         };
+        let retry_deadline = earliest(retry_deadline, budget.rate_limit_deadline());
         let deadline = earliest(queue_deadline, retry_deadline);
         let now_ms = crate::unix_time_ms();
         let retry_at = self.recovery_retry_at(

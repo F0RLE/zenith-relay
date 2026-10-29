@@ -5,6 +5,7 @@ use crate::local_pool::usage_writer::apply_account_usage_state;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 use zenith_relay_core::{
+    UsageEvent, WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
@@ -14,14 +15,53 @@ use zenith_relay_core::{
     },
     quota::{QuotaSnapshot, QuotaTransition, QuotaWindow, QuotaWindowKind, Subscription},
     scheduler::refresh::{
-        service::{RefreshRegistration, RefreshResult},
         RefreshFreshness, RefreshKind, RefreshOutcome,
+        service::{RefreshRegistration, RefreshResult},
     },
-    UsageEvent, WireApi,
 };
 mod access_blocks;
 mod desktop_runtime;
 mod wake_cycles;
+
+#[test]
+fn queued_performance_sample_does_not_keep_storage_alive() {
+    let root = crate::files::test_temp_root("queued-performance");
+    let path = root.join("relay.sqlite");
+    let database = Arc::new(TelemetryDb::open(&path).unwrap());
+    performance_sample_job(&database, "full_snapshot_native", 4.0, Some("local"))();
+    let queued = performance_sample_job(&database, "page_open", 8.0, None);
+    let lifetime = Arc::downgrade(&database);
+    drop(database);
+    let released = lifetime.upgrade().is_none();
+    queued();
+
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    let saved: i64 = reader
+        .query_row(
+            "SELECT COUNT(*) FROM performance_samples WHERE name = 'full_snapshot_native'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let skipped: i64 = reader
+        .query_row(
+            "SELECT COUNT(*) FROM performance_samples WHERE name = 'page_open'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(reader);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        released,
+        "queued optional metrics must not retain the database"
+    );
+    assert_eq!(saved, 1, "metrics are still recorded while storage is open");
+    assert_eq!(
+        skipped, 0,
+        "closed storage must not receive a queued sample"
+    );
+}
 
 struct MemorySecrets(HashMap<String, String>);
 
@@ -44,7 +84,7 @@ fn key_record(id: &str) -> LocalGatewayKeyRecord {
 }
 
 fn temp_root(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("zenith-relay-{prefix}-{}", uuid::Uuid::new_v4()))
+    crate::files::test_temp_root(prefix)
 }
 
 fn account_record(id: &str) -> LocalAccountRecord {
@@ -92,9 +132,10 @@ fn account_record(id: &str) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".into()],
         discovered_models: None,
@@ -168,6 +209,7 @@ fn account_usage_event(request_id: &str, success: bool) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success,
@@ -189,6 +231,7 @@ fn account_usage_event(request_id: &str, success: bool) -> UsageEvent {
         total_tokens: success.then_some(5),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 
@@ -214,6 +257,7 @@ fn account_status_event(
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,
@@ -235,6 +279,7 @@ fn account_status_event(
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 

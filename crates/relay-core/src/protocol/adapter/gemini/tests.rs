@@ -21,7 +21,7 @@ fn converts_tools_images_and_tool_result_continuation() {
         prepared.upstream_body["tools"][0]["functionDeclarations"][0]["name"],
         "run"
     );
-    let response = translate_gemini_response(prepared,&json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{"command":"pwd"},"id":"call_1"}}]}}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}})).unwrap();
+    let response = translate_gemini_response(prepared,&json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{"name":"run","args":{"command":"pwd"},"id":"call_1"}}]}}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}})).unwrap();
     assert_eq!(response.response_body["output"][0]["type"], "function_call");
     let continued = prepare_responses_to_gemini_with_reasoning(&json!({"previous_response_id":response.response_id,"input":[{"type":"function_call_output","call_id":"call_1","output":"/tmp"}]}),"gemini-test",false,MessagesReasoningMode::Disabled,Some(response.continuation),"route","req-2").unwrap();
     assert_eq!(
@@ -71,7 +71,7 @@ fn namespaces_are_flattened_with_a_stable_alias_and_restored_on_continuation() {
     let response = translate_gemini_response(
         prepared,
         &json!({
-            "candidates":[{"content":{"parts":[{"functionCall":{
+            "candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{
                 "name": alias.clone(),
                 "args": {"city":"Paris"},
                 "id":"call-weather"
@@ -122,7 +122,7 @@ fn function_result_preserves_text_and_media_parts() {
     let response = translate_gemini_response(
         prepared,
         &json!({
-            "candidates":[{"content":{"parts":[{"functionCall":{"name":"run","args":{},"id":"call-1"}}]}}]
+            "candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{"name":"run","args":{},"id":"call-1"}}]}}]
         }),
     )
     .unwrap();
@@ -142,16 +142,14 @@ fn function_result_preserves_text_and_media_parts() {
         "req-2",
     )
     .unwrap();
+    let function_response = &continued.upstream_body["contents"][2]["parts"][0]["functionResponse"];
+    assert_eq!(function_response["response"], json!({"output": "done"}));
     assert_eq!(
-        continued.upstream_body["contents"][2]["parts"][0]["functionResponse"]["response"]
-            ["output"],
-        "done"
+        function_response["parts"],
+        json!([{"inlineData": {"mimeType": "image/png", "data": "YQ=="}}])
     );
-    assert_eq!(
-        continued.upstream_body["contents"][2]["parts"][0]["functionResponse"]["response"]["parts"]
-            [0]["inlineData"]["mimeType"],
-        "image/png"
-    );
+    assert_eq!(function_response["name"], "run");
+    assert_eq!(function_response["id"], "call-1");
 }
 
 #[test]
@@ -170,12 +168,16 @@ fn converts_thinking_and_usage() {
         prepared.upstream_body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
         16384
     );
-    let response = translate_gemini_response(prepared,&json!({"candidates":[{"content":{"parts":[{"thought":true,"text":"private"},{"text":"done"}]}}],"usageMetadata":{"thoughtsTokenCount":4}})).unwrap();
+    let response = translate_gemini_response(prepared,&json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"private"},{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":6,"candidatesTokenCount":2,"thoughtsTokenCount":4}})).unwrap();
     assert_eq!(response.response_body["output"][0]["type"], "reasoning");
     assert_eq!(
         response.response_body["usage"]["output_tokens_details"]["reasoning_tokens"],
         4
     );
+    // Thought tokens are counted outside `candidatesTokenCount`; the client
+    // total must include them and be present together with input and output.
+    assert_eq!(response.response_body["usage"]["input_tokens"], 6);
+    assert_eq!(response.response_body["usage"]["total_tokens"], 12);
 }
 
 #[test]
@@ -194,6 +196,7 @@ fn bridge_preserves_json_schema_constraints_for_gemini() {
                         "query": {
                             "type": "string",
                             "pattern": ".+",
+                            "encrypted": true,
                             "$ref": "#/defs/query"
                         }
                     },
@@ -255,7 +258,68 @@ fn bridge_preserves_json_schema_constraints_for_gemini() {
     assert_eq!(parameters["properties"]["query"]["type"], "string");
     assert_eq!(parameters["properties"]["query"]["pattern"], ".+");
     assert_eq!(parameters["properties"]["query"]["$ref"], "#/defs/query");
+    assert!(parameters["properties"]["query"].get("encrypted").is_none());
     assert_eq!(parameters["additionalProperties"], false);
+}
+
+#[test]
+fn schema_metadata_removal_preserves_property_names_and_literal_data() {
+    let schema = json!({
+        "type": "object",
+        "encrypted": true,
+        "properties": {
+            "encrypted": {"type": "string", "encrypted": true},
+            "payload": {
+                "type": "object",
+                "default": {"encrypted": true},
+                "const": {"encrypted": true},
+                "enum": [{"encrypted": true}],
+                "examples": [{"encrypted": true}],
+                "properties": {"encrypted": {"type": "boolean"}}
+            },
+            "entries": {
+                "type": "array",
+                "items": {"type": "string", "encrypted": false}
+            }
+        },
+        "$defs": {
+            "encrypted": {"type": "string", "encrypted": true}
+        },
+        "allOf": [{"properties": {"mode": {"type": "string", "encrypted": true}}}],
+        "required": ["encrypted", "payload"],
+        "additionalProperties": false
+    });
+    let prepared = prepare_responses_to_gemini_with_reasoning(
+        &json!({"input": "synthetic", "tools": [{
+            "type": "function", "name": "store_entry", "parameters": schema
+        }]}),
+        "gemini-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+        "route",
+        "schema-metadata",
+    )
+    .unwrap();
+    let mut expected = schema;
+    for path in [
+        "",
+        "/properties/encrypted",
+        "/properties/entries/items",
+        "/$defs/encrypted",
+        "/allOf/0/properties/mode",
+    ] {
+        expected
+            .pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted");
+    }
+    assert_eq!(
+        prepared.upstream_body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"],
+        expected
+    );
 }
 
 #[test]
@@ -276,7 +340,7 @@ fn partial_function_arguments_are_translated_to_responses_arguments() {
     let response = translate_gemini_response(
         request,
         &json!({
-            "candidates":[{"content":{"parts":[{"functionCall":{
+            "candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{
                 "name":"weather",
                 "partialArgs":[
                     {"jsonPath":"$.location","stringValue":"Paris"},

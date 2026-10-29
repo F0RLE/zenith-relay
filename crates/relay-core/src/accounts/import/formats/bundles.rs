@@ -1,17 +1,17 @@
 use super::super::*;
 use super::{InputEntry, ParsedEntries};
 
-pub(super) fn is_zenith_bundle(object: &Map<String, Value>) -> bool {
-    object
+pub(super) fn is_zenith_bundle(bundle_object: &Map<String, Value>) -> bool {
+    bundle_object
         .get("format")
         .and_then(Value::as_str)
         .is_some_and(|format| format.eq_ignore_ascii_case("zenith"))
 }
 
 pub(super) fn parse_zenith_bundle(
-    object: &Map<String, Value>,
+    bundle_object: &Map<String, Value>,
 ) -> Result<ParsedEntries, ImportError> {
-    let version = object
+    let version = bundle_object
         .get("version")
         .and_then(bundle_version)
         .ok_or_else(|| {
@@ -26,7 +26,7 @@ pub(super) fn parse_zenith_bundle(
             "Zenith account bundle version is unsupported",
         ));
     }
-    let accounts = object
+    let accounts = bundle_object
         .get("accounts")
         .and_then(Value::as_array)
         .filter(|accounts| !accounts.is_empty())
@@ -37,7 +37,7 @@ pub(super) fn parse_zenith_bundle(
             )
         })?;
     check_item_count(accounts.len())?;
-    let description = match object.get("description") {
+    let description = match bundle_object.get("description") {
         None | Some(Value::Null) => None,
         Some(Value::String(description)) => normalize_account_export_description(Some(description))
             .map_err(|_| {
@@ -62,11 +62,11 @@ pub(super) fn parse_zenith_bundle(
     ))
 }
 
-pub(super) fn is_portable_bundle(object: &Map<String, Value>) -> bool {
-    let Some(accounts) = object.get("accounts").and_then(Value::as_array) else {
+pub(super) fn is_portable_bundle(bundle_object: &Map<String, Value>) -> bool {
+    let Some(accounts) = bundle_object.get("accounts").and_then(Value::as_array) else {
         return false;
     };
-    object
+    bundle_object
         .get("type")
         .and_then(Value::as_str)
         .is_some_and(|kind| kind.eq_ignore_ascii_case("portable_account_bundle"))
@@ -77,26 +77,35 @@ pub(super) fn is_portable_bundle(object: &Map<String, Value>) -> bool {
         })
 }
 
-pub(super) fn wrapped_sub2api_payload(object: &Map<String, Value>) -> Option<&Map<String, Value>> {
-    let payload = object.get("data").and_then(Value::as_object)?;
-    let recognized = payload
+pub(super) fn wrapped_sub2api_payload(
+    bundle_object: &Map<String, Value>,
+) -> Option<&Map<String, Value>> {
+    let wrapped_bundle_object = bundle_object.get("data").and_then(Value::as_object)?;
+    let recognized = wrapped_bundle_object
         .get("type")
         .and_then(Value::as_str)
         .is_some_and(is_sub2api_bundle_type);
-    (recognized && payload.get("accounts").is_some_and(Value::is_array)).then_some(payload)
+    (recognized
+        && wrapped_bundle_object
+            .get("accounts")
+            .is_some_and(Value::is_array))
+    .then_some(wrapped_bundle_object)
 }
 
 pub(super) fn parse_portable_bundle(
-    object: &Map<String, Value>,
+    bundle_object: &Map<String, Value>,
 ) -> Result<ParsedEntries, ImportError> {
-    let version = object.get("version").and_then(bundle_version).unwrap_or(1);
+    let version = bundle_object
+        .get("version")
+        .and_then(bundle_version)
+        .unwrap_or(1);
     if version != 1 {
         return Err(ImportError::new(
             ImportErrorCode::UnsupportedBundleVersion,
             "portable account bundle version is unsupported",
         ));
     }
-    let accounts = object
+    let accounts = bundle_object
         .get("accounts")
         .and_then(Value::as_array)
         .ok_or_else(|| {
@@ -105,7 +114,7 @@ pub(super) fn parse_portable_bundle(
                 "portable account bundle has no account list",
             )
         })?;
-    let (entries, warnings) = account_container(object, accounts)?;
+    let (entries, warnings) = account_container(bundle_object, accounts)?;
     Ok((
         ImportFormat::PortableAccountBundleV1,
         entries,
@@ -115,9 +124,9 @@ pub(super) fn parse_portable_bundle(
 }
 
 pub(super) fn parse_account_container(
-    object: &Map<String, Value>,
+    bundle_object: &Map<String, Value>,
 ) -> Result<ParsedEntries, ImportError> {
-    let accounts = object
+    let accounts = bundle_object
         .get("accounts")
         .and_then(Value::as_array)
         .ok_or_else(|| {
@@ -126,7 +135,7 @@ pub(super) fn parse_account_container(
                 "account container has no account list",
             )
         })?;
-    let (entries, warnings) = account_container(object, accounts)?;
+    let (entries, warnings) = account_container(bundle_object, accounts)?;
     Ok((ImportFormat::JsonArray, entries, warnings, None))
 }
 
@@ -135,11 +144,14 @@ fn is_sub2api_bundle_type(kind: &str) -> bool {
 }
 
 fn account_container(
-    object: &Map<String, Value>,
+    bundle_object: &Map<String, Value>,
     accounts: &[Value],
 ) -> Result<(Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
     check_item_count(accounts.len())?;
-    let proxy_count = object.get("proxies").map(container_count).unwrap_or(0);
+    let proxy_count = bundle_object
+        .get("proxies")
+        .map(container_count)
+        .unwrap_or(0);
     let warnings = (proxy_count > 0)
         .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
         .into_iter()
@@ -152,24 +164,24 @@ fn account_entries(accounts: &[Value]) -> Vec<InputEntry> {
         .iter()
         .cloned()
         .enumerate()
-        .map(|(ordinal, value)| InputEntry {
+        .map(|(ordinal, account_value)| InputEntry {
             ordinal,
-            value: Some(value),
+            import_value: Some(account_value),
             issue: None,
         })
         .collect()
 }
 
-fn bundle_version(value: &Value) -> Option<u64> {
-    value
+fn bundle_version(version_value: &Value) -> Option<u64> {
+    version_value
         .as_u64()
-        .or_else(|| value.as_str()?.trim().parse().ok())
+        .or_else(|| version_value.as_str()?.trim().parse().ok())
 }
 
-fn container_count(value: &Value) -> usize {
-    match value {
-        Value::Array(values) => values.len(),
-        Value::Object(values) => values.len(),
+fn container_count(container_value: &Value) -> usize {
+    match container_value {
+        Value::Array(container_values) => container_values.len(),
+        Value::Object(container_values) => container_values.len(),
         Value::Null => 0,
         _ => 1,
     }

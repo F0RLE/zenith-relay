@@ -29,6 +29,11 @@ impl PricingContext {
         let Some(model) = crate::omit_blank(model) else {
             return ResolvedPrice::unpriced(catalog.metadata());
         };
+        // Token-only aggregates do not carry the text/image/cache modality
+        // split. Applying a text input rate would invent an image valuation.
+        if crate::runtime::is_image_model_id(model) {
+            return ResolvedPrice::unpriced(catalog.metadata());
+        }
         let context_id = if candidate_kind.eq_ignore_ascii_case("source") {
             source_context_id(candidate_id)
         } else {
@@ -58,22 +63,25 @@ impl PricingContext {
             .or_else(|| self.source_metadata.get(&super::normalize(&context_id)));
         let mut resolved = catalog.resolve_source(
             model,
-            metadata.and_then(|value| value.pricing_provider.as_deref()),
-            metadata.and_then(|value| value.official_provider_family.as_deref()),
-            evidence.and_then(|value| value.provider),
-            evidence.and_then(|value| value.manual).or_else(|| {
-                self.global_manual_prices
-                    .get(&super::normalize(model))
-                    .copied()
-            }),
+            metadata.and_then(|source_metadata| source_metadata.pricing_provider.as_deref()),
+            metadata
+                .and_then(|source_metadata| source_metadata.official_provider_family.as_deref()),
+            evidence.and_then(|price_evidence| price_evidence.provider),
+            evidence
+                .and_then(|price_evidence| price_evidence.manual)
+                .or_else(|| {
+                    self.global_manual_prices
+                        .get(&super::normalize(model))
+                        .copied()
+                }),
         );
-        let cache_write_allowed = metadata
-            .is_some_and(|value| value.cache_write_models.contains(&super::normalize(model)));
-        if !cache_write_allowed {
-            if let Some(quote) = resolved.quote.as_mut() {
-                quote.cache_write_5m = None;
-                quote.cache_write_1h = None;
-            }
+        let cache_write_allowed = metadata.is_some_and(|source_metadata| {
+            source_metadata
+                .cache_write_models
+                .contains(&super::normalize(model))
+        });
+        if !cache_write_allowed && let Some(quote) = resolved.quote.as_mut() {
+            *quote = quote.clear_messages_cache_writes();
         }
         resolved
     }
@@ -100,8 +108,8 @@ fn source_context_id(candidate_id: &str) -> String {
         return candidate_id.to_string();
     };
     let known_route = suffix == "bridge"
-        || crate::WireApi::ALL.iter().any(|client| {
-            crate::WireApi::ALL.iter().any(|upstream| {
+        || crate::WireApi::ALL_NATIVE.iter().any(|client| {
+            crate::WireApi::ALL_NATIVE.iter().any(|upstream| {
                 crate::SourceAdapter::between(*client, *upstream)
                     .is_some_and(|adapter| adapter.route_suffix(*client) == suffix)
             })

@@ -1,8 +1,126 @@
-use super::{CatalogStatus, PricingCatalog, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION};
+use super::{CatalogStatus, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION, PricingCatalog};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenRateSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<u64>,
+}
+
+impl TokenRateSet {
+    pub const EMPTY: Self = Self {
+        input: None,
+        cache_read: None,
+        cache_write_5m: None,
+        cache_write_1h: None,
+        cache_write: None,
+        output: None,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        self.input.is_none()
+            && self.cache_read.is_none()
+            && self.cache_write_5m.is_none()
+            && self.cache_write_1h.is_none()
+            && self.cache_write.is_none()
+            && self.output.is_none()
+    }
+
+    pub fn is_empty_ref(rate_set: &Self) -> bool {
+        rate_set.is_empty()
+    }
+
+    pub const fn is_valid(self) -> bool {
+        option_is_valid(self.input)
+            && option_is_valid(self.cache_read)
+            && option_is_valid(self.cache_write_5m)
+            && option_is_valid(self.cache_write_1h)
+            && option_is_valid(self.cache_write)
+            && option_is_valid(self.output)
+    }
+
+    pub const fn overlay(self, above: Self) -> Self {
+        Self {
+            input: or_rate(above.input, self.input),
+            cache_read: or_rate(above.cache_read, self.cache_read),
+            cache_write_5m: or_rate(above.cache_write_5m, self.cache_write_5m),
+            cache_write_1h: or_rate(above.cache_write_1h, self.cache_write_1h),
+            cache_write: or_rate(above.cache_write, self.cache_write),
+            output: or_rate(above.output, self.output),
+        }
+    }
+
+    const fn clear_messages_cache_writes(self) -> Self {
+        Self {
+            cache_write_5m: None,
+            cache_write_1h: None,
+            ..self
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongContextRates {
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub standard: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub flex: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub priority: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub ultrafast: TokenRateSet,
+}
+
+impl LongContextRates {
+    pub const EMPTY: Self = Self {
+        standard: TokenRateSet::EMPTY,
+        flex: TokenRateSet::EMPTY,
+        priority: TokenRateSet::EMPTY,
+        ultrafast: TokenRateSet::EMPTY,
+    };
+
+    pub const fn is_empty(self) -> bool {
+        self.standard.is_empty()
+            && self.flex.is_empty()
+            && self.priority.is_empty()
+            && self.ultrafast.is_empty()
+    }
+
+    pub fn is_empty_ref(context_rates: &Self) -> bool {
+        context_rates.is_empty()
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.standard.is_valid()
+            && self.flex.is_valid()
+            && self.priority.is_valid()
+            && self.ultrafast.is_valid()
+    }
+
+    const fn clear_messages_cache_writes(self) -> Self {
+        Self {
+            standard: self.standard.clear_messages_cache_writes(),
+            flex: self.flex.clear_messages_cache_writes(),
+            priority: self.priority.clear_messages_cache_writes(),
+            ultrafast: self.ultrafast.clear_messages_cache_writes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenPrice {
     pub input: u64,
@@ -12,23 +130,89 @@ pub struct TokenPrice {
     pub cache_write_5m: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<u64>,
     pub output: u64,
+    /// Published Flex components. Within a published schedule missing
+    /// components stay unknown.
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub flex: TokenRateSet,
+    /// Published Fast components, using the upstream `priority` name.
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub priority: TokenRateSet,
+    #[serde(default, skip_serializing_if = "TokenRateSet::is_empty_ref")]
+    pub ultrafast: TokenRateSet,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_100k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_128k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_200k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_272k: LongContextRates,
+    #[serde(default, skip_serializing_if = "LongContextRates::is_empty_ref")]
+    pub above_512k: LongContextRates,
 }
 
 impl TokenPrice {
+    /// Price thresholds, in ascending order. They are independent of a model's
+    /// maximum context window and are applied to each request's input tokens.
+    pub const fn context_rates(self) -> [(u64, LongContextRates); 5] {
+        [
+            (100_000, self.above_100k),
+            (128_000, self.above_128k),
+            (200_000, self.above_200k),
+            (272_000, self.above_272k),
+            (512_000, self.above_512k),
+        ]
+    }
+
     pub const fn is_valid(self) -> bool {
         self.input <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
             && self.output <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
             && option_is_valid(self.cache_read)
             && option_is_valid(self.cache_write_5m)
             && option_is_valid(self.cache_write_1h)
+            && option_is_valid(self.cache_write)
+            && self.flex.is_valid()
+            && self.priority.is_valid()
+            && self.ultrafast.is_valid()
+            && self.above_100k.is_valid()
+            && self.above_128k.is_valid()
+            && self.above_200k.is_valid()
+            && self.above_272k.is_valid()
+            && self.above_512k.is_valid()
+    }
+
+    /// Messages-only settings must not erase a provider's generic write tariff.
+    pub const fn clear_messages_cache_writes(self) -> Self {
+        Self {
+            cache_write_5m: None,
+            cache_write_1h: None,
+            flex: self.flex.clear_messages_cache_writes(),
+            priority: self.priority.clear_messages_cache_writes(),
+            ultrafast: self.ultrafast.clear_messages_cache_writes(),
+            above_100k: self.above_100k.clear_messages_cache_writes(),
+            above_128k: self.above_128k.clear_messages_cache_writes(),
+            above_200k: self.above_200k.clear_messages_cache_writes(),
+            above_272k: self.above_272k.clear_messages_cache_writes(),
+            above_512k: self.above_512k.clear_messages_cache_writes(),
+            ..self
+        }
     }
 }
 
-const fn option_is_valid(value: Option<u64>) -> bool {
-    match value {
-        Some(value) => value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+const fn option_is_valid(rate_value: Option<u64>) -> bool {
+    match rate_value {
+        Some(rate_value) => rate_value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
         None => true,
+    }
+}
+
+const fn or_rate(preferred_rate: Option<u64>, fallback_rate: Option<u64>) -> Option<u64> {
+    match preferred_rate {
+        Some(rate_value) => Some(rate_value),
+        None => fallback_rate,
     }
 }
 
@@ -94,18 +278,18 @@ impl PricingSourceSummary {
     where
         I: IntoIterator<Item = PriceSource>,
     {
-        let mut result = None;
+        let mut resolved_source = None;
         for source in sources {
             if source == PriceSource::Unpriced {
                 continue;
             }
-            result = Some(match result {
+            resolved_source = Some(match resolved_source {
                 None => source,
-                Some(previous) if previous == source => previous,
+                Some(previous_source) if previous_source == source => previous_source,
                 Some(_) => return Self::Mixed,
             });
         }
-        match result {
+        match resolved_source {
             Some(PriceSource::Provider) => Self::Provider,
             Some(PriceSource::LiteLlmExact) => Self::LiteLlmExact,
             Some(PriceSource::LiteLlmCanonical) => Self::LiteLlmCanonical,
@@ -142,14 +326,14 @@ impl PricingMetadata {
         source: PricingSourceSummary,
         unpriced_tokens: u64,
     ) -> Self {
-        let status = if catalog.stale {
+        let catalog_status = if catalog.stale {
             CatalogStatus::Stale
         } else if catalog.revision.is_some() {
             CatalogStatus::Current
         } else {
             CatalogStatus::Unloaded
         };
-        Self::for_catalog_with_status(catalog, status, source, unpriced_tokens)
+        Self::for_catalog_with_status(catalog, catalog_status, source, unpriced_tokens)
     }
 
     pub fn for_catalog_with_status(

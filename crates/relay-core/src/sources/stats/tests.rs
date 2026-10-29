@@ -1,7 +1,58 @@
 use super::*;
-use axum::{body::Body, extract::Request, http::StatusCode, response::Response, Router};
-use serde_json::{json, Value};
+use axum::{Router, body::Body, extract::Request, http::StatusCode, response::Response};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn moonshot_balance_preserves_currency_zero_and_missing_spend() {
+    for currency in [SourceStatsCurrency::Usd, SourceStatsCurrency::Cny] {
+        for (balance, micros) in [("0", 0), ("12.345678", 12_345_678)] {
+            let stats = formats::moonshot_stats(
+                &json!({"code":0,"status":true,"data":{"available_balance":balance}}),
+                currency,
+            )
+            .unwrap();
+            assert_eq!(stats.provider, SourceStatsProvider::Moonshot);
+            assert_eq!(
+                stats.balance_micro_usd,
+                (currency == SourceStatsCurrency::Usd).then_some(micros)
+            );
+            assert_eq!(stats.amounts[0].currency, currency);
+            assert_eq!(stats.amounts[0].balance_micros, Some(micros));
+            assert_eq!(stats.spent_micro_usd, None);
+            assert_eq!(stats.requests, None);
+        }
+    }
+    for payload in [
+        json!({"code":1,"status":true,"data":{"available_balance":10}}),
+        json!({"code":0,"status":false,"data":{"available_balance":10}}),
+        json!({"code":0,"status":true,"data":{}}),
+        json!({"code":0,"status":true,"data":{"available_balance":"NaN"}}),
+    ] {
+        assert_eq!(
+            formats::moonshot_stats(&payload, SourceStatsCurrency::Usd),
+            Err(SourceStatsStatus::InvalidResponse)
+        );
+    }
+    for host in ["api.moonshot.ai", "api.moonshot.cn"] {
+        assert_eq!(
+            source_stats_provider(&format!("https://{host}/v1")),
+            SourceStatsProvider::Moonshot
+        );
+        assert_eq!(
+            source_stats_provider(&format!("https://{host}.example.test/v1")),
+            SourceStatsProvider::Unsupported
+        );
+        let client = StatsClient::new(&format!("https://{host}/v1"), "synthetic").unwrap();
+        assert_eq!(
+            client
+                .endpoint("/v1/users/me/balance", false)
+                .unwrap()
+                .path(),
+            "/v1/users/me/balance"
+        );
+    }
+}
 
 #[test]
 fn failed_stats_keep_only_a_fenced_success_and_unsupported_discards_it() {
@@ -26,7 +77,7 @@ fn failed_stats_keep_only_a_fenced_success_and_unsupported_discards_it() {
 
 #[test]
 fn source_stats_scheduler_distinguishes_transient_failure_from_unsupported() {
-    use crate::scheduler::refresh::{source_stats_outcome, RefreshOutcome};
+    use crate::scheduler::refresh::{RefreshOutcome, source_stats_outcome};
     let available =
         SourceProviderStats::empty(SourceStatsProvider::Sub2Api, SourceStatsStatus::Available);
     assert_eq!(
@@ -51,7 +102,7 @@ fn source_stats_scheduler_distinguishes_transient_failure_from_unsupported() {
 
 #[tokio::test]
 async fn rate_limited_stats_return_retry_after_even_without_a_valid_payload() {
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     let app = Router::new().route(
         "/v1/usage",
         get(|| async {
@@ -66,7 +117,10 @@ async fn rate_limited_stats_return_retry_after_even_without_a_valid_payload() {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let read = read_source_provider_stats(&format!("http://{address}/v1"), "synthetic-key").await;
-    assert_eq!(read.value.unwrap().status, SourceStatsStatus::RateLimited);
+    assert_eq!(
+        read.read_value.unwrap().status,
+        SourceStatsStatus::RateLimited
+    );
     assert!(read.retry_after_ms.is_some_and(|delay| delay >= 1_000));
     server.abort();
 }
@@ -185,11 +239,13 @@ fn new_api_uses_advertised_conversion_and_never_guesses_quota_divisor() {
             Err(SourceStatsStatus::InvalidResponse)
         );
     }
-    assert!(formats::new_api_stats(
-        &json!({"success":true,"data":{"object":"token_usage","total_used":1}}),
-        None
-    )
-    .is_ok());
+    assert!(
+        formats::new_api_stats(
+            &json!({"success":true,"data":{"object":"token_usage","total_used":1}}),
+            None
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -404,11 +460,13 @@ async fn redirects_are_not_followed_and_oversized_payload_is_rejected() {
         .await
         .unwrap();
     assert_eq!(stats.status, SourceStatsStatus::Unsupported);
-    assert!(!seen
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|(path, _)| path.contains("redirect")));
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path.contains("redirect"))
+    );
     task.abort();
     let (base, _, task) = mock_server(vec![(
         "/proxy/v1/usage",
@@ -440,11 +498,12 @@ async fn billing_discovery_uses_matching_versioned_paths_and_display_units() {
     assert_eq!(stats.balance_kind, SourceBalanceKind::KeyQuota);
     assert_eq!(stats.balance_micro_usd, None);
     assert_eq!(stats.amounts[0].balance_micros, Some(20_500_000));
-    assert!(seen
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|(path, _)| path.starts_with("/proxy/")));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(path, _)| path.starts_with("/proxy/"))
+    );
     task.abort();
 }
 

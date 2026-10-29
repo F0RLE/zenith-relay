@@ -129,15 +129,15 @@ mod tests {
 
     #[test]
     fn full_transition_and_fingerprint_survive_restart() {
-        let previous =
+        let prior_window =
             QuotaWindow::normalize(input(QuotaWindowKind::Primary, 40.0, 1_000), None).unwrap();
-        assert_eq!(previous.reset_at_ms, Some(61_000));
+        assert_eq!(prior_window.reset_at_ms, Some(61_000));
         let full = QuotaWindow::normalize(
             input(QuotaWindowKind::Primary, 99.5, 2_000),
-            Some(&previous),
+            Some(&prior_window),
         )
         .unwrap();
-        let transition = full.full_transition_from(Some(&previous)).unwrap();
+        let transition = full.full_transition_from(Some(&prior_window)).unwrap();
         assert_eq!(transition.window_kind, QuotaWindowKind::Primary);
 
         let serialized = serde_json::to_string(&full).unwrap();
@@ -168,6 +168,62 @@ mod tests {
     }
 
     #[test]
+    fn full_quota_gets_a_new_cycle_after_its_previous_reset_deadline() {
+        let first =
+            QuotaWindow::normalize(input(QuotaWindowKind::Primary, 100.0, 1_000), None).unwrap();
+        let refreshed =
+            QuotaWindow::normalize(input(QuotaWindowKind::Primary, 100.0, 2_000), Some(&first))
+                .unwrap();
+        assert_eq!(
+            first.full_transition_fingerprint,
+            refreshed.full_transition_fingerprint
+        );
+        assert!(refreshed.full_transition_from(Some(&first)).is_none());
+
+        // A tiny wake can leave the rounded quota at 100%. The next real
+        // reset must still start a distinct cycle, not suppress it forever.
+        let next = QuotaWindow::normalize(
+            input(QuotaWindowKind::Primary, 100.0, 62_000),
+            Some(&refreshed),
+        )
+        .unwrap();
+        assert_ne!(
+            refreshed.full_transition_fingerprint,
+            next.full_transition_fingerprint
+        );
+        assert!(next.full_transition_from(Some(&refreshed)).is_some());
+    }
+
+    #[test]
+    fn full_quota_keeps_its_cycle_when_reset_evidence_is_missing() {
+        let first =
+            QuotaWindow::normalize(input(QuotaWindowKind::Primary, 100.0, 1_000), None).unwrap();
+        let mut unknown_reset = input(QuotaWindowKind::Primary, 100.0, 62_000);
+        unknown_reset.reset = None;
+        let refreshed = QuotaWindow::normalize(unknown_reset, Some(&first)).unwrap();
+        assert_eq!(
+            first.full_transition_fingerprint,
+            refreshed.full_transition_fingerprint
+        );
+        assert!(refreshed.full_transition_from(Some(&first)).is_none());
+    }
+
+    #[test]
+    fn full_quota_respects_an_explicit_provider_cycle_change() {
+        let mut previous_input = input(QuotaWindowKind::Primary, 100.0, 1_000);
+        previous_input.provider_cycle_id = Some("provider-cycle-1".into());
+        let previous = QuotaWindow::normalize(previous_input, None).unwrap();
+        let mut next_input = input(QuotaWindowKind::Primary, 100.0, 2_000);
+        next_input.provider_cycle_id = Some("provider-cycle-2".into());
+        let next = QuotaWindow::normalize(next_input, Some(&previous)).unwrap();
+        assert_ne!(
+            previous.full_transition_fingerprint,
+            next.full_transition_fingerprint
+        );
+        assert!(next.full_transition_from(Some(&previous)).is_some());
+    }
+
+    #[test]
     fn exhaustion_transition_is_emitted_once_and_survives_refreshes() {
         let available =
             QuotaWindow::normalize(input(QuotaWindowKind::Secondary, 25.0, 1_000), None).unwrap();
@@ -189,12 +245,17 @@ mod tests {
             repeated.exhaustion_transition_fingerprint,
             exhausted.exhaustion_transition_fingerprint
         );
-        assert!(repeated
-            .exhaustion_transition_from(Some(&exhausted))
-            .is_none());
-        let current = repeated.exhaustion_transition().unwrap();
-        assert_eq!(current.fingerprint, transition.fingerprint);
-        assert_eq!(current.transitioned_at_ms, repeated.observed_at_ms);
+        assert!(
+            repeated
+                .exhaustion_transition_from(Some(&exhausted))
+                .is_none()
+        );
+        let repeated_transition = repeated.exhaustion_transition().unwrap();
+        assert_eq!(repeated_transition.fingerprint, transition.fingerprint);
+        assert_eq!(
+            repeated_transition.transitioned_at_ms,
+            repeated.observed_at_ms
+        );
     }
 
     #[test]

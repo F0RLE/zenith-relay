@@ -6,14 +6,26 @@ pub enum WireApi {
     ChatCompletions,
     Messages,
     Gemini,
+    /// Native-only Interactions; never inferred from Generate Content support.
+    GeminiInteractions,
 }
 
 impl WireApi {
+    /// The interoperable conversion matrix, retained for existing callers.
+    /// Native-only extensions must be enumerated with `ALL_NATIVE`.
     pub const ALL: [Self; 4] = [
         Self::Responses,
         Self::ChatCompletions,
         Self::Messages,
         Self::Gemini,
+    ];
+
+    pub const ALL_NATIVE: [Self; 5] = [
+        Self::Responses,
+        Self::ChatCompletions,
+        Self::Messages,
+        Self::Gemini,
+        Self::GeminiInteractions,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -22,17 +34,19 @@ impl WireApi {
             Self::ChatCompletions => "chat_completions",
             Self::Messages => "messages",
             Self::Gemini => "gemini",
+            Self::GeminiInteractions => "gemini_interactions",
         }
     }
 
     /// Parses canonical and legacy persisted values without accepting a new
     /// user-facing protocol spelling.
-    pub fn from_storage_value(value: &str) -> Option<Self> {
-        match value {
+    pub fn from_storage_value(stored_wire_api: &str) -> Option<Self> {
+        match stored_wire_api {
             "responses" => Some(Self::Responses),
             "chat_completions" | "chatcompletions" => Some(Self::ChatCompletions),
             "messages" => Some(Self::Messages),
             "gemini" => Some(Self::Gemini),
+            "gemini_interactions" => Some(Self::GeminiInteractions),
             _ => None,
         }
     }
@@ -62,14 +76,6 @@ impl CacheWriteTtl {
             Self::Provider => None,
             Self::FiveMinutes => Some("5m"),
             Self::OneHour => Some("1h"),
-        }
-    }
-
-    pub fn from_anthropic_ttl(value: &str) -> Option<Self> {
-        match value.trim() {
-            "5m" => Some(Self::FiveMinutes),
-            "1h" => Some(Self::OneHour),
-            _ => None,
         }
     }
 }

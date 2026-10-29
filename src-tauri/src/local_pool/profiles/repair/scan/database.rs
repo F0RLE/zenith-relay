@@ -4,27 +4,27 @@ pub(in crate::local_pool::profiles::repair) fn collect_history_databases(
     root: &Path,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
-    let sqlite_directory = root.join("sqlite");
-    let mut candidates = vec![
-        root.join("state_5.sqlite"),
-        sqlite_directory.join("state_5.sqlite"),
-    ];
-    if sqlite_directory.is_dir() {
-        let mut discovered = Vec::new();
-        for entry in fs::read_dir(&sqlite_directory).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let path = entry.path();
+    let mut candidates = Vec::new();
+    // Codex versions and Desktop catalogs use different database filenames.
+    // Discover both supported locations; scan_database checks their schema and
+    // only selects rows associated with this profile's inspected rollouts.
+    for directory in [root.to_path_buf(), root.join("sqlite")] {
+        if !directory.is_dir() {
+            continue;
+        }
+        for directory_entry in fs::read_dir(&directory).map_err(io_error)? {
+            let directory_entry = directory_entry.map_err(io_error)?;
+            let path = directory_entry.path();
             let metadata = fs::symlink_metadata(&path).map_err(io_error)?;
             if metadata.is_file()
                 && !metadata.file_type().is_symlink()
                 && is_sqlite_database_path(&path)
             {
-                discovered.push(path);
+                candidates.push(path);
             }
         }
-        discovered.sort();
-        candidates.extend(discovered);
     }
+    candidates.sort();
 
     let mut databases = Vec::new();
     for path in candidates {
@@ -184,16 +184,16 @@ pub(in crate::local_pool::profiles::repair) fn scan_database(
     let mut hasher = Sha256::new();
     for (id, provider, rollout_path, _) in &rows {
         hasher.update(b"threads");
-        for value in [id, provider, rollout_path] {
-            hasher.update((value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
+        for field_text in [id, provider, rollout_path] {
+            hasher.update((field_text.len() as u64).to_le_bytes());
+            hasher.update(field_text.as_bytes());
         }
     }
     for (host_id, thread_id, provider, missing_candidate) in &catalog_rows {
         hasher.update(b"local_thread_catalog");
-        for value in [host_id, thread_id, provider] {
-            hasher.update((value.len() as u64).to_le_bytes());
-            hasher.update(value.as_bytes());
+        for field_text in [host_id, thread_id, provider] {
+            hasher.update((field_text.len() as u64).to_le_bytes());
+            hasher.update(field_text.as_bytes());
         }
         hasher.update(missing_candidate.to_le_bytes());
     }

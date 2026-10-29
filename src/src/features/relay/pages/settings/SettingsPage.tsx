@@ -8,36 +8,50 @@ import type { DiagnosticSettings, RelayStorageInfo } from "../../api/types";
 import { Button, OptionMenu, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
+import { CodexTextModelsControl } from "./CodexTextModelsControl";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
+// Native storage roots are fixed for this process. Reuse only these paths,
+// not mutable diagnostic settings, and never persist them in display storage.
+let cachedStorageInfo: RelayStorageInfo | null = null;
+let pendingStorageInfo: Promise<RelayStorageInfo> | null = null;
+function loadStorageInfo() {
+  if (cachedStorageInfo) return Promise.resolve(cachedStorageInfo);
+  pendingStorageInfo ??= relayCommands.storageInfo().then((info) => {
+    cachedStorageInfo = info;
+    return info;
+  }).finally(() => { pendingStorageInfo = null; });
+  return pendingStorageInfo;
+}
+
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
-  const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
+  const [storageInfo, setStorageInfo] = useState(() => cachedStorageInfo);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   const [diagnosticSettings, setDiagnosticSettings] = useState<DiagnosticSettings | null>(null);
   const [diagnosticsUnavailable, setDiagnosticsUnavailable] = useState(false);
   useEffect(() => {
     let active = true;
-    void relayCommands.storageInfo()
-      .then((info) => { if (active) setStorageInfo(info); })
+    void loadStorageInfo()
+      .then((storageInfo) => { if (active) setStorageInfo(storageInfo); })
       .catch(() => { if (active) setStorageUnavailable(true); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
     let active = true;
     void relayCommands.diagnosticSettings()
-      .then((settings) => { if (active) setDiagnosticSettings(settings); })
+      .then((diagnosticSettings) => { if (active) setDiagnosticSettings(diagnosticSettings); })
       .catch(() => { if (active) setDiagnosticsUnavailable(true); });
     return () => { active = false; };
   }, []);
   const debugMode = usePendingFlag(diagnosticSettings?.debugEnabled ?? false);
   const updateDiagnosticDebug = async (enabled: boolean) => {
-    const settings = await relayCommands.setDiagnosticDebugMode(enabled);
-    setDiagnosticSettings(settings);
-    return settings;
+    const updatedDiagnosticSettings = await relayCommands.setDiagnosticDebugMode(enabled);
+    setDiagnosticSettings(updatedDiagnosticSettings);
+    return updatedDiagnosticSettings;
   };
   const reset = async () => { if (await confirm(t("settings.resetDataConfirm"), { danger: true })) await perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
   const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
@@ -57,16 +71,16 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
             className="field-option-menu"
             label={t("settings.language")}
             value={i18n.language.startsWith("ru") ? "ru" : "en"}
-            onChange={(value) => void setI18nLanguage(value)}
+            onChange={(languageCode) => void setI18nLanguage(languageCode)}
             options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]}
           />
         </div>
         <div className="settings-control-row">
           <div><strong>{t("settings.theme")}</strong></div>
           <div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>
-            {(["system", "light", "dark"] as const).map((value) => (
-              <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>
-                {t(`settings.themes.${value}`)}
+            {(["system", "light", "dark"] as const).map((themeName) => (
+              <button key={themeName} type="button" className={theme === themeName ? "active" : ""} aria-pressed={theme === themeName} onClick={() => setTheme(themeName)}>
+                {t(`settings.themes.${themeName}`)}
               </button>
             ))}
           </div>
@@ -74,6 +88,12 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
+        <SettingToggle
+          label={t("settings.launchAfterConnect")}
+          description={t("settings.launchAfterConnectHint")}
+          checked={launchApplicationAfterConnect}
+          onChange={setLaunchApplicationAfterConnect}
+        />
         <div className="settings-control-row">
           <div>
             <strong>{t("settings.currentVersion")}</strong>
@@ -91,18 +111,19 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openData")}
           busy={busy === "open-data"}
-          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened", { skipRefresh: true })}
         />
       </SettingsGroup>
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>
+        <CodexTextModelsControl />
         <SettingToggle className="settings-profile-backup-toggle" label={t("settings.profileSwitchBackupPrompt")} description={t("settings.profileSwitchBackupPromptHint")} checked={profileSwitchBackupPrompt} onChange={setProfileSwitchBackupPrompt} />
         <div className="settings-debug-section">
           <SettingToggle
             className="settings-debug-toggle"
             label={t("settings.debugMode")}
             description={diagnosticSettings
-              ? t("settings.debugModeHint", { state: t(diagnosticSettings.debugEnabled ? "settings.debugModeOn" : "settings.debugModeOff") })
+              ? t("settings.debugModeHint")
               : t(diagnosticsUnavailable ? "settings.debugModeUnavailable" : "settings.debugModeLoading")}
             checked={debugMode.checked}
             disabled={diagnosticSettings === null}
@@ -118,13 +139,12 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       {mode === "local" && diagnosticSettings?.debugEnabled ? <SettingsGroup icon={<Bug aria-hidden />} title={t("settings.diagnostics")}>
         <SettingsPathRow
           title={t("settings.logsPath")}
-          hint={t("settings.logsHint")}
           path={storageInfo?.logsPath}
           missing={t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}
           icon={<FolderOpen aria-hidden />}
           action={t("settings.openLogs")}
           busy={busy === "open-logs"}
-          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-logs", () => relayCommands.openFolder("logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.errorLogs")}
@@ -133,7 +153,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileWarning aria-hidden />}
           action={t("settings.openErrors")}
           busy={busy === "open-error-logs"}
-          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-error-logs", () => relayCommands.openFolder("error_logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.crashLogs")}
@@ -142,7 +162,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<Bug aria-hidden />}
           action={t("settings.openCrashes")}
           busy={busy === "open-crash-logs"}
-          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-crash-logs", () => relayCommands.openFolder("crash_logs"), "feedback.opened", { skipRefresh: true })}
         />
         <SettingsPathRow
           title={t("settings.operationLogs")}
@@ -151,7 +171,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
           icon={<FileText aria-hidden />}
           action={t("settings.openOperations")}
           busy={busy === "open-operation-logs"}
-          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened", { backgroundRefresh: true })}
+          onOpen={() => perform("open-operation-logs", () => relayCommands.openFolder("operation_logs"), "feedback.opened", { skipRefresh: true })}
         />
       </SettingsGroup> : null}
     </div>
@@ -162,9 +182,8 @@ function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: stri
   return <section className="settings-group"><header>{icon}<h2>{title}</h2></header><div className="settings-group-body">{children}</div></section>;
 }
 
-function SettingsPathRow({ title, hint, path, missing, icon, action, busy, onOpen }: {
+function SettingsPathRow({ title, path, missing, icon, action, busy, onOpen }: {
   title: string;
-  hint?: string;
   path: string | undefined;
   missing: string;
   icon: ReactNode;
@@ -176,9 +195,9 @@ function SettingsPathRow({ title, hint, path, missing, icon, action, busy, onOpe
     <div className="settings-control-row settings-path-row">
       <div>
         <strong>{title}</strong>
-        <small>{hint}<code data-relay-tooltip={path}>{path ?? missing}</code></small>
+        <small><code data-relay-tooltip={path}>{path ?? missing}</code></small>
       </div>
-      <Button variant="secondary" icon={icon} busy={busy} onClick={onOpen}>{action}</Button>
+      <Button variant="secondary" icon={icon} busy={busy} onClick={onOpen} aria-label={action} title={action}>{action}</Button>
     </div>
   );
 }

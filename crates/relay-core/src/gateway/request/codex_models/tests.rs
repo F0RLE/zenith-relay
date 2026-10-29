@@ -15,6 +15,75 @@ use std::sync::Arc;
 mod native_cards;
 mod speed_reasoning;
 
+#[test]
+fn api_context_limits_follow_key_scope_without_changing_reference_metadata() {
+    let sources =
+        [("small", 1000, 900, 100), ("large", 2000, 1800, 200)]
+            .into_iter()
+            .map(|(id, context, input, output)| {
+                let mut source = crate::RuntimeSource::unrestricted(crate::ProviderSource {
+                    id: id.into(),
+                    name: id.into(),
+                    base_url: "https://example.invalid/v1/responses".into(),
+                    api_key: "synthetic-key".into(),
+                    proxy_url: None,
+                    wire_api: WireApi::Responses,
+                    models: vec!["gpt-test".into()],
+                });
+                source.protocol_config.capabilities =
+                    vec![serde_json::from_value(json!({
+                "modelId":"gpt-test", "upstreamWireApi":"responses", "status":"declared",
+                "origin":"catalog", "checkedAtMs":1,
+                "tokenLimits":{"context":context, "input":input, "output":output}
+            })).unwrap()];
+                source
+            })
+            .collect();
+    let keys = [None, Some(vec!["large".to_owned()])]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scope)| {
+            let mut key = crate::RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: format!("key-{index}"),
+                secret: format!("synthetic-secret-{index}"),
+            });
+            key.source_ids = scope;
+            key.model_prefix = Some("tenant".into());
+            key
+        })
+        .collect();
+    let catalog = crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+        r#"{"openai/gpt-test":{"name":"Synthetic","limit":{"context":4096,"input":3600,"output":512}}}"#
+    ).unwrap();
+    let runtime = GatewayRuntime::from_pool(
+        sources,
+        keys,
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                catalog,
+            )),
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    for (index, maximum, input_budget) in [(0, 1000, 900), (1, 2000, 1800)] {
+        let key = runtime
+            .authenticate_secret(&format!("synthetic-secret-{index}"))
+            .unwrap();
+        let response =
+            build_codex_models_response(&runtime, &key, &["tenant/gpt-test".into()], None).unwrap();
+        let entry = &response["models"][0];
+        assert_eq!(entry["max_context_window"], maximum);
+        assert!(entry["context_window"].as_u64().unwrap() <= maximum);
+        assert!(entry["auto_compact_token_limit"].as_u64().unwrap() <= input_budget);
+    }
+    assert_eq!(
+        runtime.model_capabilities("gpt-test").context_limit,
+        Some(4096)
+    );
+}
+
 struct NoopRefresh;
 
 impl TokenRefreshAdapter for NoopRefresh {
@@ -85,11 +154,13 @@ fn native_catalog_test_runtime_with_accounts(
         account_ids
             .iter()
             .map(|account_id| RuntimeChatGptAccount {
+                oauth_client_kind: Default::default(),
                 id: (*account_id).into(),
                 source_id: "chatgpt".into(),
                 chatgpt_account_id: "chatgpt-account".into(),
+                chatgpt_user_id: None,
                 responses_url: "https://example.test/v1/responses".into(),
-                basis_points_enabled: false,
+                basis_points_headers: None,
                 models: models.iter().map(|model| (*model).into()).collect(),
                 enabled: true,
                 draining: false,
@@ -107,6 +178,7 @@ fn native_catalog_test_runtime_with_accounts(
                 cooldowns: Default::default(),
                 consecutive_failures: 0,
                 proxy: None,
+                proxy_timezone: None,
             })
             .collect(),
         vec![RuntimeMixedLocalKey {

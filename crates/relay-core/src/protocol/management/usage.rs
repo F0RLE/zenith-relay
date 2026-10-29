@@ -1,6 +1,6 @@
 use crate::{
     ApiEquivalentSummary, DefaultServiceTier, ErrorOrigin, ObservedServiceTier, PriceSource,
-    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, WireApi,
+    PricingMetadata, RoutingDiagnostics, ToolUseDiagnostics, UsageTransport, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -146,20 +146,7 @@ pub fn merge_model_equivalents(
     (equivalents, sources)
 }
 
-/// Writes merged estimates onto matching buckets. A bucket without a row keeps the default.
-pub fn assign_bucket_equivalents(
-    buckets: &mut [UsageBucket],
-    rows: impl IntoIterator<Item = (u64, ApiEquivalentSummary)>,
-) {
-    let mut equivalents = HashMap::<u64, ApiEquivalentSummary>::new();
-    for (start_ms, estimate) in rows {
-        equivalents.entry(start_ms).or_default().merge(estimate);
-    }
-    for bucket in buckets {
-        bucket.totals.api_equivalent = equivalents.remove(&bucket.start_ms).unwrap_or_default();
-    }
-}
-
+/// Usage totals for one time bucket.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
@@ -189,6 +176,15 @@ pub enum UsageRange {
     Custom,
 }
 
+/// Report scopes use explicit Codex task markers, never model-name heuristics.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageWorkload {
+    Conversation,
+    Memory,
+    Background,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageQuery {
@@ -202,10 +198,18 @@ pub struct UsageQuery {
     pub bucket_ms: Option<u64>,
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
+    /// Omitted includes every workload and preserves the complete usage total.
+    #[serde(default)]
+    pub workload: Option<UsageWorkload>,
     pub wire_api: Option<WireApi>,
+    #[serde(default)]
+    pub transport: Option<UsageTransport>,
     pub success: Option<bool>,
     pub error_category: Option<String>,
     pub request_id_query: Option<String>,
+    /// Exact logical request identity, independent of report filters.
+    #[serde(default)]
+    pub request_id: Option<String>,
     /// Include request event rows in the response. `None` preserves the
     /// legacy behavior for API clients that do not send the projection hint.
     #[serde(default)]
@@ -218,6 +222,10 @@ pub struct UsageQuery {
     /// legacy behavior for API clients that do not send the projection hint.
     #[serde(default)]
     pub include_pool_members: Option<bool>,
+    /// Include distinct request-filter values for the selected time range,
+    /// independent of pagination and other report filters.
+    #[serde(default)]
+    pub include_filter_options: bool,
 }
 
 impl UsageQuery {
@@ -246,7 +254,36 @@ impl UsageQuery {
         let (page, page_size) = self.normalized_page();
         self.page = page;
         self.page_size = page_size;
-        self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+        self.bucket_ms = self
+            .bucket_ms
+            .filter(|bucket_duration_ms| *bucket_duration_ms >= 60_000);
+    }
+
+    pub fn normalize_at(&mut self, now_ms: u64) {
+        self.normalize_pagination();
+        for field in [
+            &mut self.model_query,
+            &mut self.source_or_account_query,
+            &mut self.error_category,
+            &mut self.request_id_query,
+            &mut self.request_id,
+        ] {
+            if let Some(text) = field {
+                *text = text.trim().to_string();
+                if text.is_empty() {
+                    *field = None;
+                }
+            }
+        }
+        self.from_ms = match self.range {
+            Some(UsageRange::Daily) => Some(now_ms.saturating_sub(24 * 60 * 60 * 1_000)),
+            Some(UsageRange::Weekly) => Some(now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000)),
+            Some(UsageRange::Monthly) => Some(now_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000)),
+            Some(UsageRange::Custom) | None => self.from_ms,
+        };
+        if matches!(self.range, Some(UsageRange::Daily)) {
+            self.to_ms = Some(now_ms);
+        }
     }
 
     pub fn includes_models(&self) -> bool {
@@ -264,8 +301,93 @@ impl UsageQuery {
 
 #[cfg(test)]
 mod tests {
-    use super::{assign_bucket_equivalents, merge_model_equivalents, UsageBucket, UsageTotals};
+    use super::{UsageQuery, UsageRange, UsageTotals, merge_model_equivalents};
     use crate::{ApiEquivalentSummary, PriceSource};
+
+    #[test]
+    fn daily_usage_uses_a_rolling_24_hour_window() {
+        for timestamp in [
+            "2026-10-22T02:20:58+03:00",
+            "2026-10-22T23:59:59+03:00",
+            "2026-03-08T03:30:00-04:00",
+            "2026-11-01T01:30:00-05:00",
+        ] {
+            let now = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .timestamp_millis() as u64;
+            let mut query = UsageQuery {
+                range: Some(UsageRange::Daily),
+                from_ms: Some(1),
+                to_ms: Some(2),
+                ..Default::default()
+            };
+            query.normalize_at(now);
+            assert_eq!(query.from_ms, Some(now - 86_400_000), "{timestamp}");
+            assert_eq!(query.to_ms, Some(now), "{timestamp}");
+        }
+    }
+
+    #[test]
+    fn daily_usage_window_advances_and_saturates_at_the_epoch() {
+        for now in [0, 1_000, 1_784_201_430_000, 1_784_205_030_000] {
+            let mut query = UsageQuery {
+                range: Some(UsageRange::Daily),
+                ..Default::default()
+            };
+            query.normalize_at(now);
+            assert_eq!(query.from_ms, Some(now.saturating_sub(86_400_000)));
+            assert_eq!(query.to_ms, Some(now));
+        }
+    }
+
+    #[test]
+    fn usage_normalization_preserves_custom_bounds_and_cleans_filters() {
+        for range in [Some(UsageRange::Custom), None] {
+            let mut query = UsageQuery {
+                range,
+                from_ms: Some(10),
+                to_ms: Some(20),
+                page: 0,
+                page_size: 1_000,
+                bucket_ms: Some(1),
+                model_query: Some(" model-a ".into()),
+                source_or_account_query: Some("  ".into()),
+                error_category: Some(" error ".into()),
+                request_id_query: Some(" request ".into()),
+                request_id: Some(" exact ".into()),
+                ..Default::default()
+            };
+            query.normalize_at(30);
+            assert_eq!((query.from_ms, query.to_ms), (Some(10), Some(20)));
+            assert_eq!(
+                (query.page, query.page_size, query.bucket_ms),
+                (1, 200, None)
+            );
+            assert_eq!(query.model_query.as_deref(), Some("model-a"));
+            assert_eq!(query.source_or_account_query, None);
+            assert_eq!(query.error_category.as_deref(), Some("error"));
+            assert_eq!(query.request_id_query.as_deref(), Some("request"));
+            assert_eq!(query.request_id.as_deref(), Some("exact"));
+        }
+    }
+
+    #[test]
+    fn weekly_and_monthly_usage_keep_the_existing_upper_bound_contract() {
+        let now: u64 = 40 * 86_400_000;
+        for (range, days) in [(UsageRange::Weekly, 7), (UsageRange::Monthly, 30)] {
+            for to_ms in [None, Some(now - 1)] {
+                let mut query = UsageQuery {
+                    range: Some(range),
+                    from_ms: Some(1),
+                    to_ms,
+                    ..Default::default()
+                };
+                query.normalize_at(now);
+                assert_eq!(query.from_ms, Some(now - days * 86_400_000));
+                assert_eq!(query.to_ms, to_ms);
+            }
+        }
+    }
 
     #[test]
     fn sql_counts_follow_the_shared_usage_total_column_order() {
@@ -299,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn equivalent_rows_merge_by_model_and_bucket() {
+    fn equivalent_rows_merge_by_model() {
         let (models, sources) = merge_model_equivalents([
             ("gpt".to_string(), summary(2, 3), PriceSource::Provider),
             ("gpt".to_string(), summary(4, 0), PriceSource::Manual),
@@ -314,23 +436,6 @@ mod tests {
                 PriceSource::Manual,
                 PriceSource::Unpriced
             ]
-        );
-
-        let mut buckets = vec![
-            UsageBucket {
-                start_ms: 10,
-                totals: UsageTotals::default(),
-            },
-            UsageBucket {
-                start_ms: 20,
-                totals: UsageTotals::default(),
-            },
-        ];
-        assign_bucket_equivalents(&mut buckets, [(10, summary(5, 1)), (10, summary(1, 2))]);
-        assert_eq!(buckets[0].totals.api_equivalent, summary(6, 3));
-        assert_eq!(
-            buckets[1].totals.api_equivalent,
-            ApiEquivalentSummary::default()
         );
     }
 

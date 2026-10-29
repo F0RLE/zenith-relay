@@ -1,12 +1,27 @@
 use super::order::normalize;
-use super::{validate_payload, MAX_RECORDS};
-use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use super::{MAX_RECORDS, validate_metadata_payload};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 
 const IDENTITY_PRIORITY: &str = "_relay_identity_priority";
 
-pub(super) fn identity_priority(value: &Value) -> u64 {
-    value
+#[cfg(test)]
+mod scope_tests;
+
+/// A slash in an upstream ID does not make its hosting provider disappear.
+pub(super) fn provider_scoped_id(provider: &str, model: &str) -> String {
+    if model
+        .split_once('/')
+        .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case(provider))
+    {
+        model.to_owned()
+    } else {
+        format!("{provider}/{model}")
+    }
+}
+
+pub(super) fn identity_priority(model_record: &Value) -> u64 {
+    model_record
         .get(IDENTITY_PRIORITY)
         .and_then(Value::as_u64)
         .unwrap_or(0)
@@ -15,141 +30,255 @@ pub(super) fn identity_priority(value: &Value) -> u64 {
 /// Fixed reference sources fill missing fields, never participant /models.
 /// Keep primary fields (including false) and supplement partial model records.
 pub(super) fn merge_reference_records(
-    primary: &Value,
-    details: Option<&Value>,
-    openrouter: Option<&Value>,
-    litellm: Option<&Value>,
+    primary: Value,
+    mut details: Option<Value>,
+    mut openrouter: Option<Value>,
+    litellm: Option<Value>,
 ) -> BTreeMap<String, Value> {
-    let mut records = BTreeMap::new();
-    for (id, value) in validate_payload(primary).unwrap_or_default() {
-        insert(&mut records, &id, value.clone(), 0);
+    let mut merged_records = BTreeMap::new();
+    for (source_id, source_record) in validate_metadata_payload(&primary).unwrap_or_default() {
+        insert(&mut merged_records, &source_id, source_record.clone(), 0);
     }
-    for (provider, data) in details.and_then(Value::as_object).into_iter().flatten() {
-        for (id, record) in data
-            .get("models")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-        {
-            let id = record
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .unwrap_or(id);
-            let qualified = if id.contains('/') {
-                id.to_owned()
-            } else {
-                format!("{provider}/{id}")
-            };
-            insert(&mut records, &qualified, record.clone(), 3);
-        }
-    }
-    for record in openrouter
-        .and_then(|v| v.get("data"))
-        .and_then(Value::as_array)
+    // The primary validator supports several legacy shapes. Preserve that
+    // traversal, but release its tree before merging the auxiliary sources.
+    drop(primary);
+    let canonical_ids: BTreeSet<_> = merged_records.keys().cloned().collect();
+    for (provider_name, provider_record) in details
+        .as_mut()
+        .and_then(Value::as_object_mut)
         .into_iter()
         .flatten()
     {
-        if let Some(id) = record.get("id").and_then(Value::as_str) {
-            let mut record = record.clone();
+        for (source_id, model_record) in provider_record
+            .get_mut("models")
+            .and_then(Value::as_object_mut)
+            .into_iter()
+            .flatten()
+        {
+            let model_id = model_record
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|model_id| !model_id.trim().is_empty())
+                .unwrap_or(source_id);
+            let qualified_id = provider_scoped_id(provider_name, model_id);
+            let canonical_id = (normalize(&qualified_id) != normalize(model_id)
+                && canonical_ids.contains(&normalize(model_id)))
+            .then(|| model_id.to_owned());
+            if !model_record.is_object() {
+                continue;
+            }
+            let needs_alias = model_id != source_id;
+            let mut projected = model_record.take();
+            if let Some(canonical_id) = canonical_id {
+                projected
+                    .as_object_mut()
+                    .expect("validated catalog record")
+                    .entry("canonical_model_id")
+                    .or_insert_with(|| json!(canonical_id));
+            }
+            if needs_alias {
+                let alias = provider_scoped_id(provider_name, source_id);
+                let aliases = projected
+                    .as_object_mut()
+                    .expect("validated catalog record")
+                    .entry("aliases")
+                    .or_insert_with(|| json!([]));
+                if let Some(aliases) = aliases.as_array_mut()
+                    && !aliases
+                        .iter()
+                        .any(|existing| existing.as_str() == Some(&alias))
+                {
+                    aliases.push(json!(alias));
+                }
+            }
+            insert(&mut merged_records, &qualified_id, projected, 3);
+        }
+    }
+    drop(details);
+    for route_record in openrouter
+        .as_mut()
+        .and_then(|openrouter_catalog| openrouter_catalog.get_mut("data"))
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(route_model_id) = route_record
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            let mut projected_record = route_record.take();
             // Normalize the reference's field names before supplementing a
             // primary row. Otherwise an empty modalities/limit field could
             // shadow the useful fallback under architecture/context_length.
-            let mut limits = Map::new();
-            if let Some(context) = record
+            let mut route_limits = Map::new();
+            if let Some(context) = projected_record
                 .get("context_length")
                 .and_then(Value::as_u64)
-                .filter(|v| *v > 0)
+                .filter(|context_window| *context_window > 0)
             {
-                limits.insert("context".into(), json!(context));
+                route_limits.insert("context".into(), json!(context));
             }
-            if let Some(output) = record
+            if let Some(output) = projected_record
                 .pointer("/top_provider/max_completion_tokens")
                 .and_then(Value::as_u64)
-                .filter(|v| *v > 0)
+                .filter(|output_limit| *output_limit > 0)
             {
-                limits.insert("output".into(), json!(output));
+                route_limits.insert("output".into(), json!(output));
             }
-            if !limits.is_empty() {
-                record["limit"] = Value::Object(limits);
+            if !route_limits.is_empty() {
+                projected_record["limit"] = Value::Object(route_limits);
             }
             for (from, to) in [
                 ("input_modalities", "input"),
                 ("output_modalities", "output"),
             ] {
-                if let Some(modalities) = record
+                if let Some(modalities) = projected_record
                     .get("architecture")
-                    .and_then(|a| a.get(from))
+                    .and_then(|architecture| architecture.get(from))
                     .cloned()
                 {
-                    if !record.get("modalities").is_some_and(Value::is_object) {
-                        record["modalities"] = json!({});
+                    if !projected_record
+                        .get("modalities")
+                        .is_some_and(Value::is_object)
+                    {
+                        projected_record["modalities"] = json!({});
                     }
-                    record["modalities"][to] = modalities;
+                    projected_record["modalities"][to] = modalities;
                 }
             }
-            insert(&mut records, id, record, 1);
+            let scoped_id = provider_scoped_id("openrouter", &route_model_id);
+            if canonical_ids.contains(&normalize(&route_model_id)) {
+                projected_record["canonical_model_id"] = json!(route_model_id);
+            }
+            insert(&mut merged_records, &scoped_id, projected_record, 1);
         }
     }
-    for (id, record) in litellm.and_then(Value::as_object).into_iter().flatten() {
-        if id == "sample_spec" {
+    drop(openrouter);
+    for (model_id, pricing_record) in litellm
+        .as_ref()
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        if model_id == "sample_spec" {
             continue;
         }
-        let Some(provider) = record.get("litellm_provider").and_then(Value::as_str) else {
+        let Some(integration_provider) = pricing_record
+            .get("litellm_provider")
+            .and_then(Value::as_str)
+        else {
             continue;
         };
-        let id = if id.contains('/') {
-            id.clone()
-        } else {
-            format!("{provider}/{id}")
-        };
-        let mut projected = Map::new();
+        let qualified_id = provider_scoped_id(integration_provider, model_id);
+        let mut projected_record = Map::new();
         for (from, to) in [
             ("supports_function_calling", "tool_call"),
             ("supports_response_schema", "structured_output"),
             ("supports_vision", "attachment"),
             ("supports_reasoning", "reasoning"),
+            ("supports_prompt_caching", "prompt_caching"),
+            ("supports_parallel_function_calling", "parallel_tool_call"),
+            ("supports_tool_choice", "tool_choice"),
+            ("supports_native_streaming", "streaming"),
         ] {
-            if let Some(value) = record.get(from).and_then(Value::as_bool) {
-                projected.insert(to.into(), json!(value));
+            if let Some(flag) = pricing_record.get(from).and_then(Value::as_bool) {
+                projected_record.insert(to.into(), json!(flag));
             }
         }
-        let mut limits = Map::new();
+        for field in [
+            "aliases",
+            "canonical_model_id",
+            "protocol_preferences",
+            "supported_modalities",
+            "supported_output_modalities",
+            "supported_service_tiers",
+            "service_tiers",
+            "supported_parameters",
+            "reasoning_options",
+        ] {
+            if let Some(value) = pricing_record.get(field) {
+                projected_record.insert(field.into(), value.clone());
+            }
+        }
+        if let Some(record) = pricing_record.as_object() {
+            let efforts = super::reasoning::parse_effort_flags(record);
+            if !efforts.is_empty() {
+                projected_record.insert("reasoning_effort_levels".into(), json!(efforts));
+            }
+        }
         for (from, to) in [
-            ("max_tokens", "context"),
+            ("supported_modalities", "input"),
+            ("supported_output_modalities", "output"),
+        ] {
+            if let Some(value) = pricing_record.get(from).filter(|value| value.is_array()) {
+                projected_record
+                    .entry("modalities")
+                    .or_insert_with(|| json!({}))[to] = value.clone();
+            }
+        }
+        let mut token_limits = Map::new();
+        // LiteLLM's `max_tokens` is a legacy provider parameter. Its sample
+        // specification uses it as an output fallback, so it cannot establish
+        // a context window. Only the explicit input/output fields have stable
+        // semantics here.
+        for (from, to) in [
             ("max_input_tokens", "input"),
             ("max_output_tokens", "output"),
         ] {
-            if let Some(value) = record.get(from).and_then(Value::as_u64).filter(|v| *v > 0) {
-                limits.insert(to.into(), json!(value));
+            if let Some(limit) = pricing_record
+                .get(from)
+                .and_then(Value::as_u64)
+                .filter(|token_limit| *token_limit > 0)
+            {
+                token_limits.insert(to.into(), json!(limit));
             }
         }
-        if !limits.is_empty() {
-            projected.insert("limit".into(), Value::Object(limits));
+        if !token_limits.is_empty() {
+            projected_record.insert("limit".into(), Value::Object(token_limits));
         }
-        insert(&mut records, &id, Value::Object(projected), 2);
+        insert(
+            &mut merged_records,
+            &qualified_id,
+            Value::Object(projected_record),
+            2,
+        );
     }
-    records
+    merged_records
 }
 
-fn insert(records: &mut BTreeMap<String, Value>, id: &str, mut value: Value, priority: u64) {
-    if !crate::is_valid_model_token(id) || !value.is_object() {
+fn insert(
+    merged_records: &mut BTreeMap<String, Value>,
+    model_id: &str,
+    mut metadata_record: Value,
+    priority: u64,
+) {
+    if !crate::is_valid_model_token(model_id) || !metadata_record.is_object() {
         return;
     }
-    let id = normalize(id);
-    value[IDENTITY_PRIORITY] = json!(priority);
-    if value.get("reasoning").is_some() && value.get("reasoning_source").is_none() {
-        value["reasoning_source"] = json!(match priority {
+    let normalized_model_id = normalize(model_id);
+    metadata_record[IDENTITY_PRIORITY] = json!(priority);
+    if metadata_record.get("reasoning").is_some()
+        && metadata_record.get("reasoning_source").is_none()
+    {
+        metadata_record["reasoning_source"] = json!(match priority {
             1 => "openrouter",
             2 => "litellm",
             _ => "models_dev",
         });
     }
-    if let Some(record) = records.get_mut(&id) {
-        record[IDENTITY_PRIORITY] = json!(identity_priority(record).min(priority));
-        fill_missing(record, value);
-    } else if records.len() < MAX_RECORDS {
-        records.insert(id, value);
+    super::provenance::initialize_for_model(&mut metadata_record, priority, model_id);
+    if let Some(existing_record) = merged_records.get_mut(&normalized_model_id) {
+        existing_record[IDENTITY_PRIORITY] =
+            json!(identity_priority(existing_record).min(priority));
+        super::provenance::merge(existing_record, &metadata_record);
+        metadata_record
+            .as_object_mut()
+            .expect("object record")
+            .remove(super::provenance::MARKER);
+        fill_missing(existing_record, metadata_record);
+    } else if merged_records.len() < MAX_RECORDS {
+        merged_records.insert(normalized_model_id, metadata_record);
     }
 }
 
@@ -162,19 +291,113 @@ fn fill_missing(target: &mut Value, fallback: Value) {
         return;
     }
     if let (Some(target), Value::Object(fallback)) = (target.as_object_mut(), fallback) {
-        for (key, value) in fallback {
-            if let Some(existing) = target.get_mut(&key) {
-                fill_missing(existing, value);
+        for (field_name, fallback_value) in fallback {
+            if let Some(existing_value) = target.get_mut(&field_name) {
+                // An explicit empty mode list means no faster reference
+                // modes. It is not a missing list to fill from another source.
+                if !matches!(
+                    field_name.as_str(),
+                    "service_tiers" | "supported_service_tiers"
+                ) || !existing_value.is_array()
+                {
+                    fill_missing(existing_value, fallback_value);
+                }
             } else {
-                target.insert(key, value);
+                target.insert(field_name, fallback_value);
             }
         }
     }
 }
 
+/// Fresh evidence wins within an exact provider/model scope. Last-known stale
+/// records remain available only for missing fields or missing identities.
+pub(super) fn fill_stale_gaps(mut fresh: Value, stale: Value) -> Value {
+    let Some(targets) = fresh.as_object_mut() else {
+        return stale;
+    };
+    if let Value::Object(records) = stale {
+        for (id, mut record) in records {
+            if let Some(target) = targets.get_mut(&id) {
+                target[IDENTITY_PRIORITY] =
+                    json!(identity_priority(target).min(identity_priority(&record)));
+                super::provenance::merge(target, &record);
+                record
+                    .as_object_mut()
+                    .expect("merged record")
+                    .remove(super::provenance::MARKER);
+                fill_missing(target, record);
+            } else if targets.len() < MAX_RECORDS {
+                targets.insert(id, record);
+            }
+        }
+    }
+    fresh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_reference_records(
+        primary: &Value,
+        details: Option<&Value>,
+        openrouter: Option<&Value>,
+        litellm: Option<&Value>,
+    ) -> BTreeMap<String, Value> {
+        super::merge_reference_records(
+            primary.clone(),
+            details.cloned(),
+            openrouter.cloned(),
+            litellm.cloned(),
+        )
+    }
+
+    #[test]
+    fn auxiliary_records_move_without_cloning_unknown_payloads() {
+        let details = json!({"vendor":{"models":{"alias":{
+            "id":"vendor/actual", "description":"detail payload ".repeat(1000)
+        }}}});
+        let router = json!({"data":[{
+            "id":"vendor/route", "description":"router payload ".repeat(1000),
+            "context_length":4096, "architecture":{"input_modalities":["text"]}
+        }]});
+        let detail_ptr = details["vendor"]["models"]["alias"]["description"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let router_ptr = router["data"][0]["description"].as_str().unwrap().as_ptr();
+        let records = super::merge_reference_records(
+            json!({"vendor/primary":{"tool_call":false}}),
+            Some(details),
+            Some(router),
+            None,
+        );
+        assert_eq!(records.len(), 3);
+        assert_eq!(records["vendor/actual"]["aliases"], json!(["vendor/alias"]));
+        assert_eq!(
+            records["vendor/actual"]["description"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            detail_ptr
+        );
+        assert_eq!(
+            records["openrouter/vendor/route"]["description"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            router_ptr
+        );
+        assert_eq!(
+            records["openrouter/vendor/route"]["limit"]["context"],
+            json!(4096)
+        );
+        assert_eq!(
+            records["openrouter/vendor/route"]["modalities"]["input"],
+            json!(["text"])
+        );
+        assert_eq!(records["vendor/primary"]["tool_call"], json!(false));
+    }
 
     #[test]
     fn reference_sources_fill_all_metadata_and_keep_explicit_primary_values() {
@@ -199,7 +422,13 @@ mod tests {
         let capabilities = catalog.capabilities_for("gpt-synthetic");
         assert_eq!(capabilities.tool_call, Some(false));
         assert_eq!(capabilities.structured_output, Some(true));
-        assert_eq!(capabilities.input_modalities, ["text", "image"]);
+        assert_eq!(capabilities.input_modalities, ["text"]);
+        assert_eq!(
+            catalog
+                .capabilities_for("openrouter/openai/gpt-synthetic")
+                .input_modalities,
+            ["text", "image"]
+        );
         assert_eq!(capabilities.context_limit, Some(100));
         assert_eq!(capabilities.input_limit, Some(80));
         assert_eq!(capabilities.output_limit, Some(20));
@@ -208,6 +437,29 @@ mod tests {
             Some("New")
         );
         assert!(catalog.resolve("not-in-references").is_none());
+    }
+
+    #[test]
+    fn legacy_litellm_max_tokens_does_not_become_context_limit() {
+        let records = merge_reference_records(
+            &json!({}),
+            None,
+            None,
+            Some(&json!({
+                "gpt-synthetic": {
+                    "litellm_provider": "openai",
+                    "max_tokens": 999,
+                    "max_output_tokens": 128
+                }
+            })),
+        );
+        let catalog = super::super::ModelMetadataCatalog::from_models_dev_json(
+            &serde_json::to_string(&records).unwrap(),
+        )
+        .unwrap();
+        let capabilities = catalog.capabilities_for("openai/gpt-synthetic");
+        assert_eq!(capabilities.context_limit, None);
+        assert_eq!(capabilities.output_limit, Some(128));
     }
 
     #[test]
@@ -227,7 +479,11 @@ mod tests {
         .unwrap();
         assert_eq!(catalog.resolve("future").unwrap().provider, "openai");
         assert_eq!(
-            catalog.resolve("future").unwrap().family.as_deref(),
+            catalog
+                .resolve("router/openai/future")
+                .unwrap()
+                .family
+                .as_deref(),
             Some("future-family")
         );
         assert_eq!(
@@ -240,7 +496,8 @@ mod tests {
             catalog.resolve("new-model").unwrap().name.as_deref(),
             Some("New")
         );
-        assert!(!records.contains_key("router/openai/future"));
+        assert_eq!(catalog.resolve("future").unwrap().family, None);
+        assert!(records.contains_key("router/openai/future"));
     }
 
     #[test]
@@ -255,7 +512,7 @@ mod tests {
             &serde_json::to_string(&records).unwrap(),
         )
         .unwrap();
-        assert_eq!(catalog.resolve("future").unwrap().provider, "vendor");
+        assert_eq!(catalog.resolve("future").unwrap().provider, "openrouter");
         assert_eq!(
             catalog.resolve("host/future").unwrap().name.as_deref(),
             Some("Hosted")
@@ -275,8 +532,9 @@ mod tests {
             &serde_json::to_string(&records).unwrap(),
         )
         .unwrap();
-        let model = catalog.capabilities_for("model");
+        let model = catalog.capabilities_for("openrouter/vendor/model");
         assert_eq!(model.input_modalities, ["text"]);
         assert_eq!(model.context_limit, Some(256));
+        assert_eq!(catalog.capabilities_for("vendor/model").context_limit, None);
     }
 }

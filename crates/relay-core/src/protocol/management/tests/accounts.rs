@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn context_windows_keep_native_account_evidence_separate_from_bps_and_api() {
+    let mut account = account_summary(true, &["gpt-test"]);
+    let mut models = pool_model_summaries(&[], std::slice::from_ref(&account), &[]);
+    models[0].catalog_context_limit = Some(1_000_000);
+    for kind in [
+        crate::providers::chatgpt::OAuthClientKind::Codex,
+        crate::providers::chatgpt::OAuthClientKind::ExcelBps,
+    ] {
+        account.oauth_client_kind = kind;
+        apply_pool_model_configuration(
+            &mut models,
+            &[],
+            std::slice::from_ref(&account),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
+        let windows = models[0].context_windows.unwrap();
+        assert_eq!(windows.default_tokens, None);
+        assert_eq!(
+            windows.maximum_tokens,
+            (kind == crate::providers::chatgpt::OAuthClientKind::ExcelBps).then_some(1_000_000)
+        );
+        let serialized = serde_json::to_value(&models[0]).unwrap();
+        assert!(serialized.get("contextWindows").is_some());
+    }
+}
+
+#[test]
 fn source_revision_is_optional_in_old_snapshots_and_non_secret_in_new_ones() {
     let mut source = source_summary("synthetic", &["test"]);
     let mut legacy = serde_json::to_value(&source).unwrap();
@@ -83,23 +113,7 @@ fn runtime_and_native_account_helpers_keep_summary_rules_shared() {
     assert!(!model_has_native_account_route(&accounts, "other"));
 }
 #[test]
-fn generated_ids_require_the_expected_prefix_and_hex_suffix() {
-    assert!(valid_generated_id(
-        "batch_0123456789abcdef0123456789ABCDEF",
-        "batch_"
-    ));
-    assert!(!valid_generated_id("batch_0123456789abcdef", "batch_"));
-    assert!(!valid_generated_id(
-        "batch_0123456789abcdef0123456789abcdeg",
-        "batch_"
-    ));
-    assert!(!valid_generated_id(
-        "import_0123456789abcdef0123456789abcdef",
-        "batch_"
-    ));
-}
-#[test]
-fn usage_summary_accepts_servers_without_reasoning_telemetry() {
+fn usage_summary_accepts_saved_rows_without_reasoning_telemetry() {
     let summary: UsageSummary = serde_json::from_str(
             r#"{"id":1,"requestId":"req","localKeyId":"key","candidateKind":"source","candidateHint":"abc","requestedModel":null,"resolvedModel":null,"wireApi":"responses","success":true,"httpStatus":200,"errorCategory":null,"latencyMs":1,"inputTokens":2,"cachedInputTokens":null,"outputTokens":3,"totalTokens":5,"createdAtMs":1}"#,
         )
@@ -107,11 +121,13 @@ fn usage_summary_accepts_servers_without_reasoning_telemetry() {
 
     assert_eq!(summary.tokens.reasoning_tokens, None);
     assert_eq!(summary.ttft_ms, None);
-    assert!(!serde_json::to_value(&summary)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("localKeyId"));
+    assert!(
+        !serde_json::to_value(&summary)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("localKeyId")
+    );
 
     let mut legacy_totals = serde_json::to_value(UsageTotals::default()).unwrap();
     let fields = legacy_totals.as_object_mut().unwrap();
@@ -188,6 +204,7 @@ fn account_operational_state_is_shared_and_does_not_invent_fresh_exhaustion() {
     assert_eq!(state.routing_block_reason, None);
 
     quota.updated_at_ms = Some(1_000);
+    quota.primary.as_mut().unwrap().observed_at_ms = 1_000;
     quota.primary.as_mut().unwrap().available_basis_points = Some(5_000);
     let state = account_operational_state(AccountOperationalInput {
         enabled: true,

@@ -1,9 +1,16 @@
 use super::super::io_error_message;
-use super::{atomic_write, ErrorCode, LocalPoolError, Result};
+use super::{ErrorCode, LocalPoolError, Result, atomic_write};
 use std::{fs, path::Path};
 
 pub(super) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
+    // Account backups own a reserved filename namespace. Initial snapshots,
+    // optimistic comparisons and both rollback paths must use the same bound;
+    // config/auth files retain their existing user-selected symlink behavior.
+    let read = match super::backup::account_backup_read_limit(path) {
+        Some(max_bytes) => crate::files::read_regular_file_bounded(path, max_bytes),
+        None => fs::read(path),
+    };
+    match read {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error_at(path, error)),
@@ -58,18 +65,18 @@ pub(super) fn remove_if_unchanged(path: &Path, expected: &Option<Vec<u8>>) -> Re
 pub(super) fn rollback_file(
     path: &Path,
     expected_content: &str,
-    previous: &Option<Vec<u8>>,
+    previous_file_contents: &Option<Vec<u8>>,
 ) -> Result<()> {
     let expected = Some(expected_content.as_bytes().to_vec());
-    restore_snapshot_if_unchanged(path, &expected, previous)
+    restore_snapshot_if_unchanged(path, &expected, previous_file_contents)
 }
 
 pub(super) fn restore_snapshot_if_unchanged(
     path: &Path,
     expected_current: &Option<Vec<u8>>,
-    previous: &Option<Vec<u8>>,
+    previous_file_contents: &Option<Vec<u8>>,
 ) -> Result<()> {
-    match snapshot_text(previous, path)? {
+    match snapshot_text(previous_file_contents, path)? {
         Some(content) => replace_if_unchanged(path, expected_current, content),
         None => remove_if_unchanged(path, expected_current),
     }

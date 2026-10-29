@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { relayCommands } from "../features/relay/api/commands";
 import { redactFeedbackText } from "../features/relay/state/feedback";
+import { revealStartupShell } from "../platform/startup";
 
 type Props = { children: ReactNode };
 type State = { hasError: boolean };
@@ -14,6 +15,7 @@ export class RelayErrorBoundary extends Component<Props, State> {
   }
 
   public override componentDidCatch(error: unknown, info: ErrorInfo) {
+    revealStartupShell();
     const message = redactFeedbackText(error instanceof Error ? error.message : String(error));
     const stack = error instanceof Error && error.stack ? redactFeedbackText(error.stack) : undefined;
     const componentStack = redactFeedbackText(info.componentStack || "");

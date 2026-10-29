@@ -1,7 +1,10 @@
 use super::*;
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
+mod binding_safety;
 mod bindings;
+mod context;
+mod memory_model;
 mod model_catalog;
 mod reasoning;
 mod recovery;
@@ -11,11 +14,11 @@ mod websocket;
 struct MemorySecrets(Mutex<HashMap<String, String>>);
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
         self.0
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 
@@ -41,7 +44,7 @@ struct SwitchFaultSecrets {
 }
 
 impl SecretBackend for SwitchFaultSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
         if secret_ref.starts_with("profile:codex:projection:")
             && std::mem::take(&mut *self.fail_projection_save.lock().unwrap())
         {
@@ -53,7 +56,7 @@ impl SecretBackend for SwitchFaultSecrets {
                 "injected save failure",
             ));
         }
-        self.memory.save(secret_ref, value)
+        self.memory.save(secret_ref, secret_value)
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {
@@ -77,8 +80,8 @@ impl SecretBackend for SwitchFaultSecrets {
 }
 
 impl SecretBackend for FailingDeleteSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
-        self.0.save(secret_ref, value)
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
+        self.0.save(secret_ref, secret_value)
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>> {
@@ -110,11 +113,11 @@ impl MutatingSecrets {
 }
 
 impl SecretBackend for MutatingSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
         self.values
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         fs::write(&self.path, &self.content).map_err(io_error)
     }
 
@@ -145,11 +148,11 @@ impl MutatingLoadSecrets {
 }
 
 impl SecretBackend for MutatingLoadSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
         self.values
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 
@@ -170,10 +173,7 @@ impl SecretBackend for MutatingLoadSecrets {
 }
 
 fn profile_dirs(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-profile-{name}-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root(&format!("profile-{name}"));
     let home = root.join("profile");
     let backups = root.join("backups");
     fs::create_dir_all(&home).unwrap();
@@ -184,23 +184,29 @@ fn profile_backup_count(backups: &Path) -> usize {
     fs::read_dir(backups)
         .unwrap()
         .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter(|directory_entry| {
+            directory_entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some("json")
+        })
         .count()
 }
 
 fn write_test_catalog_file(path: &Path, slug: &str) {
-    let mut entry = routed_codex_catalog_entry(None, slug, 2, None);
-    entry["slug"] = Value::String(slug.into());
-    entry["display_name"] = Value::String(slug.into());
-    entry["description"] = Value::String("Native user model".into());
-    entry["comp_hash"] = Value::String("official".into());
-    entry["default_reasoning_level"] = Value::String("medium".into());
-    entry["supported_reasoning_levels"] = json!([
+    let mut catalog_entry = routed_codex_catalog_entry(None, slug, 2, None);
+    catalog_entry["slug"] = Value::String(slug.into());
+    catalog_entry["display_name"] = Value::String(slug.into());
+    catalog_entry["description"] = Value::String("Native user model".into());
+    catalog_entry["comp_hash"] = Value::String("official".into());
+    catalog_entry["default_reasoning_level"] = Value::String("medium".into());
+    catalog_entry["supported_reasoning_levels"] = json!([
         {"effort": "medium", "description": "Medium"}
     ]);
     fs::write(
         path,
-        serde_json::to_string_pretty(&json!({"models": [entry]})).unwrap(),
+        serde_json::to_string_pretty(&json!({"models": [catalog_entry]})).unwrap(),
     )
     .unwrap();
 }

@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn bulk_quota_refresh_keeps_a_small_future_and_reports_every_failed_account() {
-    let root = std::env::temp_dir().join(format!("relay-quota-batch-{}", Uuid::new_v4()));
+    let root = crate::files::test_temp_root("relay-quota-batch");
     let state = DesktopState::open(root.clone()).unwrap();
     let ids = (0..QUOTA_REFRESH_BATCH_SIZE + 2)
         .map(|_| format!("missing_{}", Uuid::new_v4().simple()))
@@ -40,14 +40,14 @@ fn imported_model_lists_are_trimmed_deduplicated_and_validated() {
 #[test]
 fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
     let before_refresh = account_record("account-race");
-    let mut current = before_refresh.clone();
-    current.account.health = AccountHealthState::Degraded;
-    current.account.last_error_code = Some("upstream_rate_limited".into());
-    current.cooldowns.insert("*".into(), 500);
-    current.consecutive_failures = 2;
+    let mut latest_account = before_refresh.clone();
+    latest_account.account.health = AccountHealthState::Degraded;
+    latest_account.account.last_error_code = Some("upstream_rate_limited".into());
+    latest_account.cooldowns.insert("*".into(), 500);
+    latest_account.consecutive_failures = 2;
     let mut refreshed = before_refresh.clone();
 
-    preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
+    preserve_newer_account_state(&mut refreshed, &before_refresh, &latest_account);
 
     assert!(refreshed.cooldowns.is_empty());
     assert_eq!(refreshed.consecutive_failures, 0);
@@ -60,15 +60,15 @@ fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
 #[test]
 fn quota_refresh_merges_auth_and_probe_state_independently() {
     let before_refresh = account_record("account-auth-race");
-    let mut current = before_refresh.clone();
-    current.account.auth_state = AccountAuthState::RequiresReauth(
+    let mut latest_account = before_refresh.clone();
+    latest_account.account.auth_state = AccountAuthState::RequiresReauth(
         zenith_relay_core::accounts::ReauthReason::ReusedRefreshToken,
     );
     let mut refreshed = before_refresh.clone();
     refreshed.account.health = AccountHealthState::Unhealthy;
     refreshed.account.last_error_code = Some("token_invalidated".into());
 
-    preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
+    preserve_newer_account_state(&mut refreshed, &before_refresh, &latest_account);
 
     assert!(matches!(
         refreshed.account.auth_state,
@@ -138,10 +138,12 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Ok(vec!["gpt-future-codex".into()])
     ));
     assert_eq!(account.models, ["gpt-test"]);
-    assert!(account
-        .discovered_models
-        .as_ref()
-        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex"));
+    assert!(
+        account
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-future-codex")
+    );
     assert_eq!(account.effective_models(), ["gpt-future-codex"]);
 
     assert!(!apply_model_discovery(
@@ -182,10 +184,12 @@ fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
         Ok(vec!["gpt-recovered".into()])
     ));
     assert_eq!(account.models, ["gpt-recovered"]);
-    assert!(account
-        .discovered_models
-        .as_ref()
-        .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered"));
+    assert!(
+        account
+            .discovered_models
+            .as_ref()
+            .is_some_and(|models| models.len() == 1 && models[0] == "gpt-recovered")
+    );
     assert_eq!(account.effective_models(), ["gpt-recovered"]);
     assert_eq!(account.account.health, AccountHealthState::Healthy);
     assert!(account.account.last_error_code.is_none());
@@ -320,4 +324,104 @@ fn quota_response_types_are_safe_and_serializable() {
     assert!(serialized.contains("quota_transport"));
     assert!(!serialized.contains("Bearer"));
     let _ = WireApi::Responses;
+}
+
+#[tokio::test]
+async fn access_only_reauthentication_is_bound_to_the_rejected_snapshot() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let expired = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-expired".into(),
+        None,
+        None,
+        Some(1_001),
+        1_000,
+        1,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let rejected_tokens = expired.to_token_set().unwrap();
+    let now_ms = current_time_ms();
+    let newer = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-new-login".into(),
+        None,
+        None,
+        Some(now_ms + 60_000),
+        now_ms,
+        2,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(rejected_tokens.generation() < newer.generation());
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    for (stored, initial_auth, expected_auth, expected_code) in [
+        (
+            &newer,
+            AccountAuthState::DegradedAccessOnly,
+            AccountAuthState::DegradedAccessOnly,
+            None,
+        ),
+        (
+            &expired,
+            AccountAuthState::DegradedAccessOnly,
+            AccountAuthState::RequiresReauth(ReauthReason::AccessTokenExpired),
+            Some("access_token_expired"),
+        ),
+        (
+            &expired,
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            Some("invalid_grant"),
+        ),
+    ] {
+        let root = crate::files::test_temp_root("zenith-relay-access-only-race");
+        let state = DesktopState::open(root.clone()).unwrap();
+        credentials.save(stored).unwrap();
+        let mut account = records::new_account_record(
+            stored,
+            AccountAuthMode::ImportedToken,
+            vec!["gpt-test".into()],
+            0,
+            1,
+        )
+        .unwrap();
+        account.account.auth_state = initial_auth;
+        if initial_auth.requires_fresh_login() {
+            account.account.last_error_code = Some("invalid_grant".into());
+        }
+        state
+            .store()
+            .unwrap()
+            .upsert_account(account.clone())
+            .unwrap();
+        state
+            .token_authority()
+            .register(&account_id, stored.to_token_set().unwrap(), initial_auth)
+            .await
+            .unwrap();
+
+        let marked = mark_access_only_reauthentication(&state, &account_id, &rejected_tokens).await;
+        let persisted = state.store().unwrap().account(&account_id).cloned();
+        let authority_state = state.token_authority().auth_state(&account_id).await;
+        credentials.delete(&account_id).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+
+        account.account.auth_state = expected_auth;
+        account.account.last_error_code = expected_code.map(str::to_string);
+        marked.unwrap();
+        assert_eq!(persisted.as_ref(), Some(&account));
+        assert_eq!(authority_state, Some(expected_auth));
+    }
 }

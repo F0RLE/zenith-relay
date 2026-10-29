@@ -1,10 +1,12 @@
 use super::super::errors::{
+    AttemptFailure, PreservedUpstreamError,
+    responses_function_call_output_has_invalid_call_id_value,
     responses_tool_call_links_rejected_value, upstream_failure_status,
-    zenith_gateway_invalid_request_value, AttemptFailure, PreservedUpstreamError,
 };
-use super::events::{is_empty_responses_incomplete, parse_sse_event, TerminalOutcome};
 use super::UpstreamStream;
+use super::events::{TerminalOutcome, is_empty_responses_terminal, parse_sse_event};
 use crate::error_codes;
+use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
 use crate::protocol::sse_event_end;
 use axum::body::Bytes;
 use futures_util::StreamExt;
@@ -14,8 +16,9 @@ pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) failure: AttemptFailure,
     pub(in crate::gateway) preserved: Option<PreservedUpstreamError>,
-    pub(in crate::gateway) zenith_gateway_invalid_request: bool,
+    pub(in crate::gateway) invalid_function_call_output_call_id: bool,
     pub(in crate::gateway) responses_tool_call_links_rejected: bool,
+    pub(in crate::gateway) partial_body: Vec<u8>,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
@@ -25,8 +28,9 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
             failure,
             upstream_error: None,
             preserved: None,
-            zenith_gateway_invalid_request: false,
+            invalid_function_call_output_call_id: false,
             responses_tool_call_links_rejected: false,
+            partial_body: Vec::new(),
         }
     }
 }
@@ -46,20 +50,70 @@ pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFail
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "The bounded bootstrap failure carries the diagnostics needed for retry and response ownership."
-)]
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
-) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        false,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+        false,
+    )
+    .await
+}
+
+pub(in crate::gateway) async fn bootstrap_basis_points_stream(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        true,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+        false,
+    )
+    .await
+}
+
+pub(in crate::gateway) async fn bootstrap_prewarm_stream(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_stream_impl(
+        upstream,
+        expected_model,
+        false,
+        crate::protocol::sse::MAX_EVENT_BYTES,
+        true,
+    )
+    .await
+}
+
+pub(super) async fn bootstrap_stream_impl(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+    basis_points: bool,
+    max_buffered_bytes: usize,
+    prewarm: bool,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
+    if basis_points {
+        stream = super::basis_points::guard_progress(
+            stream,
+            crate::transport::basis_points_progress_timeout(),
+        );
+    }
     let mut buffered = Vec::new();
     let mut inspected = 0;
     let mut saw_output = false;
+    let mut saw_generation = false;
     let mut completed_output_items = 0_usize;
+    let mut gemini_completion = GeminiStreamCompletion::default();
+    let mut native_gemini = false;
     // `response.created` and other setup frames do not make a response safe to
     // commit. Keep them private until the source produces real output or a
     // terminal event, so a pre-output provider failure can use another route.
@@ -68,42 +122,40 @@ pub(in crate::gateway) async fn bootstrap_stream(
     loop {
         match stream.next().await {
             Some(Ok(chunk)) => {
-                if chunk.len() > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
-                // Bootstrap may contain a large Responses setup event before the
-                // first visible delta. Keep the same bounded budget as the
-                // regular SSE parser instead of rejecting valid upstream data
-                // at the old 256 KiB bootstrap threshold.
-                if buffered.len().saturating_add(chunk.len()) > super::MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into());
-                }
-                buffered.extend_from_slice(&chunk);
+                let available = max_buffered_bytes.saturating_sub(buffered.len());
+                let prefix_len = available.min(chunk.len());
+                buffered.extend_from_slice(&chunk[..prefix_len]);
                 let mut ready_to_forward = false;
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
-                    if expected_model.is_some_and(|expected| {
-                        event
-                            .payload
+                    saw_generation |= event.semantic_output
+                        || event
+                            .event_payload
                             .as_ref()
-                            .is_some_and(|value| super::served_model_is_rejected(value, expected))
+                            .is_some_and(crate::gateway::response::has_generated_tokens);
+                    if expected_model.is_some_and(|expected| {
+                        event.event_payload.as_ref().is_some_and(|served_model| {
+                            super::served_model_is_rejected(served_model, expected)
+                        })
                     }) {
                         // The served model is known, and this buffer has not
                         // reached the client. Drop the attempt, including a
                         // later delta that arrived in the same chunk.
                         let mut failure = degraded_route_stream_failure();
-                        if saw_output || event.semantic_output {
+                        if saw_generation {
                             failure.execution =
                                 crate::scheduler::rotation::ExecutionObservation::accepted();
                         }
-                        return Err(failure);
+                        failure.partial_body = buffered;
+                        return Err(Box::new(failure));
                     }
                     if event.has_data && !event.valid {
-                        return Err(StreamBootstrapFailure {
+                        return Err(Box::new(StreamBootstrapFailure {
                             upstream_error: event.upstream_error,
+                            partial_body: buffered,
                             ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
-                        });
+                        }));
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
                         let category = event
@@ -116,8 +168,8 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             category,
                             event.cooldown_hint,
                         );
-                        return Err(StreamBootstrapFailure {
-                            execution: if saw_output || event.semantic_output {
+                        return Err(Box::new(StreamBootstrapFailure {
+                            execution: if saw_generation {
                                 crate::scheduler::rotation::ExecutionObservation::accepted()
                             } else {
                                 failure.execution
@@ -125,32 +177,62 @@ pub(in crate::gateway) async fn bootstrap_stream(
                             failure,
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,
-                            zenith_gateway_invalid_request: event
-                                .payload
+                            invalid_function_call_output_call_id: event
+                                .event_payload
                                 .as_ref()
-                                .is_some_and(zenith_gateway_invalid_request_value),
+                                .is_some_and(
+                                    responses_function_call_output_has_invalid_call_id_value,
+                                ),
                             responses_tool_call_links_rejected: event
-                                .payload
+                                .event_payload
                                 .as_ref()
                                 .is_some_and(responses_tool_call_links_rejected_value),
-                        });
+                            partial_body: buffered,
+                        }));
                     }
                     if event.output_item.is_some() && !event.is_compaction {
                         completed_output_items = completed_output_items.saturating_add(1);
                     }
                     saw_output |= event.semantic_output;
-                    // A zero-token incomplete response has not committed any
-                    // client-visible output. Treat it as a pre-output source
-                    // failure, allowing the request executor to retry another
-                    // candidate. A non-empty incomplete response remains a
-                    // terminal client response (for example max output).
-                    if event.payload.as_ref().is_some_and(|payload| {
-                        is_empty_responses_incomplete(payload, saw_output, completed_output_items)
-                    }) {
-                        return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into());
+                    // An unexplained empty terminal is a source failure, but
+                    // does not prove that generation was never accepted.
+                    // Its execution stays unknown, so no automatic retry is safe.
+                    // A non-empty incomplete response belongs to the client.
+                    if !(prewarm && event.outcome == Some(TerminalOutcome::Success))
+                        && event
+                            .event_payload
+                            .as_ref()
+                            .is_some_and(|terminal_payload| {
+                                is_empty_responses_terminal(
+                                    terminal_payload,
+                                    saw_output,
+                                    completed_output_items,
+                                )
+                            })
+                    {
+                        return Err(Box::new(StreamBootstrapFailure {
+                            partial_body: buffered,
+                            ..AttemptFailure::stream(error_codes::RESPONSE_INCOMPLETE).into()
+                        }));
                     }
-                    let terminal = event.outcome.is_some();
-                    ready_to_forward |= terminal || event.semantic_output;
+                    if let Some(payload) = event.event_payload.as_ref() {
+                        native_gemini |= payload.get("candidates").is_some()
+                            || payload.get("promptFeedback").is_some()
+                            || payload.get("usageMetadata").is_some();
+                        if native_gemini && gemini_completion.observe(payload).is_err() {
+                            return Err(Box::new(StreamBootstrapFailure {
+                                partial_body: buffered,
+                                ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
+                            }));
+                        }
+                    }
+                    // A Gemini finish reason closes one candidate, not the
+                    // transport. Retain the rest of this chunk and late usage.
+                    let terminal = event.outcome.is_some() && !native_gemini;
+                    ready_to_forward |= terminal
+                        || event.semantic_output
+                        || native_gemini
+                            && gemini_completion.outcome() != ResponseCompletion::Invalid;
                     inspected = absolute_end;
                     if terminal {
                         // A transport chunk may also contain later frames. The
@@ -160,11 +242,35 @@ pub(in crate::gateway) async fn bootstrap_stream(
                     }
                 }
                 if ready_to_forward {
+                    if prefix_len < chunk.len() {
+                        stream = Box::pin(
+                            futures_util::stream::once(
+                                async move { Ok(chunk.slice(prefix_len..)) },
+                            )
+                            .chain(stream),
+                        );
+                    }
                     return Ok((headers, Bytes::from(buffered), stream));
                 }
+                if prefix_len < chunk.len() {
+                    return Err(Box::new(StreamBootstrapFailure {
+                        partial_body: buffered,
+                        ..AttemptFailure::stream(error_codes::STREAM_EVENT_TOO_LARGE).into()
+                    }));
+                }
             }
-            Some(Err(error)) => return Err(AttemptFailure::transport(&error).into()),
-            None => return Err(AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()),
+            Some(Err(error)) => {
+                return Err(Box::new(StreamBootstrapFailure {
+                    partial_body: buffered,
+                    ..AttemptFailure::transport(&error).into()
+                }));
+            }
+            None => {
+                return Err(Box::new(StreamBootstrapFailure {
+                    partial_body: buffered,
+                    ..AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()
+                }));
+            }
         }
     }
 }

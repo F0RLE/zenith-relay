@@ -1,22 +1,24 @@
 use super::*;
 use axum::{
+    Json, Router,
     extract::{Request, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::get,
-    Json, Router,
 };
 use base64::Engine;
 use reqwest::{
-    header::{AUTHORIZATION, USER_AGENT},
     Client, StatusCode,
+    header::{AUTHORIZATION, USER_AGENT},
 };
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use url::Url;
+
+mod transport;
 
 async fn check_client(router: Router) -> (CodexSubscriptionClient, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -258,6 +260,8 @@ async fn subscription_retry_after_prevents_an_early_nested_retry() {
         .with_state(attempts.clone());
     let (client, server) = check_client(router).await;
     let failure = client.fetch("synthetic", "account", 0).await.unwrap_err();
+    assert_eq!(failure.code, crate::error_codes::SUBSCRIPTION_RATE_LIMITED);
+    assert_eq!(failure.http_status(), Some(429));
     assert_eq!(failure.retry_after_ms(), Some(3_600_000));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     server.abort();

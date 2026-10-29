@@ -1,18 +1,9 @@
-
 @media (max-width: 1023px) {
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-member-state {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
 
-  .relay-shell[data-page="connections"] .relay-page .relay-table:not(.connection-table) { min-width: 820px; }
-  .relay-shell[data-page="pool"] .relay-table:not(.model-rules-table) { min-width: 720px; }
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
-
 }
 
 @media (max-width: 700px) {
@@ -21,26 +12,6 @@
     grid-template-columns: minmax(0, 1fr);
     gap: 5px;
   }
-
-  .source-configuration-summary {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
-  }
-
-  .source-configuration-stats {
-    padding-block: 10px;
-    border-block: 1px solid var(--relay-border);
-  }
-
-  .source-configuration-stats > div:first-child {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-  .source-configuration-summary > .relay-button {
-    width: 100%;
-  }
-
 }
 
 @media (max-width: 560px) {
@@ -54,51 +25,17 @@
     margin-left: auto;
   }
 
-  .oauth-link-actions {
-    grid-template-columns: 1fr;
-  }
-
-  .pool-policy-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-  }
-
-  .pool-policy-toggle {
-    justify-self: start;
-  }
-
-  .subscription-plan-policy-heading {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .subscription-plan-order-row {
-    grid-template-columns: 16px 22px auto minmax(0, 1fr);
-  }
-
-  .subscription-plan-order-row > .inline-actions {
-    grid-column: 3 / -1;
-    justify-self: end;
-  }
-
   .model-rules > header {
     padding-bottom: 10px;
   }
-
 }
 
 @media (max-width: 900px) {
-  .account-plan-filters + .account-plan-filters {
-    padding-left: 0;
-    border-left: 0;
-  }
-
   .gateway-setting-row,
   .gateway-account-panel {
     grid-template-columns: minmax(0, 1fr);
     gap: 14px;
   }
-
 }
 
 @media (max-width: 700px) {
@@ -137,8 +74,7 @@
   .relay-page-actions .relay-button span {
     white-space: normal;
   }
-  .metric-band,
-  .runtime-grid {
+  .metric-band {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .overview-analytics-header {
@@ -150,13 +86,17 @@
     width: 100%;
     justify-content: stretch;
   }
+  .overview-analytics-controls > .overview-scope-menu {
+    flex: 1 1 0;
+    max-width: none;
+  }
   .overview-scope-menu,
   .overview-scope-menu .relay-option-trigger {
     flex: 1;
     max-width: none;
   }
   .overview-analytics-header .relay-tabs {
-    flex: 1;
+    flex: 1 0 100%;
   }
   .overview-analytics-header .relay-tabs button {
     min-width: 0;
@@ -173,11 +113,11 @@
     gap: 6px 10px;
   }
   .overview-token-trend-body {
-    grid-template-columns: 42px minmax(0, 1fr) 34px;
+    grid-template-columns: minmax(42px, max-content) minmax(0, 1fr) minmax(42px, max-content);
     gap: 6px;
   }
   .overview-chart-body {
-    grid-template-columns: 42px minmax(0, 1fr);
+    grid-template-columns: minmax(42px, max-content) minmax(0, 1fr) minmax(42px, max-content);
     gap: 6px;
   }
   .overview-chart-title small {
@@ -186,12 +126,10 @@
   .client-oauth-binding {
     max-width: none;
   }
-
 }
 
 @media (max-width: 700px) {
-  .proxy-assignment-summary,
-  .post-import-options {
+  .proxy-assignment-summary {
     grid-template-columns: 1fr;
   }
 
@@ -203,44 +141,9 @@
   .proxy-assignment-summary > div:last-child {
     border-bottom: 0;
   }
-
-
-  .source-connection-check {
-    grid-template-columns: 22px minmax(0, 1fr);
-  }
-
-  .source-connection-check-stats {
-    grid-column: 2;
-  }
-
-  .source-connection-check > .relay-button {
-    grid-column: 2;
-    width: 100%;
-  }
-
-  .source-connection-check-stats > div:first-child {
-    padding-left: 0;
-    border-left: 0;
-  }
-
-
-  .direct-api-toolbar {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 10px;
-  }
-
-  .direct-api-metrics > div:nth-child(2) {
-    border-right: 0;
-  }
-
-  .direct-api-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--relay-border);
-  }
-
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subscription-plan-order-row,
   .pool-speed-control button {
     transition: none;
   }

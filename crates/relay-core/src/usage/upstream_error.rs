@@ -13,24 +13,49 @@ pub struct UpstreamErrorDetails {
     pub http_status: Option<u16>,
     pub code: Option<String>,
     pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub message: Option<String>,
     pub redacted: bool,
     pub truncated: bool,
 }
 
 impl UpstreamErrorDetails {
-    pub fn from_body(http_status: Option<u16>, body: &[u8]) -> Self {
-        if body.len() > MAX_BODY_BYTES {
+    pub fn from_response(
+        http_status: Option<u16>,
+        response_body: &[u8],
+        headers: &reqwest::header::HeaderMap,
+    ) -> Self {
+        let mut details = Self::from_response_body(http_status, response_body);
+        if details.request_id.is_none() {
+            for name in ["x-request-id", "openai-request-id", "request-id"] {
+                if let Some(value) = headers.get(name) {
+                    let request_id = value.to_str().ok().and_then(safe_request_id);
+                    details.redacted |= request_id.is_none();
+                    if request_id.is_some() {
+                        details.request_id = request_id;
+                        break;
+                    }
+                }
+            }
+        }
+        details
+    }
+
+    pub fn from_response_body(http_status: Option<u16>, response_body: &[u8]) -> Self {
+        if response_body.len() > MAX_BODY_BYTES {
             return Self {
                 truncated: true,
                 ..Self::empty(http_status)
             };
         }
-        match serde_json::from_slice::<Value>(body) {
-            Ok(value) => Self::from_value(http_status, &value),
+        match serde_json::from_slice::<Value>(response_body) {
+            Ok(error_payload) => Self::from_value(http_status, &error_payload),
             Err(_) => {
                 let mut details = Self::empty(http_status);
-                let text = String::from_utf8_lossy(body);
+                let text = String::from_utf8_lossy(response_body);
                 if text.trim_start().starts_with(['<', '{', '['])
                     || text
                         .lines()
@@ -45,7 +70,7 @@ impl UpstreamErrorDetails {
         }
     }
 
-    pub fn from_value(http_status: Option<u16>, value: &Value) -> Self {
+    pub fn from_value(http_status: Option<u16>, error_payload: &Value) -> Self {
         let mut details = Self::empty(http_status);
         let envelope = [
             "/error",
@@ -57,21 +82,29 @@ impl UpstreamErrorDetails {
             "",
         ]
         .into_iter()
-        .filter_map(|path| value.pointer(path))
-        .find(|value| {
-            value.is_string()
-                || value.as_object().is_some_and(|object| {
-                    ["message", "detail", "code", "type"]
-                        .iter()
-                        .any(|key| object.contains_key(*key))
+        .filter_map(|path| error_payload.pointer(path))
+        .find(|candidate| {
+            candidate.is_string()
+                || candidate.as_object().is_some_and(|error_fields| {
+                    [
+                        "message",
+                        "detail",
+                        "code",
+                        "type",
+                        "request_id",
+                        "requestId",
+                    ]
+                    .iter()
+                    .any(|key| error_fields.contains_key(*key))
                 })
         });
         if let Some(envelope) = envelope {
-            let code = envelope.get("code").and_then(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| value.as_u64().map(|value| value.to_string()))
+            let code = envelope.get("code").and_then(|code_value| {
+                code_value.as_str().map(str::to_owned).or_else(|| {
+                    code_value
+                        .as_u64()
+                        .map(|numeric_code| numeric_code.to_string())
+                })
             });
             details.code = code.as_deref().and_then(safe_identifier);
             let error_type = envelope
@@ -80,8 +113,22 @@ impl UpstreamErrorDetails {
                 .or_else(|| envelope.get("status"))
                 .and_then(Value::as_str);
             details.error_type = error_type.and_then(safe_identifier);
+            let parameter = envelope
+                .get("param")
+                .or_else(|| envelope.get("parameter"))
+                .and_then(Value::as_str);
+            details.parameter = parameter.and_then(safe_parameter);
+            details.redacted |= parameter.is_some() && details.parameter.is_none();
+            let request_id = envelope
+                .get("request_id")
+                .or_else(|| envelope.get("requestId"))
+                .or_else(|| error_payload.get("request_id"))
+                .or_else(|| error_payload.get("requestId"))
+                .and_then(Value::as_str);
+            details.request_id = request_id.and_then(safe_request_id);
             details.redacted |= code.is_some() && details.code.is_none()
-                || error_type.is_some() && details.error_type.is_none();
+                || error_type.is_some() && details.error_type.is_none()
+                || request_id.is_some() && details.request_id.is_none();
             if let Some(message) = envelope.as_str().or_else(|| {
                 envelope
                     .get("message")
@@ -99,6 +146,8 @@ impl UpstreamErrorDetails {
             http_status: http_status.filter(|status| (100..600).contains(status)),
             code: None,
             error_type: None,
+            parameter: None,
+            request_id: None,
             message: None,
             redacted: false,
             truncated: false,
@@ -109,9 +158,13 @@ impl UpstreamErrorDetails {
         let mut details = Self::empty(self.http_status);
         details.code = self.code.as_deref().and_then(safe_identifier);
         details.error_type = self.error_type.as_deref().and_then(safe_identifier);
+        details.parameter = self.parameter.as_deref().and_then(safe_parameter);
+        details.request_id = self.request_id.as_deref().and_then(safe_request_id);
         details.redacted = self.redacted
             || self.code.is_some() && details.code.is_none()
-            || self.error_type.is_some() && details.error_type.is_none();
+            || self.error_type.is_some() && details.error_type.is_none()
+            || self.parameter.is_some() && details.parameter.is_none()
+            || self.request_id.is_some() && details.request_id.is_none();
         details.truncated = self.truncated;
         if let Some(message) = &self.message {
             details.set_message(message);
@@ -128,17 +181,17 @@ impl UpstreamErrorDetails {
 }
 
 impl From<Value> for UpstreamErrorDetails {
-    fn from(value: Value) -> Self {
-        let status = value
+    fn from(error_payload: Value) -> Self {
+        let status = error_payload
             .get("httpStatus")
             .and_then(Value::as_u64)
             .and_then(|status| u16::try_from(status).ok());
-        let mut details = Self::from_value(status, &value);
-        details.redacted |= value
+        let mut details = Self::from_value(status, &error_payload);
+        details.redacted |= error_payload
             .get("redacted")
             .and_then(Value::as_bool)
             .unwrap_or_default();
-        details.truncated |= value
+        details.truncated |= error_payload
             .get("truncated")
             .and_then(Value::as_bool)
             .unwrap_or_default();
@@ -146,13 +199,126 @@ impl From<Value> for UpstreamErrorDetails {
     }
 }
 
-fn safe_identifier(value: &str) -> Option<String> {
-    let normalized = crate::normalize_error_code(value)?;
-    let (_, redacted, truncated) = sanitize_message(value);
-    (!redacted && !truncated && !normalized.starts_with("eyj")).then(|| value.trim().to_string())
+fn safe_identifier(identifier_text: &str) -> Option<String> {
+    let normalized = crate::normalize_error_code(identifier_text)?;
+    let (_, redacted, truncated) = sanitize_message(identifier_text);
+    (!redacted && !truncated && !normalized.starts_with("eyj"))
+        .then(|| identifier_text.trim().to_string())
 }
 
-fn sanitize_message(value: &str) -> (String, bool, bool) {
+// These are fixed Relay validation paths, not user-selected tool names, keys or values.
+fn safe_parameter(value: &str) -> Option<String> {
+    matches!(
+        value,
+        "endpoint"
+            | "service_tier"
+            | "previous_response_id"
+            | "include"
+            | "input"
+            | "input.type"
+            | "input.name"
+            | "input.call_id"
+            | "input.arguments"
+            | "input.content"
+            | "input.output"
+            | "input.file_id"
+            | "input.async"
+            | "input.caller"
+            | "input.encrypted_content"
+            | "input.agent_message.encrypted_content"
+            | "input.run_officejs.batch"
+            | "input.run_officejs.batch.call_id"
+            | "text"
+            | "text.verbosity"
+            | "text.format"
+            | "text.format.name"
+            | "text.format.schema"
+            | "text.format.strict"
+            | "response_format"
+            | "reasoning"
+            | "reasoning.effort"
+            | "reasoning.summary"
+            | "max_tokens"
+            | "max_output_tokens"
+            | "max_completion_tokens"
+            | "temperature"
+            | "seed"
+            | "top_k"
+            | "tool_choice"
+            | "tool_choice.function"
+            | "tools"
+            | "tools.type"
+            | "tools.name"
+            | "tools.description"
+            | "tools.parameters"
+            | "tools.parameters.encrypted"
+            | "tools.allowed_callers"
+            | "tools.defer_loading"
+            | "tools.cache_control"
+            | "tools.external_web_access"
+            | "tools.filters.allowed_domains"
+            | "tools.user_location"
+            | "tools.web_search"
+            | "tool_reference"
+            | "tool_reference.tool_name"
+            | "tool_calls.async"
+            | "tool_calls.caller"
+            | "tool_calls.function.arguments"
+            | "tool_calls.function.name"
+            | "tool_calls.id"
+            | "tool_calls.namespace"
+            | "cache_control"
+            | "client_metadata"
+            | "metadata"
+            | "stream_options.include_usage"
+            | "output.function_call.arguments"
+            | "output.structured_output"
+            | "output.relay.catalog.budget"
+            | "response.json"
+            | "response.serialization"
+            | "response.status"
+            | "response.output"
+            | "stream.response_size"
+            | "stream.event.json"
+            | "stream.terminal"
+            | "output.tool_call"
+            | "output.run_officejs.status"
+            | "output.run_officejs.name"
+            | "output.run_officejs.tool"
+            | "output.run_officejs.tool_choice"
+            | "output.run_officejs.call_id"
+            | "output.run_officejs.references"
+            | "output.run_officejs.parallel_tool_calls"
+            | "output.run_officejs.args"
+            | "output.run_officejs.args.frame"
+            | "output.run_officejs.args.frame.header"
+            | "output.run_officejs.args.frame.separator"
+            | "output.run_officejs.args.frame.field"
+            | "output.run_officejs.args.frame.args"
+            | "output.run_officejs.args.frame.duplicate_field"
+            | "output.run_officejs.args.schema"
+            | "output.run_officejs.args.json"
+            | "output.run_officejs.args.object"
+            | "output.run_officejs.args.json.eof"
+            | "output.run_officejs.args.json.syntax"
+    )
+    .then(|| value.to_owned())
+}
+
+fn safe_request_id(request_id: &str) -> Option<String> {
+    let request_id = request_id.trim();
+    let suffix = request_id
+        .strip_prefix("gwreq_")
+        .or_else(|| request_id.strip_prefix("req_"))?;
+    (request_id.len() <= 128
+        && suffix.len() >= 8
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    .then(|| request_id.to_string())
+}
+
+pub(super) fn sanitize_message(raw_message: &str) -> (String, bool, bool) {
     static SENSITIVE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         [
             r#"(?i)\b(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|password|secret)\b[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\n,;]+)"#,
@@ -167,7 +333,7 @@ fn sanitize_message(value: &str) -> (String, bool, bool) {
             r#"(?is)\b(?:received|provided|supplied|got)\s*[:=]\s*.*"#,
         ].into_iter().map(|pattern| Regex::new(pattern).expect("static diagnostic redaction regex")).collect()
     });
-    let mut message = value
+    let mut message = raw_message
         .chars()
         .take(MAX_BODY_BYTES)
         .map(|ch| {
@@ -186,7 +352,7 @@ fn sanitize_message(value: &str) -> (String, bool, bool) {
     }
     let message = message.trim();
     let truncated =
-        value.chars().count() > MAX_BODY_BYTES || message.chars().count() > MAX_MESSAGE_CHARS;
+        raw_message.chars().count() > MAX_BODY_BYTES || message.chars().count() > MAX_MESSAGE_CHARS;
     (
         message.chars().take(MAX_MESSAGE_CHARS).collect(),
         redacted,
@@ -196,6 +362,54 @@ fn sanitize_message(value: &str) -> (String, bool, bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adapter_parameter_survives_storage_but_arbitrary_paths_are_redacted() {
+        for parameter in [
+            "response.json",
+            "output.run_officejs.args.json.syntax",
+            "output.run_officejs.args.frame.header",
+            "output.run_officejs.args.frame.separator",
+            "service_tier",
+            "text.format",
+            "text.verbosity",
+            "tools.parameters.encrypted",
+            "previous_response_id",
+        ] {
+            let details = super::UpstreamErrorDetails::from_value(
+                Some(502),
+                &serde_json::json!({
+                    "error":{"code":"adapter_upstream_response_invalid","param":parameter,"message":"Invalid response"}
+                }),
+            );
+            assert_eq!(details.parameter.as_deref(), Some(parameter));
+            let stored: super::UpstreamErrorDetails =
+                serde_json::from_value(serde_json::to_value(details.sanitized()).unwrap()).unwrap();
+            assert_eq!(stored.parameter.as_deref(), Some(parameter));
+        }
+        let details = super::UpstreamErrorDetails::from_value(
+            Some(502),
+            &serde_json::json!({
+                "error":{"code":"adapter_upstream_response_invalid","param":"output.private-user-content","message":"Invalid response"}
+            }),
+        );
+        assert!(details.parameter.is_none());
+        assert!(details.redacted);
+    }
+    #[test]
+    fn response_headers_supply_only_safe_request_ids_without_body_echoes() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-request-id", "req_synthetic1234".parse().unwrap());
+        let details = super::UpstreamErrorDetails::from_response(
+            Some(403),
+            br#"{"error":{"code":"model_not_allowed"}}"#,
+            &headers,
+        );
+        assert_eq!(details.request_id.as_deref(), Some("req_synthetic1234"));
+        headers.insert("x-request-id", "synthetic-secret-material".parse().unwrap());
+        let details = super::UpstreamErrorDetails::from_response(Some(403), b"{}", &headers);
+        assert!(details.request_id.is_none());
+        assert!(details.redacted);
+    }
     use super::*;
     use serde_json::json;
 
@@ -209,9 +423,11 @@ mod tests {
         assert_eq!(details.error_type.as_deref(), Some("INVALID_ARGUMENT"));
         assert_eq!(details.code.as_deref(), Some("future_validation_error"));
         assert!(details.redacted && details.truncated);
-        assert!(!serde_json::to_string(&details)
-            .unwrap()
-            .contains("synthetic-"));
+        assert!(
+            !serde_json::to_string(&details)
+                .unwrap()
+                .contains("synthetic-")
+        );
         assert_eq!(details.sanitized(), details);
     }
 
@@ -230,7 +446,7 @@ mod tests {
             b"{\"input\":\"synthetic".as_slice(),
             b"data: {\"delta\":\"synthetic\"}\n\n",
         ] {
-            let details = UpstreamErrorDetails::from_body(Some(502), body);
+            let details = UpstreamErrorDetails::from_response_body(Some(502), body);
             assert!(details.redacted);
             assert!(details.message.is_none());
         }
@@ -264,9 +480,11 @@ mod tests {
             Some("Invalid parameter: input[2].id")
         );
         assert_eq!(detail.http_status, Some(422));
-        assert!(!serde_json::to_string(&detail)
-            .unwrap()
-            .contains("synthetic request content"));
+        assert!(
+            !serde_json::to_string(&detail)
+                .unwrap()
+                .contains("synthetic request content")
+        );
     }
 
     #[test]
@@ -293,7 +511,10 @@ mod tests {
 
     #[test]
     fn plain_text_is_bounded_and_html_is_not_retained() {
-        let text = UpstreamErrorDetails::from_body(Some(503), b"Provider maintenance in progress");
+        let text = UpstreamErrorDetails::from_response_body(
+            Some(503),
+            b"Provider maintenance in progress",
+        );
         assert_eq!(
             text.message.as_deref(),
             Some("Provider maintenance in progress")
@@ -304,7 +525,8 @@ mod tests {
         );
         assert!(long.truncated);
         assert_eq!(long.message.unwrap().chars().count(), MAX_MESSAGE_CHARS);
-        let html = UpstreamErrorDetails::from_body(Some(502), b"<html>private diagnostic</html>");
+        let html =
+            UpstreamErrorDetails::from_response_body(Some(502), b"<html>private diagnostic</html>");
         assert!(html.redacted);
         assert!(html.message.is_none());
     }

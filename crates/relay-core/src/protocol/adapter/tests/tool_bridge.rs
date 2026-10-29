@@ -309,7 +309,7 @@ fn messages_bridge_rejects_invalid_tool_output_image_data() {
     assert_eq!(error.code(), "adapter_invalid_request");
 }
 #[test]
-fn messages_bridge_rejects_non_text_custom_tool_output() {
+fn messages_bridge_rejects_untyped_object_custom_tool_output() {
     let first = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
@@ -344,7 +344,7 @@ fn messages_bridge_rejects_non_text_custom_tool_output() {
             "input": [{
                 "type": "custom_tool_call_output",
                 "call_id": "toolu_custom_output",
-                "output": [{"type": "input_text", "text": "not a direct text result"}]
+                "output": {"text": "not a string or typed content list"}
             }]
         }),
         "claude-test",
@@ -492,7 +492,7 @@ fn messages_bridge_rejects_tool_result_for_an_unknown_call() {
     assert_eq!(error.code(), "adapter_continuation_mismatch");
 }
 #[test]
-fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
+fn messages_bridge_rejects_a_forced_undeclared_function_with_hosted_search() {
     let error = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
@@ -509,17 +509,19 @@ fn messages_bridge_rejects_hosted_tools_before_sending_the_request() {
     assert_eq!(error.code(), "adapter_tool_unsupported");
 }
 #[test]
-fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_request() {
-    let error = prepare_responses_to_messages(
+fn messages_bridge_rejects_unsupported_hosted_tools_even_beside_client_tools() {
+    let request = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "inspect",
             "tools": [
-                {"type": "web_search"},
+                {"type": "file_search", "vector_store_ids": ["vs_synthetic"]},
                 {
                     "type": "function",
                     "name": "run_command",
-                    "parameters": {"type": "object"}
+                    "parameters": {"type": "object"},
+                    "defer_loading": true,
+                    "allowed_callers": ["direct"]
                 }
             ]
         }),
@@ -529,5 +531,43 @@ fn messages_bridge_rejects_mixed_hosted_and_client_tools_before_sending_the_requ
         None,
     )
     .unwrap_err();
-    assert_eq!(error.code(), "adapter_tool_unsupported");
+    assert_eq!(request.code(), "adapter_tool_unsupported");
+}
+#[test]
+fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
+    let request = prepare_responses_to_messages(
+        &json!({
+            "model": "claude-test",
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{
+                    "type": "namespace",
+                    "name": "mcp__synthetic",
+                    "description": "Synthetic server",
+                    "tools": [{
+                        "type": "function",
+                        "name": "lookup",
+                        "description": "Look something up",
+                        "parameters": {"type": "object"}
+                    }]
+                }]
+            }, {"type": "message", "role": "user", "content": "go"}],
+            "tools": []
+        }),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+    let tools = request.upstream_body()["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    let name = tools[0]["name"].as_str().unwrap();
+    assert!(name.starts_with("relay_ns_"));
+    assert!(
+        tools[0]["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Namespace `mcp__synthetic` tool `lookup`.")
+    );
 }

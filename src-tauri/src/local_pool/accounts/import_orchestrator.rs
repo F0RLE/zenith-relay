@@ -1,7 +1,7 @@
 use super::quota_refresh::ConfirmAccountImportResponse;
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::import_session::ImportSessionStore;
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::error::CommandError;
 use crate::local_pool::state::DesktopState;
 use std::path::PathBuf;
@@ -15,7 +15,6 @@ mod account_policy;
 mod claims;
 mod confirmation;
 mod credential_material;
-mod current_profile;
 mod documents;
 mod errors;
 mod identity;
@@ -26,8 +25,9 @@ mod preview;
 mod refresh_state;
 mod sources;
 
-pub(crate) use account_import::stage_returned_remote_account;
-use account_import::{hinted_import_proxy, import_account_item, AccountImportOptions};
+use account_import::{
+    AccountImportOptions, account_import_proxy, import_account_item, import_proxy,
+};
 pub(in crate::local_pool::accounts) use account_lookup::{
     existing_identity_index, find_existing_account,
 };
@@ -39,19 +39,15 @@ pub(super) use confirmation::confirm_local_account_import_inner;
 #[cfg(test)]
 pub(super) use credential_material::lookup_import_account_id;
 pub(in crate::local_pool::accounts) use credential_material::{
-    build_import_credential_material, ImportedCredentialMaterial,
+    ImportedCredentialMaterial, build_import_credential_material,
 };
-#[cfg(test)]
-pub(super) use current_profile::{
-    current_codex_import_documents, is_usable_current_chatgpt_profile,
-};
-use current_profile::{current_profile_available, current_profile_documents};
-pub(super) use documents::normalize_import_input;
 pub use documents::StartAccountImportInput;
+pub(super) use documents::normalize_import_input;
 pub(crate) use documents::{pick_account_import_documents, read_import_documents};
 pub(in crate::local_pool::accounts) use errors::{
-    credential_item_error, credential_local_error, import_item_command_error, import_session_error,
-    model_failure_code, model_item_error, proxy_item_error, ImportItemError, ItemResult,
+    ImportItemError, ItemResult, credential_item_error, credential_local_error,
+    import_item_command_error, import_session_error, model_failure_code, model_item_error,
+    proxy_item_error,
 };
 #[cfg(test)]
 pub(super) use identity::account_id_from_check_response;
@@ -64,7 +60,7 @@ pub(super) use policy::{
     merge_existing_account, normalize_models, normalize_selected_item_ids,
     preserve_newer_account_state, should_probe_import_quota, validate_label,
 };
-use prepared_items::{parsed_item_value, parsed_item_value_from_material};
+use prepared_items::{parsed_item_json, parsed_item_json_with_material};
 use preview::{prepare_import_preview, preview_account_import_documents};
 pub(in crate::local_pool::accounts) use refresh_state::{
     apply_model_discovery, apply_model_discovery_failure, apply_quota_outcome,
@@ -78,16 +74,16 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 fn record_import_command_result<T>(
     stage: &str,
     started: Instant,
-    result: CommandResult<T>,
+    command_result: CommandResult<T>,
 ) -> CommandResult<T> {
-    match result {
-        Ok(value) => {
+    match command_result {
+        Ok(success_value) => {
             crate::diagnostics::record_operation(
                 "account-import",
                 stage,
                 &[("duration_ms", started.elapsed().as_millis().to_string())],
             );
-            Ok(value)
+            Ok(success_value)
         }
         Err(error) => {
             crate::diagnostics::record_error(
@@ -103,9 +99,8 @@ fn record_import_command_result<T>(
 
 mod types;
 pub(super) use types::{
-    AccountImportProgressEvent, ImportRowContext, ACCOUNT_IMPORT_PROGRESS_EVENT,
-    DEFAULT_OPENAI_SOURCE_URL, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES,
-    MAX_MODELS,
+    ACCOUNT_IMPORT_PROGRESS_EVENT, AccountImportProgressEvent, DEFAULT_OPENAI_SOURCE_URL,
+    ImportRowContext, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES, MAX_MODELS,
 };
 pub use types::{
     ConfirmAccountImportInput, ImportItemStatus, ImportSessionResponse, PrepareAccountImportInput,
@@ -119,7 +114,7 @@ pub async fn start_local_account_import(
     let _mutation = state.setup_guard().await;
     let started = Instant::now();
     crate::diagnostics::breadcrumb("account-import", "start", &[]);
-    let result = async {
+    let import_result = async {
         let (content, source_file) = normalize_import_input(input)?;
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let existing = existing_identity_index(&state, &credentials)?;
@@ -133,7 +128,7 @@ pub async fn start_local_account_import(
         Ok::<ImportSessionResponse, CommandError>(session.into())
     }
     .await;
-    record_import_command_result("start_completed", started, result)
+    record_import_command_result("start_completed", started, import_result)
 }
 
 #[tauri::command]
@@ -144,7 +139,7 @@ pub async fn preview_local_account_import_files(
 ) -> CommandResult<Option<ImportSessionResponse>> {
     let started = Instant::now();
     crate::diagnostics::breadcrumb("account-import", "preview_files", &[]);
-    let result = async {
+    let preview_result = async {
         let documents = match paths {
             Some(paths) => Some(read_import_documents(paths)?),
             None => pick_account_import_documents(&app)?,
@@ -157,47 +152,7 @@ pub async fn preview_local_account_import_files(
             .map(Some)
     }
     .await;
-    record_import_command_result("preview_files_completed", started, result)
-}
-
-#[tauri::command]
-pub async fn preview_current_codex_account_import(
-    state: State<'_, DesktopState>,
-) -> CommandResult<ImportSessionResponse> {
-    let started = Instant::now();
-    crate::diagnostics::breadcrumb("account-import", "preview_current_profile", &[]);
-    let result = async {
-        let documents = current_profile_documents(&state)?;
-        preview_account_import_documents(documents, &state).await
-    }
-    .await;
-    record_import_command_result("preview_current_completed", started, result)
-}
-
-#[tauri::command]
-pub async fn current_chatgpt_profile_available(
-    state: State<'_, DesktopState>,
-) -> CommandResult<bool> {
-    current_profile_available(&state).map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn resume_local_account_import(
-    session_id: String,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ImportSessionResponse> {
-    let _mutation = state.setup_guard().await;
-    crate::diagnostics::breadcrumb(
-        "account-import",
-        "resume",
-        &[("session", crate::diagnostics::hash_identifier(&session_id))],
-    );
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
-    let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
-        .resume(&session_id, &existing.keys().cloned().collect::<Vec<_>>())
-        .map_err(import_session_error)?;
-    Ok(session.into())
+    record_import_command_result("preview_files_completed", started, preview_result)
 }
 
 #[tauri::command]
@@ -213,7 +168,7 @@ pub async fn prepare_local_account_import(
         "prepare",
         &[("session", session_hash.clone())],
     );
-    let result = async {
+    let prepare_result = async {
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let existing = existing_identity_index(&state, &credentials)?;
         let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
@@ -238,7 +193,7 @@ pub async fn prepare_local_account_import(
         Ok::<_, CommandError>((session, candidate_count))
     }
     .await;
-    match result {
+    match prepare_result {
         Ok((session, candidate_count)) => {
             crate::diagnostics::record_operation(
                 "account-import",
@@ -333,8 +288,9 @@ async fn confirm_local_account_import_impl(
             ("add_to_pool", add_to_pool.to_string()),
         ],
     );
-    let response = match confirm_local_account_import_inner(input, &state, Some(&app)).await {
-        Ok(response) => response,
+    let import_response = match confirm_local_account_import_inner(input, &state, Some(&app)).await
+    {
+        Ok(import_response) => import_response,
         Err(error) => {
             crate::diagnostics::record_error(
                 "account-import",
@@ -351,11 +307,11 @@ async fn confirm_local_account_import_impl(
         }
     };
     let model_refresh_account_ids = if add_to_pool {
-        response
+        import_response
             .results
             .iter()
-            .filter_map(|result| {
-                result
+            .filter_map(|import_item_result| {
+                import_item_result
                     .account
                     .as_ref()
                     .filter(|account| account.account.in_pool)
@@ -365,12 +321,12 @@ async fn confirm_local_account_import_impl(
     } else {
         Vec::new()
     };
-    let succeeded = response
+    let succeeded = import_response
         .results
         .iter()
-        .filter(|result| result.status == ImportItemStatus::Succeeded)
+        .filter(|import_item_result| import_item_result.status == ImportItemStatus::Succeeded)
         .count();
-    let failed = response.results.len().saturating_sub(succeeded);
+    let failed = import_response.results.len().saturating_sub(succeeded);
     crate::diagnostics::record_operation(
         "account-import",
         "confirm_completed",
@@ -388,5 +344,5 @@ async fn confirm_local_account_import_impl(
         app,
         model_refresh_account_ids,
     );
-    Ok(response)
+    Ok(import_response)
 }

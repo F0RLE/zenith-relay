@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod cache_affinity;
+
 impl RotationEngine {
     pub fn candidate_availability(
         &self,
@@ -53,39 +55,72 @@ impl RotationEngine {
     }
 
     pub fn select(&self, request: &RotationRequest, now_ms: u64) -> Option<RotationSelection> {
-        let (ready, _) = self.selection_candidates(request, now_ms);
-        let group = self.selection_group(&ready, now_ms);
-        let selected = self.choose_for_request(request, &group)?;
-        let selected_quota = self.fresh_quota_remaining(&selected.id, now_ms);
-        let quota_decided = request.owner.is_none()
-            && !selected.recovery
-            && self.mode == RotationMode::Automatic
-            && selected_quota.is_some()
-            && ready.iter().any(|candidate| {
-                self.fresh_quota_remaining(&candidate.id, now_ms) != selected_quota
-            });
-        let reason = if request.owner.is_some() {
-            RotationSelectionReason::HardOwner
-        } else if selected.recovery {
-            RotationSelectionReason::Recovery
-        } else if ready.len() == 1 {
-            RotationSelectionReason::OnlyEligible
-        } else if self.mode == RotationMode::InOrder {
-            RotationSelectionReason::PrimaryFirst
-        } else if quota_decided {
-            RotationSelectionReason::QuotaHeadroom
-        } else if group.len() < ready.len() && self.mode == RotationMode::Automatic {
-            RotationSelectionReason::LeastLoaded
-        } else {
-            RotationSelectionReason::WeightedRotation
-        };
+        let (ready_candidates, _) = self.selection_candidates(request, now_ms);
+        let selection_group = self.selection_group(&ready_candidates, request, now_ms);
+        let selected_candidate = self.choose_for_request(request, &selection_group)?;
+        let reason = self.selection_reason(request, &ready_candidates, &selected_candidate, now_ms);
         Some(RotationSelection {
-            candidate_id: selected.id.clone(),
-            priority: selected.priority,
-            recovery: selected.recovery,
-            eligible_candidates: u32::try_from(ready.len()).unwrap_or(u32::MAX),
+            candidate_id: selected_candidate.id.clone(),
+            priority: selected_candidate.priority,
+            recovery: selected_candidate.recovery,
+            eligible_candidates: u32::try_from(ready_candidates.len()).unwrap_or(u32::MAX),
             reason,
         })
+    }
+
+    fn selection_reason(
+        &self,
+        request: &RotationRequest,
+        ready_candidates: &[ReadyCandidate],
+        selected: &ReadyCandidate,
+        now_ms: u64,
+    ) -> RotationSelectionReason {
+        if request.owner.is_some() {
+            return RotationSelectionReason::HardOwner;
+        }
+        if selected.recovery {
+            return RotationSelectionReason::Recovery;
+        }
+        if ready_candidates.len() == 1 {
+            return RotationSelectionReason::OnlyEligible;
+        }
+        if matches!(self.mode, RotationMode::Failover | RotationMode::RoundRobin) {
+            return RotationSelectionReason::ManualPriority;
+        }
+        if self.mode != RotationMode::Automatic {
+            return RotationSelectionReason::WeightedRotation;
+        }
+
+        // Only automatic selection compares resource headroom. Resolve its
+        // explanation after selection, without scanning balances for owners,
+        // recovery requests or manual/round-robin routing.
+        let least_loaded = self.cache_aware_load_group(ready_candidates, request);
+        if least_loaded.len() < ready_candidates.len() {
+            return RotationSelectionReason::LeastLoaded;
+        }
+        let best_quota = least_loaded
+            .iter()
+            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+            .max();
+        if best_quota.is_some_and(|best| {
+            least_loaded
+                .iter()
+                .any(|candidate| !self.within_quota_band(request, &candidate.id, best, now_ms))
+        }) {
+            return RotationSelectionReason::QuotaHeadroom;
+        }
+        let selected_credits = self.fresh_provider_credits(&selected.id, now_ms);
+        if selected_credits.is_some()
+            && least_loaded
+                .iter()
+                .all(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms).is_none())
+            && least_loaded.iter().any(|candidate| {
+                self.fresh_provider_credits(&candidate.id, now_ms) != selected_credits
+            })
+        {
+            return RotationSelectionReason::ProviderCredits;
+        }
+        RotationSelectionReason::WeightedRotation
     }
 
     pub(super) fn selection_candidates(
@@ -93,34 +128,91 @@ impl RotationEngine {
         request: &RotationRequest,
         now_ms: u64,
     ) -> (Vec<ReadyCandidate>, bool) {
-        let ready = self.ready_candidates(request, now_ms);
-        let ordinary_alternatives = ready.iter().any(|candidate| !candidate.recovery);
+        let ready_candidates = self.ready_candidates(request, now_ms);
+        let ordinary_alternatives = ready_candidates.iter().any(|candidate| !candidate.recovery);
         let recovery_allowed = self.recovery_in_flight < self.recovery_policy.max_in_flight
             && (!ordinary_alternatives || self.recovery_credits > 0);
-        let ready = ready
+        let eligible_candidates = ready_candidates
             .into_iter()
             .filter(|candidate| !candidate.recovery || recovery_allowed)
             .collect::<Vec<_>>();
-        (ready, ordinary_alternatives)
+        (eligible_candidates, ordinary_alternatives)
     }
 
     pub(super) fn choose_for_request(
         &self,
         request: &RotationRequest,
-        group: &[ReadyCandidate],
+        candidate_group: &[ReadyCandidate],
     ) -> Option<ReadyCandidate> {
         if self.mode == RotationMode::Automatic && request.owner.is_none() {
-            if let Some(preferred) = group.iter().find(|candidate| {
+            if let Some(preferred) = candidate_group.iter().find(|candidate| {
                 !candidate.recovery && request.preferred.as_deref() == Some(&candidate.id)
             }) {
                 return Some(preferred.clone());
             }
+            for alternative in &request.warm_fallbacks {
+                if let Some(warm) = candidate_group
+                    .iter()
+                    .find(|candidate| !candidate.recovery && candidate.id == *alternative)
+                {
+                    return Some(warm.clone());
+                }
+            }
         }
-        self.choose_weighted(&request.route_key, group)
+        if self.mode == RotationMode::RoundRobin {
+            return self.choose_round_robin(&request.route_key, candidate_group);
+        }
+        self.choose_weighted(&request.route_key, candidate_group)
+    }
+
+    fn choose_round_robin(
+        &self,
+        route_key: &str,
+        candidates: &[ReadyCandidate],
+    ) -> Option<ReadyCandidate> {
+        let mut ordered_candidates = candidates.iter().collect::<Vec<_>>();
+        ordered_candidates.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        if ordered_candidates.is_empty() {
+            return None;
+        }
+
+        let previous_cursor = self.round_robin_cursor.get(route_key).map(|cursor| {
+            let priority = self
+                .candidates
+                .values()
+                .find(|runtime| runtime.candidate.capacity_key == cursor.capacity_key)
+                .map_or(cursor.priority, |runtime| runtime.candidate.priority);
+            (priority, cursor.candidate_id.as_str())
+        });
+        let next_index = previous_cursor
+            .and_then(|(priority, candidate_id)| {
+                ordered_candidates.iter().position(|candidate| {
+                    candidate.priority < priority
+                        || (candidate.priority == priority && candidate.id.as_str() > candidate_id)
+                })
+            })
+            .unwrap_or(0);
+        ordered_candidates
+            .get(next_index)
+            .map(|candidate| (*candidate).clone())
     }
 
     pub(crate) fn fresh_quota_remaining(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
         let runtime = self.candidates.get(candidate_id)?;
+        if runtime.candidate.quota == QuotaState::Unknown {
+            return runtime
+                .candidate
+                .quota_reference
+                .as_ref()
+                .and_then(|reference| {
+                    reference.fresh_remaining(now_ms, self.quota_stale_after_ms)
+                });
+        }
         if runtime.candidate.quota != QuotaState::Available {
             return None;
         }
@@ -128,34 +220,155 @@ impl RotationEngine {
             .candidate
             .quota_remaining_basis_points
             .filter(|remaining| *remaining > 0)?;
-        if runtime
-            .candidate
-            .quota_observed_at_ms
-            .is_some_and(|observed_at_ms| {
-                now_ms.saturating_sub(observed_at_ms) > self.quota_stale_after_ms
-            })
-        {
+        if !crate::quota::observation_is_fresh(
+            runtime.candidate.quota_observed_at_ms,
+            now_ms,
+            self.quota_stale_after_ms,
+        ) {
             return None;
         }
         Some(remaining)
     }
 
-    pub(crate) fn best_other_ordinary_fresh_quota(
+    pub(crate) fn fresh_provider_credits(&self, candidate_id: &str, now_ms: u64) -> Option<u64> {
+        let candidate = &self.candidates.get(candidate_id)?.candidate;
+        if !crate::quota::observation_is_fresh(
+            candidate.provider_credits_observed_at_ms,
+            now_ms,
+            self.quota_stale_after_ms,
+        ) {
+            return None;
+        }
+        if candidate.provider_credits_unlimited {
+            return Some(u64::MAX);
+        }
+        candidate
+            .provider_credits_micro_units
+            .filter(|credits| *credits > 0)
+    }
+
+    fn quota_switch_margin(&self, request: &RotationRequest, candidate_id: &str) -> u64 {
+        if self.mode == RotationMode::Automatic
+            && request.owner.is_none()
+            && request.preferred.as_deref() == Some(candidate_id)
+        {
+            CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS
+        } else {
+            QUOTA_SWITCH_MARGIN_BASIS_POINTS
+        }
+    }
+
+    fn within_quota_band(
         &self,
         request: &RotationRequest,
+        candidate_id: &str,
+        best: u64,
+        now_ms: u64,
+    ) -> bool {
+        self.fresh_quota_remaining(candidate_id, now_ms)
+            .is_some_and(|remaining| {
+                best.saturating_sub(remaining) < self.quota_switch_margin(request, candidate_id)
+            })
+    }
+
+    /// Follow a successful resource rebalance, not a temporary load spillover.
+    /// Use the admission margins and fresh observations rather than request
+    /// completion order to decide whether the durable cache owner should move.
+    pub(crate) fn has_material_resource_lead(
+        &self,
+        candidate_id: &str,
         owner_id: &str,
         now_ms: u64,
-    ) -> Option<u64> {
-        self.ready_candidates(request, now_ms)
-            .into_iter()
-            .filter(|candidate| !candidate.recovery && candidate.id != owner_id)
-            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
-            .max()
+    ) -> bool {
+        if self.mode != RotationMode::Automatic {
+            return false;
+        }
+        match (
+            self.fresh_quota_remaining(candidate_id, now_ms),
+            self.fresh_quota_remaining(owner_id, now_ms),
+        ) {
+            (Some(remaining), Some(owner_remaining)) => {
+                remaining.saturating_sub(owner_remaining)
+                    >= CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => match (
+                self.fresh_provider_credits(candidate_id, now_ms),
+                self.fresh_provider_credits(owner_id, now_ms),
+            ) {
+                (Some(credits), Some(owner_credits)) => {
+                    credits.saturating_sub(owner_credits)
+                        >= PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS
+                }
+                (Some(_), None) => true,
+                _ => false,
+            },
+        }
+    }
+
+    fn least_loaded_group(&self, ready_candidates: &[ReadyCandidate]) -> Vec<ReadyCandidate> {
+        let compare_load = |left: &ReadyCandidate, right: &ReadyCandidate| {
+            (u64::from(left.in_flight) * u64::from(right.effective_capacity))
+                .cmp(&(u64::from(right.in_flight) * u64::from(left.effective_capacity)))
+        };
+        let Some(best) = ready_candidates
+            .iter()
+            .min_by(|left, right| compare_load(left, right))
+        else {
+            return Vec::new();
+        };
+        ready_candidates
+            .iter()
+            .filter(|candidate| compare_load(candidate, best).is_eq())
+            .cloned()
+            .collect()
+    }
+
+    fn cache_aware_load_group(
+        &self,
+        ready: &[ReadyCandidate],
+        request: &RotationRequest,
+    ) -> Vec<ReadyCandidate> {
+        let mut candidates = self.least_loaded_group(ready);
+        let Some(least_loaded) = candidates.first() else {
+            return candidates;
+        };
+        let Some(preferred_id) = request.preferred.as_deref() else {
+            return candidates;
+        };
+        let Some(preferred) = ready
+            .iter()
+            .find(|candidate| !candidate.recovery && candidate.id == preferred_id)
+        else {
+            return candidates;
+        };
+
+        // Keep a warm member eligible with at most one extra existing request
+        // relative to the least normalized load. Readiness already enforces
+        // physical capacity; quota, credits and soft health still filter this
+        // group below. Do not queue or relax limits just to preserve a cache.
+        let preferred_load = u64::from(
+            preferred
+                .in_flight
+                .saturating_sub(CACHE_AFFINITY_EXTRA_REQUESTS),
+        ) * u64::from(least_loaded.effective_capacity);
+        let baseline_load =
+            u64::from(least_loaded.in_flight) * u64::from(preferred.effective_capacity);
+        if preferred_load <= baseline_load
+            && !candidates
+                .iter()
+                .any(|candidate| candidate.id == preferred.id)
+        {
+            candidates.push(preferred.clone());
+        }
+        candidates
     }
 
     pub(super) fn selection_group(
         &self,
         ready: &[ReadyCandidate],
+        request: &RotationRequest,
         now_ms: u64,
     ) -> Vec<ReadyCandidate> {
         // Exploration is arbitrated across the runtime, not separately for
@@ -164,11 +377,11 @@ impl RotationEngine {
             .iter()
             .filter(|candidate| candidate.recovery)
             .min_by_key(|candidate| (candidate.due_at_ms, &candidate.id));
-        if let Some(candidate) = recovery {
+        if let Some(candidate) = recovery.filter(|_| self.mode != RotationMode::Failover) {
             return vec![candidate.clone()];
         }
         match self.mode {
-            RotationMode::InOrder => ready
+            RotationMode::Failover => ready
                 .iter()
                 .min_by(|left, right| {
                     right
@@ -179,39 +392,82 @@ impl RotationEngine {
                 .cloned()
                 .into_iter()
                 .collect(),
-            RotationMode::RoundRobin => ready.to_vec(),
+            RotationMode::RoundRobin | RotationMode::WeightedRoundRobin => ready.to_vec(),
             RotationMode::Automatic => {
-                let best_quota = ready
-                    .iter()
-                    .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
-                    .max();
-                let quota_group = match best_quota {
-                    Some(best_quota) => ready
-                        .iter()
-                        .filter(|candidate| {
-                            self.fresh_quota_remaining(&candidate.id, now_ms) == Some(best_quota)
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    None => ready.to_vec(),
-                };
-                let compare_load = |left: &ReadyCandidate, right: &ReadyCandidate| {
-                    (u64::from(left.in_flight) * u64::from(right.effective_capacity))
-                        .cmp(&(u64::from(right.in_flight) * u64::from(left.effective_capacity)))
-                };
-                let Some(best) = quota_group
-                    .iter()
-                    .min_by(|left, right| compare_load(left, right))
-                else {
-                    return Vec::new();
-                };
-                quota_group
-                    .iter()
-                    .filter(|candidate| compare_load(candidate, best).is_eq())
-                    .cloned()
-                    .collect()
+                // Independent work uses the least-loaded physical members.
+                // A warm owner may stay within the bounded load margin;
+                // resource and health checks apply equally to that owner.
+                let candidates = self.cache_aware_load_group(ready, request);
+                let candidates = self.resource_group(candidates, request, now_ms);
+                self.soft_health_group(candidates)
             }
         }
+    }
+
+    fn resource_group(
+        &self,
+        mut candidates: Vec<ReadyCandidate>,
+        request: &RotationRequest,
+        now_ms: u64,
+    ) -> Vec<ReadyCandidate> {
+        let best_quota = candidates
+            .iter()
+            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+            .max();
+        if let Some(best_quota) = best_quota {
+            candidates.retain(|candidate| {
+                self.within_quota_band(request, &candidate.id, best_quota, now_ms)
+            });
+        } else if let Some(best_credits) = candidates
+            .iter()
+            .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
+            .max()
+        {
+            candidates.retain(|candidate| {
+                self.fresh_provider_credits(&candidate.id, now_ms)
+                    .is_some_and(|credits| {
+                        credits == best_credits
+                            || (request.preferred.as_deref() == Some(candidate.id.as_str())
+                                && best_credits.saturating_sub(credits)
+                                    < PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS)
+                    })
+            });
+        }
+        candidates
+    }
+
+    fn soft_health_group(&self, mut candidates: Vec<ReadyCandidate>) -> Vec<ReadyCandidate> {
+        let Some(best_failure_score) = candidates
+            .iter()
+            .map(|candidate| candidate.failure_score_milli)
+            .min()
+        else {
+            return candidates;
+        };
+        // Compare all members with one baseline. Pairwise switch margins do
+        // not define a transitive ordering and can make selection depend on IDs.
+        candidates.retain(|candidate| {
+            candidate
+                .failure_score_milli
+                .saturating_sub(best_failure_score)
+                < HEALTH_FAILURE_SWITCH_MARGIN_MILLI
+        });
+        let fastest = candidates
+            .iter()
+            .filter_map(|candidate| candidate.first_output_latency_ms)
+            .map(|latency| latency.max(1))
+            .min();
+        if let Some(fastest) = fastest {
+            candidates.retain(|candidate| {
+                // Missing measurements remain eligible for ordinary rotation.
+                candidate.first_output_latency_ms.is_none_or(|latency| {
+                    u128::from(latency.max(1)) * 1_000
+                        < u128::from(fastest)
+                            * u128::from(1_000 + HEALTH_LATENCY_SWITCH_MARGIN_MILLI)
+                })
+            });
+        }
+        candidates
     }
 
     pub(super) fn mutable_availability(
@@ -223,48 +479,59 @@ impl RotationEngine {
         match runtime.candidate.auth {
             AuthState::Ready => {}
             AuthState::NeedsRefresh => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::AuthRequired)
+                return CandidateAvailability::Blocked(CandidateBlockReason::AuthRequired);
             }
             AuthState::Blocked => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::AuthBlocked)
+                return CandidateAvailability::Blocked(CandidateBlockReason::AuthBlocked);
             }
         }
-        let mut wait = None;
+        let mut earliest_wait = None;
         match runtime.candidate.quota {
+            QuotaState::CreditFallback { .. }
+                if crate::quota::observation_is_fresh(
+                    runtime.candidate.provider_credits_observed_at_ms,
+                    now_ms,
+                    self.quota_stale_after_ms,
+                ) => {}
             QuotaState::Exhausted {
                 reset_at_ms: Some(reset_at_ms),
-            } if reset_at_ms > now_ms => {
-                wait = Some((reset_at_ms, CandidateBlockReason::QuotaExhausted));
             }
-            QuotaState::Exhausted { .. } => {
-                return CandidateAvailability::Blocked(CandidateBlockReason::QuotaExhausted)
+            | QuotaState::CreditFallback {
+                reset_at_ms: Some(reset_at_ms),
+            } if reset_at_ms > now_ms => {
+                earliest_wait = Some((reset_at_ms, CandidateBlockReason::QuotaExhausted));
+            }
+            QuotaState::Exhausted { .. } | QuotaState::CreditFallback { .. } => {
+                return CandidateAvailability::Blocked(CandidateBlockReason::QuotaExhausted);
             }
             QuotaState::Unknown | QuotaState::Available | QuotaState::Stale => {}
         }
-        let route_rate = runtime
+        let model_route_rate = runtime
             .candidate
             .route_rates
             .get(route_key)
             .copied()
             .unwrap_or(runtime.candidate.rate);
-        for rate in [runtime.candidate.rate, route_rate] {
-            if let RateState::Limited { not_before_ms } = rate {
-                if not_before_ms > now_ms && wait.is_none_or(|(at, _)| not_before_ms > at) {
-                    wait = Some((not_before_ms, CandidateBlockReason::RateLimited));
-                }
+        for rate in [runtime.candidate.rate, model_route_rate] {
+            if let RateState::Limited { not_before_ms } = rate
+                && not_before_ms > now_ms
+                && earliest_wait.is_none_or(|(at, _)| not_before_ms > at)
+            {
+                earliest_wait = Some((not_before_ms, CandidateBlockReason::RateLimited));
             }
         }
-        let circuit = self
+        let circuit_state = self
             .circuits
             .get(&(runtime.candidate.id.clone(), route_key.to_owned()))
             .cloned()
             .unwrap_or_default();
-        if let Some(at) = circuit.not_before_ms.filter(|at| *at > now_ms) {
-            if wait.is_none_or(|(previous, _)| at > previous) {
-                wait = Some((at, CandidateBlockReason::CircuitOpen));
-            }
+        if let Some(not_before_ms) = circuit_state.not_before_ms.filter(|at| *at > now_ms)
+            && earliest_wait
+                .is_none_or(|(previous_deadline_ms, _)| not_before_ms > previous_deadline_ms)
+        {
+            earliest_wait = Some((not_before_ms, CandidateBlockReason::CircuitOpen));
         }
-        if let Some((at_ms, reason)) = wait {
+        if let Some((at_ms, reason)) = earliest_wait {
             return CandidateAvailability::WaitUntil { at_ms, reason };
         }
         if self.leases.len() >= self.max_in_flight as usize {
@@ -280,10 +547,10 @@ impl RotationEngine {
         {
             return CandidateAvailability::Busy(CandidateBlockReason::CapacityBusy);
         }
-        match circuit.state {
+        match circuit_state.state {
             CircuitState::Closed => {}
             CircuitState::Degraded | CircuitState::Open => {
-                if circuit.half_open_lease.is_some() {
+                if circuit_state.half_open_lease.is_some() {
                     return CandidateAvailability::Busy(CandidateBlockReason::RecoveryBusy);
                 }
                 if runtime.in_flight > 0
@@ -295,7 +562,7 @@ impl RotationEngine {
                 return CandidateAvailability::Ready { recovery: true };
             }
             CircuitState::HalfOpen => {
-                return CandidateAvailability::Busy(CandidateBlockReason::RecoveryBusy)
+                return CandidateAvailability::Busy(CandidateBlockReason::RecoveryBusy);
             }
         }
         if runtime.candidate.max_concurrency > 0
@@ -314,16 +581,11 @@ impl RotationEngine {
         self.candidates
             .values()
             .filter_map(|runtime| {
-                if !matches!(
-                    self.candidate_availability(request, &runtime.candidate.id, now_ms),
-                    CandidateAvailability::Ready { .. }
-                ) {
+                let CandidateAvailability::Ready { recovery } =
+                    self.candidate_availability(request, &runtime.candidate.id, now_ms)
+                else {
                     return None;
-                }
-                let recovery = matches!(
-                    self.candidate_availability(request, &runtime.candidate.id, now_ms),
-                    CandidateAvailability::Ready { recovery: true }
-                );
+                };
                 let due_at_ms = self
                     .circuits
                     .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
@@ -340,20 +602,38 @@ impl RotationEngine {
                         .unwrap_or(self.max_in_flight)
                         .min(self.max_in_flight),
                     priority: runtime.candidate.priority,
-                    weight: runtime.candidate.weight,
+                    weight: if self.mode == RotationMode::RoundRobin {
+                        1
+                    } else {
+                        runtime.candidate.weight
+                    },
                     recovery,
                     due_at_ms,
+                    failure_score_milli: self
+                        .health
+                        .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
+                        .map_or(0, |health| self.decayed_failure_score(health, now_ms)),
+                    first_output_latency_ms: self
+                        .health
+                        .get(&(runtime.candidate.id.clone(), request.route_key.clone()))
+                        .filter(|health| {
+                            health.latency_observed_at_ms.is_some_and(|observed_at_ms| {
+                                observed_at_ms <= now_ms
+                                    && now_ms - observed_at_ms <= HEALTH_HALF_LIFE_MS
+                            })
+                        })
+                        .and_then(|health| health.first_output_latency_ms),
                 })
             })
             // Aliases of a verified physical member carry one vote/weight.
             // Selection is stable among its compatible routes.
             .fold(
                 BTreeMap::<String, ReadyCandidate>::new(),
-                |mut members, candidate| {
-                    members
+                |mut physical_members, candidate| {
+                    physical_members
                         .entry(candidate.capacity_key.clone())
                         .or_insert(candidate);
-                    members
+                    physical_members
                 },
             )
             .into_values()
@@ -379,20 +659,27 @@ impl RotationEngine {
         candidates
             .iter()
             .max_by(|left, right| {
-                let left_credit = self
+                let left_rotation_credit = self
                     .rotation_credit
                     .get(&(route_key.to_owned(), left.capacity_key.clone()))
                     .copied()
                     .unwrap_or_default()
                     .saturating_add(i64::from(left.weight));
-                let right_credit = self
+                let right_rotation_credit = self
                     .rotation_credit
                     .get(&(route_key.to_owned(), right.capacity_key.clone()))
                     .copied()
                     .unwrap_or_default()
                     .saturating_add(i64::from(right.weight));
-                left_credit
-                    .cmp(&right_credit)
+                left_rotation_credit
+                    .cmp(&right_rotation_credit)
+                    .then_with(|| {
+                        if self.mode == RotationMode::WeightedRoundRobin {
+                            left.priority.cmp(&right.priority)
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    })
                     // `max_by` wins the right-hand value on equality. Reverse the
                     // id order so the lexicographically smallest id is stable.
                     .then_with(|| right.id.cmp(&left.id))
@@ -400,33 +687,58 @@ impl RotationEngine {
             .cloned()
     }
 
-    pub(super) fn advance_weighted_credit(
+    pub(super) fn advance_rotation_state(
         &mut self,
         route_key: &str,
         candidates: &[ReadyCandidate],
-        selected: &str,
+        selected_candidate_id: &str,
+        advance_round_robin_cursor: bool,
     ) {
-        let eligible: BTreeSet<_> = candidates
+        if self.mode == RotationMode::RoundRobin {
+            if advance_round_robin_cursor
+                && let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.id == selected_candidate_id)
+            {
+                self.round_robin_cursor.insert(
+                    route_key.to_owned(),
+                    RoundRobinCursor {
+                        capacity_key: candidate.capacity_key.clone(),
+                        candidate_id: candidate.id.clone(),
+                        priority: candidate.priority,
+                    },
+                );
+            }
+            return;
+        }
+        let eligible_capacity_keys: BTreeSet<_> = candidates
             .iter()
             .map(|candidate| &candidate.capacity_key)
             .collect();
-        self.rotation_credit
-            .retain(|(route, capacity), _| route != route_key || eligible.contains(capacity));
+        self.rotation_credit.retain(|(route, capacity), _| {
+            route != route_key || eligible_capacity_keys.contains(capacity)
+        });
         let total_weight = candidates
             .iter()
             .map(|candidate| i64::from(candidate.weight))
             .sum::<i64>();
         for candidate in candidates {
-            let key = (route_key.to_owned(), candidate.capacity_key.clone());
-            let credit = self.rotation_credit.entry(key).or_default();
-            *credit = credit.saturating_add(i64::from(candidate.weight));
+            let credit_key = (route_key.to_owned(), candidate.capacity_key.clone());
+            let candidate_credit = self.rotation_credit.entry(credit_key).or_default();
+            *candidate_credit = candidate_credit.saturating_add(i64::from(candidate.weight));
         }
-        let Some(selected) = candidates.iter().find(|candidate| candidate.id == selected) else {
+        let Some(selected_candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.id == selected_candidate_id)
+        else {
             return;
         };
-        let key = (route_key.to_owned(), selected.capacity_key.clone());
-        if let Some(credit) = self.rotation_credit.get_mut(&key) {
-            *credit = credit.saturating_sub(total_weight);
+        let credit_key = (
+            route_key.to_owned(),
+            selected_candidate.capacity_key.clone(),
+        );
+        if let Some(candidate_credit) = self.rotation_credit.get_mut(&credit_key) {
+            *candidate_credit = candidate_credit.saturating_sub(total_weight);
         }
     }
 }

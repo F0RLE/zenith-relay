@@ -2,8 +2,8 @@ use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::{
-    is_valid_model_id, model_id_key, LocalGatewayKey, ProviderSource, SourceProtocolBinding,
-    WireApi,
+    LocalGatewayKey, ProviderSource, SourceProtocolBinding, WireApi, is_valid_model_id,
+    model_id_key,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -111,17 +111,24 @@ pub trait PoolParticipant {
 }
 
 /// Pending work must be fenced when membership or model permission changes.
-pub fn pool_dispatch_permission_changed(previous: PoolAccess<'_>, next: PoolAccess<'_>) -> bool {
-    previous.enabled != next.enabled
-        || previous.in_pool != next.in_pool
-        || previous.draining != next.draining
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
+pub fn pool_dispatch_permission_changed(
+    previous_access: PoolAccess<'_>,
+    updated: PoolAccess<'_>,
+) -> bool {
+    previous_access.enabled != updated.enabled
+        || previous_access.in_pool != updated.in_pool
+        || previous_access.draining != updated.draining
+        || previous_access.allowed_models != updated.allowed_models
+        || previous_access.excluded_models != updated.excluded_models
 }
 
 /// A client catalog changes only for a participant that is or was in the pool.
-pub fn pool_catalog_visibility_changed(previous: PoolAccess<'_>, next: PoolAccess<'_>) -> bool {
-    (previous.in_pool || next.in_pool) && pool_dispatch_permission_changed(previous, next)
+pub fn pool_catalog_visibility_changed(
+    previous_access: PoolAccess<'_>,
+    updated: PoolAccess<'_>,
+) -> bool {
+    (previous_access.in_pool || updated.in_pool)
+        && pool_dispatch_permission_changed(previous_access, updated)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,22 +150,23 @@ pub trait RuntimeSourcePolicyRecord {
 /// outside this function because their executors are immutable and require a
 /// rebuild.
 pub fn changed_runtime_source_policy_updates<T: RuntimeSourcePolicyRecord>(
-    previous: &[T],
-    next: &[T],
+    previous_sources: &[T],
+    updated_sources: &[T],
 ) -> Vec<RuntimeSourcePolicyUpdate> {
-    let previous_updates = previous
+    let previous_updates = previous_sources
         .iter()
         .map(RuntimeSourcePolicyRecord::runtime_source_policy_update)
         .collect::<Vec<_>>();
-    next.iter()
-        .filter_map(|record| {
-            let update = record.runtime_source_policy_update();
+    updated_sources
+        .iter()
+        .filter_map(|updated_record| {
+            let update = updated_record.runtime_source_policy_update();
             let changed = previous_updates
                 .iter()
-                .find(|previous| previous.source_id == update.source_id)
-                .is_none_or(|previous| {
-                    previous.policy != update.policy
-                        || previous.recovery_delay_seconds != update.recovery_delay_seconds
+                .find(|previous_update| previous_update.source_id == update.source_id)
+                .is_none_or(|previous_update| {
+                    previous_update.policy != update.policy
+                        || previous_update.recovery_delay_seconds != update.recovery_delay_seconds
                 });
             changed.then_some(update)
         })
@@ -225,22 +233,24 @@ pub enum DefaultServiceTier {
     Ultrafast,
 }
 
-/// Normalizes the explicit per-model policy. Capability is resolved only from
-/// a live route's confirmed upstream manifest, so persistence must retain a
-/// valid model ID without inferring support from its spelling.
+/// Normalizes the saved per-model policy. Reference modes and configured
+/// transports determine support separately; persistence retains a valid
+/// model ID without inferring support from its spelling.
 pub fn normalize_model_service_tier_overrides(
     overrides: BTreeMap<String, DefaultServiceTier>,
 ) -> std::result::Result<BTreeMap<String, DefaultServiceTier>, &'static str> {
     let mut normalized = BTreeMap::new();
-    for (model, tier) in overrides {
-        let model = model.trim();
-        if !is_valid_model_id(model) {
+    for (model_id, tier) in overrides {
+        let model_id = model_id.trim();
+        if !is_valid_model_id(model_id) {
             return Err("model service tier override has an invalid model id");
         }
-        normalized.insert(model_id_key(model), tier);
+        normalized.insert(model_id_key(model_id), tier);
     }
     Ok(normalized)
 }
+
+pub use crate::catalog::context_policy::ModelContextPolicy;
 
 impl DefaultServiceTier {
     pub const fn as_str(self) -> &'static str {
@@ -253,8 +263,8 @@ impl DefaultServiceTier {
 
     /// Parses the durable service-tier spelling, including the legacy Codex
     /// `priority` alias for Relay's fast tier.
-    pub fn from_storage_value(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
+    pub fn from_storage_value(stored_tier: &str) -> Self {
+        match stored_tier.trim().to_ascii_lowercase().as_str() {
             "ultrafast" => Self::Ultrafast,
             "fast" | "priority" => Self::Fast,
             _ => Self::Standard,
@@ -269,8 +279,8 @@ impl DefaultServiceTier {
         }
     }
 
-    pub(crate) const fn from_atomic_value(value: u8) -> Self {
-        match value {
+    pub(crate) const fn from_atomic_value(atomic_tier: u8) -> Self {
+        match atomic_tier {
             1 => Self::Fast,
             2 => Self::Ultrafast,
             _ => Self::Standard,
@@ -299,10 +309,8 @@ impl ResponseAffinityBinding {
 
 pub const RESPONSE_AFFINITY_DELETE_EXPIRED_SQL: &str =
     "DELETE FROM response_affinity WHERE expires_at_ms <= ?1";
-pub const RESPONSE_AFFINITY_FIND_SQL: &str =
-    "SELECT response_key, candidate_id, expires_at_ms FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2";
-pub const RESPONSE_AFFINITY_UPSERT_SQL: &str =
-    "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(response_key) DO UPDATE SET candidate_id = excluded.candidate_id, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms";
+pub const RESPONSE_AFFINITY_FIND_SQL: &str = "SELECT response_key, candidate_id, expires_at_ms FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2";
+pub const RESPONSE_AFFINITY_UPSERT_SQL: &str = "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(response_key) DO UPDATE SET candidate_id = excluded.candidate_id, expires_at_ms = excluded.expires_at_ms, updated_at_ms = excluded.updated_at_ms";
 pub const RESPONSE_AFFINITY_DELETE_SQL: &str =
     "DELETE FROM response_affinity WHERE response_key = ?1";
 pub const RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL: &str =
@@ -322,17 +330,20 @@ pub trait ResponseAffinityStore: Send + Sync {
 
 #[derive(Clone)]
 pub struct GatewayRuntimeOptions {
+    /// Host-owned opt-in for detailed request telemetry; never changes execution.
+    pub diagnostics_enabled: fn() -> bool,
     pub tool_policy: crate::ToolPolicy,
     pub max_retry_candidates: usize,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub quota_stale_after_ms: u64,
-    /// Optional text model used as the Responses image-generation bridge.
-    /// `None` selects the cheapest known compatible model per account.
+    /// Host restriction: native Codex credentials may execute Images only.
+    /// Independent of editable model rules and preserved across catalog refreshes.
+    pub native_codex_images_only: bool,
+    /// Legacy import compatibility only. Native Images never selects a text model.
     pub image_base_model: Option<String>,
-    /// Immutable pricing snapshot used only to rank the automatic image
-    /// bridge model. A missing or empty snapshot never blocks runtime build.
+    /// Legacy API compatibility; native Images routing does not consult pricing.
     pub image_pricing_catalog: Option<Arc<PricingCatalog>>,
     /// Advisory presentation metadata. It only orders model-list responses;
     /// admission and routing remain owned by the runtime registry.
@@ -340,7 +351,11 @@ pub struct GatewayRuntimeOptions {
     /// Manually enabled source-model reasoning efforts. An absent model
     /// exposes no reasoning selector for API sources.
     pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    pub model_context_policies: BTreeMap<String, ModelContextPolicy>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    /// Reuse only within the same host lifetime. Payloads remain in memory;
+    /// route/credential ownership and existing cache bounds still apply.
+    pub continuation_state: Option<super::RuntimeContinuationStores>,
 }
 
 impl fmt::Debug for GatewayRuntimeOptions {
@@ -352,6 +367,7 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("hidden_models", &self.hidden_models)
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
+            .field("native_codex_images_only", &self.native_codex_images_only)
             .field("image_base_model", &self.image_base_model)
             .field(
                 "image_pricing_catalog",
@@ -376,24 +392,28 @@ impl fmt::Debug for GatewayRuntimeOptions {
 impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
+            diagnostics_enabled: || false,
             tool_policy: crate::ToolPolicy::default(),
             max_retry_candidates: 3,
             pool_routing: None,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
+            native_codex_images_only: false,
             image_base_model: None,
             image_pricing_catalog: None,
             model_metadata_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
+            model_context_policies: BTreeMap::new(),
             response_affinity_store: None,
+            continuation_state: None,
         }
     }
 }
 
 #[cfg(test)]
 mod pool_access_tests {
-    use super::{pool_catalog_visibility_changed, pool_dispatch_permission_changed, PoolAccess};
+    use super::{PoolAccess, pool_catalog_visibility_changed, pool_dispatch_permission_changed};
 
     fn access<'a>(in_pool: bool, allowed: &'a [String]) -> PoolAccess<'a> {
         PoolAccess {

@@ -7,6 +7,8 @@ export type PerformOptions = {
   afterWork?: () => Promise<unknown>;
   /** Report the command result immediately. The snapshot refreshes afterwards and cannot undo that result. */
   backgroundRefresh?: boolean;
+  /** Skip runtime reads for actions that do not change Relay state. */
+  skipRefresh?: boolean;
   /** Keep other controls usable. The command still runs and reports its own result. */
   uiLock?: boolean;
   /** Keep an operation error local to the surface that initiated it. */
@@ -52,12 +54,16 @@ export async function runRelayOperation({
       await options.afterWork();
       if (!isCurrent()) return false;
     }
-    if (options?.backgroundRefresh) {
+    if (options?.skipRefresh || options?.backgroundRefresh) {
       if (successKey) setFeedback({ kind: "success", key: successKey });
       // The command result must not wait for the snapshot. A failed refresh
       // is reported separately and does not undo a command that already ran.
-      if (isCurrent()) {
-        void Promise.resolve().then(() => refresh()).then(() => undefined, (cause: unknown) => {
+      if (!options.skipRefresh && isCurrent()) {
+        void Promise.resolve().then(() => {
+          // Ownership can change between scheduling and starting this read.
+          if (isCurrent()) return refresh();
+          return undefined;
+        }).then(() => undefined, (cause: unknown) => {
           if (!isCurrent()) return;
           const resolved = resolveError(cause);
           try {
@@ -98,11 +104,11 @@ export async function captureOperationResult<T>(
   run: (work: () => Promise<unknown>) => Promise<boolean>,
   work: () => Promise<T>,
 ): Promise<{ ok: boolean; value: T | undefined }> {
-  let value: T | undefined;
+  let operationResult: T | undefined;
   let captured = false;
   const ok = await run(async () => {
-    value = await work();
+    operationResult = await work();
     captured = true;
   });
-  return { ok, value: captured ? value : undefined };
+  return { ok, value: captured ? operationResult : undefined };
 }

@@ -4,7 +4,7 @@ import { subscriptionExpiryFormatter } from "../hooks/useRelativeTimeClock";
 import { formatDetailedRemainingTime } from "../quotaFormatting";
 
 /** One subscription date presentation for Connections and Pool account cards. */
-export function AccountSubscriptionLine({ activeUntilMs, nowMs }: { activeUntilMs: number | null; nowMs: number }) {
+export function AccountSubscriptionLine({ activeUntilMs, nowMs, hint }: { activeUntilMs: number | null; nowMs: number; hint?: string | undefined }) {
   const { t, i18n } = useTranslation();
   if (activeUntilMs == null) return null;
 
@@ -12,5 +12,5 @@ export function AccountSubscriptionLine({ activeUntilMs, nowMs }: { activeUntilM
   const date = subscriptionExpiryFormatter(i18n.resolvedLanguage ?? i18n.language).format(activeUntilMs);
   const remaining = formatDetailedRemainingTime(activeUntilMs, nowMs, t);
 
-  return <div className={`account-subscription-line${expired ? " expired" : ""}`}><CalendarDays aria-hidden /><span>{date}</span>{remaining ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{remaining}</span></> : null}</div>;
+  return <div className={`account-subscription-line${expired ? " expired" : ""}`} data-relay-tooltip={hint} tabIndex={hint ? 0 : undefined}><CalendarDays aria-hidden /><span>{date}</span>{remaining ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{remaining}</span></> : null}</div>;
 }

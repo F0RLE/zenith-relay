@@ -1,16 +1,16 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tauri::{
+    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::local_pool::{commands::gateway::lifecycle as gateway, DesktopState};
+use crate::local_pool::{DesktopState, commands::gateway::lifecycle as gateway};
 use crate::platform::ui_text;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
@@ -138,13 +138,13 @@ async fn toggle_pool(app: AppHandle) {
         .runtime()
         .await
         .is_some();
-    let result = if running {
+    let toggle_result = if running {
         gateway::stop_local_gateway(app.clone(), app.state()).await
     } else {
         gateway::start_local_gateway(app.clone(), app.state()).await
     };
     let _ = app.emit("zenith-state-changed", ());
-    if result.is_err() {
+    if toggle_result.is_err() {
         show_main_window(&app);
     }
 }
@@ -170,17 +170,17 @@ fn tooltip_text(running: bool) -> String {
 
 pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        if let Some(state) = app.try_state::<DesktopState>() {
-            state.set_background_session_active(true);
+        if let Some(desktop_state) = app.try_state::<DesktopState>() {
+            desktop_state.set_background_session_active(true);
         }
         reveal_main_window(&window);
         return;
     }
 
-    let Some(state) = app.try_state::<AppState>() else {
+    let Some(app_state) = app.try_state::<AppState>() else {
         return;
     };
-    if !state.try_start_main_window_open() {
+    if !app_state.try_start_main_window_open() {
         return;
     }
 
@@ -195,8 +195,8 @@ pub fn show_main_window(app: &AppHandle) {
             // The frontend reveals a new window after applying its saved theme.
             let _ = create_main_window(&app);
         }
-        if let Some(state) = app.try_state::<AppState>() {
-            state.finish_main_window_open();
+        if let Some(app_state) = app.try_state::<AppState>() {
+            app_state.finish_main_window_open();
         }
     });
 }
@@ -211,7 +211,7 @@ fn reveal_main_window(window: &WebviewWindow<tauri::Wry>) {
 /// initial application window. The native app, tray, and local gateway remain
 /// alive when this window is later destroyed.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri::Wry>> {
-    let config = app
+    let window_config = app
         .config()
         .app
         .windows
@@ -219,12 +219,17 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
         .find(|window| window.label == MAIN_WINDOW_LABEL)
         .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
-    let window = WebviewWindowBuilder::from_config(app, config)?
+    let builder = WebviewWindowBuilder::from_config(app, window_config)?
         .data_directory(webview_data)
-        .visible(false)
-        .build()?;
-    if let Some(state) = app.try_state::<DesktopState>() {
-        state.set_background_session_active(true);
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    let window = builder.build()?;
+    if let Some(desktop_state) = app.try_state::<DesktopState>() {
+        desktop_state.set_background_session_active(true);
     }
     Ok(window)
 }
@@ -233,10 +238,10 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// process, tray, and local pool keep running. The next open creates a new
 /// window; a failed destroy still hides the current one instead of exiting.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        if window.destroy().is_err() {
-            let _ = window.hide();
-        }
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
+        && window.destroy().is_err()
+    {
+        let _ = window.hide();
     }
 }
 

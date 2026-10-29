@@ -1,678 +1,738 @@
 # Zenith Relay
 
-Relay connects ChatGPT, OpenCode, and other compatible applications to your
-accounts and API providers. A pool combines several connections behind one
-address: the application sends a request, and Relay chooses who will serve it.
+Relay connects an installed ChatGPT application, Claude Desktop, OpenCode,
+or another API client to your accounts and API sources. Use one source directly or build a
+pool that chooses an available connection for each request. Conversations
+and work with the model stay in your chosen application.
 
-[How Relay works](#how-relay-works) | [Quick start](#quick-start) |
+[Quick start](#quick-start) | [How Relay works](#how-relay-works) |
 [Overview](#1-overview) | [Connections](#2-connections) | [Pool](#3-pool) |
-[API](#4-api) | [Usage](#5-usage) | [Recovery](#6-recovery) |
-[Settings](#7-settings) | [Errors](#8-errors)
+[Access](#4-access) | [Usage](#5-usage) |
+[Recovery](#6-recovery) | [Settings](#7-settings) | [Errors](#8-errors)
+
+## Quick start
+
+You need your own account or provider API key and an installed application
+to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
+
+### Connect an application through the pool
+
+1. Select **Computer** mode.
+2. Add at least one connection:
+   - account: **Connections → Accounts → Sign in → ChatGPT** or **Excel / Basis Points**,
+     then **Open sign-in window**;
+   - API: **Connections → Sources → Add source**, select the service
+     and enter its key.
+3. Open **Pool → Members → Add**. Select the saved connection and add it.
+   Skip this step if the connection is already a pool member.
+   Its card should appear in **Members**.
+4. In **Pool → Model Rules**, check that the model you need is enabled.
+   If it is missing, refresh the connection and check your access with
+   the provider.
+5. In **Access → Local API**, select **Start API**.
+   The status should change to **API is running**.
+6. Open **Pool → Connect** and select ChatGPT, Claude Desktop, or OpenCode.
+   Relay validates and saves Claude Desktop's [inference profile](#claude-desktop),
+   closing the client first. Applications launch by default; disable
+   **Settings → Application → Launch applications after connecting** to prevent it.
+   Other clients use [manual API setup](#local-api).
+7. Select a model in the application and send a short request.
+   Open **Usage → Requests** in Relay to see its result and selected member.
+
+Use **SIWC** or **Excel / BPS** for text and **Add to pool for images** for Codex.
+Experimental Codex text access requires **Settings → Pool data → Text models
+through Codex sign-in**. Read the warning and wait 10 seconds to confirm.
+Cancellation leaves settings intact; reopening restarts the countdown.
+The setting covers existing and future manually added Codex members.
+Disabling needs no confirmation and preserves accounts/images; degraded-route
+blocking is separate. This experimental route is not official OpenAI API access:
+errors, restrictions and lower availability/quality are possible. Requested
+model names do not prove actual model identity; Relay cannot guarantee it.
+
+The client badge selects the route; **Connect**
+adds its separate sign-in/quota. Switching preserves sign-ins, **Notes** and
+weight/concurrency, but clears image-only opt-in. Finish active requests first
+and fix incompatible automation models: rules follow the selected route.
+Codex/BPS can use saved Notes for email/password/authenticator 2FA on all three
+OSes; new accounts, missing Notes and SIWC stay manual. See [Account sign-in](#account-sign-in).
+
+Quick Setup configures mode, connection and client without launching it.
+Skip or repeat it via **Help → Repeat quick setup**. Claude Desktop needs Computer mode.
+
+### Work without the pool
+
+- **Codex:** **Launch in ChatGPT** switches accounts using native credentials. SIWC/BPS use the pool only.
+- **API:** add a source in **Connections → Sources**, then **Launch** it
+  with your application.
+
+Direct requests bypass rotation and the **Usage** log. Return to the pool
+through **Pool → Connect** in **Computer** mode.
 
 ## How Relay works
 
-- **Connections** stores your accounts, API addresses, and provider keys.
-- **Pool** selects which connections may serve requests and which models each
-  may use. A member can be an account or an API provider.
-- **API** gives the application the pool address and a key to access it.
+A pooled request follows this path:
+**application → Relay API → eligible member → provider**.
 
-The application chooses a model. Relay finds members allowed to serve that
-model in the requested format, then applies the rotation mode. An alternative
-must support the same request; a similarly named model is not a replacement.
-
-Saving a connection, including it in the pool, and connecting an application
-to the pool are separate actions. Adding a connection can also include it in
-the pool, but check its membership in **Pool**.
+- **Connection:** a saved account sign-in or an API address with its key.
+- **Pool member:** a connection allowed to receive requests through Relay.
+  Saving a connection and adding it to the pool are separate actions.
+- **Model:** an exact provider model ID. Similar names do not imply
+  identical access.
+- **Client:** the application that sends requests. Connect it to the pool
+  after adding members.
 
 ### Operating modes
 
-- **Computer**: the pool runs on this device. Relay and its API must keep
-  running to serve requests. Use this for multiple personal accounts and APIs.
-- **Choose API**: the application connects directly to a selected external
-  API. **Pool**, **API**, and **Usage** are hidden, and Relay rotation does not
-  apply. Overview shows the selected provider's data when it is available.
-- **On your server**: the pool runs in your Relay Server. The desktop application
-  manages it and displays its data; closing Relay does not stop the server.
-  Available actions depend on the connected server's capabilities.
+| Mode | When to choose it |
+| --- | --- |
+| **Computer** | The pool and its API run on this computer. The usual starting point. |
+| **Relay Hosted** | In development. |
 
-Changing modes does not transfer accounts or secrets. Moving accounts to your
-own server is a separate action with confirmation.
-
-### Quick start
-
-1. Select **Computer**.
-2. In **Connections**, sign in to ChatGPT, import your account, or add an API
-   provider. Wait for the connection check and model list.
-3. Add the connections you need in **Pool**. Allow the required model both in
-   the member's policy and in **Model Rules**.
-4. In **API**, select **Start API** if it is not already running.
-5. Return to **Pool → Connect** and choose ChatGPT or OpenCode. For another
-   compatible application, copy the address and API key from **API**.
-6. Send a request from the application. **Usage** will show its model, member,
-   and result.
-
-**Repeat quick setup** in **Help** opens the setup wizard again. To connect
-directly to one provider, use **Choose API** or the API source's **Launch**
-action instead of connecting to the pool.
-
-Quick Setup first chooses where the shared pool runs: on this computer or on
-your server. On the computer, the connection step can add multiple accounts
-and API sources to the same pool. Select a provider and enter its key; for
-**Custom API**, also enter the address and a name. A saved source is included
-in the pool immediately. Add another connection or continue to the client
-choice. Importing the current profile does not advance the wizard for you.
-Use **Back** to change a choice or **Set up later** to open the application.
-For a direct connection to a single source, switch to **Choose API** inside
-the application after setup.
+In **Computer**, closing the window keeps Relay in the tray; quitting stops
+the local API and automations. Mode changes do not stop it or transfer secrets.
 
 ### Install on macOS
 
-Download the DMG for your Mac from the official Zenith Relay GitHub Release and
-move **Zenith Relay.app** to **Applications**. The app has an ad-hoc signature,
-not Apple notarization. If macOS blocks the first launch, open **System Settings
-→ Privacy & Security**, select **Open Anyway** for Zenith Relay, then confirm
-**Open**. This approves this app only; you do not need to disable Gatekeeper.
+Move the downloaded DMG application to **Applications**. The build is ad-hoc
+signed and not notarized. If macOS blocks the first launch, use
+**System Settings → Privacy & Security → Open Anyway** for this application.
+Do not disable Gatekeeper for the whole system.
 
-If macOS instead reports the app as damaged, first make sure the DMG came from
-the official release. Compare the release's `SHA256SUMS` entry with
-`shasum -a 256 ~/Downloads/zenith-relay-macos-arm64.dmg` (use `intel` instead
-of `arm64` on an Intel Mac). If the hashes differ, download it again. If they
-match, in Terminal remove the download quarantine **only from this app**:
+If the release checksum matches but macOS still reports the app as damaged,
+remove quarantine only from the application:
 
 ~~~sh
 xattr -dr com.apple.quarantine "/Applications/Zenith Relay.app"
 ~~~
 
-If you installed it elsewhere, use that app's path instead. In-app updates
-have a separate Relay updater signature; report it if an update is blocked
-again so that the specific update can be checked.
-
 ## 1. Overview
 
-**Overview** shows the selected mode's address, available models, members,
-requests, and speed. Select the chart period and scope separately. Statistics
-for an individual account or API apply only to that connection.
+**Overview** shows pool activity, connections, models, errors, and charts.
+Filter by period and connection; open **Usage** for individual requests.
+
+### Reading the charts
+
+**Weekly quota in $**, after the speed charts, estimates the full
+weekly allowance from your requests. **All models** of the selected subscription
+is the default. Each account counts once; Plus and Pro are estimated separately.
+The model menu lists each name once. A selected model uses observations for that
+model only; mixed-model intervals remain in **All models**. Subscription and model
+menus appear only when there are alternatives; hover or focus a point for its date,
+amount and estimate range when available. Subscription comparisons use measured quota consumption.
+
+Measurements require at least 5% paired weekly consumption and fully priced usage.
+Collection runs in the background without provider requests. Linked Codex/BPS/SIWC
+routes count once; only Codex/BPS establish subscription quota.
+Prefer the last 24 hours; expire after 72 hours or reset. History lasts 30 days.
+Missing data makes gaps; resets and plan/price changes are separate events.
+External use and delayed quota updates can bias estimates.
+
+**Today** covers 24 hours including the current hour; **Week**, 7 days;
+**Month**, 30 days, in local time. The connection filter applies to charts and
+**Requests/Errors**. Errors count all recorded failures; **Connections** counts
+enabled accounts/API sources; **Models**, the pool's published models.
+
+| Chart | Meaning |
+| --- | --- |
+| **Token usage** | Input includes instructions/history/tools and cache reads/writes; output includes reported reasoning. Left axis: tokens; right: cache-hit %. |
+| **API equiv. used** | Estimated cost at API prices. Coverage depends on available prices. |
+| **Requests** | Requests per interval, including errors; individual outcomes are in **Usage**. |
+| **Generation speed** | Output tokens/s after the first token, excluding reported reasoning and initial waiting. |
+| **E2E speed** | Output tokens / full duration including initial waiting. |
+
+Purple dashes show **Cache hit rate**, the cached share of input. Headers summarize
+the period; speed is total tokens/time. Hover or focus for exact values.
+Gaps/**—** mean unmeasured; warnings indicate loading errors.
 
 ### Balances and estimates
 
-An API may report **Balance**, **Key remaining**, and **Plan remaining**
-separately. These are different limits: **No limit** on a key does not mean
-an unlimited account balance. Values retain the provider's currency or units;
-different currencies are not added together.
+Balance and quota come from providers; **API equiv. used** is Relay's estimate at API prices.
 
-Use **Refresh balance** on a pool card or **Refresh** in the selected API's
-overview to request fresh data. **No balance API** means Relay could not find
-a supported way to read statistics; **Stats access denied** means access
-to those statistics was refused. Model requests may still work in either
-case. A failed refresh keeps the last amount. The selected API overview marks
-it **Not refreshed**; a pool card keeps the amount without that label.
-Reopening the page may display the last value from this running session without
-contacting the provider. Use **Refresh balance** to request a new reading.
-The warning identifies a stale or failed reading, not a fresh balance; restarting
-Relay or the user-managed server clears this temporary statistics cache.
-Replacing a source key also discards the previous key's figures, including
-when the API address is unchanged.
-Background readings also update the open Pool and selected API overview;
-displaying those readings does not send another request to the provider. Model,
-quota, and balance refresh state is kept separate from routing and is not shown
-as a status line on ordinary cards. Errors and stale-data reasons remain
-available in diagnostics.
-
-**Relay estimate** and **API equiv. used** are calculated from requests
-seen by Relay and available prices. They estimate usage value, not a balance
-or a confirmed provider charge. **API equiv. left** appears only
-when weekly-window and usage data are sufficient. **Payback** compares used
-API-equivalent value with the account's purchase cost. Activity outside Relay
-is not included in these estimates.
+**No balance API** means unreadable. **Stats access denied** is a
+statistics refusal; model requests may still work. Failed refreshes retain
+the last value, marked stale.
 
 ## 2. Connections
 
-### Accounts and quota
+Save accounts, API sources, and proxies, and configure automations here.
+Account behavior settings are under **Access → Accounts**.
 
-In local mode, add an account through Relay's sign-in window or by importing
-your own file. The sign-in button opens that window instead of the system
-browser. When the account already has a proxy, both the sign-in page and the
-token exchange use it. The common proxy is used only when the account has none
-and does not bypass it. **Connections** also manages proxies. A saved account
-does not have to participate in the pool.
-The lock inside **Open sign-in window**, on its right side, appears only for a new
-sign-in, not when signing in again. It starts that sign-in through a saved
-proxy. Left-click opens the list, and right-click repeats the previous choice.
-If there is no previous choice, or that proxy has been removed, the list opens
-again. Relay does not pick a random proxy, because a ChatGPT session is tied
-to the exit address. The same proxy is used for the sign-in window, the token
-exchange, and the new account. This sign-in needs an HTTP proxy.
+<!-- relay:topic:sign-in -->
 
-If a ChatGPT session in the window is still active, sign-in finishes by itself.
-Otherwise finish it in that window: email, password, and 2FA notes are not
-filled in. The sign-in link can be copied and opened separately. The window
-cannot use an `https://` proxy; sign-in needs an HTTP proxy.
-An invalid login token does not block import when the file already contains an
-account id. Relay saves the record, and you can sign in after importing it.
+### Account sign-in
 
-If the import includes an email, phone, password, or 2FA secret, Relay stores
-them with that account's credentials. The sign-in window shows these notes
-under the two actions, and the account card can open the same notes. You can
-edit them or type your own. A 2FA secret also shows the current code.
+Open **Connections → Accounts → Sign in** and choose a method:
 
-**Refresh** checks the provider's account state and quota. It does not add
-quota or reset its window. The provider defines the window length, remaining
-allowance, and reset time. Relay cannot infer a date that was not reported.
-A subscription end date alone does not prevent rotation: actual access,
-sign-in state, quota, and account errors determine availability.
+- **Codex** — the default; account switching, linked SIWC quota display, and explicit pool membership. Images only by default; text requires separate consent in Settings.
+- **ChatGPT (SIWC)** — Relay sign-in window, for the pool.
+- **Excel / Basis Points** — pool use; access is checked with the provider (BPS).
 
-On Relay Server, manual and background account refreshes share the same work.
-Repeated clicks do not start parallel checks or bypass a provider's requested
-pause. Canceling one waiting request does not stop a check needed by others.
-Disabled accounts are not checked periodically; an enabled account can still
-be monitored outside the inference pool. Refresh details do not affect routing
-and remain available in diagnostics with the provider error when one exists.
+1. Select **Open sign-in window**.
+2. Sign in. Relay saves the account and closes the dialog.
+3. Add the account to **Pool** manually when needed.
 
-Request **Credits** and **reset credits** are different. Fresh positive request
-credits can allow work even when percentage quota is exhausted. A reset credit
-only allows a separate reset operation. **Reset weekly quota** appears for a
-local account with an available credit, asks for confirmation, and consumes
-that provider credit.
+Every method has **Copy sign-in link** for browser recovery on the same computer.
 
-When an account requires sign-in, sign in to that account again. A revoked
-sign-in cannot be restored by refreshing the saved session. Other eligible pool
-members can keep working.
+**Notes** saves email, phone, password and 2FA with the account. A new-account
+draft survives folding, clears on cancellation, and does not autofill login forms.
 
-An account export contains sign-in credentials. Treat it as a secret file.
-It is different from a pool preset, which contains settings only.
+The password/2FA **Copy** button copies the whole value without revealing it.
+For selected text, use **Ctrl+C** (**Cmd+C** on macOS) or the context menu.
 
-On the computer, a late quota/model refresh does not overwrite an account after
-you sign in again, change its proxy, or remove and re-add it. Newer quota data
-received with a model request also takes precedence over an older background read.
-A blank model-catalog response does not replace models the account already reported. Quota and model lists refresh independently. A manual refresh joins any matching
-read already in progress; closing its waiting view does not cancel shared work.
-Provider-requested pauses still apply, including to repeated manual refreshes.
+For an existing **Excel / Basis Points** account, right-click **Sign-in required**
+to use saved email/password and optional authenticator 2FA. Left-click stays manual.
+This works on Windows, macOS and Linux with the account's isolated profile/proxy.
+CAPTCHA, additional checks, consent, unfamiliar forms, errors or a 45-second limit
+reveal the window for manual continuation. **Open sign-in window** does so at any
+time. Email/SMS codes and social sign-in remain manual. Relay validates account
+identity before saving; adding a route never reuses another client's grant.
+
+For SIWC, authorize plan usage during sign-in. Codex/BPS counters do not confirm SIWC limits.
+If SIWC confirms exhausted quota before generation, Relay cools that connection
+and selects the next eligible pool member. Once generation starts or execution
+is uncertain, the request is not replayed.
+Use the same account and method when signing in again.
+The close button or Escape cancels sign-in before saving.
+
+<!-- relay:topic-end:sign-in -->
+
+### Import, export, and account state
+
+**Import** accepts files and pasted data. Review the recognized records first,
+then select those you want and confirm the import. You can also drop a file
+into Relay. Enable **Add selected to pool after import** only if wanted:
+it applies to eligible pool connections and API sources, not Codex. After
+importing Codex, use **Add to pool for images** on its account card if wanted
+(**Add to pool** when text access is enabled).
+Free plans can be imported and added to the pool; actual access and quotas are
+determined by the provider, not the plan label.
+After a partial failure, you can retry only the failed records.
+
+Zenith preserves all three sign-in methods. SIWC supports only Zenith;
+sign in again after import before use. Existing SIWC connections are not
+overwritten. Do not run copied refresh tokens on two devices.
+BPS supports Zenith and Sub2API.
+
+Cards show plan, quota, resets and state. **Refresh** requests current quota data
+from the provider. Linked Codex/BPS can supply missing SIWC displays and fresh
+rotation ranking. SIWC access depends on its authorization and own limits.
+Hover/focus shows source/time; amber means stale. Refresh reads
+that source without extra polling. Credits and quota have independent freshness
+windows. Rotation uses fresh credit observations;
+the last balance stays visible until a complete poll.
+
+BPS cards also show token expiry (hover for date; `—` if unknown).
+A refresh token may renew access; a revoked session needs sign-in.
+Retry network failures later; credential recovery preserves your enabled state
+and membership. Follow the card's sign-in hint. The shared visibility control
+reveals account details hidden by default.
+
+**Remove from pool** stops new assignments but keeps the connection.
+Left-click **Delete** in **Connections** to move an account to **Trash**: sign-in
+data stays, pool participation and background tasks stop. **Trash → Restore**
+returns it disabled and outside the pool; enable and add it separately.
+Right-click **Delete → Delete permanently** (or use the action below a Trash
+card), then confirm to irreversibly remove the account and sign-in data.
+Exports contain sign-in data: protect them like passwords, never attach them to reports.
+
+### Account timezones
+
+The timezone follows the assigned proxy's observed exit IP automatically.
+Hover over the proxy for its timezone and check time.
+
+Checks run in the background even while Proxies is closed. An observation stays
+valid for 15 minutes and refreshes before expiry; failures retry after a delay.
+Model requests never wait for geolocation. When no current timezone is known,
+the client's original timezone is kept, without guessing from country or latency.
+
+Relay changes existing timezone fields in the account's request environment
+and web-search location, including HTTP and WebSocket requests.
+Dates, ordinary text, system timezone, and API-source requests stay unchanged.
 
 ### Proxies
 
-**Connections → Proxies** lists saved addresses, assigned accounts and the last
-connection check in this session. Usernames and passwords stay hidden.
-Use **Import** to add one address per line. **Check after adding** is enabled by
-default and can be cleared before importing; the globe icon with the **Test proxy**
-tooltip runs another check later.
-Only newly added addresses are checked, with up to three checks at a time.
+Proxies are optional. In **Connections → Proxies → Import**, add one address
+per line, then assign a proxy in the account's settings. You can also select
+a sign-in proxy using the lock in the sign-in dialog.
 
-The check makes an HTTPS request to Cloudflare through the selected proxy. It
-shows the observed exit IP, country and request duration, with a 12-second limit.
-No account, model or API key is used; a failed proxy never falls back to a direct
-connection. The declared country from a proxy's username is shown separately.
-Results describe this request, not model access or a guarantee of the next IP
-for a rotating proxy. A failed check keeps the address and account assignments.
-Check results are cleared when you leave Connections or change runtime mode.
+**Test proxy** shows country/city and HTTPS-check time.
+Hover over the location for exit IP, timezone, and the saved check date.
+Model access is checked separately; a failed proxy never falls back to direct.
+
+The bottom strip keeps three actions: connectivity, **Test speed**, and accounts.
+The speed test runs only on click and downloads a 5 MiB sample; its result appears
+in the middle of the card. Multiple tests run in order; waiting cards show
+**Queued…** until measurement starts. Hover over the people icon/count for **Accounts**.
+Set an optional name through the card's **Rename proxy** menu; the address and
+assignments stay unchanged.
+
+Exit country is automatic; city/timezone use an optional online lookup.
+A failed city lookup keeps the country.
+IPv4/IPv6 conflicts hide region/timezone; hover for IPs. One available IP family is sufficient.
+
+New, unlocated, and legacy proxies are checked once automatically; use
+**Test proxy** to refresh. The detected timezone applies without restarting.
+
+Each card shows account and API-source assignments. Deleting an account proxy
+asks for confirmation and returns those accounts to the common proxy, or to a
+direct connection when no common proxy is set and direct access is permitted.
+First replace an API-source proxy in the source settings. For a common proxy,
+use **Clear common proxy** on this tab and confirm before deleting its entry.
+This removes the common setting, not entries in proxy storage or explicit
+account assignments. Subsequent inherited requests use direct access only
+when pool policy permits it; otherwise they remain unavailable.
 
 ### API sources
 
-Select a service at the top of **Add source**, or choose **Custom API**. The key,
-API address and name appear below. Known services fill in the address and name;
-you can edit them. The provider selector stays available while you fill the form.
-Use the provider's API address, not
-a dashboard URL. A full endpoint such as `/v1/messages` also supplies a format
-hint. Relay reads the model catalog and declared endpoint support. Every model
-returned by the provider enters the source inventory immediately.
+1. Open **Connections → Sources → Add source**.
+2. Select the service or **Custom API**, and enter a name, address, and provider
+   key. **Get API key** opens the selected service's console.
+3. Save the source and check the discovered models. If the catalog did not
+   load, check the address, key, and error on the card.
+4. Add the source to **Pool** or select **Launch** for a direct connection.
 
-The API source editor contains:
+A preset fills in the address and request format. Obtain a key and check model
+access with your provider. For **Custom API**, use its specified address and format.
 
-- **General**: name, address, key replacement, and discovered models.
-- **Pricing**: prices for usage estimates; see the pool policy section below.
+Direct ChatGPT launch requires a Responses endpoint. If direct launch is
+unavailable because of the API format, add the source to the pool and connect
+the application through it, provided the pool supports the required conversion.
 
-Relay always resolves routes automatically. For each request it prefers a matching
-native Responses, Chat Completions, Messages, or Gemini endpoint and otherwise
-uses the required adapter. Provider declarations and the entered endpoint guide
-that choice; when neither identifies a protocol, Relay uses the source fallback.
-Refreshing the catalog does not send a generation request and no probe controls
-whether a discovered model is present or routed.
-
-**Launch** on a source connects the chosen application directly to that API.
-Those requests bypass the pool, its rotation, and Relay's usage history.
-ChatGPT/Codex direct connections require native Responses. OpenCode uses the
-source's native Responses, Chat Completions, Messages or Gemini SDK. A model
-in the source inventory does not by itself establish client compatibility.
+**Moonshot / Kimi API** and **Kimi Code** are different connections. Choose
+the preset for your key and console region. Relay does not currently read
+Kimi Code quota or MiniMax balance and M Plan quota; check them with
+the provider. Other supported services are listed in the add-source dialog.
 
 ### Automations
 
-In local mode, **Connections → Automations** offers two actions:
+In **Connections → Automations → Add automation**, choose an action, pool
+accounts, and a model if required. Actions can start a countdown after
+the primary quota recovers or request a reset when weekly quota is exhausted.
+Save the rule and enable its switch; its card shows the result.
+After saving or enabling it, Relay checks current quota. An already-full window
+is considered without waiting for another transition to 100% or repeating a wake
+in the same cycle.
+If the selected model is no longer available for the accounts, edit the rule
+and choose another. Relay keeps your selection without replacing it automatically.
 
-- **Start quota countdown**: a small request to the selected model after
-  the window recovers, to start its next reset countdown when the provider
-  uses that mechanism. This request consumes quota and runs automatically
-  when the enabled rule's condition is met.
-- **Reset weekly quota**: when the weekly window is exhausted, Relay tries
-  to use an available provider reset credit. It does not need a model request.
-  Enabling the automation authorizes subsequent resets without confirming
-  each one separately.
+Starting the countdown sends a request and may use quota. A reset requires
+support from the provider. Automations do not add subscription allowance.
+Tasks run while Relay runs.
+There is no manual run button.
 
-Choose the **Automation type**, then the accounts and, if it sends a request,
-the model. **Name** is optional: it defaults to the type's name. A custom name
-helps distinguish rules for different accounts.
-Save and enable the task. Local automations run while Relay
-is running; server automations depend on Relay Server capabilities.
-Existing local rules that required a manual run become automatic after an update;
-disabled rules stay disabled. No separate start button is needed.
+### Saved account recovery
 
-### Your server
-
-Save the Relay Server address and management token in the server connection
-tab. The token lets the desktop application manage the server. Model clients
-need its API address and a separate request key; these credentials have
-different purposes.
-
-Moving an account to the server is a separate confirmed action. After a
-successful move, it participates in the server pool. Its local record remains
-for recovery and does not receive local requests.
+The old personal-server desktop mode is retired. Saved settings open **Computer**;
+they do not connect to Relay Hosted or delete server credentials or inactive local
+account recovery records. Stop the old server's use of an account before choosing
+**Recover local account**. Relay does not contact that server; the recovered account
+remains disabled and outside the pool until you explicitly enable it.
+**Relay Hosted** is a separate service in development. To share this computer's
+pool, enable **Access → Local API → Allow local network access**.
 
 ## 3. Pool
 
 ### Members and route selection
 
-Add saved connections in **Members** and open their policies. In the add dialog,
-choose accounts or API sources, search by name or address, and select the rows
-you need. Selection persists while searching and switching sections. Review
-the complete set under **Selected** before clicking **Add to pool**.
-**Select shown** only selects the current search and filter results.
+**Members** contains SIWC connections with plan-use consent, eligible BPS connections, and
+API sources added to the pool. In **Connections**, use **Add to pool** on a
+saved account or the bulk action; addition is immediate without an account-kind warning.
+Cards show which members are in rotation, waiting for quota, disabled,
+or unavailable. **Next candidate** previews the choice for the current pool state.
 
-Removing a
-member from the pool does not require deleting it from **Connections**.
-Disabled members and accounts requiring sign-in, denied access, or without
-available quota are skipped. Their presence does not block other members.
+Select members with the button on each card, or use the checkbox above the cards
+to select the entire pool. The same toolbar then offers refresh, enable, disable
+and **Remove from pool** for the selection. Removal asks for confirmation and keeps
+accounts, API sources and their credentials in **Connections**. After a partial
+failure, selection is retained and cards show the persisted state.
 
-Eligibility is checked for the specific model and request format. A working
-pool can therefore lack a route for one model. A temporary restriction on a
-single model does not necessarily block the member's other models.
+### Pool rotation
 
-The 1.1.3 update switches existing profiles to the current pool rotation automatically.
-No separate confirmation or gateway stop is needed. Saved member order, request
-shares, concurrency limits, pool membership and gateway enabled state remain.
-The former Smart mode becomes Automatic; In order and Round robin keep their
-mode. There is no separate migration notification or old-scheduler rollback.
+<!-- relay:topic:pool-rotation -->
 
-New profiles also use this rotation. Older servers without support for these settings
-cannot accept them; update your own server before using the rotation editor.
-Older configuration presets are converted on import without adding permissions.
+Cards follow the scheduler's current preference, left-to-right then down, without
+highlighting. Ready candidates come before waits, unavailable and disabled
+members; timed waits use retry order. If model/protocol routes disagree, the
+remaining cards use fresh limiting quota, then usable provider credits in automatic
+mode, or saved order otherwise. Selection accounts for model, load and session
+ownership. The view reflects current rotation state; ongoing requests retain their member.
 
-**Pool rotation** has three modes:
+In **Pool rotation settings**, **How pool rotation works** opens this Help
+without closing your settings.
 
-- **Automatic** chooses the member with the greatest fresh quota remainder.
-  A one-point difference is enough: requests stay there until that remainder
-  falls below another known remainder. Load and request share are compared
-  only when the remainder is equal. Unknown or stale remainders do not outrank
-  anyone. Balance, latency and money do not rank members. Confirmed quota or
-  access blocks still exclude a member. Cache affinity applies only inside
-  that same group.
-- **In order** chooses the first eligible member with a free slot in your
-  list. If it is unavailable or at its concurrency cap, Relay checks the next
-  members. New requests return to it when it recovers. Only this mode lets
-  you reorder members manually.
-- **Round robin** distributes new independent requests among eligible members
-  according to their request shares. Equal shares alternate; unavailable
-  members and those at their concurrency cap are skipped.
+#### Modes
 
-In every mode, a continuation that carries another member's response id stays
-on that member. Automatic mode can move it to a member with a larger known
-remainder only when Relay has saved history it can resend. Without that
-history, the continuation stays put.
+- **Automatic:** balances load, fresh quota/credits and request shares.
+  Quota-based switching needs a lead of at least 5 percentage points, or 10
+  for the primary prompt-cache connection while its quota is fresh and positive.
+  Availability and concurrency limits still apply.
+- **Round robin:** independent requests cycle through available members in
+  saved order. **Use custom request shares** enables weighted distribution.
+- **Primary & reserve:** the first compatible available member handles requests;
+  later members are reserves when earlier ones are unavailable or full.
 
-Mode, order, request share and concurrency changes save immediately. Drag a
-member by its handle or use the arrows in **In order**. **Close** waits for
-pending changes. The list follows changes to pool membership automatically;
-if saving fails, an error appears and the stored values are shown again.
+Reorder members by dragging or using the arrows. All modes skip incompatible
+models, unavailable members, and members at their concurrency limit.
+Shares target relative request counts;
+protocol-owned conversations and different route availability affect distribution.
+**Concurrent requests** limits load on a member;
+**Unlimited** (0) removes Relay's additional limit; provider limits still apply.
+Changes save automatically.
 
-**Request share** is a ratio for Automatic and Round robin. For example, 2 and 1
-give roughly two parts of traffic to the first member and one to the second
-when they are equally available. In Automatic mode this ratio applies only to
-members with the same known quota remainder and equal load, not to all traffic. It is not a percentage,
-requests per second, or extra quota. **Concurrent requests** limits how many requests one member
-can serve at a time, across its models and formats. A value of 2 allows two
-simultaneous requests. **Unlimited** removes the member-specific cap; runtime safety and provider
-limits still apply.
+#### Presets
 
-Cards group members by readiness, quota wait, unavailability, and disabled
-state. In the rotation dialog, **In order** preserves the manual queue even
-when states change; automatic modes show ready members first.
-The current, last-used, and **Next candidate** indicators have different
-meanings. Next candidate appears only when the choice for a new text request
-agrees across enabled models and formats. An absent hint does not mean the
-pool has stopped.
+Three buttons apply a ready-made setup in one click:
+
+- **Recommended:** automatic selection by load and available resources.
+- **Even distribution:** independent requests cycle in the saved order.
+- **Accounts → API:** primary/reserve routing with accounts before API sources.
+  The order inside each group is preserved. Reserve API requests may spend
+  their balance.
+
+Presets reset shares to 1 and extra limits to 0. Strategy-only changes keep
+both. Manual overrides show **Custom**.
+Switching strategies does not restart applications or the gateway, interrupt
+active requests, clear cooldowns, or move an opaque continuation to another account.
+
+<!-- relay:topic-end:pool-rotation -->
 
 ### Failures and retries
 
-Recovery is automatic, but each request has a shared attempt limit: three
-upstream sends by default, including auth and compatibility retries. Relay first
-tries an untried eligible physical member; changing a protocol alias is not a
-new independent source. A retry requires proof that the failed operation was
-not accepted, plus enough context to replay it safely. An unexplained server
-error, broken stream or disconnect after send does not provide that proof.
-
-Transient inference failures are paced per route. The first two independent
-request failures wait 250 and 500 ms; three open the circuit, with a retry delay
-starting at 2 seconds and increasing up to 60 seconds. Retries of the same
-logical request do not repeatedly increase its failure count. Provider retry
-and quota-reset deadlines remain mandatory, including for the last member;
-configured member delays cannot shorten explicit provider hints. A model-scoped
-block does not disable the source's other models.
-
-Recovery waits hold no slot. The normal retry window starts at the first safe
-rejection and lasts up to 30 seconds. Capacity/recovery waits share a separate
-30-second accumulated queue budget across all retry passes and transports.
-Waiting also has pool-wide and per-key request-count and memory limits; a full
-queue returns a local error without penalizing any provider. Cancelling removes
-the waiter immediately. A half-open recovery request and the pool's recovery budget prevent
-every waiting request from testing the same failed route at once. The
-**API → API → Wait for route recovery** option can extend waiting for text
-requests on all four input formats, but cannot reset
-the send limit or retry an uncertain or already-visible result.
-
-Relay does not limit the duration of an active generation. Long reasoning or a
-pause in output does not terminate or resend the request. Relay keeps streaming
-connections alive and waits for provider completion or failure; you can cancel
-the request in the client. The client, proxy and provider may have their own
-timeouts. Connecting to an unreachable address still has a bounded timeout.
-
-Relay can retry with another member only after a proven safe rejection and
-before response data reaches the application. It does not combine an already-started answer with another
-provider's output. Moving a conversation continuation also requires sufficient
-saved history. Saved history proves portability, not whether a failed send ran. A response reference or tool result without its required
-context may need the original member; Relay does not silently discard that
-context. Invalid requests, such as excess context or an invalid tool call,
-cannot be repaired by trying more members.
+The pool may select another member after a refusal before generation.
+A started or uncertain request is not automatically replayed on another account.
+Continuing a conversation may also require its original member.
+Having several accounts therefore does not guarantee that every interruption
+will be invisible to the client. You can cancel a wait in the client.
 
 ### Models and member policies
 
-ChatGPT/Codex shows GPT models under their original IDs, including models
-available through an API provider when the signed-in account lacks them.
-The pool and request key still determine access. A missing native catalog card
-does not rename a model or grant it additional tools or reasoning modes.
+There are two permission levels:
 
-Picker names come from the specific model's
-catalog metadata. Without a name, Relay builds a compact label from the ID.
-New models do not need a separate version list. Matching names do not merge
-distinct models; technical IDs remain available for routing. Membership in
-the OpenAI group does not replace the shared reference and Relay rules for other capabilities.
+- **Pool member policy** determines which of that member's models can be used.
+- **Pool → Model Rules** controls pool-wide models, their order, reasoning
+  modes, speed, and visibility in ChatGPT.
 
-In **Pool member policy → Models**, a switch allows the model for that
-specific account or API. It is permission, not a quota indicator. Search and
-expandable groups help locate models.
-A model that was not in the saved exact list turns on by itself. Only a model
-that was explicitly switched off stays off. A `*` rule still limits the set.
+A model must be enabled at both levels and available from the provider.
+Permission in Relay does not unlock a restricted model or replenish quota.
+**API only** means the model is not shown in ChatGPT's model list.
 
-The pool's **Model Rules** tab enables or disables a model for the whole pool.
-It also controls model and group order, available reasoning modes, and
-per-model speed. Model order affects catalog presentation; member order in
-rotation controls connection selection. The application's model list is also
-limited by client compatibility.
-
-**Reset model order** in the pool toolbar clears manual model and group positions.
-Companies start with OpenAI, Anthropic, Google and xAI, followed by the others
-alphabetically. Within each company, known families keep a fixed order: OpenAI
-is Astra, Sol, Terra, then Luna; Anthropic is Fable, Opus, Sonnet, then Haiku.
-A new version joins its catalog family without a separate model-ID list. A later
-release does not move a lower family above a higher one. Other families stay
-after that lineup. When they share one numbered generation, they use that
-generation's newest release, then the family name. Versions within a family run
-newest first. If the release dates match, the update date is used, then the
-model ID. Models without a family follow known families; undated versions follow
-dated versions in their family. Newly discovered models and families follow
-these rules automatically.
-Reset leaves model switches, prices, reasoning and rotation settings intact.
-On a remote pool, the button requires a server supporting order reset.
-
-Model Rules retains every model of pooled members. Missing sign-in, keys,
-proxies or compatible routes do not remove names, groups, prices or known
-reasoning modes. Matching model IDs share one row; similar display names do
-not merge distinct IDs. Relay checks request availability when selecting a member.
-
-**Request speed** offers **Standard**, **Fast**, and **Ultrafast** for OpenAI
-models. This is a Relay family rule: account/provider speed lists and temporary
-unavailability do not change the choices. Select a pool default or a preference
-for a model. An explicit speed from the application wins and is preserved when
-Relay switches members. This requests a processing tier; it does not guarantee
-response time or add quota.
-
-Model names, groups, reasoning, tools, images and limits come from shared
-reference catalogs. Missing fields use Relay defaults; unknown limits and
-reasoning levels remain unspecified. A participant's empty or conflicting
-capability fields do not replace this information. Prices are the exception:
-a participant's declared price is used when available.
+Models share an order across accounts and APIs: developer, family, class,
+newest version first. Drag models or groups; **Reset model order** restores it.
+**Fast/Ultrafast** require support in both the model reference and connection;
+they do not guarantee response times. BPS uses **Standard**.
+For text models, **Short context** uses the published default, or 25% of a known
+maximum only if that default is unknown. **Long context** uses the known maximum.
+Hover over the token count for the reference maximum. **Custom limit** accepts
+1,024–2,000,000 tokens within the hard maximum; saves after a pause or Enter,
+while Escape cancels the draft. Other changes save automatically.
+The pool and active requests keep running. Codex needs a restart to reload its
+catalog; hover or focus its status icon for restart/refresh details. OpenCode
+may need a new session. Claude Desktop manages its own history without forced trimming.
 
 ### Prices and additional settings
 
-API prices are in **Pool member policy → Pricing** and in the source editor
-under **Connections**. Estimates use a provider price first. Otherwise they use the official catalog price for the model family: GPT, ChatGPT, and Codex use OpenAI, Claude uses Anthropic, Gemini uses Google, and Grok uses xAI. A manual price is used only when neither is available. A manual price
-does not change the provider's tariff or unconditionally override other prices.
+In **Pool member policy → Pricing**, choose **Tier** (Standard/Flex/Fast/Ultrafast)
+and **Context** (price thresholds, e.g. ≤ 272k / > 272k, or **All sizes**).
+Ranges come from model prices or saved manual settings.
+These selectors choose the prices to edit. Estimates
+use actual tier/input size; missing prices show `—`, without Standard fallback.
 
-Token prices are in USD per million tokens. A manual set requires input and
-output prices; the reset button removes that manual set. The 5-minute and
-1-hour cache-write fields appear when a Messages route permits manual pricing
-or the model has a price explicitly tagged with that lifetime, even if its
-catalog came from another endpoint. A dash means the price is unknown. These
-fields price cache creation; they do not enable request caching or prove that
-the source accepts a cache-control option.
+Relay prefers the provider's price, then the reference catalog; a manual
+price is a fallback. Cache fields set read and write prices.
+**Purchase cost, USD** estimates lifetime payback. **Weekly remaining** uses shared
+workload calibration, not cash; linked routes count once. Hover for details.
+Catalog updates revalue recent measurements in the background without consuming
+quota. Missing or expired evidence shows `—`.
+**Drain** stops new assignments to a member.
 
-Request details show cache reads and writes from the provider's usage response.
-When either counter is present, an approximate remaining time appears in
-parentheses beside the cache read, or beside the cache write when there is no
-read. A lifetime reported by the provider is used as given. If the response
-omits it, GPT-5.6 and later use OpenAI's documented 30-minute minimum after
-that request's latest cache write or read. Other models stay marked as an
-unreported window. This is an estimate from that request, not a live provider
-expiry and not proof that the next request will read the cache.
+Use **Configuration preset** to save settings or import them with a preview
+of changes. A preset contains pool, model, and price rules; it does not include
+accounts, keys, quota, or request history.
 
-An account's **Settings** includes **Drain** and **Purchase
-cost, USD**. The first stops new assignments; the second is only for the
-payback estimate. An API source offers an automatic or manual failure recovery
-delay. It cannot shorten a provider's mandatory retry delay. Select **Save
-policy** to apply the dialog's changes; **Cancel** discards them.
+## 4. Access
 
-In the pool's **⋯** menu, **Save preset** and **Apply preset** transfer
-membership, rotation, and model
-settings. A preset contains no keys, sign-ins, actual quota balance, or request
-history. Relay previews changes and matches members to existing connections
-before applying it.
+Configure access to the pool and connected application behavior here:
+**Local API**, **Applications**, and **Accounts**.
 
-## 4. API
+### Local API
 
-### Application address and key
+1. Start the API and copy the **API endpoint**.
+2. Select **Copy key** and paste it into the client's API key field.
+3. Choose a supported request format and the exact ID of an enabled model.
+4. Send a request and check it in **Usage**.
 
-The **API** tab in this section shows status, address, and start controls.
-Copy the displayed address. The usual local address is:
+The usual base address for an OpenAI-compatible client is:
 
 ```text
 http://127.0.0.1:14998/v1
 ```
 
-**Copy key** copies Relay's request key. It is different from an external
-provider key or a server management token. In the menu beside it, **Reissue API
-key** asks for confirmation, then replaces the key and copies the new one.
-Update your clients afterward. Simply copying the key does not change it.
-Local **Port** settings are below the address and key. Save a changed port to
-apply it; a running API restarts at the new address. Update the address in
-your applications or connect them again.
+In **Computer** mode, the pool runs on this device.
+Use the displayed address; the port may differ.
+`127.0.0.1` is local only. For another computer or phone, enable
+**Allow local network access** and copy the **Network API address** and
+**Network API key**. Start the API separately. Local profiles and keys stay
+unchanged, including when rotating the network key. Disabling sharing
+closes network access.
+Use trusted private IPv4 networks; HTTP is unencrypted. Allow the port
+only on private firewall profiles; never forward it to the internet.
+Browser-origin requests and account management are blocked.
+Do not add `/v1` twice.
 
-All four formats use the same pool request key and model permissions:
+**Which key goes where**
 
-| Format | Local endpoint | Authentication |
-| --- | --- | --- |
-| Responses | `http://127.0.0.1:14998/v1/responses` | Bearer key |
-| Chat Completions | `http://127.0.0.1:14998/v1/chat/completions` | Bearer key |
-| Messages | `http://127.0.0.1:14998/v1/messages` | `x-api-key` or Bearer key |
-| Gemini | `http://127.0.0.1:14998/v1beta/models/{model}:generateContent` | `x-goog-api-key` or Bearer key |
+| Key | Where to use it |
+| --- | --- |
+| Provider key | In the API source under **Connections**. |
+| Relay request key | In the application you are connecting to the pool. |
 
-Gemini streaming uses `:streamGenerateContent?alt=sse`. Replace the host/port
-with the displayed server address when using a remote pool. Relay selects the
-model's native format and converts the application's request automatically
-when needed. Unsupported conversion options fail before generation;
-native routes preserve provider-specific parameters. Realtime, cross-format
-WebSocket, audio/video conversion and server-side tool emulation are not offered.
+**Reissue API key** is in the menu beside the key. After confirmation,
+the old key stops working and the new key is copied to the clipboard.
+Update clients where you entered it manually. When changing the port,
+use the save button beside it: a running API restarts, and the client's
+address needs updating.
 
-### Basis Points
+**Wait for route recovery** can hold eligible text requests until a member
+becomes available again. The client can cancel the wait.
+This does not fix a wrong key, an invalid format, or a response already started.
 
-**Use Basis Points** is available in the **API** tab. For ChatGPT accounts in
-the pool it sends requests through Excel instead of Responses. It may help a
-degraded account generate, without a guarantee. **Degraded routes** checks the
-model identity reported by the upstream; it cannot measure generation quality
-or independently prove which model ran. Changes save immediately and
-apply to every compatible ChatGPT account. The route used is still shown in
-request details under **Usage**.
+**Paths for manual setup**
 
-The route shares the account's quota and rotation slot. Applications can use
-any of Relay's four supported request formats; client tool calls and results
-are translated into the calling format. If the application requests a stream,
-SSE events arrive after the provider completes the response, without
-incremental output during generation. An explicitly requested fast speed
-cannot use this transport and needs another compatible route. An image in a
-user message is uploaded to the Basis Points attachment endpoint: a data URL
-is replaced with file_id, and detail is not sent. A remote image URL is
-rejected.
-Ordinary speed labels `auto`, `default`, and `standard` are accepted and are
-not sent upstream. A structured `text.format` (`json_object` or `json_schema`)
-is rejected before generation instead of being ignored. Tool instructions
-include an example only for a tool this request allows, using that tool's
-declared type: function arguments stay a JSON object inside the outer JSON
-string, and only a custom tool receives raw text.
-Continuation by `previous_response_id` is also unsupported: Relay rejects it
-explicitly rather than losing context. Send complete history without this
-field or use another route.
+| Format | Path from the server root |
+| --- | --- |
+| Model catalog | `/v1/models` |
+| Responses | `/v1/responses` |
+| Chat Completions | `/v1/chat/completions` |
+| Anthropic Messages | `/v1/messages` |
+| Gemini | `/v1beta/models/{model}:generateContent` |
+| Gemini Interactions, native API sources only | `/v1beta/interactions` |
 
-If Excel / Basis Points returns `adapter_upstream_response_invalid` with
-`output.run_officejs.code`, the model generated invalid JSON for a tool call.
-Relay does not execute that call and regenerates the response once with a short
-format hint. If the retry is malformed again, Relay returns a terminal 502 and
-does not cool down the account. Share the error code and request ID, if
-available, for diagnosis; do not share tool arguments.
+Streaming Gemini uses `/v1beta/models/{model}:streamGenerateContent?alt=sse`.
 
-### ChatGPT
+Interactions needs an explicit API source (e.g. `/v1beta/interactions`), not just
+Gemini support. Use the server root without `/v1`; `stream: true` enables SSE.
+Continuation requires the original local key, model and source; unknown IDs fail.
+This native endpoint provides no foreign conversion, account login, agents,
+background execution or retrieval. Tools and images depend on the member/format;
+unsupported conversions fail. Realtime and audio/video conversion are unavailable.
 
-In the **ChatGPT** tab, **ChatGPT account** chooses the sign-in used by the
-application interface: automatic, a selected account, or **Without account**.
-**Switch** applies that choice and restarts ChatGPT. This is separate from
-rotation: model requests through the pool address still use eligible pool
-members.
+### Applications
 
-**Keep 1% reserved** keeps the selected account's last percent for launching ChatGPT
-directly by limiting its use through the pool. It is not a reserve for every
-member or a balance setting for API providers.
+In **Access → Applications**, select a client, choose its **Application path**
+with the folder button or enter an absolute path, then **Save**. Use the desktop
+`.app` on macOS or `.exe` on Windows; shortcuts, CLI commands, arguments and
+configuration folders are invalid. Clear and save to restore automatic discovery.
+Saving only stores the local path; it neither connects nor launches the client.
+Paths stay out of pool presets.
 
-- **ChatGPT background tasks** allows automatic activity summaries and task
-  titles. These can issue separate requests.
-- **WebSocket for ChatGPT** controls the client's connection method. Enabling
-  it may restart ChatGPT and interrupt an active request. It does not add
-  WebSocket support to an external provider.
-  A catalog with converted Responses routes uses HTTP/SSE automatically.
-  Native Responses routes keep WebSocket support when the catalog permits it.
+Launch priority: saved path → `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN` → discovery.
+Fix or clear an invalid override; Relay never silently substitutes an installation.
+OpenCode/Claude require a running desktop process. A timeout preserves settings;
+check the installation and retry.
 
-Under **API → API**, **Wait for route recovery** holds text requests through
-Responses, Chat Completions, Messages and Gemini when configured eligible
-members are temporarily unavailable, until recovery or client cancellation.
-Image generation is not covered. Without it, the client receives an error after
-normal attempts. Waiting cannot fix invalid requests, waive continuation-history
-requirements or replay a generation already accepted upstream.
-On a remote pool, this control requires a Relay Server advertising
-`route_recovery_v1`; update an older server to enable the four-format behavior.
+#### ChatGPT
 
-For a server pool, the ChatGPT tab connects to your server when that capability
-is supported.
+In **Access → Applications → ChatGPT**, **ChatGPT account** selects the sign-in
+used by the application's interface. Choose an account, **Automatic**, or
+**Without account**. Select **Switch** to apply the choice and restart the application.
+The pool distributes generation requests through its API.
 
-Relay publishes Fast and Ultrafast for OpenAI models automatically. An open
-Codex keeps using its loaded catalog. On the next launch through Relay, pending
-updates are applied before the client opens. If an update fails, the previous
-catalog is retained and a warning appears. Reconnecting the pool also updates
-the catalog. The selected speed remains unchanged across accounts and API
-sources; observed processing tier and usage come from the upstream response.
+**Keep 1% reserved** is intended to preserve part of the selected account's
+quota for direct ChatGPT launch.
 
-**Ultra in Codex's reasoning picker** is a Codex subagent orchestration mode,
-not a higher API reasoning effort. Relay offers it for an exact model that the
-installed Codex marks as eligible when the pool can route Max and the required
-subagent effort. Codex's Ultra toggle must also be enabled. If the option is
-still absent after a catalog update, relaunch Codex through Relay. This is
-separate from the **Ultrafast** speed tier.
+Set context in **Pool → Model Rules**; see [model policies](#models-and-member-policies).
+Relay refreshes its catalog without restarting the pool, but an already open
+ChatGPT needs relaunch to read it. Speed changes do not need that catalog reload.
+Automatic compaction uses about 90% of the selected window, subject to known
+input/output limits; there is no separate compaction switch.
 
-### OpenCode
+For **SIWC**, Relay compacts through a text summary on the same connection,
+without the tool catalog. Relay restores its checkpoint as a summary on the
+next turn; foreign encrypted checkpoints are not supported.
 
-In local mode, use **Pool → Connect → OpenCode**. Relay prepares the connection
-and compatible model catalog. To use one API directly, select **Launch** on
-that source. Models are grouped by native protocol under matching SDKs.
-Working connection/model IDs, the selected model and user options are preserved.
-Catalog refresh updates Relay-owned groups only while their address, key and
-SDK remain unchanged; it does not restart OpenCode. Recovery retains the
-original configuration. **API → OpenCode** is currently marked **In development**;
-its dedicated integration settings panel is not implemented yet.
+**ChatGPT background tasks** allows activity summaries and task titles.
+**Memory extraction** reads previous chats (`memories.extract_model`);
+**Memory summaries** consolidates them (`memories.consolidation_model`).
+Each stage has its own permission and pool model; **Application default** clears
+the override. Connect ChatGPT to the pool first, and restart it after changing
+a model. The main chat model stays unchanged.
+
+Both memory stages default to allowed, independently of summaries/titles.
+Their switches affect only new requests explicitly marked by the client;
+blocked work appears in Usage as a local restriction. They preserve saved
+memory, reads, in-flight work and chat compaction; enabling memory in Codex
+remains separate. A selected model still needs sufficient context and capabilities.
+
+**WebSocket for ChatGPT** controls ChatGPT → Relay; BPS and converted routes still
+use HTTP upstream. Changes ask to restart ChatGPT. Request details show
+**Client transport**.
+
+#### Claude Desktop
+
+In **Computer** mode, start the API and select **Pool → Connect → Claude Desktop**.
+Relay validates the connection, closes Desktop, and writes its own profile while
+keeping other profiles. It launches Desktop again only when automatic launch is
+enabled. For explicit launch, use **Overview → Launch application → Claude Desktop**.
+Managed device inference policy can override the local profile.
+
+The list preserves pool names/order, with one entry per enabled Messages-routable
+model and at most 200 models. Excess models are rejected before changing profiles.
+Claude-compatible IDs route to the real model. Desktop's effort menu is capped
+at the highest allowed level, but it may still show unsupported intermediate
+choices: the current profile cannot supply an exact sparse list. For a model
+with Low/High/Max, choose one of those levels. Relay rejects Medium and XHigh.
+Disabled thinking stays disabled.
+
+After updating Relay, reconnect Desktop and start a new chat. **MCP tools** and
+**System tools** count tool definitions. Keep working tools, skills and history.
+Relay enables on-demand MCP schemas; native Messages still
+requires provider support for discovery.
+
+Caching/prices follow the actual provider. Required features that cannot be
+converted return an error. `Claude-3p/configLibrary` is the profile directory,
+not an executable path. Do not share its Relay profile: it contains a pool key.
+
+Use [Recovery](#6-recovery) to undo attachment. Newer manual selections and
+edited profiles are preserved. If a recovery record was lost, reconnect can
+reclaim an exactly matching Relay profile, but cannot recover an unknown previous
+selection; restore then leaves that selection unset.
+
+#### OpenCode
+
+Connect through **Pool → Connect → OpenCode** or **Launch** on an individual
+API source. Additional OpenCode settings under **Access** currently show
+**In development**. This does not prevent connecting the client.
+Use **Recovery** to restore its saved configuration.
+
+### Accounts
+
+This tab configures requests through accounts. Use **Connections** to sign in
+and manage saved accounts.
+
+**Reject model substitution** checks the model name in an account response.
+Relay rejects a response reporting another model or an internal downgrade
+ID such as `degrade2`. Dated versions of the same model are accepted.
 
 ## 5. Usage
 
-This section shows requests through the selected local or server pool.
-Direct API calls and account activity in other applications are not included.
-Changing the period filters the display without deleting records.
+Filter local pool requests by period, status, model or member; open a row in
+**Sends** or **Errors**. **24 hours** is a rolling period. Pages hold up to 50
+records. **More filters** adds protocol, transport, error category and request ID;
+its **Reset** clears only that group.
 
-Open a request to inspect its model, member, format, time to first output,
-total time, tokens, and estimated cost. Requested reasoning and speed can
-differ from the values sent upstream; check their respective fields.
-Unknown measurements do not mean zero cost.
-When routing changes the model ID, **Requested model** shows the client's ID
-and **Sent to source** shows the ID Relay sent to the member. The latter does
-not prove which model the provider used internally.
+Details show status, timing, cost, tokens, tools and copyable provider errors.
+**Technical details** adds IDs, route, transport and requested/sent/provider-declared
+model names. A provider-declared name is not independent identity verification.
+`≈` marks an API-price estimate; `—` marks missing data, distinct from zero.
 
-Failed requests show **Error origin**, Relay's category, and the saved
-provider code, HTTP status, and redacted message separately. Older records
-may not have a provider message. The journal does not store request or
-response text or secrets.
+**Sends** counts calls, retries and tool lookups; **Client requests** counts final
+outcomes once. Timings start with the client request. Cache tokens are included in
+input, reasoning in output. Logs exclude request/response text and secrets.
+
+**Cache retention (estimate)** starts at the latest observed read/write for the
+same chat, connection and upstream model. Misses do not renew it; expiry does not
+prove eviction. Unknown TTL remains unknown; mixed TTLs belong to separate prefixes.
+Use the route's observed retention, not another service's advertised TTL.
+
+**Technical details → Context** compares JSON bytes, including instructions,
+history and tools; cache hits still occupy context. BPS can add unobserved context.
+[BPS catalog lookup](../../project/BASIS_POINTS.md) describes on-demand schemas.
+Structural differences alone do not establish a cache-miss cause.
+
+**Save diagnostics** exports redacted JSON locally. TTFT comparisons use recorded
+single-send requests on the same route, grouped by effective reasoning. They show
+sample counts, median, p95 when sufficient, input/cache sizes and missing data.
+
+`ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` optionally limits native HTTP connection,
+upload and header waiting, including provider queueing, across attempts. Set 1–1800
+seconds; unset, zero or invalid disables it. Bodies, BPS and native WS are excluded.
+`http_headers_timeout` (504, Relay) can follow execution: Relay neither resends nor
+disables the account. Check the client outcome before retrying; increase the limit
+or disable it for slow sources.
+
+### Image requests
+
+Select Codex in **Connections → Accounts → Add to pool for images**, or its
+**Images only** row in **Pool → Add member**. Sign-in alone does not add it.
+Relay must run, not the Codex application. This image route does not serve text;
+Codex text access requires the separate opt-in in Settings.
+
+Use `/v1/images/generations` or `/v1/images/edits`, the local API key and an
+image model from `/v1/models`. Native ChatGPT/Codex uses no extra text-model
+call; Excel/BPS and subscription-sharing connections are unsupported. Provider
+access and limits, not plan names, decide availability.
+
+Edits accept JSON image URLs/data URLs or multipart files and masks; limit:
+128 MiB. `stream: true` returns partial/completed base64 images; nonstreaming
+`response_format: "url"` returns inline data URLs. Relay does not host/save files.
+Details show completed images and reported text/image input tokens, already in
+totals. Missing usage/prices stay unknown; subscription credit charges are not
+available. Interruptions retain observed usage without automatic regeneration.
 
 ## 6. Recovery
 
-This section is available in **Computer** mode. **Create snapshot** only saves
-a copy and does not change the current settings.
+In **Computer** mode, this page restores client settings—not quota, deleted
+Relay accounts or conversations.
 
-**ChatGPT.** A snapshot stores `config.toml` settings and the `auth.json`
-sign-in under the name you enter. You can keep several copies. **Restore**
-replaces the current settings and sign-in with the selected copy. The model
-catalog is not part of this snapshot.
+1. Select the client's tab. Before changes, enter a **Snapshot name** and
+   select **Create snapshot**.
+2. To restore, select the snapshot, choose **Restore** and review the confirmation.
 
-**OpenCode.** One configuration file is saved: `opencode.json`,
-`opencode.jsonc`, or `config.json`. The first copy stays until you restore it;
-creating another does not add a history. **Restore** replaces the current file
-with that copy.
+**ChatGPT** keeps several named snapshots; restoration replaces its configuration
+and sign-in. Its automatic protected backup is separate and preserves newer
+manual sign-ins. Check the current profile if recovery reports a conflict.
 
-**Open backups folder** opens the folder that holds these files.
+**OpenCode** keeps one snapshot, consumed on restoration.
 
-The automatic backup made before connecting ChatGPT to Relay is separate.
-Disconnecting undoes only unchanged Relay-owned `config.toml` fields and restores
-the previous sign-in only while the current one still belongs to Relay. New
-manual sign-ins and settings edited outside the app stay in place; reconnecting
-explicitly saves a new sign-in as the next restore point before applying the
-selected Relay connection. Automatic rollback never replaces a new sign-in.
-This differs from explicitly restoring
-a complete named snapshot, which replaces its contents.
-If the Relay-created model catalog file changes outside the app, disconnecting
-restores the previous settings and sign-in but leaves the edited file untouched.
-A catalog refresh will not overwrite it. Before reconnecting, preserve or move
-that file out of the backup folder if needed; Relay will not replace it without
-verification.
-
-Restoring a snapshot and resetting all Relay data are different actions.
+**Claude Desktop** keeps one original recovery point. Restoration works with
+the API stopped. For an attached profile, Relay validates files, closes Desktop
+and restores the selection without relaunching. A pre-attachment snapshot leaves
+Desktop and its files untouched. Other profiles and newer manual selections survive.
 
 ## 7. Settings
 
-**Appearance** controls language and theme. Help follows the selected language.
-**Application** shows the version, update controls, and the working data
-folder for this device.
+**Appearance** changes language and theme. **Application** shows the version
+and working data folder. Language, theme, and operating mode save immediately.
+Fields with a separate save button, such as the API port, need that button.
 
-In **Pool data**, **Remind me about the restore point** controls the confirmation
-before switching ChatGPT. The protected automatic backup is still created
-when this reminder is off.
+**Launch applications after connecting** defaults to on. Turn it off to configure
+clients without opening them. The choice saves immediately, survives restarts
+and preserves a previously disabled value. Explicit launch actions still work.
 
-Enable **Debug mode** to investigate a problem. **Diagnostics** then provides
-access to error, crash, and operation-stage logs. Errors and crashes are also
-recorded without debug mode; detailed operation stages are for troubleshooting.
+**Overview → Launch application** preserves the connection, profile, keys,
+catalog and running client—even with the API stopped, an empty pool or external
+profile changes. Use **Pool → Connect** to attach Relay. Manual ChatGPT context
+settings survive catalog updates, reconnection and recovery.
 
-**Reset local pool data** first attempts to restore Relay-managed ChatGPT
-settings safely, then removes local accounts, sources, settings, and usage.
-If restoration is unsafe, deletion does not proceed. Fixing a single
-connection does not require resetting the entire pool.
+**Updates.** Select **Check** beside the version or **Update available**.
+Read the changes and select **Update**.
+Checking a version does not install an update.
+The Windows portable folder must be writable.
+
+**Diagnostics.** In **Computer** mode, enable **Pool data → Debug mode**
+to reveal **Diagnostics** with log folders. Errors and crashes are recorded
+without debug mode; detailed operations require it.
+
+**Reset local pool data** removes accounts, sources, settings, and statistics
+after safely restoring client settings. If recovery is not possible,
+the deletion does not proceed. For an ordinary connection error, try the
+checks below first; a reset is not reauthentication.
 
 ## 8. Errors
+
+### Check these first
+
+| What happens | What to do |
+| --- | --- |
+| A saved account is missing from the member picker | The pool accepts SIWC with plan-use consent, BPS connections regardless of plan, and Codex for images only by default. Codex text requires the separate experimental opt-in in Settings. Select the connection's route first. Accounts awaiting recovery and members already added are not listed. |
+| **Connect** is unavailable | Start **Access → Local API** and check available pool members. |
+| The API is running but has no models | Check members, provider access, and model permissions both in the member policy and in **Model Rules**. Starting the API does not add models. |
+| The client cannot connect | Check the address, port, and Relay request key. `127.0.0.1` only works on the same computer. |
+| A request is missing from **Usage** | Clear filters and check the mode. Direct account or source launch bypasses the pool. |
+| Every member is waiting for quota | Wait for the provider's reset or add another available connection. **Refresh** only rereads quota. |
+| A context change had no effect | Close and relaunch ChatGPT. Check that you are using a connection managed by Relay. |
+
+If this did not help, search for the code or message in the reference below.
 
 <!-- relay:error-reference -->
 
@@ -680,6 +740,11 @@ Open the affected card's error or the request in **Usage**. Read **Error origin*
 Relay category, provider code, and HTTP status together. For example,
 `invalid_api_key` can refer to the pool key or an external provider key.
 Fix the connection named in the details.
+
+If a provider request ID is shown, copy it when contacting that provider.
+It identifies the provider's request separately from Relay's local request ID.
+Relay also includes a supported provider ID in the error message returned to
+the client, so it remains visible in clients that display only the message.
 
 This reference covers Relay codes and recognized failure cases. External
 providers may return other messages; their redacted details remain available.
@@ -693,32 +758,37 @@ such as 429, explains why. More retries do not replenish quota.
 | `admission_queue_full` | Relay reached the waiting-request count or retained-memory limit for the pool or request key. No new provider request was sent. | Reduce concurrent waiting requests or their input size, let queued requests finish, then retry. |
 | `admission_wait_expired` | The logical request exhausted its total admission wait or retry deadline. | Retry as a new request after capacity recovers; review concurrency limits or the explicit wait-until-available setting. |
 | `no_eligible_source` · 503 · "no eligible source is available for this model" | No member currently qualifies for this model and format. | In **Pool**, check membership, pool and member model rules, sign-in, quota, pauses, and draining. Wait for busy members or add a compatible reserve. Test a new independent request and inspect its route in **Usage**. Removing unhealthy accounts is unnecessary for rotation. |
-| `exceeded retry limit`, `unexpected status` | The client reports a failed request or exhausted retries. | Check the last HTTP status and code in **Usage**. For 429, distinguish quota exhaustion from request frequency; for 503, inspect available routes. Resolve that cause before retrying. The retry limit itself is not the cause of a provider rejection. |
+| `exceeded retry limit`, `unexpected status` | The client reports a failed request or exhausted retries. | Check the last HTTP status and code in **Usage**. For 429, distinguish quota exhaustion from request frequency; for 503, inspect available routes. Resolve that cause before retrying. |
 | `all_sources_cooling_down`, `all_candidates_cooling_down` · 429 | Eligible routes are paused after rate limits. | Wait for `Retry-After` or the next attempt time. Reduce concurrent requests. A reserve must support the same model and format. |
 | `all_sources_temporarily_unavailable` · 503 | Eligible members are temporarily unavailable after failures. | Inspect each member's last error and wait for recovery. Fix network failures; follow the quota instructions for exhaustion. |
 | `model_not_found` · 404 | The model is absent from the pool's available catalog. | Refresh models in **Connections**, check the exact ID and both sets of **Pool** model permissions, and confirm client format compatibility. |
-| `invalid_api_key` · 401 from Relay | The client uses an invalid or old pool key. | Copy the current address and key from **API → API**, or reconnect the application. Rotating the key invalidates its predecessor. |
-| `client_api_not_allowed` · 403 | The client key does not permit this API format. | Connect through the intended client profile and use an allowed endpoint. A server management token is not a `/v1` request key. |
-| `invalid_host` · 400 | The local API received an unsuitable Host. | Use the address shown in **API** without a proxy rewriting Host. Use your Relay Server for access from another device. |
-| `gateway_stopped`, `gateway_unavailable`, `runtime_unavailable` | The API is stopped, unreachable, or not ready. | Start the API in the selected environment and check the address/port. Choose a free port if occupied, then reconnect the client. For a server, check its process, network, and HTTPS. |
-| `codex_background_blocked_activity_summary`, `codex_background_blocked_task_title` | A ChatGPT background request was disabled. | Enable **API → ChatGPT → ChatGPT background tasks** when summaries/titles are wanted. This is not a main-request failure or exhausted quota. |
+| `route_not_found` · 404 | The requested API path does not exist. | Check the Relay API address and use an endpoint supported by the connected client. |
+| `method_not_allowed` · 405 | The endpoint does not accept this HTTP method. | Use the method required by that endpoint; for example, generation uses POST. |
+| `invalid_api_key` · 401 from Relay | The client uses an invalid or old pool key. | Copy the current address and key from the API tab under **Access**, or reconnect the application. Rotating the key invalidates its predecessor. |
+| `client_api_not_allowed` · 403 | The client key does not permit this API format. | Connect through the intended client profile and use an allowed endpoint with the Relay request key. |
+| `invalid_host` · 400 | The local API received an unsuitable Host. | Use the address shown in **Access → Local API** without a proxy rewriting Host. For another device, enable **Allow local network access** and use the displayed LAN address. |
+| `gateway_stopped`, `gateway_unavailable`, `runtime_unavailable` | The API is stopped, unreachable, or not ready. | Start the local API and check the address/port. Choose a free port if occupied, then reconnect the client. For LAN access, check the private network and firewall. |
+| `codex_background_blocked_activity_summary`, `codex_background_blocked_task_title` | A ChatGPT background request was disabled. | Enable **Access → Applications → ChatGPT → ChatGPT background tasks** when summaries/titles are wanted. |
+| `codex_background_blocked_memory_extraction`, `codex_background_blocked_memory_consolidation` | Relay disabled this memory stage (403). | Enable **Memory extraction** or **Memory summaries** under **Access → Applications → ChatGPT**. No provider call or empty success is generated. |
 
 ### Quota, rate limits and provider permissions
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
 | `upstream_quota_exhausted`, `insufficient_quota`, `quota_exhausted` · 429 | The provider confirmed exhausted quota, credits, or a spending cap. | For accounts, wait for the quota window or use an available reset. For APIs, check wallet and key spending limits in the provider dashboard. Add a compatible reserve; refreshing statistics does not replenish quota. |
-| `upstream_rate_limited`, `rate_limit_exceeded` · 429 | Request frequency or concurrency is too high. | Respect the stated delay, reduce simultaneous tasks or the member's concurrent request limit, and avoid immediate retry loops. |
+| `upstream_rate_limited`, `rate_limit_exceeded` · 429 | Provider request, concurrency or tokens-per-minute (TPM) limit; the message may say `Request too large`. | Respect the stated delay; reduce simultaneous tasks or request tokens. That wording alone does not prove context overflow or a terminal 413. Avoid immediate retry loops. |
+| `upstream_turn_rate_limited`, `turn_rate_limit_exceeded` · 429 | The current conversation turn reached a rate limit. | Wait for the stated delay before continuing. This error alone does not require another login or account; Relay does not rotate the pool or pause the whole account. |
 | `upstream_usage_not_included`, `usage_not_included` · 403 | The plan does not include this capability. | Choose an entitled model or connection. A normal quota reset does not grant a new capability. |
-| `upstream_unauthorized` · `invalid_api_key` from a provider | The provider rejected authentication. | Update the external API key in **Connections**, then refresh models. Sign in again for an account. Changing the pool key does not fix provider authorization. |
+| `upstream_siwc_not_eligible`, `subscription_sharing_user_not_eligible` · 403 | SIWC is unavailable for this user, workspace or policy. | Check SIWC eligibility and plan-use permission. Relay does not rotate accounts for this refusal. |
+| `upstream_unauthorized` · `invalid_api_key` from a provider | The provider rejected authentication. | Update an external API key in **Connections**, then refresh models. BPS with a saved refresh token renews access before the next request; the failed generation is not repeated automatically. Follow the account's recovery hint and sign in again when refresh is no longer possible. Changing the pool key does not fix provider authorization. |
 | `upstream_account_disabled`, `account_deactivated` · 403 | An account, workspace, or project is disabled. | Check its provider dashboard and restore access through that provider. Use another permitted member while it is unavailable. |
-| `upstream_account_verification_required`, `account_verification_required` | Account verification is required. | Complete verification on the provider website, then refresh sign-in and account data in Relay. |
+| `upstream_account_verification_required`, `account_verification_required` | The provider requires account verification. | Complete it on the provider website, then refresh sign-in and account data. See [BPS sign-in requirements](#account-sign-in). |
 | `upstream_forbidden`, `permission_denied` · 403 | The account or key lacks permission for the operation. | Check project, key, and model permissions. Reading a model list does not prove inference access. |
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
-| `upstream_edge_challenge`, `edge_security_challenge` | An edge security check replaced the API response. | Verify the API address, service status, and network configuration. Ask the provider for supported API access; signing in to Relay again cannot resolve its edge challenge. |
+| `upstream_edge_challenge`, `edge_security_challenge` | Edge security, including Cloudflare 1010, blocked API access. | Check the API address, proxy and provider access. Signing in again does not resolve this block. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
-| `upstream_route_degraded`, `route_degraded` | The ChatGPT response reports a different model or an internal downgrade id such as `degrade2`. | With Degraded routes enabled in API, Relay rejects it in JSON, SSE (including response.created) and WebSocket. A pre-generation refusal can rotate; generated or delivered output is never replayed. Dated snapshots of the same model are allowed. The account pauses briefly. This checks reported identity, not quality. |
-| `upstream_model_unavailable`, `model_not_available` · 403/503 | The model is temporarily unavailable, including Basis Points `Model access has changed`. | Only this model on the member pauses; other models remain available. Relay can try another compatible member. Basis Points access can differ between accounts and from native Responses; the model pause currently covers both account transports. This is not exhausted quota. |
+| `upstream_route_degraded`, `route_degraded` | The ChatGPT response reports a different model or an internal downgrade id such as `degrade2`. | With Reject model substitution enabled under Access → Accounts, Relay rejects it in JSON, SSE (including response.created) and WebSocket. A pre-generation refusal can rotate; generated or delivered output is never replayed. Dated snapshots of the same model are allowed. The account pauses briefly. This checks reported identity, not quality. |
+| `upstream_model_unavailable`, `model_not_available` · 403/503 | The model is temporarily unavailable, including Basis Points `Model access has changed`. | The route pauses this model on the member. BPS `basispoints_model_access_changed` and `model_not_allowed` pause its canonical model and aliases for 30 minutes. The failed request ends without another account or a transport change. This is not exhausted quota. |
 | `upstream_model_unsupported`, `model_not_supported` | The selected provider path does not support this model. | Refresh the source catalog and verify the model ID, API address, key permissions, and provider support. Relay will use another compatible member when one is available. |
 | `upstream_model_capacity`, `model_at_capacity` | The model is temporarily overloaded. | Wait or use another compatible source. Signing in again does not increase provider capacity. |
 
@@ -729,17 +799,17 @@ such as 429, explains why. More retries do not replenish quota.
 | `invalid_request`, `upstream_invalid_request` · 400 / 422 | The body or a request parameter is invalid. | Fix the field named in the redacted message. Requests need a JSON object, nonempty model, and valid `stream`; path/body models must agree. Compact responses do not support streaming. |
 | `invalid_stream_id` · 400 | A Responses WebSocket `stream_id` is invalid. | Use 1–256 ASCII letters, digits, `_`, `-` or `.`; omit the field for the default stream. |
 | `upstream_context_too_large`, `context_too_large`, `context_length_exceeded` | History exceeds the model context. | Shorten history/attachments, summarize, start a new conversation, or choose a model with a larger context. |
-| `request_too_large`, `upstream_payload_too_large` · 413 | The request body or attachments exceed a size limit. | Reduce or split input files. Relay's incoming image-request limit is 64 MiB; the provider may impose a smaller one. |
+| `request_too_large`, `upstream_payload_too_large` · 413 | The provider rejected the request as too large. | Shorten history or remove images. Relay does not reject JSON generation, image upload, or image edit for size. Retrying the unchanged request will not help. |
 | `request_encoding_unsupported` · 415 | Unsupported or stacked request compression. | Use an uncompressed JSON body or a single `gzip` / `zstd` encoding. |
-| `request_encoding_invalid` · 400 | Compressed input is corrupt, incomplete or needs a decoder window above 64 MiB. | Update the client or send an uncompressed request. Both compressed and expanded JSON are limited to 64 MiB. |
+| `request_encoding_invalid` · 400 | Compressed input is corrupt, incomplete or needs a zstd window above 64 MiB. | Update the client or send an uncompressed request. Relay does not apply a size cap to compressed or expanded JSON. |
 | `compaction_response_invalid` · 502 | Context compaction did not finish with a valid encrypted result. | Keep the existing conversation history and retry explicitly after checking the upstream connection. Relay does not replay this generation or fabricate a summary. |
 | `upstream_instructions_required`, `missing_required_parameter` | A required field, including instructions, is absent. | Supply the field named by the provider or update the client generating it. Retrying the same body does not fix it. |
 | `upstream_unsupported_request`, `unsupported_request` | A parameter or capability is unsupported. | Disable the named parameter, tool, or mode and use a compatible format. |
 | `upstream_content_policy`, `content_policy_violation` | Provider policy rejected the request, including `This request was blocked by our usage policy`. | A real HTTP 403 stays 403, even if a host labels it insufficient_quota. Relay does not zero quota, pause the account or rotate members for this refusal. Check the provider's rules and route access; headers do not establish permission. |
-| `response_continuation_unavailable`, `response_affinity_miss` | The response owner is unavailable and full replay history is missing. | Restore the original account/API or resend complete history from the client. Start a new conversation if history is lost. A rotation mode change cannot restore context. |
+| `response_continuation_unavailable`, `response_affinity_miss` | The response owner is unavailable or the required continuation context is missing/changed. | Restore the original account/API or resend complete replayable history. Gemini continuation tokens require the same local key, model and original contents; they cannot move to another owner. Start a new conversation if state is lost. A rotation mode change cannot restore context. |
 | `upstream_previous_response_not_found`, `previous_response_not_found` | The provider no longer knows the previous response. | Resend full history without the stale response reference, or start a new conversation. Do not transfer just a response ID to another API. |
 | `upstream_tool_call_mismatch`, `tool_call_not_found` | A tool result has no matching call, or a call has no result. | Relay retries once when the complete pair proves a missing or confused call identifier. It never removes results or guesses between parallel calls. If the error remains, update the client and resend the complete call/result pair, or start a new conversation if the missing history cannot be recovered. |
-| `upstream_encrypted_content_invalid`, `invalid_encrypted_content` | Stored encrypted reasoning context is not accepted. | Return to the original connection or start a new task with ordinary history. Do not manually edit encrypted blocks. |
+| `upstream_encrypted_content_invalid`, `invalid_encrypted_content` | The account rejected encrypted reasoning or compaction context. | For reasoning alone, Relay can remove the rejected ciphertext and its bound ID, retain visible summaries, and retry once before output. An encrypted compaction checkpoint blocks this repair: Relay keeps the complete history and returns the error. Return to the connection that created the item or start a new task with ordinary history. Do not manually edit encrypted blocks. |
 | `tool_use_not_supported`, `chat_feature_not_supported` | This route cannot represent the requested tool or feature. | Function tools and their results are supported on compatible Chat Completions routes. Check the model's format capabilities; choose a matching native route or remove the specifically unsupported option. |
 | `upstream_conflict`, `conflict` · 409 | State changed or another operation is in progress. | Wait for the earlier operation, refresh state, and retry once. Restore conversation history when the conflict concerns continuation. |
 | `upstream_candidate_rejected`, `source_rejected` | A route rejected the request without a more specific category. | Read the provider code/message and check model, permissions, and format. A new independent request can use a compatible reserve. |
@@ -750,10 +820,13 @@ such as 429, explains why. More retries do not replenish quota.
 | --- | --- | --- |
 | `adapter_binding_unsupported`, `source_protocol_invalid`, `source_pool_protocol_unsupported` | Relay could not build a compatible automatic route for the requested protocol and model. | Refresh the source catalog and verify its API address and model ID. Use another member when the provider does not expose a compatible native path or translatable format. |
 | `adapter_invalid_request` | The adapter cannot translate the request. | Remove the field named in the message or choose a native-format source. |
-| `adapter_parameter_unsupported` | A meaningful request parameter has no lossless mapping on the selected route. | Check the field named in the message and `error.param`. Use a native route or change that option. Encrypted input history requires its compatible native route; do not delete it from the conversation. Relay does not silently discard it. |
-| `adapter_compaction_unsupported` | This route cannot accept another provider's encrypted compaction checkpoint. | Codex auto-compact on any non-native model, including `/v1/responses/compact`, is handled by Relay. Use a native Responses route for a foreign checkpoint, or start a new task. |
+| `adapter_parameter_unsupported` | A meaningful request parameter has no lossless mapping on the selected route. | Check `error.param` and use a compatible native route. For `text.format` in command approval, a BPS-only pool cannot provide native strict JSON: add an allowed compatible route, not an approval bypass. Encrypted history also requires its native route; do not delete it. |
+| `adapter_compaction_unsupported` | This route cannot accept another provider's encrypted compaction checkpoint. | ChatGPT auto-compaction on any non-native model, including `/v1/responses/compact`, is handled by Relay. Use a native Responses route for a foreign checkpoint, or start a new task. |
 | `adapter_continuation_missing`, `adapter_continuation_mismatch` | Adapter continuation state is lost or belongs to another binding. | Restore the former source/adapter. Transfer complete history or start a new conversation when it is unavailable. |
 | `adapter_tool_unsupported`, `adapter_reasoning_unsupported` | The adapter cannot represent the tool or reasoning mode. | Choose a supported capability or native format. Allowing a mode in model rules does not add upstream support. |
+| `adapter_metadata_conflict` | Source and reference reasoning levels conflict. | Refresh both catalogs or use a compatible route. Relay never disables reasoning or lowers effort to bypass this conflict. |
+| `token_count_unsupported` | No native API count endpoint. | Use a Messages/Gemini API source, not account transports or cross-protocol estimates. |
+| `token_count_response_invalid` | Missing/invalid count or oversized response. | Check the provider endpoint. Failure never becomes zero or an estimate. |
 | `adapter_upstream_response_invalid`, `adapter_upstream_stream_invalid` | The provider response does not match a supported conversion. | Update Relay and check the source's API address and format. If reproducible, use a source with a native format and report the code and request ID. |
 | `invalid_image_model`, `image_generation_not_enabled` | The image model or capability is unavailable. | Check the image model, member inventory, and pool permissions. A normal text model is unsuitable for image endpoints. |
 | `image_generation_user_error` | The provider rejected image parameters. | Correct the prompt, size, format, or named parameter. Image edits require at least one nonempty input image. |
@@ -772,11 +845,15 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_not_found`, `not_found` · provider 404 | The API path or resource does not exist. | Verify base URL and path prefix. Restore history instead when the message concerns a previous response. |
 | `upstream_status`, `upstream_failure` | No more specific provider classification is available. | Use the actual status and redacted details: 401/403 access, 429 quota/frequency, 5xx service health. An unknown code is not success. |
 | `upstream_stream`, `stream_error`, `upstream_terminal` | A provider error event ended the stream. | Follow the embedded provider code in request details. Initial HTTP 200 does not prove successful completion. |
-| `stream_invalid` | The stream event format is invalid. | Open the request details. Type `relay_stream_parser` identifies Relay's JSON parser diagnostics: error category, position and frame sizes, without response content. Report these diagnostics and the request ID. Older records may lack details; reproduce on the current build. |
+| `http_headers_timeout` · 504 | The optional Relay native HTTP deadline expired before response headers; upstream execution may have started. | Check the client outcome before manually resending. Increase or unset `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` for slow sources. No automatic replay or account penalty occurs. |
+| `http_send_start_timeout` · 504 | HTTP/3 startup exceeded 10 seconds, not a generation timeout. | Check connectivity and the client outcome before resending. Later requests temporarily use TCP; no automatic replay or account penalty. To disable HTTP/3, restart with `ZENITH_RELAY_HTTP3=0`. |
+| `stream_invalid` | Invalid stream event. | Report the request ID and `relay_stream_parser` diagnostics from request details: category, position and frame sizes, without content. For missing diagnostics, reproduce on the current build. |
 | `stream_incomplete`, `upstream_websocket_closed`, `upstream_websocket` | The connection ended before completion. | Check network and proxy timeouts. Retry the unfinished step from the client; a partial answer is not a completed answer. |
-| `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout`, `stream_semantic_timeout` | A stream timeout from an older Relay version or an external service. The current version does not time out an active generation while waiting for output. | Update Relay and your Relay Server. For provider or proxy errors, check that service's limits. You can cancel a stuck request in the client. |
-| `stream_event_too_large`, `upstream_body_too_large` | A response or individual event exceeded Relay's limit. | Reduce output/image volume. For a small request, verify the API and report its error ID. |
-| `upstream_websocket_unsupported`, `websocket_not_supported` | The provider cannot use WebSocket. | Use HTTP streaming. If automatic fallback fails, disable **API → ChatGPT → WebSocket for ChatGPT** and reconnect the client. |
+| `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout`, `stream_semantic_timeout` | Legacy/external timeout; current Relay does not time out active generation. | Update Relay, check provider/proxy limits, or cancel a stuck request in the client. |
+| `stream_event_too_large` | A WebSocket frame exceeded Relay's 64 MiB frame limit. | Shorten that turn or use HTTP streaming. For a small request, verify the API and report its error ID. |
+| `upstream_websocket_unsupported`, `websocket_not_supported` | The provider cannot use WebSocket. | Use HTTP streaming. If automatic fallback fails, disable **Access → Applications → ChatGPT → WebSocket for ChatGPT** and reconnect the client. |
+| `upstream_websocket_slow_handshake`, `websocket_slow_handshake` | The optional initial WebSocket connection took too long; no generation was sent over it. | Relay can use HTTP before sending the request, without penalizing the account. If this repeats, check connection and proxy latency. |
+| `upstream_websocket_handshake_rejected`, `websocket_handshake_rejected` | The upstream relay's internal WS connection returned 403, not an account-authentication failure. | Check endpoint/proxy permissions. No automatic replay or HTTP downgrade. |
 | `upstream_websocket_connection_limit`, `websocket_connection_limit_reached` | Too many provider connections. | Close unused connections, reduce concurrent tasks, and wait for the stated pause. |
 | `client_cancelled`, `upstream_cancelled` | The client or provider cancelled the request. | Nothing is needed for intentional cancellation. Otherwise check application/connection closure and retry the unfinished request. |
 | `response_incomplete` | The answer ended incomplete, for example at an output limit. | Inspect the finish reason. Increase a supported output limit, reduce the task, or request continuation with retained history. |
@@ -804,17 +881,20 @@ such as 429, explains why. More retries do not replenish quota.
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
+| `basis_points_free_account_unsupported` | A historical local Free-plan restriction, removed from current sign-in, import, and pool execution. | Refresh account data or recreate an old import preview. Actual provider access and quota checks still apply. |
 | `quota_unauthorized`, `models_unauthorized`, `models_invalid_access_token`, `subscription_unauthorized`, `subscription_access_token_invalid` | Monitoring authentication was rejected. | Refresh account sign-in and check its data again. |
-| `quota_forbidden`, `models_forbidden`, `subscription_forbidden` | The provider forbids these data reads. | Check account/workspace permissions and regional availability. Verify model access separately. |
+| `models_forbidden` | The model-list request returned HTTP 403; this alone does not prove an account block. | Verify model access separately. Initial sign-in and refresh preserve this error without blocking an otherwise healthy account. |
+| `pool_models_unavailable` | The pool has no available ChatGPT-compatible models. | Check enabled members and model rules, refresh model access, then reconnect. |
+| `quota_forbidden`, `subscription_forbidden` | The provider forbids these data reads. | Check account/workspace permissions and regional availability. Verify model access separately. |
 | `account_profile_rate_limited`, `quota_rate_limited`, `models_rate_limited`, `subscription_rate_limited` | Checks are too frequent. | Wait for the pause; do not repeatedly press refresh. |
-| `quota_timeout`, `quota_transport`, `models_transport`, `subscription_transport`, `quota_probe_failed` | A monitoring request did not complete. | Check internet and the account proxy, then refresh. The last recorded quota may remain visible until a successful check. |
+| `quota_timeout`, `models_timeout` | A quota or model-list check timed out while connecting or reading the response. | Check internet and the configured account or common proxy, then refresh. A timeout does not prove that the account is blocked; saved values remain until a successful check. |
+| `quota_transport`, `models_transport`, `subscription_transport`, `quota_probe_failed` | A monitoring request failed to complete because of a connection error. | Check internet and the configured proxy, then refresh. The last recorded quota or model list may remain visible until a successful check. |
 | `quota_upstream`, `models_upstream`, `subscription_upstream`, `quota_http_status`, `models_http_status`, `subscription_http_status` | The monitoring service failed or returned an unexpected status. | Inspect the status. Retry transient failures later; correct access/request problems for 4xx. This does not prove zero quota. |
 | `quota_invalid_response`, `quota_invalid_percentage`, `models_invalid_response`, `subscription_invalid_response` | Monitoring data is invalid. | Check for proxy/login pages replacing API responses. Update Relay and report a persistent code without the raw response body. |
 | `quota_response_too_large`, `models_response_too_large`, `subscription_response_too_large` | Monitoring response size exceeded the limit. | Verify API and proxy configuration. A repeat on the correct connection needs provider/Relay compatibility investigation. |
 | `models_invalid_account_id`, `subscription_account_id_invalid`, `subscription_account_missing` | The check cannot find the account. | Select the correct workspace and repeat sign-in/import. |
 | `models_invalid_client_version`, `models_invalid_endpoint`, `models_client_init`, `subscription_configuration`, `quota_policy_invalid` | Monitoring parameters are unsupported. | Update Relay and check saved connection settings; report the code if already correct. |
 | `quota_proxy_unavailable`, `models_proxy_unavailable`, `account_runtime_proxy_invalid` | The account proxy is invalid or unavailable. | Correct its URL/credentials and assignment in **Connections**, then check again. |
-| `quota_account_location`, `models_account_location`, `remote_missing` | The account belongs to another environment or was removed from the server. | Select its owning environment. Refresh your server state and explicitly transfer again when needed. |
 | `quota_authorization_prepare`, `quota_token_prepare`, `quota_token_refresh`, `quota_prepare`, `models_prepare`, `models_authorization_prepare`, `token_authority_failed` | Monitoring could not prepare the local sign-in, token, or model check. The account itself may still be usable. | Refresh the account again. If it remains, sign in again or check the account proxy. This is not a provider rejection of the account. |
 | `quota_secret_load`, `quota_secret_store`, `models_secret_store` | Monitoring cannot access protected credentials. | Restore the OS user's secret store and restart Relay. Sign in again if the secret is lost. |
 | `quota_storage`, `models_storage`, `quota_queue_failed` | The check cannot be queued or its result persisted. | Wait for current operations, check disk space/data permissions, and inspect **Settings → Diagnostics** if persistent. |
@@ -830,7 +910,7 @@ such as 429, explains why. More retries do not replenish quota.
 | Balance `rate_limited`, `unavailable`, `invalid_response`; `source_stats_unavailable` | Statistics were limited, unavailable, or malformed. | Wait after 429; otherwise check API/network and refresh. Retained values are stale, and an unknown balance is not zero. |
 | `pricing_catalog_refresh_failed` | The price reference could not refresh. | Check connectivity and retry later. Older prices may remain; missing prices do not remove models. |
 | `source_pricing_identity_invalid`, `model_price_invalid`, `source_model_price_invalid` | Price identity or amount is invalid. | Use an existing model ID and nonnegative USD prices per million tokens. A manual set needs input and output prices; do not confuse per-token and per-million rates. |
-| `account_purchase_cost_invalid` | The account purchase price is invalid or too large. | Correct the USD amount in **Pool member rules → Settings**. It estimates payback and is not the provider balance. |
+| `account_purchase_cost_invalid` | The account purchase price is invalid or too large. | Correct the USD amount in **Pool member rules → Settings**. The purchase price is used to calculate payback. |
 
 ### Imports and connection settings
 
@@ -839,7 +919,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `empty_input`, `malformed_json`, `json_too_deep`, `input_too_large`, `too_many_items`, `invalid_source_file` | The import is empty, invalid, or too large. | Use the original supported JSON/TXT and split large packages. Do not paste HTML, archives, or a quoted JSON string as an object. |
 | `unsupported_bundle_version`, `unsupported_snapshot_version`, `unsupported_schema` | The data version is unsupported. | Update Relay to a compatible version. Do not edit the version number or overwrite the original file. |
 | `ambiguous_credentials`, `unknown_auth_mode`, `import_input_conflict` | Incompatible authentication methods or import inputs are mixed. | Use one consistent export and authentication method per record; do not combine an API key and OAuth account credentials. |
-| `use_source_import` | This record is an API source. | Add it as an **API** in **Connections**, not as a ChatGPT subscription account. |
+| `use_source_import` | This record is an API source. | Add it under **Connections → Sources**. |
 | `duplicate_item`, `item_not_selectable`, `import_selection_invalid` | A duplicate or unready import row is selected. | Select one valid record in the preview, correct its errors, and retry only failed rows. |
 | `item_not_found`, `import_not_found`, `session_not_found`, `import_expired`, `import_session_invalid`, `invalid_session_id`, `session_collision` | The import preview is unavailable or stale. | Create a new preview from the original file, check selected records, and confirm again. |
 | `import_invalid`, `preview_invalid`, `snapshot_invalid`, `snapshot_mismatch`, `snapshot_unsafe` | Temporary import data changed, is damaged, or unsafe. | End this attempt and create a fresh preview. Do not edit temporary snapshots manually. |
@@ -863,37 +943,34 @@ such as 429, explains why. More retries do not replenish quota.
 | `account_not_found`, `account_missing`, `source_not_found`, `source_priority_target_not_found`, `not_found` | A record was removed or belongs to another pool. | Refresh and select an existing connection in the correct environment. An old editor cannot restore a deleted record. |
 | `max_retry_candidates_invalid`, `source_recovery_delay_invalid` | A configured retry value or member recovery delay is outside supported bounds. | Correct the retry value or the delay in member **Settings**. Pool recovery is automatic. |
 | `model_id_invalid`, `model_order_invalid` | A model ID/order is invalid or duplicated. | Refresh the catalog and select actual model IDs without duplicates. |
-| `reasoning_levels_invalid`, `model_service_tier_unsupported`, `model_reasoning_recovery_failed` | The selected reasoning mode is absent from reference metadata, the speed is outside Relay family policy, or model settings could not be recovered. | Refresh models and choose a supported mode or standard speed. Reopen model rules after a recovery failure. |
+| `reasoning_levels_invalid`, `model_service_tier_unsupported`, `model_context_unsupported`, `model_reasoning_recovery_failed` | The selected reasoning mode, speed, or context size is absent from the model reference, a pool connection cannot carry it, or model settings could not be recovered. | Refresh models and choose a supported mode, Standard speed, or the default context. Reopen model rules after a recovery failure. |
 | `configuration_preset_invalid`, `configuration_reference_missing` | A preset is invalid or references missing connections. | Export it again with a compatible version; map members to existing connections in preview. Presets do not transfer secrets. |
 | `configuration_store_failed`, `configuration_runtime_failed`, `runtime_reload_failed`, `gateway_sync_failed`, `source_runtime_invalid` | Configuration could not be saved or applied to the runtime. | Refresh and inspect actual pool membership/settings, fix the named connection, and apply again. Use diagnostics if it persists; a closed dialog is not proof of success. |
 | `wake_task_not_found`, `wake_account_missing` | A background task/account is absent from this environment. | Open the task in its owning environment and select an existing account. |
 | `wake_model_unavailable`, `wake_invalid_request`, `wake_invalid_configuration`, `wake_invalid_endpoint` | Background request configuration/model is unsuitable. | Choose an entitled model and supported task parameters. |
-| `wake_invalid_access_token`, `wake_invalid_provider_account_id`, `wake_unauthorized`, `wake_credentials_unavailable` | Background work has no usable account sign-in. | Restore account sign-in and checks in **Connections**, then retry the task. |
-| `wake_forbidden`, `wake_tags_unsupported`, `wake_confirmation_unsupported` | Permissions or a server feature are unsupported. | Check account rights. Use supported account selection and automatic execution for server tasks. |
+| `wake_invalid_access_token`, `wake_invalid_provider_account_id`, `wake_unauthorized`, `wake_credentials_unavailable` | Background work has no usable account sign-in. | Restore account sign-in and checks in **Connections**. Make sure the rule is enabled and wait for its next automatic run when the condition is met. |
+| `wake_forbidden`, `wake_tags_unsupported`, `wake_confirmation_unsupported` | The selected background-task option is unsupported. | Check account rights and use supported account selection and automatic execution. |
 | `wake_rate_limited` | The provider limited background requests. | Wait and reduce task frequency/concurrency. |
 | `wake_proxy_unavailable`, `wake_timeout`, `wake_transport`, `wake_upstream`, `wake_http_status` | Network or provider failure interrupted background work. | Check proxy and HTTP status, resolve the cause, then retry. |
 | `wake_request_too_large`, `wake_response_too_large`, `wake_invalid_response` | Background request/response size or format is invalid. | Use a short request and compatible model. Check the connection and update Relay if persistent. |
 
-### Profiles, server and local data
+### Profiles and local data
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
 | `profile_restore_blocked` | The profile changed during the operation or automatic rollback would replace a newer sign-in. | Let ChatGPT finish writing and retry the explicit connection. Relay saves a new manual sign-in as the next restore point; if the error repeats, inspect the profile under **Recovery**. |
 | `recovery_required`, `cleanup_incomplete` | Recovery or cleanup from an earlier operation is unfinished. | Open **Recovery** and operation diagnostics. Preserve backups and finish recovery before repeating. A full data reset is not the first remedy. |
+| `account_rotation_recovery_required` | Account token rotation cannot safely resume; the request was not sent. | Sign in to that account again. Preserve its data instead of resetting Relay. |
+| `account_credential_store_unavailable` | Protected account credentials could not be read before dispatch. | Check access to the operating system credential store, then retry. Do not delete account data to work around a temporary storage failure. |
 | `snapshot_missing`, `snapshot_io` | A required snapshot is missing or unreadable. | Check environment, backup existence, and folder access. Reconfigure the client if the backup is lost; do not replace it with an empty file. |
-| `profile_attach_unavailable`, `profile_rotation_invalid`, `profile_rotation_missing`, `system_key_missing`, `diagnostic_key_unavailable` | Managed client attachment could not complete. | Refresh server state and reconnect the application. Use the current request key after rotation, never a management token. |
-| `management_unauthorized` · 401 | Your server management token is invalid. | Correct the token in the server connection. It is separate from the `/v1` request key. |
-| `management_blocked` · 429 | Repeated failed authentication temporarily blocked management access. | Stop retries, correct the token, and wait for the block to expire. |
-| "remote server URL is invalid", "must not contain a path", "HTTP requires the explicit insecure option" | The server address is unsuitable. | Use its origin without `/v1`, query, fragment, or embedded credentials. Prefer HTTPS; insecure HTTP is only an explicit choice for a trusted environment. |
-| "remote server redirect was rejected", "remote server request failed" | The server redirects or is unreachable. | Enter the final address directly and check DNS, certificate, network, and Relay Server process. Secrets are not automatically forwarded through redirects. |
-| "remote protocol is incompatible", "remote server response is invalid/too large" | Server versions are incompatible or the response is not its management API. | Update desktop and server to compatible versions and check reverse-proxy routing. |
+| `profile_attach_unavailable`, `system_key_missing`, `diagnostic_key_unavailable` | Managed client attachment could not complete. | Refresh the local API state and reconnect the application. Use the current Relay request key after rotation. |
 | `proxy_invalid`, `proxy_unavailable`, `proxy_route_ambiguous` | Proxy configuration is invalid or both bypass and proxy use are selected. | Choose one route: shared proxy, individual proxy, or bypass. Correct URL and credentials. |
 | `proxy_assignment_invalid`, `proxy_assignment_duplicate` | Bulk proxy assignment does not match the selected accounts. | Supply one URL per selected account and remove duplicate assignments. |
 | `proxy_check_timeout` | The connection check exceeded 12 seconds. | Check the address and port, or retry later. The saved proxy is retained. |
 | `proxy_check_connection_failed`, `proxy_check_auth_failed` | The selected proxy could not be reached or rejected authentication. | Correct its address, port, username and password. No direct connection is attempted. |
 | `proxy_check_rejected`, `proxy_check_invalid_response` | The check service rejected the request or returned no valid exit IP. | Retry later and check whether this proxy permits HTTPS traffic to Cloudflare. This does not establish model availability. |
 | `proxy_check_unavailable` | The saved proxy could not be read or was removed during a check. | Refresh the list and restore access to protected storage before retrying. |
-| `secret_store_unavailable`, `credential_store_unavailable`, `vault_failed` | Protected storage is unavailable. | Restore OS-user access; for a server, check the vault and its encryption key. Do not replace the key for an existing database with a new one. |
+| `secret_store_unavailable`, `credential_store_unavailable`, `vault_failed` | Protected storage is unavailable. | Restore access for the current OS user and preserve protected storage. Do not replace an existing vault key. |
 | `io`, `store_failed`, `persistence_failed`, `account_token_persistence`, `credential_persist_failed`, `metadata_persist_failed` | Reading/writing data or refreshed credentials failed. | Check disk space, permissions, and file locks; close duplicate Relay processes. Preserve a backup before recovery and inspect diagnostics if persistent. |
 | `usage_persistence_failed`, `response_affinity_persistence_failed` | Usage or response ownership could not be persisted. | Restore disk writes. Usage may have gaps, and continuation after restart may require complete history. |
 | `account_export_failed` | Account export could not be created. | Check protected-credential access and retry the selected record. Exports contain sign-in material and must not be sent to support. |

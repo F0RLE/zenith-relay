@@ -19,6 +19,9 @@ test("connection account actions use full-width zones and centered dates", async
     return label.left >= value.right;
   }))).toBe(true);
   await expect(actions).toHaveCount(3);
+  expect(await actions.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))).toEqual([
+    "Убрать из пула", "Обновить", "Запустить в ChatGPT",
+  ]);
   const [cardBox, dateBox, actionBoxes] = await Promise.all([
     card.boundingBox(),
     card.locator(".account-subscription-line").boundingBox(),
@@ -31,16 +34,7 @@ test("connection account actions use full-width zones and centered dates", async
   expect(Math.abs(actionBoxes[0].x - cardBox!.x)).toBeLessThanOrEqual(1);
   expect(Math.abs(actionBoxes.at(-1)!.x + actionBoxes.at(-1)!.width - (cardBox!.x + cardBox!.width))).toBeLessThanOrEqual(1);
 
-  await actions.first().hover();
-  const dangerHover = await actions.first().evaluate((button) => ({
-    background: getComputedStyle(button).backgroundColor,
-    buttonColor: getComputedStyle(button).color,
-    iconColor: getComputedStyle(button.querySelector("svg")!).color,
-  }));
-  expect(dangerHover.background).toBe("rgba(0, 0, 0, 0)");
-  expect(dangerHover.iconColor).not.toBe(dangerHover.buttonColor);
-
-  await actions.nth(1).click();
+  await card.getByRole("button", { name: "Обновить", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "refresh_local_account_quota" && call.args.accountId === "account_synthetic"))).toBe(true);
   await page.mouse.move(1200, 1000);
   await page.waitForTimeout(180);

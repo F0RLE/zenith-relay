@@ -16,7 +16,7 @@ describe("model reasoning policy", () => {
     const current = ["low"];
     expect(toggleReasoningLevel(current, " HIGH ")).toEqual(["low", "high"]);
     expect(toggleReasoningLevel(current, "low")).toEqual([]);
-    expect(normalizeReasoningEffort("  X_HIGH ")).toBe("x_high");
+    expect(normalizeReasoningEffort("  X_HIGH ")).toBe("xhigh");
   });
 
 });

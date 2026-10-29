@@ -1,69 +1,5 @@
 use super::*;
 
-pub(crate) fn attach_ready_api(codex_home: &Path, backup_root: &Path, api_key: &str) -> Result<()> {
-    attach_ready_api_with_intent(codex_home, backup_root, api_key, false)
-}
-
-pub(crate) fn attach_ready_api_explicit(
-    codex_home: &Path,
-    backup_root: &Path,
-    api_key: &str,
-) -> Result<()> {
-    attach_ready_api_with_intent(codex_home, backup_root, api_key, true)
-}
-
-pub(super) fn attach_ready_api_with_intent(
-    codex_home: &Path,
-    backup_root: &Path,
-    api_key: &str,
-    rebase_newer_login: bool,
-) -> Result<()> {
-    switch_to_local_with(
-        codex_home,
-        backup_root,
-        "ready_api",
-        "https://api.zenithmarket.dev/v1",
-        api_key,
-        LocalAttachOptions {
-            provider_id: READY_API_PROVIDER_ID,
-            rebase_newer_login,
-            ..LocalAttachOptions::default()
-        },
-        &OsSecretBackend,
-    )
-    .map(|_| ())
-}
-
-pub(crate) fn restore_ready_api(codex_home: &Path, backup_root: &Path) -> Result<bool> {
-    let _profile_guard = lock_codex_profile();
-    let Some(backup) = local_backup(codex_home, backup_root)? else {
-        return Ok(false);
-    };
-    if backup.managed_provider_id != READY_API_PROVIDER_ID {
-        return Ok(false);
-    }
-    local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)?;
-    Ok(true)
-}
-
-pub fn attach(
-    codex_home: &Path,
-    backup_root: &Path,
-    key_id: &str,
-    base_url: &str,
-    local_key: &str,
-) -> Result<ProfileBinding> {
-    switch_to_local_with(
-        codex_home,
-        backup_root,
-        key_id,
-        base_url,
-        local_key,
-        LocalAttachOptions::default(),
-        &OsSecretBackend,
-    )
-}
-
 pub fn attach_with_catalog(
     codex_home: &Path,
     backup_root: &Path,
@@ -166,10 +102,14 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     if account_backup_for_profile(codex_home, backup_root)?.is_some() {
-        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)?;
-        return Ok(());
+        let context_change =
+            context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+        account::restore_account_locked(codex_home, backup_root, &OsSecretBackend)
+            .map(|_| ())
+            .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+    } else {
+        local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
     }
-    local::restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
 /// Updates the managed profile and returns the previous provider setting when
@@ -216,9 +156,9 @@ pub(super) fn set_local_gateway_websockets_with_backend(
         let Some(mut backup) = parse_backup_snapshot(&original_backup, &backup_path)? else {
             return Ok(None);
         };
-        if expected_credential_id.is_some_and(|id| {
+        if expected_credential_id.is_some_and(|credential_id| {
             backup.credential_kind() != ProfileCredentialKind::LocalGateway
-                || backup.managed_key_id != id
+                || backup.managed_key_id != credential_id
         }) {
             return Ok(None);
         }

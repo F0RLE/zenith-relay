@@ -3,6 +3,88 @@ use std::sync::atomic::Ordering;
 
 struct InvalidGrant;
 
+struct RotationRecoveryFailure(std::sync::atomic::AtomicUsize);
+
+impl TokenRefreshAdapter for RotationRecoveryFailure {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _refresh_token: &'a str,
+        _now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::RotationRecoveryRequired,
+                "siwc_rotation_outcome_unknown",
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn uncertain_rotation_persists_reauth_and_stops_repeated_refreshes() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::new("access", Some("refresh".into()), None, Some(1), 0, 0).unwrap();
+    authority
+        .register("local-account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let persistence = CapturePersistence::default();
+    let refresh = RotationRecoveryFailure(std::sync::atomic::AtomicUsize::new(0));
+    for now in [2, 3, 60_000] {
+        assert_eq!(
+            authority
+                .prepare_and_persist("local-account", now, 0, &refresh, &persistence)
+                .await
+                .unwrap_err(),
+            TokenAuthorityError::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired),
+        );
+    }
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+    assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+    let saved_state = AccountAuthState::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired);
+    assert_eq!(
+        *persistence.auth_states.lock().unwrap(),
+        vec![("local-account".into(), saved_state)]
+    );
+    let restarted = TokenAuthority::new(1).unwrap();
+    restarted
+        .register("local-account", tokens, saved_state)
+        .await
+        .unwrap();
+    assert!(matches!(
+        restarted
+            .prepare("local-account", 60_001, 0, &refresh)
+            .await,
+        Err(TokenAuthorityError::RequiresReauth(
+            ReauthReason::TokenRotationRecoveryRequired
+        ))
+    ));
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+    // A genuinely newer sign-in restores the existing authority, not a new retry bypass.
+    let fresh = TokenSet::new(
+        "new-access",
+        Some("new-refresh".into()),
+        None,
+        Some(90_000),
+        60_002,
+        1,
+    )
+    .unwrap();
+    restarted
+        .register("local-account", fresh, AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert!(
+        restarted
+            .prepare("local-account", 60_003, 0, &refresh)
+            .await
+            .is_ok()
+    );
+    assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+}
+
 impl TokenRefreshAdapter for InvalidGrant {
     fn refresh<'a>(
         &'a self,
@@ -245,6 +327,11 @@ async fn invalidated_access_is_expired_and_persisted_once() {
     let tokens = authority.tokens("local-account").await.unwrap();
     assert_eq!(tokens.expires_at_ms(), Some(10));
     assert_eq!(tokens.generation(), 8);
+    assert_eq!(tokens.refresh_token(), Some("refresh"));
+    assert_eq!(
+        authority.auth_state("local-account").await,
+        Some(AccountAuthState::Active)
+    );
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 1);
 }
 
@@ -265,10 +352,12 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
         .await
         .unwrap();
     let persistence = CapturePersistence::default();
-    assert!(!authority
-        .invalidate_access_generation_and_persist("local-account", Some(7), 10, &persistence,)
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_generation_and_persist("local-account", Some(7), 10, &persistence,)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("local-account").await,
         Some(current.clone())
@@ -288,29 +377,35 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
         8,
     )
     .unwrap();
-    assert!(!authority
-        .invalidate_access_if_current_and_persist(
-            "local-account",
-            &same_generation_new_login,
-            10,
-            &persistence
-        )
-        .await
-        .unwrap());
+    assert!(
+        !authority
+            .invalidate_access_if_current_and_persist(
+                "local-account",
+                &same_generation_new_login,
+                10,
+                &persistence
+            )
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority.tokens("local-account").await,
         Some(current.clone())
     );
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
 
-    assert!(authority
-        .invalidate_access_generation_and_persist("local-account", Some(8), 20, &persistence,)
-        .await
-        .unwrap());
-    assert!(!authority
-        .invalidate_access_generation_and_persist("local-account", Some(8), 30, &persistence,)
-        .await
-        .unwrap());
+    assert!(
+        authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 20, &persistence,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !authority
+            .invalidate_access_generation_and_persist("local-account", Some(8), 30, &persistence,)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         authority
             .tokens("local-account")
@@ -324,6 +419,46 @@ async fn stale_management_unauthorized_does_not_invalidate_a_newer_login() {
 
 struct MustNotRefresh;
 
+#[tokio::test]
+async fn late_401_cannot_expire_a_reinstalled_login_with_identical_tokens() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::new(
+        "synthetic-access",
+        Some("synthetic-refresh".into()),
+        None,
+        Some(60_000),
+        1,
+        7,
+    )
+    .unwrap();
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let rejected = authority
+        .prepare("account", 2, 0, &MustNotRefresh)
+        .await
+        .unwrap();
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let persistence = CapturePersistence::default();
+    assert!(
+        !authority
+            .invalidate_access_revision_and_persist(
+                "account",
+                &rejected.dispatch_revision,
+                10,
+                &persistence,
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(authority.tokens("account").await, Some(tokens));
+    assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+}
+
 impl TokenRefreshAdapter for MustNotRefresh {
     fn refresh<'a>(
         &'a self,
@@ -333,6 +468,35 @@ impl TokenRefreshAdapter for MustNotRefresh {
     ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
         Box::pin(async { panic!("access-only token must not refresh") })
     }
+}
+
+#[tokio::test]
+async fn access_only_token_remains_usable_until_its_actual_expiry() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let tokens = TokenSet::access_only("access", Some(300_000), 0).unwrap();
+    authority
+        .register(
+            "account",
+            tokens.clone(),
+            AccountAuthState::DegradedAccessOnly,
+        )
+        .await
+        .unwrap();
+
+    for now_ms in [0, 1, 299_999] {
+        let prepared = authority
+            .prepare("account", now_ms, 300_000, &MustNotRefresh)
+            .await
+            .unwrap();
+        assert_eq!(prepared.status, PrepareStatus::Ready);
+        assert_eq!(prepared.tokens, tokens);
+    }
+    assert!(matches!(
+        authority
+            .prepare("account", 300_000, 300_000, &MustNotRefresh)
+            .await,
+        Err(TokenAuthorityError::AccessTokenExpired)
+    ));
 }
 
 #[tokio::test]

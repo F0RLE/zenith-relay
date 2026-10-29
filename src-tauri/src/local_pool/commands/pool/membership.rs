@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 /// Caller holds setup_guard. Split from the Tauri event wrapper so the
 /// durable membership and live routing transaction can be exercised locally.
-pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
+pub(in crate::local_pool) async fn apply_local_pool_membership(
     input: PoolMembershipInput,
     state: &DesktopState,
 ) -> CommandResult<(LocalPoolSnapshot, bool, Vec<String>)> {
@@ -25,27 +25,42 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
             store.keys().to_vec(),
         )
     };
-    if source_ids
-        .iter()
-        .any(|id| !old_sources.iter().any(|record| &record.id == id))
-        || account_ids
+    if source_ids.iter().any(|source_id| {
+        !old_sources
             .iter()
-            .any(|id| !old_accounts.iter().any(|record| &record.account.id == id))
-    {
+            .any(|source_record| &source_record.id == source_id)
+    }) || account_ids.iter().any(|account_id| {
+        !old_accounts
+            .iter()
+            .any(|account_record| &account_record.account.id == account_id)
+    }) {
         return Err(LocalPoolError::new(ErrorCode::NotFound, "pool member not found").into());
     }
     if input.in_pool
-        && old_accounts.iter().any(|record| {
-            account_ids.contains(&record.account.id) && record.remote_location.is_some()
+        && old_accounts.iter().any(|account_record| {
+            account_ids.contains(&account_record.account.id) && account_record.recovery.is_some()
         })
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "an account managed by a remote server cannot join the local pool",
+            "account requires local recovery before joining the pool",
         )
         .into());
     }
     if input.in_pool {
+        let selected_routes = {
+            let store = state.store()?;
+            account_ids
+                .iter()
+                .all(|id| store.gateway().account_route_is_selected(id))
+        };
+        if !selected_routes {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "Select this account route before adding it to the pool",
+            )
+            .into());
+        }
         for source in old_sources
             .iter()
             .filter(|source| source_ids.contains(&source.id))
@@ -79,7 +94,7 @@ pub(in crate::local_pool::commands) async fn apply_local_pool_membership(
     }
     for account in &mut accounts {
         if account_ids.contains(&account.account.id) {
-            account.account.in_pool = input.in_pool;
+            crate::local_pool::accounts::records::set_pool_membership(account, input.in_pool)?;
         }
     }
     if sources == old_sources && accounts == old_accounts {

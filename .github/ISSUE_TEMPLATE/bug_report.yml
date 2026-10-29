@@ -24,7 +24,6 @@ body:
         - Windows
         - macOS
         - Linux
-        - Relay Server
         - Other
     validations:
       required: true

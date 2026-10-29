@@ -5,7 +5,9 @@ use std::process::Command;
 
 #[cfg(target_os = "windows")]
 use super::process::windows_hidden_command;
-use super::process::{find_command_on_path, is_opencode_running, stop_opencode_and_wait};
+use super::process::{
+    find_commands_on_path, is_opencode_running, stop_opencode_and_wait, wait_for_application_start,
+};
 
 #[cfg(target_os = "windows")]
 pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
@@ -31,9 +33,6 @@ pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
 
 pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(configured) = env::var_os("OPENCODE_BIN").filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(configured));
-    }
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from);
@@ -162,21 +161,27 @@ pub(super) fn resolve_opencode_desktop_command() -> Option<PathBuf> {
 
     // Homebrew exposes the desktop app as `opencode-desktop`, while the
     // terminal package and all distro packages expose `opencode`.
-    for name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
-        if let Some(path) = find_command_on_path(name) {
-            candidates.push(path);
+    if let Some(paths) = env::var_os("PATH").or_else(|| env::var_os("Path")) {
+        for command_name in ["opencode", "opencode-desktop", "ai.opencode.desktop"] {
+            candidates.extend(find_commands_on_path(&paths, command_name));
         }
     }
 
-    candidates
-        .into_iter()
-        .filter(|candidate| candidate.is_file())
-        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
-        .find(|candidate| is_opencode_desktop_path(candidate))
+    first_desktop_executable(candidates)
+}
+
+pub(super) fn first_desktop_executable(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    candidates.into_iter().find_map(|candidate| {
+        let candidate = std::fs::canonicalize(candidate).ok()?;
+        super::settings::validate_path(super::settings::Application::Opencode, candidate.to_str()?)
+            .ok()
+    })
 }
 
 fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
-    for name in [
+    for executable_name in [
         "opencode",
         "opencode.exe",
         "opencode.cmd",
@@ -191,7 +196,7 @@ fn push_opencode_commands(candidates: &mut Vec<PathBuf>, directory: &Path) {
         "OpenCode Dev.exe",
         "OpenCode Beta.exe",
     ] {
-        candidates.push(directory.join(name));
+        candidates.push(directory.join(executable_name));
     }
 }
 
@@ -199,25 +204,25 @@ fn push_desktop_files(candidates: &mut Vec<PathBuf>, directory: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path
+    for directory_entry in entries.flatten() {
+        let desktop_path = directory_entry.path();
+        let file_name = desktop_path
             .file_name()
-            .and_then(|name| name.to_str())
+            .and_then(|file_name| file_name.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if name.contains("opencode") && name.ends_with(".appimage") {
-            candidates.push(path);
+        if file_name.contains("opencode") && file_name.ends_with(".appimage") {
+            candidates.push(desktop_path);
         }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn push_macos_app_bundles(candidates: &mut Vec<PathBuf>, directory: &Path) {
-    for name in ["OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"] {
+    for app_bundle_name in ["OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"] {
         candidates.push(
             directory
-                .join(name)
+                .join(app_bundle_name)
                 .join("Contents")
                 .join("MacOS")
                 .join("OpenCode"),
@@ -228,7 +233,7 @@ fn push_macos_app_bundles(candidates: &mut Vec<PathBuf>, directory: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn push_macos_app_bundles(_candidates: &mut Vec<PathBuf>, _directory: &Path) {}
 
-fn is_opencode_desktop_path(path: &Path) -> bool {
+pub(super) fn is_opencode_desktop_path(path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
         is_windows_opencode_desktop_path(path)
@@ -245,7 +250,7 @@ fn is_opencode_desktop_path(path: &Path) -> bool {
 
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
-    let path = path
+    let normalized_path = path
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
@@ -256,11 +261,21 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
         "opencode beta.exe",
     ]
     .iter()
-    .any(|name| path.ends_with(&format!("\\{name}")));
+    .any(|executable_name| normalized_path.ends_with(&format!("\\{executable_name}")));
+    let desktop_directory = normalized_path.rsplit('\\').nth(1);
     desktop_name
-        && !path.contains("\\bin\\")
-        && !path.contains("\\resources\\")
-        && [
+        && !normalized_path.contains("\\bin\\")
+        && !normalized_path.contains("\\resources\\")
+        && (matches!(
+            desktop_directory,
+            Some(
+                "@opencode-aidesktop"
+                    | "opencode"
+                    | "opencode desktop"
+                    | "opencode dev"
+                    | "opencode beta"
+            )
+        ) || [
             "\\programs\\@opencode-aidesktop\\",
             "\\programs\\opencode\\",
             "\\programs\\opencode desktop\\",
@@ -273,7 +288,7 @@ pub(super) fn is_windows_opencode_desktop_path(path: &Path) -> bool {
             "\\scoop\\apps\\opencode-desktop\\",
         ]
         .iter()
-        .any(|root| path.contains(root))
+        .any(|root| normalized_path.contains(root)))
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
@@ -285,38 +300,36 @@ pub(super) fn is_macos_opencode_desktop_path(path: &Path) -> bool {
 
 #[cfg(any(not(target_os = "windows"), test))]
 pub(super) fn is_macos_app_executable(path: &Path, bundle: &str, executable: &str) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
+    let normalized_path = path.to_string_lossy().to_ascii_lowercase();
+    normalized_path.ends_with(&format!("/{bundle}.app/contents/macos/{executable}"))
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
 pub(super) fn is_linux_opencode_desktop_path(path: &Path) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    path.ends_with(".appimage") && path.contains("opencode")
-        || path.ends_with("/opencode-desktop")
-        || path.ends_with("/ai.opencode.desktop")
-        || (path.ends_with("/opencode")
-            && (path.contains("/opt/opencode/")
-                || (path.contains("/.mount_") && path.contains("opencode"))))
+    let normalized_path = path.to_string_lossy().to_ascii_lowercase();
+    normalized_path.ends_with(".appimage") && normalized_path.contains("opencode")
+        || normalized_path.ends_with("/opencode-desktop")
+        || normalized_path.ends_with("/ai.opencode.desktop")
+        || (normalized_path.ends_with("/opencode")
+            && (normalized_path.contains("/opt/opencode/")
+                || (normalized_path.contains("/.mount_") && normalized_path.contains("opencode"))))
 }
 
-/// Restart OpenCode after changing its global configuration. OpenCode's
-/// desktop sidecar snapshots the provider catalog at startup, and launching
-/// a second instance only focuses the existing single-instance process.
-pub(super) fn restart_opencode() -> Result<(), String> {
-    let executable = resolve_opencode_desktop_command().ok_or_else(|| {
+pub(super) fn launch_opencode(restart: bool) -> Result<(), String> {
+    let executable = super::settings::configured_path(super::settings::Application::Opencode)?
+        .or_else(resolve_opencode_desktop_command).ok_or_else(|| {
         "OpenCode desktop was not found. Install the desktop app or open it manually; Relay does not launch the terminal CLI without a terminal".to_string()
     })?;
 
     // Resolve the executable before stopping the current instance. A broken
     // installation must not leave a working OpenCode session closed.
-    if is_opencode_running() {
+    if restart && is_opencode_running() {
         stop_opencode_and_wait()?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        spawn_opencode_windows(&executable)
+        spawn_opencode_windows(&executable)?;
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -337,7 +350,7 @@ pub(super) fn restart_opencode() -> Result<(), String> {
                         .success()
                         .then_some(())
                         .ok_or_else(|| "OpenCode desktop did not open".to_string())
-                })
+                })?;
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -345,7 +358,12 @@ pub(super) fn restart_opencode() -> Result<(), String> {
             Command::new(executable)
                 .spawn()
                 .map(|_| ())
-                .map_err(|error| format!("failed to start OpenCode: {error}"))
+                .map_err(|error| format!("failed to start OpenCode: {error}"))?;
         }
     }
+    wait_for_application_start(
+        is_opencode_running,
+        std::time::Duration::from_secs(10),
+        "OpenCode",
+    )
 }

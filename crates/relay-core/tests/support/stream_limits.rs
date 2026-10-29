@@ -43,7 +43,7 @@ async fn non_stream_response_and_usage_are_redacted() {
 }
 
 #[tokio::test]
-async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
+async fn large_client_requests_are_forwarded() {
     let (upstream, state) = spawn_upstream().await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
 
@@ -59,65 +59,6 @@ async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.requests.lock().unwrap().len(), 1);
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model": "gpt-test",
-            "input": "x".repeat(MAX_CLIENT_REQUEST_BODY_BYTES),
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "request_too_large");
-    assert_eq!(state.requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn oversized_non_stream_response_is_rejected_and_recorded() {
-    let upstream = spawn(Router::new().route(
-        "/v1/responses",
-        post(|| async {
-            let chunks = stream::iter([
-                Ok::<_, Infallible>(Bytes::from(vec![b'x'; 8 * 1024 * 1024])),
-                Ok::<_, Infallible>(Bytes::from(vec![b'x'; 8 * 1024 * 1024 + 1])),
-            ]);
-            Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from_stream(chunks))
-                .unwrap()
-        }),
-    ))
-    .await;
-    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "gpt-test", "input": "private prompt"}))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "upstream_error");
-    assert_eq!(body["error"]["message"], "upstream response is too large");
-    assert_eq!(
-        body["error"]["zenith_relay"]["category"],
-        "upstream_body_too_large"
-    );
-    let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(!events[0].success);
-    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
-    assert_eq!(
-        events[0].error_category.as_deref(),
-        Some("upstream_body_too_large")
-    );
 }
 
 #[tokio::test]
@@ -165,7 +106,10 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\"}}\n\n");
+    assert_eq!(
+        second,
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\",\"annotations\":[]}]}]}}\n\n"
+    );
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -179,9 +123,87 @@ async fn stream_prelude_is_buffered_until_the_first_text_output() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
-    assert!(events[0]
-        .ttft_ms
-        .is_some_and(|ttft| ttft <= events[0].latency_ms));
+    assert!(
+        events[0]
+            .ttft_ms
+            .is_some_and(|ttft| ttft <= events[0].latency_ms)
+    );
+}
+
+#[tokio::test]
+async fn failed_stream_bootstrap_keeps_reported_usage_without_replaying() {
+    for (tail, category, expected_status) in [
+        (
+            "data: {broken\n\n",
+            "stream_invalid",
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            "data: {\"type\":\"response.completed\"",
+            "stream_incomplete",
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"output\":[],\"usage\":{\"input_tokens\":null,\"output_tokens\":null}}}\n\n",
+            "response_incomplete",
+            StatusCode::OK,
+        ),
+    ] {
+        let frames = format!(
+            "{}{}{}",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-response\",\"usage\":{\"input_tokens\":17,\"input_tokens_details\":{\"cached_tokens\":5},\"total_tokens\":17}}}\n\n",
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n",
+            tail,
+        );
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded_requests = requests.clone();
+        let upstream = spawn(Router::new().route(
+            "/v1/responses",
+            post(move || {
+                let frames = frames.clone();
+                let requests = recorded_requests.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(frames))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({
+                "model": "gpt-test",
+                "input": "synthetic-private-bootstrap",
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status, "{category}");
+        let body = response.text().await.unwrap();
+        assert!(!body.contains("synthetic-private-bootstrap"));
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{category}");
+        let event = &events[0];
+        assert!(!event.success);
+        assert_eq!(event.error_category.as_deref(), Some(category));
+        assert_eq!(event.input_tokens, Some(17));
+        assert_eq!(event.output_tokens, Some(3));
+        assert_eq!(event.cached_input_tokens, Some(5));
+        assert_eq!(event.reasoning_tokens, Some(1));
+        assert_eq!(event.total_tokens, Some(20));
+        assert!(
+            !serde_json::to_string(event)
+                .unwrap()
+                .contains("synthetic-private-bootstrap")
+        );
+    }
 }
 
 #[tokio::test]
@@ -272,9 +294,11 @@ async fn coalesced_terminal_sse_does_not_forward_later_output_or_record_it_twice
     assert_eq!(state.requests.lock().unwrap().len(), 2);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .all(|event| event.success && event.total_tokens == Some(3)));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.success && event.total_tokens == Some(3))
+    );
 }
 
 #[tokio::test]
@@ -314,6 +338,7 @@ async fn responses_route_to_chat_completions_sources() {
             name: "Stateless chat source".to_string(),
             base_url: "http://127.0.0.1:9/v1".to_string(),
             api_key: SOURCE_KEY.to_string(),
+            proxy_url: None,
             wire_api: WireApi::ChatCompletions,
             models: vec!["gpt-test".to_string()],
         },
@@ -340,6 +365,7 @@ async fn responses_route_to_chat_completions_sources() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
     for (index, event) in events.iter().enumerate() {
         assert!(!event.success);
@@ -387,6 +413,7 @@ async fn non_account_compact_summarizes_every_bridged_model() {
             name: "Stateless chat source".to_string(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.to_string(),
+            proxy_url: None,
             wire_api: WireApi::ChatCompletions,
             models: vec!["vendor-model".to_string()],
         },
@@ -414,10 +441,12 @@ async fn non_account_compact_summarizes_every_bridged_model() {
     let compact: Value = response.json().await.unwrap();
     assert_eq!(compact["object"], "response.compaction");
     assert_eq!(compact["output"][0]["type"], "compaction");
-    assert!(compact["output"][0]["encrypted_content"]
-        .as_str()
-        .unwrap()
-        .starts_with("zenith-relay-compact-v1:"));
+    assert!(
+        compact["output"][0]["encrypted_content"]
+            .as_str()
+            .unwrap()
+            .starts_with("zenith-relay-compact-v1:")
+    );
 
     let continued = client
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -491,6 +520,7 @@ async fn non_success_stream_done_does_not_override_upstream_status() {
     let _ = response.bytes().await.unwrap();
 
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), 3);
     for (index, event) in events.iter().enumerate() {
         assert!(!event.success);

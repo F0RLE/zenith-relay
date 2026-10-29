@@ -91,7 +91,7 @@ pub(super) struct SessionMeta {
     pub(super) start: u64,
     pub(super) end: u64,
     pub(super) separator: Vec<u8>,
-    pub(super) value: Value,
+    pub(super) session_record: Value,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -127,13 +127,6 @@ pub(super) struct RepairManifest {
     pub(super) backup_id: String,
     pub(super) profile_roots: Vec<String>,
     pub(super) entries: Vec<BackupEntry>,
-    #[serde(default)]
-    pub(super) created_at_ms: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct BackupTimestamp {
     #[serde(default)]
     pub(super) created_at_ms: u64,
 }

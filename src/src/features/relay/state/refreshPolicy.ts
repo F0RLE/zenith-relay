@@ -1,16 +1,16 @@
 import type { PageId, RuntimeSnapshot } from "../api/types";
 
 export const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
-// Runtime activity events update the visible route immediately. This is only
-// a low-frequency fallback for remote/older hosts that do not forward events.
+// Activity updates immediately; scheduler preferences refresh after coalesced
+// events. This is the fallback when activity notifications are missed.
 export const ROUTING_REFRESH_INTERVAL_MS = 5_000;
 export const RUNTIME_EVENT_REFRESH_DEBOUNCE_MS = 500;
 // Auto-start happens after the WebView is created. A first snapshot can
 // legitimately arrive before the local listener is ready, so give the native
 // startup a few bounded chances to publish its live scheduler order.
 export const STARTUP_RUNTIME_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000] as const;
-// Usage writes can emit both a state and a usage event. Give the writer a
-// short settling window so a burst becomes one report refresh.
+// Coalesce usage notifications into one report refresh. General runtime
+// state notifications invalidate cached pages without reloading this view.
 export const USAGE_EVENT_REFRESH_DEBOUNCE_MS = 500;
 // Overview charts are intentionally less eager than the request table. A
 // burst of completed requests should settle before the aggregate query runs.
@@ -37,7 +37,7 @@ export function usageRefreshDebounceMs(page: PageId) {
  * the renderer observed it during the auto-start race.
  */
 export function startupSnapshotNeedsRetry(snapshot: RuntimeSnapshot | null) {
-  if (!snapshot || snapshot.runtimeTarget.kind !== "local") return false;
+  if (!snapshot) return false;
   if (snapshot.warnings.includes("gateway_configured_but_not_running")) return true;
   return snapshot.gateway.running
     && snapshot.gateway.candidateCount > 0

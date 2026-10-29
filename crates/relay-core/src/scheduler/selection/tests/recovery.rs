@@ -123,30 +123,37 @@ fn due_recovery_never_overrides_auth_quota_or_request_scope() {
     scheduler.set_candidate_health("only", CandidateHealth::ReauthRequired);
     assert!(at(&mut scheduler, 250).is_none());
     scheduler.set_candidate_health("only", CandidateHealth::Healthy);
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope {
-                source_ids: Some(BTreeSet::new()),
-                ..Default::default()
-            },
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 250,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope {
+                    source_ids: Some(BTreeSet::new()),
+                    ..Default::default()
+                },
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 250,
+            })
+            .is_none()
+    );
 }
 
 #[test]
 fn old_request_release_and_success_cannot_release_a_running_recovery_trial() {
     let mut scheduler = PoolScheduler::new();
     scheduler.upsert(candidate("only"));
-    let old = start(&mut scheduler, "only", 0);
+    let previous_attempt = start(&mut scheduler, "only", 0);
     fail(&mut scheduler, "only", 0);
     let probe = start(&mut scheduler, "only", 250);
-    finish(&mut scheduler, old, HealthObservation::Success, 251);
+    finish(
+        &mut scheduler,
+        previous_attempt,
+        HealthObservation::Success,
+        251,
+    );
     assert!(at(&mut scheduler, 251).is_none());
     assert_eq!(scheduler.active_request_count("only"), 1);
     assert_eq!(circuit(&scheduler, "only").state, CircuitState::HalfOpen);
@@ -163,9 +170,11 @@ fn repeated_rate_observation_does_not_release_the_recovery_owner() {
     for retry_at in [249, 248] {
         scheduler.set_cooldown("only", "gpt-5", retry_at);
         assert!(at(&mut scheduler, 250).is_none());
-        assert!(scheduler
-            .reserve_request("only", "gpt-5", 250, false)
-            .is_none());
+        assert!(
+            scheduler
+                .reserve_request("only", "gpt-5", 250, false)
+                .is_none()
+        );
     }
     finish(&mut scheduler, probe, HealthObservation::Success, 251);
     assert!(!at(&mut scheduler, 251).unwrap().half_open_probe);

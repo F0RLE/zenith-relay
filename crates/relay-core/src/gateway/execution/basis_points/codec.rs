@@ -1,117 +1,385 @@
 use crate::protocol::AdapterError;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
-pub(super) fn as_input_items(input: Option<&Value>) -> Vec<Value> {
-    match input {
-        Some(Value::String(text)) => vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}],
-        })],
-        Some(Value::Object(item)) => vec![Value::Object(item.clone())],
+pub(super) fn as_input_items(request_input: Option<&Value>) -> Vec<Value> {
+    match request_input {
+        Some(Value::String(text)) => vec![text_message("user", "input_text", text.clone())],
+        Some(Value::Object(input_fields)) => vec![Value::Object(input_fields.clone())],
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
     }
 }
 
 pub(super) fn text_message(role: &str, content_type: &str, text: String) -> Value {
-    json!({
-        "type": "message",
-        "role": role,
-        "content": [{"type": content_type, "text": text}],
+    // Preserve the wire field order while moving the already-owned text. The
+    // json! serialization path would allocate another copy of large histories.
+    Value::Object(Map::from_iter([
+        ("type".into(), Value::String("message".into())),
+        ("role".into(), Value::String(role.into())),
+        (
+            "content".into(),
+            Value::Array(vec![text_part(content_type, text)]),
+        ),
+    ]))
+}
+
+pub(super) fn text_part(content_type: &str, text: String) -> Value {
+    Value::Object(Map::from_iter([
+        ("type".into(), Value::String(content_type.into())),
+        ("text".into(), Value::String(text)),
+    ]))
+}
+
+pub(super) fn explicit_input_message(mut item: Value) -> Value {
+    let Some(fields) = item.as_object_mut() else {
+        return item;
+    };
+    let Some(role @ ("user" | "assistant" | "system" | "developer")) =
+        fields.get("role").and_then(Value::as_str)
+    else {
+        return item;
+    };
+    let content_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
+    match fields.get("type") {
+        None => {
+            fields.insert("type".into(), Value::String("message".into()));
+        }
+        Some(Value::String(kind)) if kind == "message" => {}
+        _ => return item,
+    }
+    // Responses accepts compact messages without a discriminator and with
+    // string content. BPS needs explicit message/content variants, including
+    // for histories emitted by the shared cross-protocol codec.
+    if let Some(content) = fields.get_mut("content")
+        && let Value::String(text) = content
+    {
+        let text = std::mem::take(text);
+        *content = Value::Array(vec![text_part(content_type, text)]);
+    }
+    item
+}
+
+pub(super) fn json_text(json_value: &Value) -> Result<String, AdapterError> {
+    serde_json::to_string(json_value).map_err(|_| AdapterError::invalid_request())
+}
+
+#[derive(serde::Serialize)]
+struct FunctionFrameHeader<'a> {
+    field: &'a str,
+    #[serde(serialize_with = "serialize_argument_fields")]
+    args: Vec<(&'a String, &'a Value)>,
+}
+
+fn serialize_argument_fields<S>(
+    fields: &[(&String, &Value)],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_map(fields.iter().copied())
+}
+
+pub(super) fn encode_function_arguments(arguments: &Value) -> Result<String, AdapterError> {
+    let fields = arguments
+        .as_object()
+        .ok_or_else(|| AdapterError::invalid_request().with_parameter("input.arguments"))?;
+    let framed_field = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (field, value))| {
+            let raw = value.as_str()?;
+            let escapes = raw
+                .bytes()
+                .filter(|byte| matches!(*byte, b'"' | b'\\' | 0..=0x1f))
+                .count();
+            (escapes > 0).then_some((index, field, raw, escapes))
+        })
+        .max_by_key(|(_, _, _, escapes)| *escapes);
+    let Some((index, field, raw, _)) = framed_field else {
+        return json_text(arguments);
+    };
+    let mut other_arguments = fields.iter().collect::<Vec<_>>();
+    // Match Map::remove's preserve_order swap exactly: changing key order
+    // here would invalidate existing prompt-cache prefixes.
+    other_arguments.swap_remove(index);
+    let header = serde_json::to_string(&FunctionFrameHeader {
+        field,
+        args: other_arguments,
+    })
+    .map_err(|_| AdapterError::invalid_request())?;
+    Ok(format!("{}{header}\n{raw}", super::FUNCTION_STRING_PREFIX))
+}
+
+pub(super) fn parse_payload_json(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(text).or_else(|error| {
+        if !text.contains(['\n', '\r', '\t', '\\']) {
+            return Err(error);
+        }
+        // Preserve non-JSON escapes literally; valid escapes retain JSON semantics.
+        let mut normalized = String::with_capacity(text.len());
+        let mut quoted = false;
+        let mut escaped = false;
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if quoted && !escaped {
+                if character == '\\'
+                    && characters.peek().is_some_and(|next| {
+                        !next.is_control()
+                            && !matches!(
+                                *next,
+                                '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u'
+                            )
+                    })
+                {
+                    normalized.push_str("\\\\");
+                    continue;
+                }
+                let escape = match character {
+                    '\n' => Some("\\n"),
+                    '\r' => Some("\\r"),
+                    '\t' => Some("\\t"),
+                    _ => None,
+                };
+                if let Some(escape) = escape {
+                    normalized.push_str(escape);
+                    continue;
+                }
+            }
+            normalized.push(character);
+            if character == '"' && !escaped {
+                quoted = !quoted;
+            }
+            escaped = quoted && character == '\\' && !escaped;
+        }
+        serde_json::from_str(&normalized)
     })
 }
 
-pub(super) fn json_text(value: &Value) -> Result<String, AdapterError> {
-    serde_json::to_string(value).map_err(|_| AdapterError::invalid_request())
+pub(super) fn json_argument_error(text: &str, error: &serde_json::Error) -> AdapterError {
+    let (failure, parameter) = if error.is_eof() {
+        (
+            AdapterError::upstream_tool_arguments_json_incomplete(),
+            "output.run_officejs.args.json.eof",
+        )
+    } else {
+        (
+            AdapterError::upstream_tool_arguments_json_syntax_invalid(),
+            "output.run_officejs.args.json.syntax",
+        )
+    };
+    let reason = if error.is_eof() {
+        "unexpected_eof"
+    } else {
+        let message = error.to_string();
+        [
+            ("invalid escape", "invalid_escape"),
+            ("invalid unicode", "invalid_unicode"),
+            ("control character", "unescaped_control"),
+            ("expected `,`", "expected_separator"),
+            ("expected `:`", "expected_colon"),
+            ("key must be a string", "key_not_string"),
+            ("trailing characters", "trailing_data"),
+            ("trailing comma", "trailing_comma"),
+            ("expected value", "expected_value"),
+            ("expected ident", "invalid_literal"),
+            ("recursion limit exceeded", "nesting_limit"),
+        ]
+        .into_iter()
+        .find_map(|(prefix, reason)| message.starts_with(prefix).then_some(reason))
+        .unwrap_or("syntax")
+    };
+    let trimmed = text.trim_start();
+    let shape = if trimmed.starts_with(super::FUNCTION_STRING_PREFIX) {
+        "string_frame"
+    } else if trimmed.starts_with("```") {
+        "markdown_fence"
+    } else {
+        match trimmed.chars().next() {
+            Some('{') => "json_object",
+            Some('[') => "json_array",
+            Some('"') => "json_string",
+            None => "empty",
+            _ => "text",
+        }
+    };
+    failure.with_parameter(parameter).with_json_diagnostic(
+        reason,
+        shape,
+        error.line(),
+        error.column(),
+        text.len(),
+    )
 }
 
-pub(super) fn parse_json_object(value: Option<&Value>) -> Option<Value> {
-    match value {
-        Some(Value::Object(object)) => Some(Value::Object(object.clone())),
+fn split_function_string_frame(frame: &str) -> Option<(&str, &str)> {
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (offset, byte) in frame.bytes().enumerate() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'\n' if depth == 0 => return Some((&frame[..offset], &frame[offset + 1..])),
+            b'\r' if depth == 0 => {
+                let bytes = if frame[offset..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                };
+                return Some((&frame[..offset], &frame[offset + bytes..]));
+            }
+            b'\\' if depth == 0 => {
+                // The outer JSON can leave one separator escaped. Interpret
+                // only that delimiter outside the header; executable bytes
+                // after it remain opaque, including any further escapes.
+                for separator in [r"\r\n", r"\n", r"\r"] {
+                    if let Some(raw) = frame[offset..].strip_prefix(separator) {
+                        return Some((&frame[..offset], raw));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // Keep the original failure path for malformed or incomplete headers. This
+    // scan only finds a delimiter outside JSON containers/strings; the existing
+    // decoder and original tool schema still validate the whole header. Never
+    // normalize, trim, or parse the executable body after that delimiter.
+    frame.split_once('\n')
+}
+
+pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError> {
+    let arguments = match payload {
+        Value::Object(_) => payload.clone(),
+        Value::String(text) => {
+            if let Some(frame) = text.strip_prefix(super::FUNCTION_STRING_PREFIX) {
+                let invalid = AdapterError::upstream_tool_arguments_frame_invalid();
+                let (header, raw) = split_function_string_frame(frame).ok_or_else(|| {
+                    invalid.with_parameter("output.run_officejs.args.frame.separator")
+                })?;
+                let header = parse_payload_json(header).map_err(|error| {
+                    invalid
+                        .with_parameter("output.run_officejs.args.frame.header")
+                        .with_diagnostics_from(json_argument_error(header, &error))
+                })?;
+                let fields = header
+                    .as_object()
+                    .filter(|fields| fields.len() == 2)
+                    .ok_or_else(|| {
+                        invalid
+                            .with_parameter("output.run_officejs.args.frame.header")
+                            .with_shape_diagnostic(&header, None)
+                    })?;
+                let field = fields.get("field").and_then(Value::as_str).ok_or_else(|| {
+                    invalid
+                        .with_parameter("output.run_officejs.args.frame.field")
+                        .with_shape_diagnostic(&header, Some(("field", &header["field"])))
+                })?;
+                let mut arguments = fields
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .ok_or_else(|| {
+                        invalid
+                            .with_parameter("output.run_officejs.args.frame.args")
+                            .with_shape_diagnostic(&header, Some(("args", &header["args"])))
+                    })?;
+                if arguments.contains_key(field) {
+                    return Err(
+                        invalid.with_parameter("output.run_officejs.args.frame.duplicate_field")
+                    );
+                }
+                arguments.insert(field.to_owned(), Value::String(raw.to_owned()));
+                Value::Object(arguments)
+            } else {
+                parse_payload_json(text).map_err(|error| json_argument_error(text, &error))?
+            }
+        }
+        _ => {
+            return Err(AdapterError::upstream_tool_arguments_json_invalid()
+                .with_parameter("output.run_officejs.args.object"));
+        }
+    };
+    if !arguments.is_object() {
+        return Err(AdapterError::upstream_tool_arguments_json_invalid()
+            .with_parameter("output.run_officejs.args.object"));
+    }
+    Ok(arguments)
+}
+
+pub(super) fn parse_json_object(json_value: Option<&Value>) -> Option<Value> {
+    match json_value {
+        Some(Value::Object(object_fields)) => Some(Value::Object(object_fields.clone())),
         Some(Value::String(text)) => serde_json::from_str(text).ok(),
         _ => None,
     }
 }
 
-pub(super) fn parse_function_arguments(item: &Map<String, Value>) -> Result<Value, AdapterError> {
-    let raw = item.get("arguments");
-    let parsed = parse_json_object(raw).ok_or_else(AdapterError::invalid_request)?;
+pub(super) fn parse_function_arguments(
+    tool_call_object: &Map<String, Value>,
+) -> Result<Cow<'_, Value>, AdapterError> {
+    let parsed = match tool_call_object.get("arguments") {
+        Some(arguments @ Value::Object(_)) => Cow::Borrowed(arguments),
+        raw_arguments => {
+            Cow::Owned(parse_json_object(raw_arguments).ok_or_else(AdapterError::invalid_request)?)
+        }
+    };
     if !parsed.is_object() {
         return Err(AdapterError::invalid_request().with_parameter("input.arguments"));
     }
     Ok(parsed)
 }
 
-/// Basis Points accepts the provider's effort vocabulary (`low`, `medium`,
-/// `high`, `xhigh`, `ultra`). Relay's catalog also exposes the client-facing
-/// `max` label, which is the same level as `xhigh` for this transport. Keep
-/// that normalization local to the adapter so native account routes retain
-/// their original request value and diagnostics.
-pub(super) fn basis_points_reasoning_effort(request: &Map<String, Value>) -> String {
-    let effort = request
+/// Normalize client aliases without replacing an explicit level. The fresh
+/// access catalog decides which levels this account accepts. An omitted level
+/// leaves the provider's default intact.
+pub(super) fn basis_points_reasoning_effort(request_body: &Map<String, Value>) -> Option<String> {
+    request_body
         .get("reasoning")
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("effort"))
-        .or_else(|| request.get("reasoning_effort"))
+        .or_else(|| request_body.get("reasoning_effort"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    match effort.as_deref() {
-        Some("low") => "low",
-        Some("medium") => "medium",
-        Some("high") => "high",
-        Some("xhigh" | "x-high" | "extra-high" | "extra_high" | "max") => "xhigh",
-        Some("ultra") => "ultra",
-        // The Basis Points plugin uses medium as its safe default for an
-        // absent or unknown level. This keeps a stale client label from
-        // producing the upstream 422 `Invalid request body` response.
-        _ => "medium",
-    }
-    .to_string()
+        .filter(|effort_text| !effort_text.is_empty())
+        .map(crate::providers::chatgpt::normalize_basis_points_reasoning_effort)
 }
 
-pub(super) fn sanitized_metadata(value: Option<&Value>) -> Option<Value> {
-    let object = value?.as_object()?;
-    let mut metadata = Map::new();
-    for (key, value) in object {
-        if matches!(key.as_str(), "task_id" | "turn_id" | "agent_iteration") {
-            continue;
-        }
-        let safe_key = key.chars().take(64).collect::<String>();
-        if safe_key.is_empty() {
-            continue;
-        }
-        let safe_value = match value {
-            Value::String(text) => text.chars().take(512).collect::<String>(),
-            Value::Bool(value) => value.to_string(),
-            Value::Number(value) => value.to_string(),
-            _ => continue,
-        };
-        metadata.insert(safe_key, Value::String(safe_value));
-    }
-    (!metadata.is_empty()).then_some(Value::Object(metadata))
-}
-
-pub(super) fn explicit_conversation_key(object: &Map<String, Value>) -> Option<String> {
+pub(super) fn explicit_conversation_key(request_fields: &Map<String, Value>) -> Option<String> {
     for key in [
         "prompt_cache_key",
         "promptCacheKey",
         "session_id",
         "sessionId",
     ] {
-        if let Some(value) = object
+        if let Some(conversation_value) = request_fields
             .get(key)
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|conversation_value| !conversation_value.is_empty())
         {
-            return Some(value.to_string());
+            return Some(conversation_value.to_string());
         }
     }
-    object
+    request_fields
         .get("client_metadata")
         .and_then(Value::as_object)
         .and_then(|metadata| {
@@ -120,23 +388,23 @@ pub(super) fn explicit_conversation_key(object: &Map<String, Value>) -> Option<S
                     .get(*key)
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|conversation_value| !conversation_value.is_empty())
                     .map(str::to_string)
             })
         })
 }
 
-pub(super) fn short_hash(value: &Value) -> String {
-    let mut digest = Sha256::new();
-    digest.update(serde_json::to_vec(value).unwrap_or_default());
-    hex::encode(digest.finalize())
+pub(super) fn short_hash(json_value: &impl serde::Serialize) -> String {
+    let digest =
+        crate::json_fingerprint::sha256(json_value).unwrap_or_else(|_| Sha256::digest([]).into());
+    hex::encode(digest)
 }
 
-pub(super) fn stable_uuid(namespace: &str, value: &str) -> String {
+pub(super) fn stable_uuid(namespace: &str, identifier: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(namespace.as_bytes());
     digest.update([0]);
-    digest.update(value.as_bytes());
+    digest.update(identifier.as_bytes());
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.finalize()[..16]);
     // UUID version 5/variant bits keep the identifier accepted by the
@@ -164,23 +432,23 @@ pub(super) fn stable_uuid(namespace: &str, value: &str) -> String {
     )
 }
 
-pub(super) fn request_iteration(input: &[Value]) -> String {
-    let last_user = input
+pub(super) fn request_iteration(input_items: &[Value]) -> String {
+    let last_user = input_items
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| {
-            (item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
+        .filter_map(|(index, input_item)| {
+            (input_item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
         })
         .next_back()
         .unwrap_or(0);
-    let iteration = input
+    let iteration = input_items
         .iter()
         .skip(last_user.saturating_add(1))
-        .filter(|item| {
+        .filter(|input_item| {
             matches!(
-                item.get("type").and_then(Value::as_str),
+                input_item.get("type").and_then(Value::as_str),
                 Some("function_call_output" | "custom_tool_call_output")
-            )
+            ) && !super::history::is_thread_handoff(input_item)
         })
         .count()
         .saturating_add(1);
@@ -188,10 +456,10 @@ pub(super) fn request_iteration(input: &[Value]) -> String {
 }
 
 pub(super) fn basis_points_metadata(
-    object: &Map<String, Value>,
+    request_fields: &Map<String, Value>,
     translated_input: &[Value],
 ) -> Value {
-    let conversation = explicit_conversation_key(object).unwrap_or_else(|| {
+    let conversation = explicit_conversation_key(request_fields).unwrap_or_else(|| {
         translated_input
             .first()
             .map(short_hash)
@@ -200,14 +468,13 @@ pub(super) fn basis_points_metadata(
     let last_user = translated_input
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| {
-            (item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
+        .filter_map(|(index, input_item)| {
+            (input_item.get("role").and_then(Value::as_str) == Some("user")).then_some(index)
         })
         .next_back();
-    let turn_prefix = last_user
-        .map(|index| translated_input[..=index].to_vec())
-        .unwrap_or_else(|| translated_input.to_vec());
-    let turn_fingerprint = short_hash(&Value::Array(turn_prefix));
+    let prefix_end = last_user.map_or(translated_input.len(), |index| index + 1);
+    let turn_prefix = &translated_input[..prefix_end];
+    let turn_fingerprint = short_hash(&turn_prefix);
     json!({
         "task_id": stable_uuid("cpa-oai-basispoints", &conversation),
         "turn_id": stable_uuid(

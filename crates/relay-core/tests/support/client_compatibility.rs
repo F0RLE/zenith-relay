@@ -16,7 +16,7 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             json!([{"type":"compaction", "encrypted_content":"synthetic-opaque-state"}])
         };
         let (upstream, observed) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
-            json!({"type":"response.completed", "response":{"id":"synthetic-response", "output":output}}),
+            json!({"type":"response.completed", "response":{"id":"synthetic-response","status":"completed", "output":output}}),
         ]))).await;
         let authority = ready_authority("compat-account", "synthetic-old").await;
         let (gateway, _, _, _) = spawn_mixed_gateway(
@@ -76,11 +76,13 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             let requests = observed.requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
             assert!(requests[1].get("previous_response_id").is_none());
-            assert!(requests[1]["input"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["role"] == "assistant"));
+            assert!(
+                requests[1]["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["role"] == "assistant")
+            );
         } else {
             let failure = receive_websocket_json(&mut socket).await;
             assert_eq!(
@@ -98,7 +100,7 @@ async fn turn_state_is_exact_and_invalidated_by_in_band_auth_refresh() {
     let (upstream, state) = spawn_upstream(vec![
         Reply::JsonWithHeaders(
             StatusCode::OK,
-            json!({"id":"first","output":[]}),
+            json!({"id":"first","status":"completed","output":[]}),
             vec![("x-codex-turn-state", "synthetic-state")],
         ),
         success_reply("second"),
@@ -240,7 +242,7 @@ async fn missing_compact_endpoint_uses_one_v2_attempt_with_usage() {
         Reply::Json(StatusCode::NOT_FOUND, json!({"error":{"code":"endpoint_not_found"}})),
         Reply::Stream(vec![
             StreamChunk::Data("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"synthetic\"}}\n\n"),
-            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-compact\",\"status\":\"completed\",\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}}\n\n"),
+            StreamChunk::Data("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-compact\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":42,\"output_tokens\":3}}}\n\n"),
         ]),
     ]).await;
     let response = reqwest::Client::new()
@@ -319,9 +321,11 @@ async fn compact_bridge_preserves_rate_limit_delay_and_stops() {
     let events = events.lock().unwrap();
     let event = events.last().unwrap();
     assert!(!event.success);
-    assert!(event
-        .retry_at_ms
-        .is_some_and(|retry_at| retry_at >= started + 120_000));
+    assert!(
+        event
+            .retry_at_ms
+            .is_some_and(|retry_at| retry_at >= started + 120_000)
+    );
 }
 
 #[tokio::test]

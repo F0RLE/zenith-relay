@@ -57,7 +57,7 @@ test("source editor does not expose obsolete route controls or tooltips", async 
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
-  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  await page.locator(".source-card").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await expect(dialog.locator(".source-add-adapters")).toHaveCount(0);
   await expect(dialog.locator(".source-route-cell")).toHaveCount(0);
@@ -134,23 +134,29 @@ test("a nested custom control wins over a delegated parent hint", async ({ page 
 test("main pages and model rules contain no browser tooltip attributes", async ({ page }) => {
   await openRules(page);
   await expect(page.locator("[title]")).toHaveCount(0);
-  for (const name of ["Overview", "Connections", "Pool", "API", "Usage", "Settings"]) {
+  for (const name of ["Overview", "Connections", "Pool", "Access", "Usage", "Settings"]) {
     await page.getByRole("button", { name, exact: true }).click();
     await expect(page.locator("[title]")).toHaveCount(0);
   }
 });
 
-test("shared navigation keeps keyboard focus without restoring a focus ring", async ({ page }) => {
+test("shared navigation distinguishes visible keyboard focus from pointer focus", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, theme: "dark" });
   await page.goto("/");
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
 
   const usage = page.getByRole("button", { name: "Usage", exact: true });
+  await page.keyboard.press("Tab");
   await usage.focus();
   await expect(usage).toBeFocused();
   const focusStyle = await usage.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { outlineStyle: style.outlineStyle, boxShadow: style.boxShadow };
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth, boxShadow: style.boxShadow };
   });
-  expect(focusStyle.outlineStyle).toBe("none");
+  expect(focusStyle.outlineStyle).toBe("solid");
+  expect(focusStyle.outlineWidth).toBe("2px");
   expect(focusStyle.boxShadow).toBe("none");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await usage.click();
+  await expect(usage).toHaveCSS("outline-style", "none");
 });

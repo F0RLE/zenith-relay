@@ -10,8 +10,9 @@ pub struct TokenSet {
     pub(in crate::accounts::token_authority) generation: u64,
 }
 
-/// Refresh an access token this long before it expires.
-pub const TOKEN_REFRESH_SKEW_MS: u64 = 60_000;
+/// Refresh an access token five minutes before it expires.
+/// Reserve time for the token exchange and persistence before dispatch.
+pub const TOKEN_REFRESH_SKEW_MS: u64 = 5 * 60_000;
 
 /// Returns whether an access token remains usable after the refresh skew.
 pub fn access_token_is_usable(
@@ -78,11 +79,14 @@ impl TokenSet {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
+        // Early renewal needs a refresh grant. Access-only tokens retain their
+        // full lifetime, including in discovery ranking and request preparation.
+        let refresh_skew_ms = if self.refresh_token.is_some() {
+            refresh_skew_ms
+        } else {
+            0
+        };
         access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
-    }
-
-    pub fn refresh_eligible(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
-        self.refresh_token.is_some() && !self.is_access_usable(now_ms, refresh_skew_ms)
     }
 }
 
@@ -143,5 +147,32 @@ impl fmt::Debug for TokenRefresh {
             .field("id_token", &self.id_token.as_ref().map(|_| "[redacted]"))
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TOKEN_REFRESH_SKEW_MS, access_token_is_usable};
+
+    #[test]
+    fn refresh_window_is_five_minutes() {
+        assert_eq!(TOKEN_REFRESH_SKEW_MS, 300_000);
+    }
+
+    #[test]
+    fn token_becomes_unusable_inside_refresh_window() {
+        let now_ms = 1_000_000;
+        let expires_at_ms = now_ms + TOKEN_REFRESH_SKEW_MS;
+
+        assert!(!access_token_is_usable(
+            Some(expires_at_ms),
+            now_ms,
+            TOKEN_REFRESH_SKEW_MS
+        ));
+        assert!(access_token_is_usable(
+            Some(expires_at_ms + 1),
+            now_ms,
+            TOKEN_REFRESH_SKEW_MS
+        ));
     }
 }

@@ -5,7 +5,7 @@ use crate::{
     files::atomic_write,
     local_pool::{
         accounts::{
-            credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
+            NativeSecretBackend, credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::ProviderSourceRecord,
@@ -16,10 +16,10 @@ use crate::{
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::protocol::{
-    AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
-    ConfigurationPresetApplyResult, ConfigurationPresetPreview, ConfigurationPresetSettings,
-    PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
-    CONFIGURATION_PRESET_SCHEMA_VERSION,
+    AccountPresetRule, CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
+    ConfigurationPreset, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
+    ConfigurationPresetPreview, ConfigurationPresetSettings, PresetQuotaPolicy,
+    PresetRoutingPolicy, SourcePresetRule,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -46,51 +46,54 @@ pub(super) fn local_configuration_preset(
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let sources = sources
         .into_iter()
-        .map(|record| SourcePresetRule {
+        .map(|source_record| SourcePresetRule {
             legacy_protocol_mode: None,
-            id: record.id,
-            name: record.name,
-            base_url: record.base_url.trim_end_matches('/').to_string(),
-            pricing_provider: record.pricing_provider,
-            official_provider_family: record.official_provider_family,
-            wire_api: record.wire_api,
-            protocol_bindings: record.protocol_bindings,
-            enabled: record.enabled,
-            in_pool: record.in_pool,
-            allowed_models: record.allowed_models,
-            excluded_models: record.excluded_models,
-            priority: record.priority,
-            weight: record.weight,
-            recovery_delay_seconds: record.recovery_delay_seconds,
-            model_price_overrides: record.model_price_overrides,
+            id: source_record.id,
+            name: source_record.name,
+            base_url: source_record.base_url.trim_end_matches('/').to_string(),
+            pricing_provider: source_record.pricing_provider,
+            official_provider_family: source_record.official_provider_family,
+            proxy_id: source_record.proxy_id,
+            wire_api: source_record.wire_api,
+            protocol_bindings: source_record.protocol_bindings,
+            enabled: source_record.enabled,
+            in_pool: source_record.in_pool,
+            allowed_models: source_record.allowed_models,
+            excluded_models: source_record.excluded_models,
+            priority: source_record.priority,
+            weight: source_record.weight,
+            recovery_delay_seconds: source_record.recovery_delay_seconds,
+            model_price_overrides: source_record.model_price_overrides,
         })
         .collect();
     let accounts = accounts
         .into_iter()
-        .map(|record| {
-            let credential = credentials.load(&record.account.id).map_err(|error| {
-                LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
-            })?;
+        .map(|account_record| {
+            let credential = credentials
+                .load(&account_record.account.id)
+                .map_err(|error| {
+                    LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+                })?;
             let proxy_id = credential.as_ref().and_then(|credential| {
                 credential
                     .proxy_url()
-                    .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+                    .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
             });
             Ok(AccountPresetRule {
-                id: record.account.id,
-                identity_hint: record
+                id: account_record.account.id,
+                identity_hint: account_record
                     .account
                     .identity
                     .identity_hash
                     .chars()
                     .take(12)
                     .collect(),
-                enabled: record.account.enabled,
-                in_pool: record.account.in_pool,
-                allowed_models: record.allowed_models,
-                excluded_models: record.excluded_models,
-                priority: record.priority,
-                weight: record.weight,
+                enabled: account_record.account.enabled,
+                in_pool: account_record.account.in_pool,
+                allowed_models: account_record.allowed_models,
+                excluded_models: account_record.excluded_models,
+                priority: account_record.priority,
+                weight: account_record.weight,
                 proxy_id,
                 bypass_common_proxy: credential
                     .is_some_and(|credential| credential.bypass_common_proxy()),
@@ -100,7 +103,7 @@ pub(super) fn local_configuration_preset(
     let common_proxy_id = if gateway.common_proxy_configured {
         secret_store::load(COMMON_PROXY_SECRET_REF)?
             .as_deref()
-            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
     } else {
         None
     };
@@ -112,7 +115,6 @@ pub(super) fn local_configuration_preset(
             accounts,
             routing: PresetRoutingPolicy {
                 tool_policy: Some(gateway.tool_policy),
-                basis_points_enabled: gateway.basis_points_enabled,
                 max_retry_candidates: gateway.max_retry_candidates,
                 pool_routing: gateway.pool_routing,
                 default_service_tier: gateway.default_service_tier,
@@ -127,6 +129,8 @@ pub(super) fn local_configuration_preset(
             model_price_overrides: gateway.model_price_overrides,
             model_reasoning_allowed_levels: gateway.model_reasoning_allowed_levels,
             model_reasoning_allowed_levels_present: true,
+            model_context_policies: gateway.model_context_policies,
+            model_context_policies_present: true,
             model_service_tier_overrides: gateway.model_service_tier_overrides,
             model_display_order: gateway.model_display_order,
             model_service_tier_overrides_present: true,
@@ -175,8 +179,8 @@ pub fn preview_local_configuration_preset(
         )
     })?;
     let prepared = prepare_local_configuration_preset(&state, preset)?;
-    let base_revision = local_preset_revision(&prepared.current)?;
-    let changes = local_configuration_diff(&prepared.current, &prepared.target)?;
+    let base_revision = local_preset_revision(&prepared.existing)?;
+    let changes = local_configuration_diff(&prepared.existing, &prepared.target)?;
     Ok(Some(ConfigurationPresetPreview {
         base_revision,
         preset: prepared.resolved,
@@ -190,19 +194,19 @@ pub async fn apply_local_configuration_preset(
 ) -> CommandResult<ConfigurationPresetApplyResult> {
     let _mutation = state.setup_guard().await;
     let prepared = prepare_local_configuration_preset(&state, input.preset)?;
-    let current_revision = local_preset_revision(&prepared.current)?;
-    if input.base_revision != current_revision {
+    let existing_revision = local_preset_revision(&prepared.existing)?;
+    if input.base_revision != existing_revision {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "local configuration changed; preview the preset again",
         )
         .into());
     }
-    let changes = local_configuration_diff(&prepared.current, &prepared.target)?;
+    let changes = local_configuration_diff(&prepared.existing, &prepared.target)?;
     if changes.is_empty() {
         return Ok(ConfigurationPresetApplyResult {
-            previous_revision: current_revision.clone(),
-            revision: current_revision,
+            previous_revision: existing_revision.clone(),
+            revision: existing_revision,
             changes,
         });
     }
@@ -245,7 +249,7 @@ pub async fn apply_local_configuration_preset(
         let current_proxy_id = credential.as_ref().and_then(|credential| {
             credential
                 .proxy_url()
-                .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+                .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
         });
         let current_bypass = credential
             .as_ref()
@@ -259,6 +263,7 @@ pub async fn apply_local_configuration_preset(
         }
         account.account.enabled = rule.enabled;
         account.account.in_pool = rule.in_pool;
+        account.image_pool_enabled &= rule.in_pool;
         account.allowed_models = rule.allowed_models.clone();
         account.excluded_models = rule.excluded_models.clone();
         account.priority = rule.priority;
@@ -268,7 +273,7 @@ pub async fn apply_local_configuration_preset(
     let current_proxy_id = if old_gateway.common_proxy_configured {
         secret_store::load(COMMON_PROXY_SECRET_REF)?
             .as_deref()
-            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
     } else {
         None
     };
@@ -284,7 +289,6 @@ pub async fn apply_local_configuration_preset(
     if let Some(policy) = &settings.routing.tool_policy {
         gateway.tool_policy = policy.clone();
     }
-    gateway.basis_points_enabled = settings.routing.basis_points_enabled;
     gateway.pool_routing = settings.routing.pool_routing.clone();
     gateway.default_service_tier = settings.routing.default_service_tier;
     gateway.image_base_model = settings.routing.image_base_model.clone();
@@ -293,6 +297,7 @@ pub async fn apply_local_configuration_preset(
     gateway.hidden_models = settings.hidden_models.clone();
     gateway.model_price_overrides = settings.model_price_overrides.clone();
     gateway.model_reasoning_allowed_levels = settings.model_reasoning_allowed_levels.clone();
+    gateway.model_context_policies = settings.model_context_policies.clone();
     gateway.model_service_tier_overrides = settings.model_service_tier_overrides.clone();
     gateway.model_display_order = settings.model_display_order.clone();
     // Presets may change several scopes (including source routes and the
@@ -340,7 +345,7 @@ pub async fn apply_local_configuration_preset(
     }
     let revision = local_preset_revision(&prepared.target)?;
     Ok(ConfigurationPresetApplyResult {
-        previous_revision: current_revision,
+        previous_revision: existing_revision,
         revision,
         changes,
     })

@@ -1,39 +1,6 @@
 use super::*;
 
 #[test]
-fn moved_accounts_remain_stored_but_leave_local_routing() {
-    let mut moved = account_record("account-moved");
-    moved.account.in_pool = true;
-    let untouched = account_record("account-untouched");
-    let mut accounts = vec![moved, untouched.clone()];
-
-    let location = RemoteAccountLocation {
-        server_id: "server-one".into(),
-        remote_account_id: "account-remote".into(),
-    };
-    mark_local_accounts_moved(
-        &mut accounts,
-        &HashMap::from([("account-moved".to_string(), location.clone())]),
-    )
-    .unwrap();
-
-    assert!(!accounts[0].account.enabled);
-    assert!(!accounts[0].account.in_pool);
-    assert_eq!(accounts[0].remote_location, Some(location));
-    assert_eq!(accounts[1], untouched);
-    assert!(mark_local_accounts_moved(
-        &mut accounts,
-        &HashMap::from([(
-            "account-missing".to_string(),
-            RemoteAccountLocation {
-                server_id: "server-one".into(),
-                remote_account_id: "account-missing".into(),
-            },
-        )]),
-    )
-    .is_err());
-}
-#[test]
 fn revealable_identity_prefers_email_and_falls_back_to_provider_account() {
     let with_email = StoredCodexCredentials::new(
         "account_email",
@@ -121,97 +88,10 @@ fn selected_ids_are_validated_and_deduplicated_in_order() {
     assert!(normalize_selected_item_ids(vec!["../secret".into()]).is_err());
 }
 #[test]
-fn current_codex_profile_reads_only_its_auth_document() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-current-codex-import-{}",
-        Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    let content = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-current-key"}"#;
-    std::fs::write(root.join("auth.json"), content).unwrap();
-
-    let documents = current_codex_import_documents(&root, &[]).unwrap();
-
-    assert_eq!(documents, [content]);
-    std::fs::remove_dir_all(root).unwrap();
-}
-#[test]
-fn current_codex_profile_rejects_an_active_local_gateway_projection() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-managed-codex-import-{}",
-        Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join("auth.json"),
-        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-local-key"}"#,
-    )
-    .unwrap();
-    let binding = codex::ProfileBinding {
-        profile_dir: root.to_string_lossy().into_owned(),
-        credential_kind: codex::ProfileCredentialKind::LocalGateway,
-        credential_id: "local_gateway".into(),
-        bound_oauth_account_id: None,
-        active: true,
-    };
-
-    let error = current_codex_import_documents(&root, &[binding]).unwrap_err();
-
-    assert!(matches!(error.code, ErrorCode::Conflict));
-    std::fs::remove_dir_all(root).unwrap();
-}
-#[test]
-fn current_chatgpt_profile_visibility_requires_refreshable_oauth_identity() {
-    let oauth = parse_import(
-            r#"{"auth_mode":"chatgpt","account_id":"provider-current","access_token":"access-current","refresh_token":"refresh-current"}"#,
-            Some("auth.json"),
-            &[],
-        )
-        .unwrap();
-    let api_key = parse_import(
-        r#"{"auth_mode":"apikey","account_id":"provider-key","OPENAI_API_KEY":"key-current"}"#,
-        Some("auth.json"),
-        &[],
-    )
-    .unwrap();
-
-    assert!(is_usable_current_chatgpt_profile(&oauth, current_time_ms()));
-    assert!(!is_usable_current_chatgpt_profile(
-        &api_key,
-        current_time_ms()
-    ));
-}
-#[test]
-fn expired_local_access_metadata_does_not_hide_a_refreshable_chatgpt_profile() {
-    let payload = URL_SAFE_NO_PAD.encode(
-        serde_json::json!({
-            "exp": 1,
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": "provider-expired"
-            }
-        })
-        .to_string(),
-    );
-    let access_token = format!("header.{payload}.signature");
-    let parsed = parse_import(
-        &serde_json::json!({
-            "auth_mode": "chatgpt",
-            "account_id": "provider-expired",
-            "access_token": access_token,
-            "refresh_token": "refresh-expired-access-metadata"
-        })
-        .to_string(),
-        Some("auth.json"),
-        &[],
-    )
-    .unwrap();
-
-    assert!(is_usable_current_chatgpt_profile(&parsed, u64::MAX));
-}
-#[test]
 fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
     let credentials = StoredCodexCredentials::new(
-        "account_local",
+        &account_id,
         "access-private".into(),
         Some("refresh-private".into()),
         None,
@@ -226,6 +106,8 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
         false,
     )
     .unwrap();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    credential_store.save(&credentials).unwrap();
     let mut account = records::new_account_record(
         &credentials,
         AccountAuthMode::OAuth,
@@ -237,7 +119,7 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     apply_account_patch(
         &mut account,
         UpdateAccountInput {
-            account_id: "account_local".into(),
+            account_id: account_id.clone(),
             label: Some("  Personal  ".into()),
             priority: Some(7),
             weight: Some(2),
@@ -255,22 +137,51 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     assert_eq!(account.allowed_models, ["gpt-test"]);
     assert_eq!(account.excluded_models, ["gpt-old"]);
     assert_eq!(account.purchase_cost_micro_usd, Some(12_500_000));
+    assert!(account.account.in_pool);
+    assert!(account.image_pool_enabled);
     assert!(account.account.draining);
-    assert!(apply_account_patch(
+    assert!(
+        apply_account_patch(
+            &mut account,
+            UpdateAccountInput {
+                account_id: account_id.clone(),
+                label: None,
+                priority: None,
+                weight: Some(0),
+                allowed_models: None,
+                excluded_models: None,
+                in_pool: None,
+                draining: None,
+                purchase_cost_micro_usd: None,
+            },
+        )
+        .is_err()
+    );
+    credential_store.delete(&account_id).unwrap();
+}
+#[test]
+fn account_patch_cannot_join_pool_without_stored_credentials() {
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let mut account = account_record(&account_id);
+    let before = account.clone();
+    let error = apply_account_patch(
         &mut account,
         UpdateAccountInput {
-            account_id: "account_local".into(),
+            account_id,
             label: None,
             priority: None,
-            weight: Some(0),
+            weight: None,
             allowed_models: None,
             excluded_models: None,
-            in_pool: None,
+            in_pool: Some(true),
             draining: None,
             purchase_cost_micro_usd: None,
         },
     )
-    .is_err());
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidState);
+    assert_eq!(error.message, "stored ChatGPT credentials are missing");
+    assert_eq!(account, before);
 }
 #[test]
 fn deleting_account_prunes_explicit_selectors_without_rewriting_wake_state() {
@@ -302,10 +213,7 @@ fn bulk_delete_preflights_every_account_before_mutation() {
 }
 #[test]
 fn failed_delete_restores_credentials_quota_and_profile_binding() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-delete-rollback-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-delete-rollback");
     let profile = root.join("profile");
     std::fs::create_dir_all(&profile).unwrap();
     std::fs::write(profile.join("config.toml"), "model_provider = \"custom\"\n").unwrap();
@@ -364,185 +272,106 @@ fn failed_delete_restores_credentials_quota_and_profile_binding() {
     rollback_deleted_account_side_effects(
         &state,
         &credentials,
-        &account_id,
-        Some(&stored),
-        previous_wake,
-        old_automations,
-        &restored,
-        None,
+        &crate::local_pool::accounts::mutations::delete::PreparedAccountDelete {
+            provider_revoked: false,
+            old_credential: Some(stored.clone()),
+            previous_wake,
+            old_automations,
+            restored_bindings: restored,
+            previous_proxy_pool: None,
+        },
         &LocalPoolError::new(ErrorCode::Io, "injected delete failure"),
     )
     .unwrap();
 
     assert!(credentials.require(&account_id).is_ok());
-    assert!(state
-        .store()
-        .unwrap()
-        .ensure_account_refresh_current(&before_refresh)
-        .is_err());
-    assert!(state
-        .sync_account_quota_refresh(&account_id, current_time_ms())
-        .unwrap());
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .ensure_account_refresh_current(&before_refresh)
+            .is_err()
+    );
+    assert!(
+        state
+            .sync_account_quota_refresh(&account_id, current_time_ms())
+            .unwrap()
+    );
     assert_eq!(
         codex::account_bindings(&state.profile_backup_root())
             .unwrap()
             .len(),
         1
     );
-    assert!(std::fs::read_to_string(profile.join("auth.json"))
-        .unwrap()
-        .contains("access-private"));
+    assert!(
+        std::fs::read_to_string(profile.join("auth.json"))
+            .unwrap()
+            .contains("access-private")
+    );
 
     codex::restore_account_profile(&profile, &state.profile_backup_root()).unwrap();
     credentials.delete(&account_id).unwrap();
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
-#[tokio::test]
-async fn pre_authority_refresh_failure_restores_credentials_and_account_state() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-refresh-rollback-{}",
-        Uuid::new_v4().simple()
-    ));
+#[test]
+fn registered_account_projection_preserves_newer_tokens_and_reauth_state() {
+    let root = crate::files::test_temp_root("zenith-relay-authority-projection");
     let state = DesktopState::open(root.clone()).unwrap();
     let account_id = format!("account_{}", Uuid::new_v4().simple());
-    let previous = StoredCodexCredentials::new(
-        &account_id,
-        "access-before".into(),
+    let expected = TokenSet::new(
+        "access-before",
         Some("refresh-before".into()),
         None,
         Some(60_000),
+        100,
         1,
-        1,
-        None,
-        Some("provider-private".into()),
-        None,
-        None,
-        None,
-        false,
     )
     .unwrap();
-    let refreshed = StoredCodexCredentials::new(
-        &account_id,
-        "access-after".into(),
+    let authoritative = TokenSet::new(
+        "access-after",
         Some("refresh-after".into()),
         None,
         Some(120_000),
+        200,
         2,
-        2,
-        None,
-        Some("provider-private".into()),
-        None,
-        None,
-        None,
-        false,
     )
     .unwrap();
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    credentials.save(&previous).unwrap();
-    let old_record = records::new_account_record(
-        &previous,
-        AccountAuthMode::OAuth,
-        vec!["gpt-test".into()],
-        0,
-        1,
-    )
-    .unwrap();
-    state
-        .store()
-        .unwrap()
-        .upsert_account(old_record.clone())
-        .unwrap();
-    let old_accounts = {
-        let store = state.store().unwrap();
-        store.accounts().to_vec()
-    };
-    let previous_tokens = previous.to_token_set().unwrap();
-    state
-        .token_authority()
-        .register(
-            &account_id,
-            previous_tokens.clone(),
-            old_record.account.auth_state,
-        )
-        .await
-        .unwrap();
-
-    // Simulate a failure after the reversible credential and account writes,
-    // before TokenAuthority is updated.
-    credentials.save(&refreshed).unwrap();
-    let mut changed_record = old_record.clone();
-    changed_record.account.token_generation = refreshed.generation();
-    changed_record.account.token_updated_at_ms = Some(2);
-    state
-        .store()
-        .unwrap()
-        .upsert_account(changed_record)
-        .unwrap();
-
-    let error = rollback_force_refreshed_before_authority(
-        &state,
-        &credentials,
-        &account_id,
-        &previous,
-        &previous_tokens,
-        &refreshed.to_token_set().unwrap(),
-        &old_accounts,
-        "provider-private",
-        false,
-        LocalPoolError::new(ErrorCode::Io, "injected refresh failure"),
-    )
-    .await;
-
-    assert_eq!(error.code, ErrorCode::Io);
-    assert_eq!(
-        credentials.require(&account_id).unwrap().access_token(),
-        previous.access_token()
-    );
-    assert_eq!(
+    for (generation, updated_at_ms, auth_state) in [
+        (2, 200, AccountAuthState::Active),
+        (1, 101, AccountAuthState::Active),
+        (
+            1,
+            100,
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+        ),
+    ] {
+        let mut record = account_record(&account_id);
+        record.account.token_generation = generation;
+        record.account.token_updated_at_ms = Some(updated_at_ms);
+        record.account.auth_state = auth_state;
+        record.account.last_error_code = Some("newer_state".into());
         state
-            .token_authority()
-            .tokens(&account_id)
-            .await
+            .store()
             .unwrap()
-            .access_token(),
-        previous.access_token()
-    );
-    assert_eq!(
-        state.store().unwrap().account(&account_id),
-        Some(&old_record)
-    );
-
-    let mut newer_record = old_record.clone();
-    newer_record.account.token_generation = refreshed.generation().saturating_add(1);
-    newer_record.account.token_updated_at_ms = Some(3);
-    state
-        .store()
-        .unwrap()
-        .upsert_account(newer_record.clone())
+            .upsert_account(record.clone())
+            .unwrap();
+        reconcile_registered_account_record(
+            &state,
+            &account_id,
+            &expected,
+            &authoritative,
+            AccountAuthState::Active,
+        )
         .unwrap();
-    assert!(!restore_force_refreshed_account_record(
-        &state,
-        &account_id,
-        &refreshed.to_token_set().unwrap(),
-        &old_accounts,
-    )
-    .unwrap());
-    assert_eq!(
-        state.store().unwrap().account(&account_id),
-        Some(&newer_record)
-    );
-
-    credentials.delete(&account_id).unwrap();
+        assert_eq!(state.store().unwrap().account(&account_id), Some(&record));
+    }
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-refresh-watchdog-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-refresh-watchdog");
     let state = DesktopState::open(root.clone()).unwrap();
     let account_id = format!("account_{}", Uuid::new_v4().simple());
     let mut record = account_record(&account_id);
@@ -568,7 +397,7 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
     )
     .unwrap();
 
-    reconcile_force_refreshed_account_record(
+    reconcile_registered_account_record(
         &state,
         &account_id,
         &attempted,
@@ -594,6 +423,7 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
 #[test]
 fn prepared_credentials_debug_output_is_redacted() {
     let prepared = PreparedAccountCredentials {
+        oauth_client_kind: Default::default(),
         tokens: TokenSet::new(
             "access-private",
             Some("refresh-private".into()),

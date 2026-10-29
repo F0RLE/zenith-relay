@@ -2,7 +2,7 @@ import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 for (const theme of ["light", "dark"] as const) {
-  for (const mode of ["local", "remote"] as const) {
+  for (const mode of ["local"] as const) {
     test(`${mode} ${theme} model switches match settings and support keyboard changes`, async ({ page }) => {
       await installTauriMock(page, { mode, theme, locale: "en", populated: true });
       await page.goto("/");
@@ -25,14 +25,10 @@ for (const theme of ["light", "dark"] as const) {
       await page.keyboard.press("Escape");
       await page.screenshot({ path: `output/playwright/switches-${mode}-${theme}.png` });
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+      await expect(page.locator(".relay-shell")).toHaveClass(/sidebar-collapsed/);
       await expect(toggle).toBeInViewport();
       await page.screenshot({ path: `output/playwright/switches-${mode}-${theme}-mobile.png` });
-      const settingsPage = mode === "remote" ? await page.context().newPage() : page;
-      if (mode === "remote") {
-        await installTauriMock(settingsPage, { mode: "local", theme, locale: "en", populated: true });
-        await settingsPage.goto("/");
-      }
+      const settingsPage = page;
       await settingsPage.getByRole("button", { name: "Settings", exact: true }).click();
       const settingsSwitch = settingsPage.locator(".setting-toggle input").first();
       await expect(settingsSwitch).toBeVisible();

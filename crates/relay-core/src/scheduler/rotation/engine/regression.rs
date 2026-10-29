@@ -1,5 +1,72 @@
 use super::*;
 
+#[test]
+fn account_health_failures_remain_isolated_by_model_and_protocol_route() {
+    let mut candidate = member("a");
+    candidate.add_route("messages:text", "text-model", RotationOperation::Text);
+    candidate.add_route("responses:other", "other-model", RotationOperation::Text);
+    let mut engine = engine(&["b"]);
+    engine.upsert(candidate).unwrap();
+    fail(&mut engine, "a", 1, 0);
+    assert!(
+        engine
+            .health
+            .contains_key(&("a".into(), "responses:text".into()))
+    );
+    for (id, route, model) in [
+        ("a", "messages:text", "text-model"),
+        ("a", "responses:other", "other-model"),
+        ("b", "responses:text", "text-model"),
+    ] {
+        assert!(!engine.health.contains_key(&(id.into(), route.into())));
+        let request = RotationRequest::new(RequestId(2), route, model).with_owner(id);
+        assert!(matches!(
+            engine.candidate_availability(&request, id, 0),
+            CandidateAvailability::Ready { .. }
+        ));
+    }
+}
+
+#[test]
+fn cancelling_one_dispatched_lease_never_releases_or_penalizes_a_live_peer() {
+    let mut engine = engine(&[]);
+    engine
+        .upsert(member("a").with_capacity("shared", 2))
+        .unwrap();
+    let first = engine.reserve(&request(1), 0).unwrap();
+    let second = engine.reserve(&request(2), 0).unwrap();
+    let mut first_budget = RequestBudget::default_for(first.request_id);
+    let mut second_budget = RequestBudget::default_for(second.request_id);
+    engine
+        .begin_dispatch(first.lease_id, &mut first_budget)
+        .unwrap();
+    engine
+        .begin_dispatch(second.lease_id, &mut second_budget)
+        .unwrap();
+    assert_eq!(engine.active_leases(), 2);
+    engine.cancel(first.lease_id, &first_budget, 1).unwrap();
+    assert_eq!(engine.active_leases(), 1);
+    assert!(engine.cancel(first.lease_id, &first_budget, 2).is_err());
+    assert_eq!(engine.active_leases(), 1);
+    assert!(engine.health.is_empty());
+    engine
+        .settle(
+            second.lease_id,
+            AttemptObservation {
+                execution: ExecutionObservation::accepted(),
+                health: HealthObservation::Success,
+            },
+            &second_budget,
+            3,
+        )
+        .unwrap();
+    assert_eq!(engine.active_leases(), 0);
+    assert_eq!(
+        engine.health[&("a".into(), "responses:text".into())].failure_score_milli,
+        0
+    );
+}
+
 fn request(id: u64) -> RotationRequest {
     RotationRequest::new(RequestId(id), "responses:text", "text-model")
 }
@@ -60,13 +127,15 @@ fn exact_route_binding_does_not_cross_product_model_or_operation() {
     let invalid = RotationRequest::new(RequestId(1), "responses:text", "image-model")
         .with_operation(RotationOperation::Image);
     assert_eq!(engine.select(&invalid, 0), None);
-    assert!(engine
-        .select(
-            &RotationRequest::new(RequestId(2), "images:image", "image-model")
-                .with_operation(RotationOperation::Image),
-            0
-        )
-        .is_some());
+    assert!(
+        engine
+            .select(
+                &RotationRequest::new(RequestId(2), "images:image", "image-model")
+                    .with_operation(RotationOperation::Image),
+                0
+            )
+            .is_some()
+    );
     assert_eq!(
         engine.select(&request(3).with_operation(RotationOperation::Metadata), 0),
         None
@@ -95,20 +164,28 @@ fn runtime_capacity_is_finite_and_shrink_preserves_every_live_lease() {
 #[test]
 fn old_identity_release_does_not_decrement_new_identity_load() {
     let mut engine = engine(&["a"]);
-    let old = engine.reserve(&request(1), 0).unwrap();
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
     engine.remove("a").unwrap();
     engine
         .upsert(member("a").with_capacity("new-resource", 1))
         .unwrap();
-    let new = engine.reserve(&request(2), 0).unwrap();
+    let replacement_lease = engine.reserve(&request(2), 0).unwrap();
     engine
-        .cancel(old.lease_id, &RequestBudget::default_for(old.request_id), 0)
+        .cancel(
+            previous_lease.lease_id,
+            &RequestBudget::default_for(previous_lease.request_id),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.in_flight("a"), 1);
     assert_eq!(engine.capacity_in_flight("new-resource"), 1);
     assert!(engine.reserve(&request(3), 0).is_err());
     engine
-        .cancel(new.lease_id, &RequestBudget::default_for(new.request_id), 0)
+        .cancel(
+            replacement_lease.lease_id,
+            &RequestBudget::default_for(replacement_lease.request_id),
+            0,
+        )
         .unwrap();
     assert_eq!(engine.active_leases(), 0);
 }
@@ -280,14 +357,14 @@ fn upsert_and_equal_or_older_quota_revision_cannot_clear_provider_blocks() {
 }
 
 #[test]
-fn automatic_uses_normalized_load_and_in_order_skips_busy_members() {
+fn automatic_uses_normalized_load_and_failover_skips_busy_members() {
     let mut engine = engine(&[]);
     engine.upsert(member("a").with_capacity("a", 1)).unwrap();
     engine.upsert(member("b").with_capacity("b", 4)).unwrap();
     engine.reserve(&request(1).with_owner("a"), 0).unwrap();
     engine.reserve(&request(2).with_owner("b"), 0).unwrap();
     assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "b");
-    engine.set_mode(RotationMode::InOrder);
+    engine.set_mode(RotationMode::Failover);
     assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "b");
     assert_eq!(
         engine.select(
@@ -301,7 +378,7 @@ fn automatic_uses_normalized_load_and_in_order_skips_busy_members() {
 #[test]
 fn aliases_neither_double_weight_nor_accumulate_absent_debt() {
     let mut engine = engine(&["a", "b"]);
-    engine.set_mode(RotationMode::RoundRobin);
+    engine.set_mode(RotationMode::WeightedRoundRobin);
     engine
         .upsert(member("a-alias").with_capacity("a", 0))
         .unwrap();
@@ -395,10 +472,10 @@ fn long_separated_failures_do_not_accumulate_forever() {
 #[test]
 fn outcomes_from_a_closed_incident_cannot_join_a_later_incident() {
     let mut engine = engine(&["a"]);
-    let old = engine.reserve(&request(1), 0).unwrap();
-    let mut old_budget = RequestBudget::default_for(old.request_id);
+    let previous_lease = engine.reserve(&request(1), 0).unwrap();
+    let mut previous_budget = RequestBudget::default_for(previous_lease.request_id);
     engine
-        .begin_dispatch(old.lease_id, &mut old_budget)
+        .begin_dispatch(previous_lease.lease_id, &mut previous_budget)
         .unwrap();
     let success = engine.reserve(&request(2), 0).unwrap();
     outcome(&mut engine, success, HealthObservation::Success, 0);
@@ -406,16 +483,48 @@ fn outcomes_from_a_closed_incident_cannot_join_a_later_incident() {
     let before = engine.circuit("a", "responses:text");
     engine
         .settle(
-            old.lease_id,
+            previous_lease.lease_id,
             AttemptObservation {
                 execution: ExecutionObservation::not_sent(),
                 health: HealthObservation::CountableTransient {
                     provider_not_before_ms: None,
                 },
             },
-            &old_budget,
+            &previous_budget,
             2,
         )
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:text"), before);
+}
+
+#[test]
+fn fresh_authorization_and_other_route_success_do_not_reset_a_model_rate_deadline() {
+    let mut engine = engine(&["a"]);
+    let mut candidate = member("a");
+    candidate.add_route("responses:other", "other-model", RotationOperation::Text);
+    engine.upsert(candidate.clone()).unwrap();
+    engine.sync_candidate_route_rate(
+        "a",
+        "responses:text",
+        RateState::Limited { not_before_ms: 800 },
+    );
+    engine.set_auth("a", AuthState::NeedsRefresh);
+    // A new bearer restores authorization, independently of the provider rate limit.
+    engine.set_auth("a", AuthState::Ready);
+    candidate.weight = 10;
+    engine.upsert(candidate).unwrap();
+    let other = RotationRequest::new(RequestId(10), "responses:other", "other-model");
+    let lease = engine.reserve(&other, 1).unwrap();
+    outcome(&mut engine, lease, HealthObservation::Success, 2);
+    assert_eq!(
+        engine.candidate_availability(&request(11), "a", 799),
+        CandidateAvailability::WaitUntil {
+            at_ms: 800,
+            reason: CandidateBlockReason::RateLimited
+        }
+    );
+    assert!(matches!(
+        engine.candidate_availability(&request(12), "a", 800),
+        CandidateAvailability::Ready { .. }
+    ));
 }

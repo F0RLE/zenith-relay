@@ -373,7 +373,8 @@ async fn retry_budget_counts_execution_attempts_and_stops_before_third_source() 
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
     assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     assert!(state_c.requests.lock().unwrap().is_empty());
-    assert_eq!(events.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(usage_observations::physical_attempts(&events).len(), 2);
 }
 
 #[tokio::test]
@@ -406,7 +407,7 @@ async fn exhausted_retry_preserves_a_safe_gateway_error_message() {
     assert_eq!(body["error"]["code"], "service_unavailable");
     assert_eq!(
         body["error"]["message"],
-        "no eligible source is available for this model"
+        "Provider: no eligible source is available for this model"
     );
     assert!(!body.to_string().contains(&upstream.base_url));
     assert_eq!(state.requests.lock().unwrap().len(), 1);

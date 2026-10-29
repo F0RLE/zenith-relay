@@ -3,7 +3,7 @@ use super::super::{
     credentials::StoredCodexCredentials,
     import_session::{SecretBackend, SecretBackendError},
 };
-use super::lock::{ensure_lock_dir, lock_path, LockOwner};
+use super::lock::{LockOwner, ensure_lock_dir, lock_path};
 use super::*;
 use std::fs;
 use std::future::Future;
@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
     AccountAuthState, PrepareStatus, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
@@ -26,25 +26,34 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
+mod rotation_persistence;
+
 #[derive(Default)]
 struct MemorySecrets {
     values: Mutex<HashMap<String, String>>,
     fail_save: AtomicBool,
+    fail_primary_save: AtomicBool,
+    fail_load: AtomicBool,
 }
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
-        if self.fail_save.load(Ordering::SeqCst) {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
+        if self.fail_save.load(Ordering::SeqCst)
+            || (self.fail_primary_save.load(Ordering::SeqCst) && !secret_ref.ends_with("-rotation"))
+        {
             return Err(SecretBackendError);
         }
         self.values
             .lock()
             .unwrap()
-            .insert(secret_ref.into(), value.into());
+            .insert(secret_ref.into(), secret_value.into());
         Ok(())
     }
 
     fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError> {
+        if self.fail_load.load(Ordering::SeqCst) {
+            return Err(SecretBackendError);
+        }
         Ok(self.values.lock().unwrap().get(secret_ref).cloned())
     }
 
@@ -65,6 +74,7 @@ impl CodexRefreshClient for RefreshOnce {
         provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
+        _kind: super::super::oauth::OAuthClientKind,
     ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -169,6 +179,94 @@ async fn twenty_concurrent_refreshes_make_one_network_rotation() {
 }
 
 #[tokio::test]
+async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() {
+    use super::super::oauth::{OAuthClientKind, siwc::SiwcRegistration};
+    use zenith_relay_core::accounts::ReauthReason;
+    let root = temp_root("siwc-recovery-state");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    let registration = SiwcRegistration {
+        client_id: "oaiapp_synthetic".into(),
+        host_id: "urn:uuid:synthetic-host".into(),
+        issuer: "https://auth.openai.com".into(),
+        subject: "synthetic-subject".into(),
+        scopes: vec!["resource.invoke".into(), "chatgpt.tokens.use.direct".into()],
+        earliest_refresh_at_ms: None,
+        requires_reauthentication: false,
+    };
+    let initial = StoredCodexCredentials::new(
+        "siwc_account",
+        "old-access".into(),
+        Some("old-refresh".into()),
+        None,
+        Some(1),
+        0,
+        0,
+        None,
+        Some(registration.identity_key()),
+        Some(registration.subject.clone()),
+        None,
+        None,
+        false,
+    )
+    .unwrap()
+    .with_oauth_client_kind(OAuthClientKind::Siwc)
+    .with_siwc_registration(Some(registration))
+    .unwrap();
+    store.save(&initial).unwrap();
+    store.checkpoint_token_rotation(&initial, None).unwrap();
+    let client = Arc::new(RefreshOnce {
+        calls: AtomicUsize::new(0),
+    });
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client.clone(),
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    let metadata = Arc::new(CaptureMetadata::default());
+    let persistence = CredentialPersistence::new(store.clone(), metadata.clone(), root.clone());
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register(
+            "siwc_account",
+            initial.to_token_set().unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    for now in [10, 20, 30] {
+        assert_eq!(
+            authority
+                .prepare_and_persist("siwc_account", now, 0, &adapter, &persistence)
+                .await
+                .unwrap_err(),
+            TokenAuthorityError::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired)
+        );
+    }
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        *metadata.auth_states.lock().unwrap(),
+        vec![(
+            "siwc_account".into(),
+            AccountAuthState::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired)
+        )]
+    );
+    assert!(
+        store
+            .require("siwc_account")
+            .unwrap()
+            .matches_snapshot(&initial)
+    );
+    assert_eq!(
+        store.recover_token_rotation(&initial).unwrap_err().code,
+        super::super::credentials::CredentialErrorCode::RotationOutcomeUnknown
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn stale_lock_is_recovered_and_owner_cleanup_is_safe() {
     let root = temp_root("stale");
     let locks = ProcessAccountLocks::with_config(root.clone(), fast_lock_config()).unwrap();
@@ -262,6 +360,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
             _provider_account_id: Option<&'a str>,
             _refresh_token: &'a str,
             now_ms: u64,
+            _kind: super::super::oauth::OAuthClientKind,
         ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
         {
             Box::pin(async move {
@@ -280,8 +379,8 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
 
     let root = temp_root("removed-slot-refresh");
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
-    let old = expired_credentials();
-    store.save(&old).unwrap();
+    let expired_account = expired_credentials();
+    store.save(&expired_account).unwrap();
     let client = Arc::new(PausedRefresh {
         entered: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
@@ -305,7 +404,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
     authority
         .register(
             "relay_account_1",
-            old.to_token_set().unwrap(),
+            expired_account.to_token_set().unwrap(),
             AccountAuthState::Active,
         )
         .await
@@ -338,10 +437,12 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
             .unwrap(),
         Err(TokenAuthorityError::AccountNotFound)
     ));
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -382,10 +483,12 @@ async fn pending_token_persistence_cannot_write_into_a_readded_account() {
             .unwrap(),
         Err(TokenAuthorityError::PersistenceFailed(_))
     ));
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -394,7 +497,8 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
     const TEST_KEY: &str = "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
     let root = temp_root("replaced-agent-task");
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
-    let old = AgentIdentityCredential::unregistered(TEST_KEY.into(), "old-runtime".into()).unwrap();
+    let previous_identity =
+        AgentIdentityCredential::unregistered(TEST_KEY.into(), "old-runtime".into()).unwrap();
     let replacement = StoredCodexCredentials::new_agent_identity(
         "relay_account_1",
         AgentIdentityCredential::unregistered(TEST_KEY.into(), "new-runtime".into()).unwrap(),
@@ -414,14 +518,18 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
         Arc::new(CaptureMetadata::default()),
         root.clone(),
     );
-    assert!(persistence
-        .persist_agent_task_id_for_identity("relay_account_1", &old, "old-task")
-        .await
-        .is_err());
-    assert!(store
-        .require("relay_account_1")
-        .unwrap()
-        .matches_snapshot(&replacement));
+    assert!(
+        persistence
+            .persist_agent_task_id_for_identity("relay_account_1", &previous_identity, "old-task")
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&replacement)
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -457,6 +565,269 @@ fn expired_credentials() -> StoredCodexCredentials {
         false,
     )
     .unwrap()
+}
+
+struct RetryRefresh {
+    calls: AtomicUsize,
+    failure_kind: TokenRefreshFailureKind,
+}
+
+impl CodexRefreshClient for RetryRefresh {
+    fn refresh<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        _provider_account_id: Option<&'a str>,
+        _refresh_token: &'a str,
+        now_ms: u64,
+        _kind: super::super::oauth::OAuthClientKind,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(TokenRefreshFailure::new(
+                    self.failure_kind,
+                    "synthetic_refresh_failure",
+                ));
+            }
+            CredentialRefresh::new(
+                "new-access".into(),
+                Some("new-refresh".into()),
+                None,
+                Some(now_ms + 60_000),
+            )
+            .map_err(|_| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_fixture")
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn transient_refresh_backoff_survives_adapter_restart_grows_and_clears_on_success() {
+    let root = temp_root("persisted-refresh-backoff");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    store.save(&expired_credentials()).unwrap();
+    let client = Arc::new(RetryRefresh {
+        calls: AtomicUsize::new(0),
+        failure_kind: TokenRefreshFailureKind::Transient,
+    });
+    for (now_ms, expected_code) in [
+        (1_000, "synthetic_refresh_failure"),
+        (2_000, "token_refresh_backoff"),
+        (10_000, "synthetic_refresh_failure"),
+        (16_000, "token_refresh_backoff"),
+    ] {
+        // Recreate the adapter and reread the vault on every attempt.
+        let adapter = StoredRefreshAdapter::with_lock_config(
+            root.clone(),
+            store.clone(),
+            client.clone(),
+            0,
+            fast_lock_config(),
+        )
+        .unwrap();
+        assert_eq!(
+            adapter
+                .refresh("relay_account_1", "ignored", now_ms)
+                .await
+                .err()
+                .unwrap()
+                .code,
+            expected_code
+        );
+        let saved = store.require("relay_account_1").unwrap();
+        assert_eq!(saved.access_token(), "old-access-secret");
+        assert_eq!(saved.generation(), 7);
+    }
+    assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client,
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    assert!(
+        adapter
+            .refresh("relay_account_1", "ignored", 30_000)
+            .await
+            .is_ok()
+    );
+    let saved = store.require("relay_account_1").unwrap();
+    assert!(!saved.refresh_is_paused(30_000));
+    assert_eq!(saved.generation(), 8);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn usable_tokens_and_new_login_are_not_blocked_by_refresh_backoff() {
+    let root = temp_root("refresh-backoff-valid-token");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    let usable = expired_credentials()
+        .apply_refresh(
+            CredentialRefresh::new("usable-access".into(), None, None, Some(60_000)).unwrap(),
+            1,
+        )
+        .unwrap();
+    store
+        .save(&usable.clone().with_refresh_failure(1_000))
+        .unwrap();
+    let client = Arc::new(RetryRefresh {
+        calls: AtomicUsize::new(0),
+        failure_kind: TokenRefreshFailureKind::Transient,
+    });
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client.clone(),
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    assert!(
+        adapter
+            .refresh("relay_account_1", "ignored", 2_000)
+            .await
+            .is_ok()
+    );
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    store.save(&expired_credentials()).unwrap();
+    assert_eq!(
+        adapter
+            .refresh("relay_account_1", "ignored", 2_000)
+            .await
+            .err()
+            .unwrap()
+            .code,
+        "synthetic_refresh_failure"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn terminal_grant_errors_do_not_become_retry_backoff() {
+    let root = temp_root("refresh-backoff-terminal");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    let previous = expired_credentials();
+    store.save(&previous).unwrap();
+    let client = Arc::new(RetryRefresh {
+        calls: AtomicUsize::new(0),
+        failure_kind: TokenRefreshFailureKind::InvalidGrant,
+    });
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client,
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    assert_eq!(
+        adapter
+            .refresh("relay_account_1", "ignored", 1_000)
+            .await
+            .err()
+            .unwrap()
+            .kind,
+        TokenRefreshFailureKind::InvalidGrant
+    );
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&previous)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn refresh_backoff_is_bounded_and_tolerates_stale_request_timestamps() {
+    let mut saved = expired_credentials();
+    for _ in 0..100 {
+        saved = saved.with_refresh_failure(1_000_000);
+    }
+    assert!(saved.refresh_is_paused(999_999));
+    assert!(saved.refresh_is_paused(1_299_999));
+    assert!(!saved.refresh_is_paused(1_300_000));
+    assert!(!saved.refresh_is_paused(0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_failed_refreshes_share_the_persisted_pause() {
+    let root = temp_root("concurrent-refresh-backoff");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    store.save(&expired_credentials()).unwrap();
+    let client = Arc::new(RetryRefresh {
+        calls: AtomicUsize::new(0),
+        failure_kind: TokenRefreshFailureKind::Transient,
+    });
+    let adapter = Arc::new(
+        StoredRefreshAdapter::with_lock_config(
+            root.clone(),
+            store,
+            client.clone(),
+            0,
+            fast_lock_config(),
+        )
+        .unwrap(),
+    );
+    let mut tasks = Vec::new();
+    for _ in 0..20 {
+        let adapter = adapter.clone();
+        tasks.push(tokio::spawn(async move {
+            assert!(
+                adapter
+                    .refresh("relay_account_1", "ignored", 1_000)
+                    .await
+                    .is_err()
+            );
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn failed_backoff_persistence_preserves_credentials_and_reports_storage_failure() {
+    let root = temp_root("refresh-backoff-storage-failure");
+    let backend = Arc::new(MemorySecrets::default());
+    let store = CredentialStore::new(backend.clone());
+    let previous = expired_credentials();
+    store.save(&previous).unwrap();
+    backend.fail_save.store(true, Ordering::SeqCst);
+    let client = Arc::new(RetryRefresh {
+        calls: AtomicUsize::new(0),
+        failure_kind: TokenRefreshFailureKind::Transient,
+    });
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client,
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    let error = adapter
+        .refresh("relay_account_1", "ignored", 1_000)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.kind, TokenRefreshFailureKind::Transient);
+    assert_eq!(
+        error.code,
+        zenith_relay_core::error_codes::CREDENTIAL_PERSIST_FAILED
+    );
+    assert!(
+        store
+            .require("relay_account_1")
+            .unwrap()
+            .matches_snapshot(&previous)
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 async fn readd_replacement(
@@ -501,9 +872,78 @@ fn fast_lock_config() -> ProcessLockConfig {
     }
 }
 
+#[tokio::test]
+async fn invalid_grant_after_new_authorization_reads_the_new_credentials() {
+    struct ReplacedGrant {
+        store: CredentialStore<MemorySecrets>,
+    }
+    impl CodexRefreshClient for ReplacedGrant {
+        fn refresh<'a>(
+            &'a self,
+            _local_account_id: &'a str,
+            _provider_account_id: Option<&'a str>,
+            _refresh_token: &'a str,
+            now_ms: u64,
+            _kind: super::super::oauth::OAuthClientKind,
+        ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let current = self.store.require("relay_account_1").unwrap();
+                let updated = current
+                    .apply_refresh(
+                        CredentialRefresh::new(
+                            "synthetic-login-access".into(),
+                            Some("synthetic-login-refresh".into()),
+                            None,
+                            Some(now_ms + 60_000),
+                        )
+                        .unwrap(),
+                        now_ms,
+                    )
+                    .unwrap();
+                self.store.save(&updated).unwrap();
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::InvalidGrant,
+                    "invalid_grant",
+                ))
+            })
+        }
+    }
+    let root = temp_root("invalid-grant-new-login");
+    let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
+    let initial = expired_credentials();
+    store.save(&initial).unwrap();
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        Arc::new(ReplacedGrant {
+            store: store.clone(),
+        }),
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register(
+            "relay_account_1",
+            initial.to_token_set().unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    let refreshed = authority
+        .prepare("relay_account_1", 10, 0, &adapter)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.tokens.access_token(), "synthetic-login-access");
+    assert_eq!(
+        store.require("relay_account_1").unwrap().refresh_token(),
+        Some("synthetic-login-refresh")
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temp_root(label: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("zenith-relay-authority-{label}-{}", Uuid::new_v4()));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("authority-{label}"))
 }

@@ -70,11 +70,32 @@ impl GatewayRuntime {
         lease: &CandidateLease,
         observation: crate::scheduler::rotation::AttemptObservation,
         cooldown: Option<CooldownRequest<'_>>,
+        shared_bucket: Option<[u8; 32]>,
         now_ms: u64,
     ) {
         let _ = lease.settle_rotation_with(observation, now_ms, |scheduler| {
             if let Some(request) = cooldown {
-                self.apply_cooldown_locked(scheduler, lease.candidate_id(), request);
+                let shared_bucket = shared_bucket.filter(|_| {
+                    self.is_basis_points_account(lease.candidate_id())
+                        && request.reason == crate::scheduler::CooldownReason::RateLimit
+                        && request.scope != "*"
+                });
+                if let Some(bucket) = shared_bucket {
+                    use sha2::{Digest, Sha256};
+                    let account = &self.chatgpt_accounts[lease.candidate_id()];
+                    let mut digest = Sha256::new();
+                    digest.update(account.basis_points_url.as_str().as_bytes());
+                    digest.update([0]);
+                    digest.update(bucket);
+                    scheduler.observe_shared_rate_limit(
+                        lease.candidate_id(),
+                        digest.finalize().into(),
+                        request,
+                        now_ms,
+                    );
+                } else {
+                    self.apply_cooldown_locked(scheduler, lease.candidate_id(), request);
+                }
             }
         });
     }
@@ -85,31 +106,9 @@ impl GatewayRuntime {
         candidate_id: &str,
         request: CooldownRequest<'_>,
     ) -> bool {
-        let applied = scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request);
-        if applied {
-            if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-                let resource_failure = request.reason
-                    == crate::scheduler::CooldownReason::RateLimit
-                    || (request.scope == "*"
-                        && request.reason == crate::scheduler::CooldownReason::Mandatory);
-                let upstream = binding.adapter.upstream_protocol(binding.wire_api);
-                for (id, sibling) in &self.source_candidate_bindings {
-                    if id != candidate_id
-                        && sibling.source_id == binding.source_id
-                        && (resource_failure
-                            || sibling.adapter.upstream_protocol(sibling.wire_api) == upstream)
-                    {
-                        scheduler.set_cooldown_with_reason(
-                            id,
-                            request.scope,
-                            request.retry_at_ms,
-                            request.reason,
-                        );
-                    }
-                }
-            }
-        }
-        applied
+        // All source protocol routes share the candidate's physical quota,
+        // activity and cooldown. No sibling candidate needs synchronization.
+        scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request)
     }
 
     pub(crate) fn failure_state_for(

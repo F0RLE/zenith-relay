@@ -1,7 +1,8 @@
 use super::super::*;
 use super::messages::first_message_terminal;
 use super::telemetry::{
-    record_connect_affinity_miss, record_connect_failure_with_hint, record_connect_rejection,
+    record_connect_affinity_miss, record_connect_failure_with_outcome, record_connect_repair,
+    record_identifier_repair,
 };
 use super::{ConnectProgress, ConnectScope};
 
@@ -35,10 +36,15 @@ pub(super) fn handle_initial_terminal(
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
         _ => None,
     });
+    let (status, category) = resolved_terminal_failure(&terminal);
+    if category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+        // Forward the original terminal frame and let the bridge settle it.
+        // A turn limit must not enter any history repair or candidate retry.
+        return Ok(TerminalAction::Proceed);
+    }
     if continue_after_item_prefix_repair(terminal_body, scope, progress) {
         return Ok(TerminalAction::Continue);
     }
-    let (status, category) = resolved_terminal_failure(&terminal);
     if continue_after_legacy_call_links(terminal_body, scope, progress) {
         return Ok(TerminalAction::Continue);
     }
@@ -99,10 +105,10 @@ fn continue_after_item_prefix_repair(
     let lease = scope.lease;
     let tried = &mut *progress.tried;
     let repairs = &mut *progress.repairs;
-    let repaired = terminal_body.is_some_and(|body| {
+    let repaired = terminal_body.is_some_and(|terminal_body_bytes| {
         repair_responses_item_prefixes(
-            scope.request.value_mut(),
-            body,
+            scope.request.request_body_mut(),
+            terminal_body_bytes,
             true,
             &mut ResponsesItemPrefixRepairs {
                 function_ids: &mut repairs.function_item_id,
@@ -121,6 +127,7 @@ fn continue_after_item_prefix_repair(
     // failure. Settling the terminal first would mark the outcome unknown
     // and stop this retry.
     lease.settle_rotation_repair(now_ms());
+    record_identifier_repair(&scope.trace());
     *progress.last_failure = None;
     true
 }
@@ -140,6 +147,7 @@ fn continue_after_legacy_call_links(
     progress.repairs.legacy_call_id = true;
     progress.tried.remove(&scope.route.candidate_id);
     scope.lease.settle_rotation_repair(now_ms());
+    record_identifier_repair(&scope.trace());
     true
 }
 
@@ -189,11 +197,11 @@ fn continue_after_stale_tool_history(
     let key = scope.key;
     let recovered = !progress.repairs.stale_tool_history
         && scope.request.has_previous_response_id()
-        && terminal_body.is_some_and(|body| {
-            super::super::super::errors::responses_tool_call_is_missing_output(body)
+        && terminal_body.is_some_and(|terminal_body_bytes| {
+            super::super::super::errors::responses_tool_call_is_missing_output(terminal_body_bytes)
                 && scope
                     .request
-                    .recover_stale_tool_history(runtime, &key.id, body)
+                    .recover_stale_tool_history(runtime, &key.id, terminal_body_bytes)
         });
     if !recovered {
         return false;
@@ -258,16 +266,18 @@ fn continue_after_cache_write_rejection(
     if !terminal_body.is_some_and(super::super::super::errors::prompt_cache_write_rejected) {
         return false;
     }
-    scope
-        .runtime
-        .invalidate_prompt_affinity(scope.request.prompt_affinity_key.as_deref());
+    scope.runtime.invalidate_prompt_affinity(
+        scope.request.prompt_affinity_key.as_deref(),
+        &scope.route.candidate_id,
+    );
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
-    record_connect_failure_with_hint(
+    record_connect_failure_with_outcome(
         &scope.trace(),
         &failure,
         Some(&terminal.headers),
         terminal.body_hint,
+        Some(crate::AttemptOutcome::RetrySelection),
     );
     *progress.last_failure = Some(failure);
     true
@@ -299,11 +309,12 @@ fn retry_initial_terminal(
             .invalidate_response_affinity(scope.request.response_affinity_key.as_deref());
         record_connect_affinity_miss(&scope.trace(), status);
     } else {
-        record_connect_failure_with_hint(
+        record_connect_failure_with_outcome(
             &scope.trace(),
             &failure,
             Some(&terminal.headers),
             terminal.body_hint,
+            Some(crate::AttemptOutcome::RetrySelection),
         );
         if scope.response_affinity_hit && !scope.request.requires_affinity_owner {
             scope.request.response_affinity_key = None;
@@ -338,7 +349,7 @@ fn remember_terminal_rejection(
 ) {
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
-    record_connect_rejection(&scope.trace(), &failure);
+    record_connect_repair(&scope.trace(), &failure);
     scope.lease.settle_rotation_repair(now_ms());
     *progress.last_failure = Some(failure);
 }

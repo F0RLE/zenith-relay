@@ -1,18 +1,100 @@
 use super::*;
 use serde_json::json;
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+#[tokio::test]
+async fn unchanged_and_failed_refreshes_share_data_without_changing_old_snapshots() {
+    let directory = crate::test_support::temp_root("pricing-shared");
+    let store = PricingCacheStore::new(directory.join("catalog.json"));
+    let envelope = PricingCacheEnvelope::new(json!({"openai/synthetic":{"litellm_provider":"openai","input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}), "revision".into(), 1).unwrap();
+    store.write(&envelope).unwrap();
+    let loader = PricingCatalogLoader::open(store.path()).unwrap();
+    let original = loader.snapshot();
+    let source = loader
+        .envelope
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .payload
+        .clone();
+    let same = loader.catalog_for_envelope(&envelope).unwrap();
+    assert!(Arc::ptr_eq(&same.entries, &original.entries));
+    assert_eq!(
+        loader.refresh_failed::<()>(PricingError::Network),
+        Err(PricingError::Network)
+    );
+    assert!(!original.stale);
+    let stale = loader.snapshot();
+    assert!(stale.stale);
+    assert!(Arc::ptr_eq(&stale.entries, &original.entries));
+    assert!(Arc::ptr_eq(
+        &source,
+        &loader.envelope.read().unwrap().as_ref().unwrap().payload
+    ));
+    let response = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .header("etag", "synthetic-v2")
+            .body("")
+            .unwrap(),
+    );
+    assert!(matches!(
+        loader.accept_not_modified(response).await.unwrap(),
+        CatalogRefreshOutcome::NotModified { .. }
+    ));
+    let refreshed = loader.snapshot();
+    assert!(!refreshed.stale);
+    assert!(stale.stale);
+    assert!(Arc::ptr_eq(&refreshed.entries, &original.entries));
+    assert!(Arc::ptr_eq(&refreshed.unique, &original.unique));
+    assert!(Arc::ptr_eq(&refreshed.lookup, &original.lookup));
+    assert_eq!(
+        store.read().unwrap().unwrap().etag.as_deref(),
+        Some("synthetic-v2")
+    );
+    let mut changed = envelope.clone();
+    changed.payload["openai/synthetic"]["input_cost_per_token"] = json!(0.000003);
+    changed.payload_sha256 = super::super::payload_hash(&changed.payload).unwrap();
+    changed.validate().unwrap();
+    let updated = loader.catalog_for_envelope(&changed).unwrap();
+    assert!(!Arc::ptr_eq(&updated.entries, &original.entries));
+    assert_ne!(
+        updated.resolve_account("synthetic", Some("openai")).quote,
+        original.resolve_account("synthetic", Some("openai")).quote
+    );
+    let invalid = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .header("etag", "x".repeat(2048))
+            .body("")
+            .unwrap(),
+    );
+    assert_eq!(
+        loader.accept_not_modified(invalid).await,
+        Err(PricingError::InvalidCache)
+    );
+    assert_eq!(
+        store.read().unwrap().unwrap().etag.as_deref(),
+        Some("synthetic-v2")
+    );
+    let cold = PricingCatalogLoader::open(directory.join("missing.json")).unwrap();
+    let response = reqwest::Response::from(
+        axum::http::Response::builder()
+            .status(304)
+            .body("")
+            .unwrap(),
+    );
+    assert_eq!(
+        cold.accept_not_modified(response).await,
+        Err(PricingError::InvalidCache)
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
 
 #[test]
 fn cache_store_round_trips_and_rejects_corrupt_data() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-test");
     let store = PricingCacheStore::new(directory.join("litellm.json"));
     let envelope = PricingCacheEnvelope::new(
         json!({"gpt-test": {"input_cost_per_token": "0.000001", "output_cost_per_token": "0.000002"}}),
@@ -36,14 +118,7 @@ fn stale_detection_is_monotonic() {
 
 #[test]
 fn cache_store_skips_an_identical_envelope() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-unchanged-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-unchanged");
     let store = PricingCacheStore::new(directory.join("litellm.json"));
     let envelope = PricingCacheEnvelope::new(
         json!({
@@ -85,14 +160,7 @@ fn explicit_stale_marker_forces_refresh_even_with_a_fresh_timestamp() {
 
 #[test]
 fn refresh_failure_persists_stale_marker_for_the_next_startup() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-stale-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-stale-test");
     let path = directory.join("litellm.json");
     let store = PricingCacheStore::new(&path);
     let envelope = PricingCacheEnvelope::new(
@@ -167,14 +235,7 @@ fn retry_backoff_progresses_and_reset_allows_an_immediate_attempt() {
 
 #[test]
 fn retry_deadline_precedes_the_daily_schedule_and_is_not_jittered() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-retry-deadline-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-retry-deadline");
     let loader = PricingCatalogLoader::open(directory.join("litellm.json")).unwrap();
     let now = 10_000;
 
@@ -194,14 +255,7 @@ fn retry_deadline_precedes_the_daily_schedule_and_is_not_jittered() {
 fn loader_with_fresh_test_cache(
     prefix: &str,
 ) -> (std::path::PathBuf, std::sync::Arc<PricingCatalogLoader>) {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-{prefix}-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root(&format!("pricing-{prefix}"));
     let path = directory.join("litellm.json");
     let envelope = PricingCacheEnvelope::new(
         json!({
@@ -276,14 +330,7 @@ async fn failed_manual_refresh_wakes_waiters_after_retry_state_is_recorded() {
 
 #[test]
 fn startup_check_precedes_ttl_and_then_daily_schedule_controls_refresh() {
-    let directory = std::env::temp_dir().join(format!(
-        "zenith-relay-pricing-due-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = crate::test_support::temp_root("pricing-due");
     let path = directory.join("litellm.json");
     let payload = json!({
         "gpt-test": {

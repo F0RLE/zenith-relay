@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::{fmt, fs, path::PathBuf};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
-    parse_import, ImportError, ImportErrorCode, ImportPreview, ParsedImportItem,
+    ImportError, ImportErrorCode, ImportPreview, ParsedImportItem, parse_import,
 };
 use zenith_relay_core::unix_time_ms;
 
@@ -15,17 +15,17 @@ mod snapshot;
 mod tests;
 
 use snapshot::{
-    parse_stable, prepared_secret_ref, prepared_snapshot_path, preview_value, read_snapshot,
-    remove_snapshot_file, secret_ref, selectable_row_count, session_from_parsed, snapshot_path,
-    snapshot_temp_path, validate_preview, validate_session_id, write_snapshot_new, SessionSnapshot,
-    SNAPSHOT_VERSION,
+    SNAPSHOT_VERSION, SessionSnapshot, parse_stable, prepared_secret_ref, prepared_snapshot_path,
+    preview_value, read_snapshot, remove_snapshot_file, secret_ref, selectable_row_count,
+    session_from_parsed, snapshot_path, snapshot_temp_path, validate_preview, validate_session_id,
+    write_snapshot_new,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SecretBackendError;
 
 pub trait SecretBackend {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError>;
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError>;
     fn delete(&self, secret_ref: &str) -> Result<(), SecretBackendError>;
 }

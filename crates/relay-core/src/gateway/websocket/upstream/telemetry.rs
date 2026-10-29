@@ -15,7 +15,17 @@ pub(super) fn record_connect_failure_with_hint(
     headers: Option<&HeaderMap>,
     hint: RateLimitBodyHint,
 ) {
-    let state = match headers {
+    record_connect_failure_with_outcome(trace, failure, headers, hint, None);
+}
+
+pub(super) fn record_connect_failure_with_outcome(
+    trace: &ConnectTrace<'_>,
+    failure: &GatewayFailure,
+    headers: Option<&HeaderMap>,
+    hint: RateLimitBodyHint,
+    outcome: Option<crate::AttemptOutcome>,
+) {
+    let failure_state = match headers {
         Some(headers) => settle_classified_failure(
             trace.runtime,
             trace.lease,
@@ -40,29 +50,60 @@ pub(super) fn record_connect_failure_with_hint(
         failure.status.as_u16(),
         Some(failure.category.to_string()),
     );
-    apply_failure_state(&mut event, state);
+    apply_failure_state(&mut event, failure_state);
     event.upstream_error = failure.upstream_error.as_deref().cloned();
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = outcome;
+    }
     emit_usage(trace.runtime, event);
 }
 
 pub(super) fn record_connect_affinity_miss(trace: &ConnectTrace<'_>, status: StatusCode) {
-    emit_usage(
-        trace.runtime,
-        connect_usage(
-            trace,
-            status.as_u16(),
-            Some(error_codes::RESPONSE_AFFINITY_MISS.to_string()),
-        ),
+    let mut event = connect_usage(
+        trace,
+        status.as_u16(),
+        Some(error_codes::RESPONSE_AFFINITY_MISS.to_string()),
     );
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+    }
+    emit_usage(trace.runtime, event);
 }
 
-pub(super) fn record_connect_rejection(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+pub(super) fn record_connect_repair(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+    record_connect_rejection_with_outcome(trace, failure, crate::AttemptOutcome::RetryRepair);
+}
+
+pub(super) fn record_connect_returned_failure(trace: &ConnectTrace<'_>, failure: &GatewayFailure) {
+    record_connect_rejection_with_outcome(trace, failure, crate::AttemptOutcome::ReturnedFailure);
+}
+
+fn record_connect_rejection_with_outcome(
+    trace: &ConnectTrace<'_>,
+    failure: &GatewayFailure,
+    outcome: crate::AttemptOutcome,
+) {
     let mut event = connect_usage(
         trace,
         failure.status.as_u16(),
         Some(failure.category.to_string()),
     );
     event.upstream_error = failure.upstream_error.as_deref().cloned();
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(outcome);
+    }
+    emit_usage(trace.runtime, event);
+}
+
+pub(super) fn record_identifier_repair(trace: &ConnectTrace<'_>) {
+    let mut event = connect_usage(
+        trace,
+        400,
+        Some(error_codes::UPSTREAM_INVALID_REQUEST.to_string()),
+    );
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+    }
     emit_usage(trace.runtime, event);
 }
 

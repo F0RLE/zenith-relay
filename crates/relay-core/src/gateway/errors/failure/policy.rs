@@ -18,7 +18,10 @@ pub(crate) fn retryable_failure(
     category: &str,
     has_previous_response_id: bool,
 ) -> bool {
-    if !failure_category_requires_cooldown(category) {
+    if super::rejection_execution(status, category).certainty
+        != crate::scheduler::rotation::ExecutionCertainty::NotSent
+        || !failure_category_requires_cooldown(category)
+    {
         return false;
     }
     if category == error_codes::UPSTREAM_CANDIDATE_REJECTED {
@@ -79,6 +82,7 @@ pub(crate) fn failure_category_affects_account_state(category: &str) -> bool {
         && !matches!(
             category,
             error_codes::UPSTREAM_MODEL_NOT_FOUND
+                | error_codes::UPSTREAM_EDGE_CHALLENGE
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
@@ -89,6 +93,8 @@ pub(crate) fn failure_category_affects_account_state(category: &str) -> bool {
                 | error_codes::UPSTREAM_UNAVAILABLE
                 | error_codes::UPSTREAM_GATEWAY_TIMEOUT
                 | error_codes::IMAGE_GENERATION_NOT_ENABLED
+                | error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID
+                | error_codes::ADAPTER_UPSTREAM_STREAM_INVALID
         )
 }
 
@@ -96,6 +102,11 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
     matches!(
         category,
         error_codes::UPSTREAM_TOOL_CALL_MISMATCH
+            | error_codes::HTTP_HEADERS_TIMEOUT
+            | error_codes::HTTP_SEND_START_TIMEOUT
+            | error_codes::STREAM_EVENT_TOO_LARGE
+            | error_codes::UPSTREAM_TURN_RATE_LIMITED
+            | error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE
             | error_codes::UPSTREAM_CONTEXT_TOO_LARGE
             | error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID
             | error_codes::UPSTREAM_INSTRUCTIONS_REQUIRED
@@ -103,6 +114,7 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
             | error_codes::UPSTREAM_PAYLOAD_TOO_LARGE
             | error_codes::UPSTREAM_UNSUPPORTED_REQUEST
             | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
+            | error_codes::UPSTREAM_WEBSOCKET_HANDSHAKE_REJECTED
             | error_codes::UPSTREAM_INVALID_REQUEST
     )
 }

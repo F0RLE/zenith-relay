@@ -42,11 +42,7 @@ pub fn system_language_is_russian() -> bool {
 }
 
 pub fn ui_text(en: &'static str, ru: &'static str) -> &'static str {
-    if system_language_is_russian() {
-        ru
-    } else {
-        en
-    }
+    if system_language_is_russian() { ru } else { en }
 }
 
 pub fn default_codex_home() -> PathBuf {
@@ -54,7 +50,7 @@ pub fn default_codex_home() -> PathBuf {
 }
 
 pub fn default_opencode_config_path() -> PathBuf {
-    if let Some(path) = env::var_os("OPENCODE_CONFIG").filter(|value| !value.is_empty()) {
+    if let Some(path) = env::var_os("OPENCODE_CONFIG").filter(|path_text| !path_text.is_empty()) {
         return PathBuf::from(path);
     }
     // OpenCode uses `xdg-basedir` on every platform. In particular, its
@@ -76,7 +72,7 @@ fn opencode_config_directory(xdg_config_home: Option<OsString>, home: PathBuf) -
 fn existing_opencode_config(directory: &Path) -> PathBuf {
     ["opencode.jsonc", "opencode.json", "config.json"]
         .iter()
-        .map(|name| directory.join(name))
+        .map(|config_file_name| directory.join(config_file_name))
         .find(|path| path.is_file())
         .unwrap_or_else(|| directory.join("opencode.json"))
 }
@@ -85,11 +81,15 @@ pub fn resolve_codex_home() -> Result<PathBuf, String> {
     resolve_codex_home_from(env::var_os("CODEX_HOME"), user_home())
 }
 
-fn resolve_codex_home_from(value: Option<OsString>, home: PathBuf) -> Result<PathBuf, String> {
-    let Some(value) = value.filter(|value| !value.is_empty()) else {
+fn resolve_codex_home_from(
+    configured_home: Option<OsString>,
+    home: PathBuf,
+) -> Result<PathBuf, String> {
+    let Some(configured_home) = configured_home.filter(|home_path_text| !home_path_text.is_empty())
+    else {
         return Ok(home.join(".codex"));
     };
-    let configured = PathBuf::from(value);
+    let configured = PathBuf::from(configured_home);
     let metadata = fs::metadata(&configured).map_err(|error| {
         format!(
             "CODEX_HOME must point to an existing directory ({}): {error}",
@@ -137,11 +137,13 @@ pub fn relay_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[cfg(debug_assertions)]
-fn relay_dir_override(value: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
-    let Some(value) = value else {
+fn relay_dir_override(
+    override_value: Option<std::ffi::OsString>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(override_value) = override_value else {
         return Ok(None);
     };
-    let root = PathBuf::from(value);
+    let root = PathBuf::from(override_value);
     if !root.is_absolute() {
         return Err("ZENITH_RELAY_DEV_DATA_DIR must be an absolute path".to_string());
     }
@@ -256,7 +258,7 @@ mod tests {
 
     #[test]
     fn codex_home_uses_an_existing_override_and_canonicalizes_it() {
-        let root = std::env::temp_dir().join(format!("zenith-codex-home-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("codex-home-existing");
         let nested = root.join("nested");
         fs::create_dir_all(&nested).unwrap();
         let resolved = resolve_codex_home_from(Some(nested.clone().into()), root.clone()).unwrap();
@@ -266,8 +268,7 @@ mod tests {
 
     #[test]
     fn codex_home_rejects_a_missing_or_file_override() {
-        let root = std::env::temp_dir().join(format!("zenith-codex-home-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::files::test_temp_root("codex-home-invalid");
         assert!(resolve_codex_home_from(Some(root.join("missing").into()), root.clone()).is_err());
         let file = root.join("file");
         fs::write(&file, "x").unwrap();
@@ -290,9 +291,7 @@ mod tests {
 
     #[test]
     fn opencode_config_prefers_the_file_open_code_loads_first() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-opencode-config-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+        let root = crate::files::test_temp_root("opencode-config");
         let json = root.join("opencode.json");
         let jsonc = root.join("opencode.jsonc");
         fs::write(&json, "{}").unwrap();

@@ -1,11 +1,151 @@
 use super::*;
 
 #[test]
+fn generic_cache_write_catalog_updates_reprice_history_without_a_ttl_migration() {
+    let root = crate::files::test_temp_root("relay-generic-cache-price");
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    for (id, ttl) in [
+        ("unspecified", None),
+        ("provider-window", Some("17m".into())),
+    ] {
+        database
+            .record(&aggregate_test_event(id, 1, 100, 40, ttl, 10))
+            .unwrap();
+    }
+    let context = PricingContext::default();
+    for (write_rate, expected) in [(0.0000025, 640), (0.0000031, 688)] {
+        let catalog = PricingCatalog::from_litellm_payload(
+            &serde_json::json!({"model":{
+                "litellm_provider":"openai", "input_cost_per_token":0.000002,
+                "output_cost_per_token":0.00001, "cache_creation_input_token_cost":write_rate
+            }}),
+            Some(format!("synthetic-price-{write_rate}")),
+            Some(1),
+            false,
+        )
+        .unwrap();
+        let equivalents = database
+            .api_equivalents_with_pricing(&catalog, &context)
+            .unwrap();
+        let value = equivalents.sources.get("source").unwrap();
+        assert_eq!(value.micro_usd, expected);
+        assert_eq!(value.unpriced_tokens, 0);
+    }
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn context_band_sql_matches_request_boundaries() {
+    use zenith_relay_core::usage::{USAGE_CONTEXT_BAND_SQL, UsageContextBand};
+    let connection = Connection::open_in_memory().unwrap();
+    let query = format!("SELECT {USAGE_CONTEXT_BAND_SQL} FROM (SELECT ?1 AS input_tokens)");
+    for tokens in [None, Some(0)].into_iter().chain(
+        [100_000, 128_000, 200_000, 272_000, 512_000]
+            .into_iter()
+            .flat_map(|boundary| [Some(boundary), Some(boundary + 1)]),
+    ) {
+        let label: String = connection
+            .query_row(&query, [tokens.map(sql_u64)], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            label,
+            UsageContextBand::from_input_tokens(tokens).as_label()
+        );
+    }
+}
+
+#[test]
+fn context_band_migration_reclassifies_retained_usage_and_preserves_archives() {
+    let root = crate::files::test_temp_root("relay-context-bands");
+    let path = root.join("usage.sqlite");
+    let database = TelemetryDb::open(&path).unwrap();
+    for id in ["retained", "archived"] {
+        database
+            .record(&aggregate_test_event(
+                id,
+                1,
+                110_000,
+                20,
+                Some("5m".into()),
+                50,
+            ))
+            .unwrap();
+    }
+    // Recreate schema 31's single base bucket for both requests; one raw log
+    // has already been removed by retention and cannot be reclassified.
+    database
+        .lock_connection()
+        .unwrap()
+        .execute_batch(
+            "DROP VIEW usage_sends;
+         ALTER TABLE request_logs DROP COLUMN image_usage_json;
+         DROP TABLE request_attempts;
+         DROP TRIGGER request_attempts_retention;
+         DELETE FROM request_logs WHERE request_id = 'archived';
+         UPDATE usage_candidate_rollups SET context_band = 'base';
+         DROP TABLE app_state_items;
+         DROP TABLE weekly_capacity_anchors;
+         DROP TABLE weekly_capacity_history;
+         PRAGMA user_version = 31;",
+        )
+        .unwrap();
+    drop(database);
+    type Bands = Vec<(String, i64, i64)>;
+    let read_bands = |database: &TelemetryDb| -> Bands {
+        let connection = database.lock_connection().unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT context_band, input_tokens, cache_write_5m_tokens
+             FROM usage_candidate_rollups WHERE input_samples > 0 ORDER BY context_band",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let database = TelemetryDb::open(&path).unwrap();
+    assert_eq!(
+        read_bands(&database),
+        vec![
+            ("above_100k".into(), 110_000, 20),
+            ("base".into(), 110_000, 20)
+        ]
+    );
+    database
+        .record(&aggregate_test_event(
+            "retained",
+            2,
+            130_000,
+            30,
+            Some("5m".into()),
+            50,
+        ))
+        .unwrap();
+    let expected = vec![
+        ("above_100k".into(), 110_000, 20),
+        ("above_128k".into(), 130_000, 30),
+        ("base".into(), 110_000, 20),
+    ];
+    assert_eq!(read_bands(&database), expected);
+    drop(database);
+    let database = TelemetryDb::open(&path).unwrap();
+    assert_eq!(read_bands(&database), expected);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-equivalent-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-equivalent");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let event = UsageEvent {
         request_id: "req_equivalent".into(),
@@ -22,6 +162,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -43,8 +184,30 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         total_tokens: Some(28),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     };
     database.record(&event).unwrap();
+    let report = database.usage_page(&UsageQuery::default()).unwrap();
+    let row = &report.events[0];
+    assert_eq!(row.api_equivalent.micro_usd, 148);
+    assert_eq!(
+        row.api_equivalent_breakdown
+            .uncached_input
+            .unwrap()
+            .micro_usd,
+        25
+    );
+    assert_eq!(
+        row.api_equivalent_breakdown.cache_read.unwrap().micro_usd,
+        3
+    );
+    assert_eq!(row.api_equivalent_breakdown.input.unwrap().micro_usd, 28);
+    assert_eq!(row.api_equivalent_breakdown.output.unwrap().micro_usd, 120);
+    let serialized = serde_json::to_value(row).unwrap();
+    assert_eq!(
+        serialized["apiEquivalentBreakdown"]["cacheRead"]["microUsd"],
+        3
+    );
     let equivalents = database.api_equivalents().unwrap();
     assert_eq!(
         equivalents.accounts.get("account_1"),
@@ -60,10 +223,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
 }
 #[test]
 fn custom_price_revalues_existing_unknown_model_usage() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-custom-price-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-custom-price");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let event = private_model_source_event("req_custom_price", "source_1");
     database.record(&event).unwrap();
@@ -85,6 +245,7 @@ fn custom_price_revalues_existing_unknown_model_usage() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 10_000_000,
+            ..Default::default()
         },
     )]);
     let page = database
@@ -108,10 +269,7 @@ fn custom_price_revalues_existing_unknown_model_usage() {
 }
 #[test]
 fn source_prices_are_applied_before_same_model_usage_is_merged() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-usage-source-prices-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-usage-source-prices");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     let mut event = private_model_source_event("req_source_cheap", "source_cheap");
     database.record(&event).unwrap();
@@ -131,6 +289,7 @@ fn source_prices_are_applied_before_same_model_usage_is_merged() {
         cache_write_5m_micro_usd_per_million: None,
         cache_write_1h_micro_usd_per_million: None,
         output_micro_usd_per_million: output,
+        ..Default::default()
     };
     let source_prices = BTreeMap::from([
         (
@@ -208,10 +367,7 @@ fn usage_speed_rollup_ignores_buffered_outliers() {
 }
 #[test]
 fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_economics() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-account-purchase-cost-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-account-purchase-cost");
     let path = root.join("usage.sqlite");
     let database = TelemetryDb::open(&path).unwrap();
     database
@@ -245,13 +401,36 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .lock()
         .unwrap()
         .execute_batch(
-            "ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
+            "DROP VIEW usage_sends;
+                 DROP INDEX request_logs_usage_reads;
+                 DROP INDEX request_attempts_usage_reads;
+                 DROP INDEX request_logs_account_usage_reads;
+                 DROP INDEX request_attempts_account_usage_reads;
+                 CREATE INDEX request_logs_account_created_idx ON request_logs(account_id, created_at);
+                 ALTER TABLE request_logs DROP COLUMN image_usage_json;
+                 DROP INDEX request_logs_unaggregated;
+                 ALTER TABLE request_logs DROP COLUMN cache_write_ttl;
                  ALTER TABLE request_logs DROP COLUMN usage_aggregate_recorded;
                  ALTER TABLE request_logs DROP COLUMN client_context_id;
                  ALTER TABLE request_logs DROP COLUMN upstream_error_json;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_5m_tokens;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN cache_write_1h_tokens;
-                 ALTER TABLE usage_candidate_rollups DROP COLUMN unknown_cache_write_tokens;",
+                 ALTER TABLE request_logs DROP COLUMN transport;
+                 DROP TABLE usage_candidate_rollups;
+                 CREATE TABLE usage_candidate_rollups (
+                     candidate_kind TEXT NOT NULL,
+                     candidate_id TEXT NOT NULL,
+                     model TEXT NOT NULL,
+                     input_tokens INTEGER NOT NULL DEFAULT 0,
+                     input_samples INTEGER NOT NULL DEFAULT 0,
+                     cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                     cached_input_samples INTEGER NOT NULL DEFAULT 0,
+                     cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+                     cache_write_input_samples INTEGER NOT NULL DEFAULT 0,
+                     output_tokens INTEGER NOT NULL DEFAULT 0,
+                     output_samples INTEGER NOT NULL DEFAULT 0,
+                     total_tokens INTEGER NOT NULL DEFAULT 0,
+                     total_samples INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY(candidate_kind, candidate_id, model)
+                 ) WITHOUT ROWID;",
         )
         .unwrap();
     database
@@ -259,6 +438,12 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
         .lock()
         .unwrap()
         .pragma_update(None, "user_version", 23)
+        .unwrap();
+    database
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TABLE request_attempts; DROP TRIGGER request_attempts_retention; DROP TABLE app_state_items; DROP TABLE weekly_capacity_anchors; DROP TABLE weekly_capacity_history;")
         .unwrap();
     drop(database);
 
@@ -282,9 +467,11 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
     assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
     assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
     assert!(accounts[3].get("purchaseCostMicroUsd").is_none());
-    assert!(accounts
-        .iter()
-        .all(|account| account.get("economics").is_none()));
+    assert!(
+        accounts
+            .iter()
+            .all(|account| account.get("economics").is_none())
+    );
     let version: u32 = database
         .connection
         .lock()
@@ -300,11 +487,13 @@ fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_ec
     assert_eq!(accounts[0]["purchaseCostMicroUsd"], 42_000_000);
     assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
     assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
-    assert!(accounts
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|account| account.get("economics").is_none()));
+    assert!(
+        accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account.get("economics").is_none())
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -43,18 +43,19 @@ async fn manual_auth_recovery_restores_health_but_preserves_disables() {
 }
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         authority::AccountMetadataSink,
         credentials::{CredentialStore, StoredCodexCredentials},
-        records, NativeSecretBackend,
+        records,
     },
     state::DesktopState,
     store::secret_store,
 };
 use std::{path::PathBuf, sync::Arc};
 use zenith_relay_core::{
+    CandidateHealth, GatewayRuntime,
     accounts::{AccountAuthMode, AccountAuthState, ReauthReason},
     protocol::OperationalStatus,
-    CandidateHealth, GatewayRuntime,
 };
 
 struct ReviewPool {
@@ -100,9 +101,11 @@ async fn membership_scope_preserves_disable_drain_and_removal() {
             .upsert_account(blocked.clone())
             .unwrap();
         assert!(apply_account_policy_if_running(&pool.state, &blocked).await);
-        assert!(refresh_local_gateway_key_scope_if_running(&pool.state)
-            .await
-            .unwrap());
+        assert!(
+            refresh_local_gateway_key_scope_if_running(&pool.state)
+                .await
+                .unwrap()
+        );
         assert!(pool.models().await.is_empty());
 
         pool.state
@@ -113,9 +116,11 @@ async fn membership_scope_preserves_disable_drain_and_removal() {
         assert!(apply_account_policy_if_running(&pool.state, &original).await);
         if !in_pool {
             // Rejoining changes authorization; recovering availability does not.
-            assert!(refresh_local_gateway_key_scope_if_running(&pool.state)
-                .await
-                .unwrap());
+            assert!(
+                refresh_local_gateway_key_scope_if_running(&pool.state)
+                    .await
+                    .unwrap()
+            );
         }
         assert_eq!(pool.models().await, ["gpt-review"]);
     }
@@ -152,10 +157,12 @@ async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_mem
             .await
             .unwrap();
     assert!(hot);
-    assert!(removed
-        .accounts
-        .iter()
-        .all(|account| !account.account.in_pool));
+    assert!(
+        removed
+            .accounts
+            .iter()
+            .all(|account| !account.account.in_pool)
+    );
     assert!(pool.models().await.is_empty());
     assert!(Arc::ptr_eq(
         &pool.runtime,
@@ -170,10 +177,12 @@ async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_mem
     .unwrap();
     assert!(hot);
     assert_eq!(refresh_ids, vec![pool.ids[0].clone()]);
-    assert!(joined
-        .accounts
-        .iter()
-        .any(|account| account.account.id == pool.ids[0] && account.account.in_pool));
+    assert!(
+        joined
+            .accounts
+            .iter()
+            .any(|account| account.account.id == pool.ids[0] && account.account.in_pool)
+    );
     assert_eq!(pool.models().await, ["gpt-review"]);
     assert!(Arc::ptr_eq(
         &pool.runtime,
@@ -183,11 +192,10 @@ async fn desktop_membership_batch_keeps_the_live_runtime_and_rejects_missing_mem
 }
 
 #[tokio::test]
-async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
+async fn desktop_common_proxy_fence_targets_only_inheriting_accounts() {
     let pool = ReviewPool::new().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let affected =
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap();
+    let affected = super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap();
     assert_eq!(affected, pool.ids);
 
     let second = credentials.require(&pool.ids[1]).unwrap();
@@ -197,23 +205,14 @@ async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
         .unwrap();
     credentials.save(&explicit).unwrap();
     assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap(),
         [pool.ids[0].clone()]
     );
-    assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
-        [pool.ids[0].clone()]
-    );
-
     let bypassed = second.with_proxy_route(None, true).unwrap();
     credentials.save(&bypassed).unwrap();
     assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, false).unwrap(),
+        super::gateway::settings::accounts_inheriting_common_proxy(&pool.state).unwrap(),
         [pool.ids[0].clone()]
-    );
-    assert_eq!(
-        super::gateway::settings::accounts_without_explicit_proxy(&pool.state, true).unwrap(),
-        pool.ids
     );
     pool.close().await;
 }
@@ -221,12 +220,21 @@ async fn desktop_proxy_fence_targets_inherited_and_bypassed_accounts() {
 impl ReviewPool {
     async fn new() -> Self {
         let unique = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("relay-rotation-review-{unique}"));
+        let root = crate::files::test_temp_root("rotation-review");
         let state = DesktopState::open(root.clone()).unwrap();
         let ids = [format!("review-a-{unique}"), format!("review-b-{unique}")];
         let now = current_time_ms();
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         for id in &ids {
+            let registration = crate::local_pool::accounts::oauth::siwc::SiwcRegistration {
+                client_id: "oaiapp_synthetic_rotation".into(),
+                host_id: "urn:uuid:synthetic-rotation".into(),
+                issuer: "https://auth.openai.com".into(),
+                subject: id.clone(),
+                scopes: vec!["resource.invoke".into(), "chatgpt.tokens.use.direct".into()],
+                earliest_refresh_at_ms: None,
+                requires_reauthentication: false,
+            };
             let secret = StoredCodexCredentials::new(
                 id,
                 "synthetic-access".into(),
@@ -236,12 +244,15 @@ impl ReviewPool {
                 now,
                 1,
                 None,
-                Some(id.clone()),
-                None,
+                Some(registration.identity_key()),
+                Some(registration.subject.clone()),
                 None,
                 Some("plus".into()),
                 false,
             )
+            .unwrap()
+            .with_oauth_client_kind(zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc)
+            .with_siwc_registration(Some(registration))
             .unwrap();
             credentials.save(&secret).unwrap();
             let mut record = records::new_account_record(
@@ -346,9 +357,11 @@ async fn recovered_account_remains_authorized_after_scope_refresh() {
         .persist_auth_state(&pool.ids[0], AccountAuthState::Error)
         .await
         .unwrap();
-    assert!(refresh_local_gateway_key_scope_if_running(&pool.state)
-        .await
-        .unwrap());
+    assert!(
+        refresh_local_gateway_key_scope_if_running(&pool.state)
+            .await
+            .unwrap()
+    );
 
     // A successful background check restores A without changing its model inventory.
     let previous = pool
@@ -400,9 +413,11 @@ async fn recovered_account_remains_authorized_after_scope_refresh() {
         .upsert_account(removed.clone())
         .unwrap();
     assert!(apply_account_policy_if_running(&pool.state, &removed).await);
-    assert!(refresh_local_gateway_key_scope_if_running(&pool.state)
-        .await
-        .unwrap());
+    assert!(
+        refresh_local_gateway_key_scope_if_running(&pool.state)
+            .await
+            .unwrap()
+    );
     let after_removal = pool.models().await;
     pool.close().await;
 
@@ -440,12 +455,14 @@ async fn refreshed_models_keep_desktop_runtime_and_live_candidate_block() {
         .unwrap()
         .upsert_account(updated.clone())
         .unwrap();
-    assert!(pool
-        .runtime
-        .set_candidate_cooldown(&pool.ids[0], "*", current_time_ms() + 60_000));
-    assert!(pool
-        .runtime
-        .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked));
+    assert!(
+        pool.runtime
+            .set_candidate_cooldown(&pool.ids[0], "*", current_time_ms() + 60_000)
+    );
+    assert!(
+        pool.runtime
+            .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked)
+    );
     sync_refreshed_account_or_rollback(&pool.state, previous, updated, true)
         .await
         .unwrap();
@@ -464,13 +481,15 @@ async fn refreshed_models_keep_desktop_runtime_and_live_candidate_block() {
             .unwrap()
             .available
     );
-    assert!(pool
-        .runtime
-        .set_candidate_health(&pool.ids[0], CandidateHealth::Healthy));
+    assert!(
+        pool.runtime
+            .set_candidate_health(&pool.ids[0], CandidateHealth::Healthy)
+    );
     assert_eq!(pool.models().await, ["gpt-new"]);
-    assert!(pool
-        .runtime
-        .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked));
+    assert!(
+        pool.runtime
+            .set_candidate_health(&pool.ids[0], CandidateHealth::Blocked)
+    );
     let unchanged = pool
         .state
         .store()

@@ -1,7 +1,7 @@
 //! Synthetic contention through the real reservation queue, without provider I/O.
 
 use super::*;
-use futures_util::{poll, stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, poll, stream::FuturesUnordered};
 
 #[tokio::test(start_paused = true)]
 async fn mixed_text_and_image_waiters_remain_bounded_and_principal_fair() {
@@ -45,10 +45,11 @@ async fn run_mixed_waiters(per_principal: usize) {
             waiter.budget.retain_input_bytes(8 * 1024);
             expected_retained += waiter.retained_bytes();
             let runtime = &runtime;
+            let enqueued_at = std::time::Instant::now();
             pending.push(async move {
                 let budget = waiter.budget.clone();
                 let admitted = runtime.admit(waiter, now).await;
-                (principal, budget, admitted)
+                (principal, budget, admitted, enqueued_at.elapsed())
             });
         }
     }
@@ -60,7 +61,9 @@ async fn run_mixed_waiters(per_principal: usize) {
 
     let started = std::time::Instant::now();
     let mut served = [0usize; 3];
-    while let Some((principal, budget, admitted)) = pending.next().await {
+    let mut queue_wait_ns = Vec::new();
+    while let Some((principal, budget, admitted, waited)) = pending.next().await {
+        queue_wait_ns.push(waited.as_nanos());
         let (_, lease) = admitted.expect("a queued, compatible route remains available");
         served[principal] += 1;
         // Each principal had waiters from the start. The queue may select the
@@ -84,10 +87,19 @@ async fn run_mixed_waiters(per_principal: usize) {
         enqueue_elapsed,
         started.elapsed()
     );
+    queue_wait_ns.sort_unstable();
+    eprintln!(
+        "admission_wait_ns p50={} p95={} p99={}",
+        queue_wait_ns[queue_wait_ns.len() / 2],
+        queue_wait_ns[queue_wait_ns.len() * 95 / 100],
+        queue_wait_ns[queue_wait_ns.len() * 99 / 100],
+    );
     assert_eq!(served, [per_principal; 3]);
     assert_eq!(queued(&runtime), (0, 0));
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.active_request_count == 0));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.active_request_count == 0)
+    );
 }

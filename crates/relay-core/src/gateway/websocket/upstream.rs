@@ -14,14 +14,25 @@ use std::collections::HashSet;
 use super::super::execution::AttemptRepairs;
 use super::*;
 
+pub(in crate::gateway::websocket) use messages::first_message_terminal;
 #[cfg(test)]
-pub(in crate::gateway::websocket) use messages::initial_payloads_are_empty_incomplete;
 pub(in crate::gateway::websocket) use messages::{
-    first_message_terminal, message_serves_rejected_model,
+    initial_payloads_are_empty_incomplete, message_serves_rejected_model,
 };
 pub(in crate::gateway::websocket) use session::{
-    await_while_client_connected, connect_upstream_while_client_connected,
+    await_while_client_connected, connect_transport_while_client_connected,
+    connect_upstream_while_client_connected,
 };
+
+pub(super) enum ConnectedTransport {
+    Websocket(Box<Connected>),
+    Http(Box<HttpFallback>),
+}
+
+pub(super) struct HttpFallback {
+    pub(super) request: ClientRequest,
+    pub(super) reserved_candidate: super::super::execution::ReservedCandidate,
+}
 
 /// The candidate reserved for the WebSocket upgrade that is in progress.
 pub(super) struct ConnectScope<'a> {
@@ -77,6 +88,8 @@ pub(super) struct Connected {
     pub(super) initial_messages: Vec<UpstreamMessage>,
     pub(super) route: ExecutorRoute,
     pub(super) request: ClientRequest,
+    pub(super) reasoning_effort: crate::usage::ReasoningEffortDiagnostics,
+    pub(super) tool_use: crate::ToolUseDiagnostics,
     pub(super) lease: CandidateLease,
     pub(super) attempt: u16,
     pub(super) started: Instant,

@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useTooltip } from "./Ui";
+import { isTooltipFocusSuppressed } from "./ui/focus";
 
 const hintSelector = "[data-relay-tooltip]";
 const controlSelector = "button, input, select, textarea, a, summary, [tabindex]";
-const normalizeHintText = (value: string) => value.replace(/\s+/g, " ").trim();
+const normalizeHintText = (hintText: string) => hintText.replace(/\s+/g, " ").trim();
 
 function hintTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return null;
@@ -32,9 +33,16 @@ export function AppTooltips() {
 
   useEffect(() => {
     const activate = (event: Event, keyboard: boolean) => {
+      // Check intent before hintLabel: that function may read layout to detect
+      // clipping, which must not run during passive focus restoration.
+      if (keyboard && (isTooltipFocusSuppressed()
+        || !(event.target instanceof Element && event.target.matches(":focus-visible")))) {
+        hide();
+        return;
+      }
       const anchor = hintTarget(event.target);
       const text = anchor ? hintLabel(anchor) : "";
-      if (!anchor || !text || (keyboard && !(event.target instanceof Element && event.target.matches(":focus-visible")))) {
+      if (!anchor || !text) {
         hide();
         return;
       }
@@ -74,11 +82,11 @@ export function AppTooltips() {
   useLayoutEffect(() => {
     const target = hint?.target;
     if (!target || !describedBy) return;
-    const ids = new Set(target.getAttribute("aria-describedby")?.split(/\s+/).filter(Boolean));
-    ids.add(describedBy);
-    target.setAttribute("aria-describedby", [...ids].join(" "));
+    const describedByIds = new Set(target.getAttribute("aria-describedby")?.split(/\s+/).filter(Boolean));
+    describedByIds.add(describedBy);
+    target.setAttribute("aria-describedby", [...describedByIds].join(" "));
     return () => {
-      const remaining = target.getAttribute("aria-describedby")?.split(/\s+/).filter((id) => id && id !== describedBy);
+      const remaining = target.getAttribute("aria-describedby")?.split(/\s+/).filter((tooltipId) => tooltipId && tooltipId !== describedBy);
       if (remaining?.length) target.setAttribute("aria-describedby", remaining.join(" "));
       else target.removeAttribute("aria-describedby");
     };
@@ -90,7 +98,7 @@ export function AppTooltips() {
     const observer = new MutationObserver(() => {
       const nextLabel = hintLabel(anchor);
       if (!nextLabel) hide();
-      else setHint((current) => current && current.label !== nextLabel ? { ...current, label: nextLabel } : current);
+      else setHint((previousHint) => previousHint && previousHint.label !== nextLabel ? { ...previousHint, label: nextLabel } : previousHint);
     });
     observer.observe(anchor, { attributes: true, attributeFilter: ["data-relay-tooltip"], childList: true, characterData: true, subtree: true });
     return () => observer.disconnect();

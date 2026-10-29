@@ -1,8 +1,14 @@
 use super::*;
+use crate::providers::chatgpt::{BasisPointsCapturedHeaders, BasisPointsHeader};
 
 #[test]
 fn basis_points_headers_match_excel_client_contract() {
-    let headers = basis_points_headers("account-1");
+    let captured = BasisPointsCapturedHeaders::from_entries(vec![BasisPointsHeader {
+        name: "user-agent".to_string(),
+        values: vec!["captured-agent/1".to_string()],
+    }])
+    .unwrap();
+    let headers = basis_points_headers("account-1", Some("user-1"), Some(&captured));
     assert_eq!(
         headers
             .get("x-openai-internal-basispoints-client-host")
@@ -24,45 +30,34 @@ fn basis_points_headers_match_excel_client_contract() {
     assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
     assert_eq!(
         headers.get("x-stainless-package-version").unwrap(),
-        "7.25.0"
+        "6.31.0"
     );
     assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
     assert_eq!(
         headers.get("x-stainless-runtime").unwrap(),
         "browser:chrome"
     );
-    assert_eq!(
-        headers.get("user-agent").unwrap(),
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-    );
-    assert_eq!(
-        headers.get("x-stainless-runtime-version").unwrap(),
-        "154.0.0"
-    );
-    assert_eq!(
-        headers
-            .get("x-openai-internal-basispoints-browser-ua-brands")
-            .unwrap(),
-        "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\""
-    );
-    assert_eq!(
+    assert_eq!(headers.get("user-agent").unwrap(), "captured-agent/1");
+    assert_eq!(headers.get("x-openai-account-user-id").unwrap(), "user-1");
+    assert!(headers.get("x-stainless-runtime-version").is_none());
+    assert!(
         headers
             .get("x-openai-internal-basispoints-browser-name")
-            .unwrap(),
-        "Chrome"
+            .is_none()
     );
-    assert_eq!(
+    assert!(
         headers
             .get("x-openai-internal-basispoints-browser-ua-platform")
-            .unwrap(),
-        "\"Windows\""
+            .is_none()
     );
-    assert!(headers
-        .get("x-openai-internal-basispoints-oiiice-host")
-        .is_none());
+    assert!(
+        headers
+            .get("x-openai-internal-basispoints-oiiice-host")
+            .is_none()
+    );
 }
 #[test]
-fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
+fn ordinary_accounts_use_native_responses() {
     let oauth = quota_runtime(QuotaSnapshot::default());
     let key = oauth.authenticate_secret("local-secret").unwrap();
     let transport = || {
@@ -78,10 +73,6 @@ fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
             .account_transport
     };
     assert_eq!(transport(), AccountTransport::NativeResponses);
-    oauth.set_basis_points_enabled(true);
-    assert_eq!(transport(), AccountTransport::ExcelBasisPoints);
-    oauth.set_basis_points_enabled(false);
-    assert_eq!(transport(), AccountTransport::NativeResponses);
 
     let agent = AgentIdentityCredential::new(
         "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
@@ -93,7 +84,6 @@ fn basis_points_switch_changes_only_oauth_account_routes_immediately() {
     let key = identity_runtime
         .authenticate_secret("local-secret")
         .unwrap();
-    identity_runtime.set_basis_points_enabled(true);
     assert_eq!(
         identity_runtime
             .executor_route(
@@ -345,9 +335,11 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         })
         .unwrap();
     assert!(runtime.update_account_models("account-1", &["gpt-added".into()]));
-    assert!(runtime
-        .visible_models(&key, &[WireApi::Responses], now)
-        .contains(&"gpt-added".to_string()));
+    assert!(
+        runtime
+            .visible_models(&key, &[WireApi::Responses], now)
+            .contains(&"gpt-added".to_string())
+    );
     assert_eq!(
         pending.begin_rotation_http_dispatch(),
         Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged)
@@ -365,26 +357,30 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         .is_err(),
         "new inventory must not bypass the old physical lease"
     );
-    assert!(started
-        .settle_rotation(
-            crate::scheduler::rotation::AttemptObservation {
-                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
-                health: crate::scheduler::rotation::HealthObservation::Success,
-            },
-            crate::unix_time_ms(),
-        )
-        .unwrap()
-        .is_some());
-    assert!(started
-        .settle_rotation(
-            crate::scheduler::rotation::AttemptObservation {
-                execution: crate::scheduler::rotation::ExecutionObservation::committed(),
-                health: crate::scheduler::rotation::HealthObservation::Success,
-            },
-            crate::unix_time_ms(),
-        )
-        .unwrap()
-        .is_none());
+    assert!(
+        started
+            .settle_rotation(
+                crate::scheduler::rotation::AttemptObservation {
+                    execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                    health: crate::scheduler::rotation::HealthObservation::Success,
+                },
+                crate::unix_time_ms(),
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        started
+            .settle_rotation(
+                crate::scheduler::rotation::AttemptObservation {
+                    execution: crate::scheduler::rotation::ExecutionObservation::committed(),
+                    health: crate::scheduler::rotation::HealthObservation::Success,
+                },
+                crate::unix_time_ms(),
+            )
+            .unwrap()
+            .is_none()
+    );
     let (_, added) = reserve_account(&runtime, &key, "gpt-added", &added_budget, now)
         .await
         .unwrap();
@@ -402,18 +398,20 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
         CandidateHealth::Blocked,
         "inventory edits are not positive health evidence"
     );
-    assert!(reserve_account(
-        &runtime,
-        &key,
-        "gpt-new",
-        &SharedRequestBudget::for_incoming_request(3),
-        now
-    )
-    .await
-    .is_none());
+    assert!(
+        reserve_account(
+            &runtime,
+            &key,
+            "gpt-new",
+            &SharedRequestBudget::for_incoming_request(3),
+            now
+        )
+        .await
+        .is_none()
+    );
 }
 #[test]
-fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_evidence() {
+fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidence() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
@@ -424,14 +422,12 @@ fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_eviden
         serde_json::json!({"models": [{"slug": "gpt-test"}]}),
         1,
     );
-    runtime.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
     assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
-    assert!(runtime
-        .stale_codex_model_manifests(["account-1"])
-        .is_empty());
-    assert!(runtime
-        .codex_model_responses_lite_candidates("gpt-test")
-        .is_empty());
+    assert!(
+        runtime
+            .stale_codex_model_manifests(["account-1"])
+            .is_empty()
+    );
     assert_eq!(
         runtime
             .image_executor_route(
@@ -442,17 +438,19 @@ fn model_inventory_refresh_updates_image_bridge_and_retires_old_transport_eviden
             )
             .unwrap()
             .source_model,
-        "gpt-5.6-sol"
+        IMAGE_API_MODEL
     );
     assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
-    assert!(runtime
-        .image_executor_route(
-            "account-1",
-            IMAGE_API_MODEL,
-            &scope,
-            &[WireApi::ChatCompletions],
-        )
-        .is_none());
+    assert!(
+        runtime
+            .image_executor_route(
+                "account-1",
+                IMAGE_API_MODEL,
+                &scope,
+                &[WireApi::ChatCompletions],
+            )
+            .is_some()
+    );
 }
 #[tokio::test]
 async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
@@ -500,7 +498,7 @@ async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {
     assert_eq!(budget.dispatches(), 1);
 }
 #[tokio::test]
-async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_generation() {
+async fn image_inventory_change_revokes_pending_dispatch_without_charging_a_generation() {
     use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
 
     let runtime = quota_runtime(QuotaSnapshot::default());
@@ -528,7 +526,7 @@ async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_genera
             .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
             .unwrap()
             .source_model,
-        "gpt-5.4"
+        IMAGE_API_MODEL
     );
     assert!(runtime.update_account_models("account-1", &["gpt-5.6-sol".into()]));
     assert_eq!(
@@ -559,7 +557,7 @@ async fn changed_image_bridge_revokes_pending_dispatch_without_charging_a_genera
             .image_executor_route("account-1", IMAGE_API_MODEL, &scope, &protocols)
             .unwrap()
             .source_model,
-        "gpt-5.6-sol"
+        IMAGE_API_MODEL
     );
     fresh.begin_rotation_http_dispatch().unwrap();
     fresh.settle_rotation_success(crate::unix_time_ms());

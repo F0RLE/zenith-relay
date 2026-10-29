@@ -1,10 +1,10 @@
 use super::super::payload_hash;
 use super::{
-    now_ms, CatalogRefreshOutcome, CatalogStatus, PricingCacheEnvelope, PricingCatalog,
-    PricingCatalogLoader, PricingError, MAX_CATALOG_RESPONSE_BYTES,
+    CatalogRefreshOutcome, CatalogStatus, MAX_CATALOG_RESPONSE_BYTES, PricingCacheEnvelope,
+    PricingCatalog, PricingCatalogLoader, PricingError, now_ms,
 };
 use crate::catalog_io::{self, CatalogIoError};
-use reqwest::{header, StatusCode};
+use reqwest::{StatusCode, header};
 
 impl PricingCatalogLoader {
     pub async fn refresh(&self, force: bool) -> Result<CatalogRefreshOutcome, PricingError> {
@@ -16,85 +16,89 @@ impl PricingCatalogLoader {
             return Ok(CatalogRefreshOutcome::Skipped);
         }
         self.set_status(CatalogStatus::Updating, None);
-        let mut request = self.client.get(super::super::LITELLM_SOURCE_URL);
-        let current_envelope = self
-            .envelope
-            .read()
-            .expect("pricing envelope lock poisoned")
-            .clone();
-        if let Some(envelope) = current_envelope.as_ref() {
-            if let Some(etag) = envelope.etag.as_deref() {
-                request = request.header(header::IF_NONE_MATCH, etag);
-            }
-            if let Some(last_modified) = envelope.last_modified.as_deref() {
-                request = request.header(header::IF_MODIFIED_SINCE, last_modified);
-            }
-        }
-        let (response, permit) = match crate::scheduler::refresh::http::management_http_gate()
-            .send(
-                &self.client,
-                request,
-                crate::scheduler::refresh::http::HttpClass::Ordinary,
-            )
-            .await
+        let mut pricing_request = self.client.get(super::super::LITELLM_SOURCE_URL);
         {
-            Ok(result) => result,
-            Err(_) => return self.refresh_failed(PricingError::Network),
-        };
-        if response.status() == StatusCode::NOT_MODIFIED {
-            let result = self.accept_not_modified(response).await;
+            let current_envelope = self
+                .envelope
+                .read()
+                .expect("pricing envelope lock poisoned");
+            if let Some(envelope) = current_envelope.as_ref() {
+                if let Some(etag) = envelope.etag.as_deref() {
+                    pricing_request = pricing_request.header(header::IF_NONE_MATCH, etag);
+                }
+                if let Some(last_modified) = envelope.last_modified.as_deref() {
+                    pricing_request =
+                        pricing_request.header(header::IF_MODIFIED_SINCE, last_modified);
+                }
+            }
+        }
+        let (pricing_response, permit) =
+            match crate::scheduler::refresh::http::management_http_gate()
+                .send(
+                    &self.client,
+                    pricing_request,
+                    crate::scheduler::refresh::http::HttpClass::Ordinary,
+                )
+                .await
+            {
+                Ok(response_with_permit) => response_with_permit,
+                Err(_) => return self.refresh_failed(PricingError::Network),
+            };
+        if pricing_response.status() == StatusCode::NOT_MODIFIED {
+            let refresh_result = self.accept_not_modified(pricing_response).await;
             drop(permit);
-            return result;
+            return refresh_result;
         }
-        if response.status() != StatusCode::OK {
-            return self.refresh_failed(PricingError::HttpStatus(response.status().as_u16()));
+        if pricing_response.status() != StatusCode::OK {
+            return self
+                .refresh_failed(PricingError::HttpStatus(pricing_response.status().as_u16()));
         }
-        let response_headers = response.headers().clone();
-        let payload = match catalog_io::response_json(response, MAX_CATALOG_RESPONSE_BYTES).await {
-            Ok(payload) => payload,
-            Err(error) => return self.refresh_failed(map_catalog_io_error(error, false)),
-        };
+        let response_headers = pricing_response.headers().clone();
+        let pricing_payload =
+            match catalog_io::response_json(pricing_response, MAX_CATALOG_RESPONSE_BYTES).await {
+                Ok(pricing_payload) => pricing_payload,
+                Err(error) => return self.refresh_failed(map_catalog_io_error(error, false)),
+            };
         drop(permit);
-        let payload_sha256 = match payload_hash(&payload) {
+        let payload_sha256 = match payload_hash(&pricing_payload) {
             Ok(hash) => hash,
             Err(error) => return self.refresh_failed(error),
         };
         let fetched_at_ms = now_ms();
-        let mut envelope = match PricingCacheEnvelope::new(payload, payload_sha256, fetched_at_ms) {
-            Ok(envelope) => envelope,
-            Err(error) => return self.refresh_failed(error),
-        };
+        let mut envelope =
+            match PricingCacheEnvelope::new(pricing_payload, payload_sha256, fetched_at_ms) {
+                Ok(envelope) => envelope,
+                Err(error) => return self.refresh_failed(error),
+            };
         envelope.etag = header_string(&response_headers, header::ETAG);
         envelope.last_modified = header_string(&response_headers, header::LAST_MODIFIED);
         envelope.stale = false;
-        let catalog = match PricingCatalog::from_litellm_payload(
-            &envelope.payload,
-            Some(envelope.revision.clone()),
-            Some(envelope.fetched_at_ms),
-            false,
-        ) {
+        let catalog = match self.catalog_for_envelope(&envelope) {
             Ok(catalog) => catalog,
+            Err(error) => return self.refresh_failed(error),
+        };
+        let envelope = match envelope.into_compact() {
+            Ok(envelope) => envelope,
             Err(error) => return self.refresh_failed(error),
         };
         // Keep validators and freshness metadata current even when the
         // payload itself is unchanged. The serialized envelope is still
         // replaced only after complete parsing and validation.
-        if let Err(error) = self.store.write_if_changed(&envelope) {
+        if let Err(error) = self.store.write_retained(&envelope) {
             return self.refresh_failed(error);
         }
         self.handle.replace(catalog);
+        let revision = envelope.revision.clone();
         *self
             .envelope
             .write()
-            .expect("pricing envelope lock poisoned") = Some(envelope.clone());
+            .expect("pricing envelope lock poisoned") = Some(envelope);
         self.set_status(CatalogStatus::Current, None);
         self.record_refresh_success();
-        Ok(CatalogRefreshOutcome::Updated {
-            revision: envelope.revision,
-        })
+        Ok(CatalogRefreshOutcome::Updated { revision })
     }
 
-    async fn accept_not_modified(
+    pub(super) async fn accept_not_modified(
         &self,
         response: reqwest::Response,
     ) -> Result<CatalogRefreshOutcome, PricingError> {
@@ -103,42 +107,40 @@ impl PricingCatalogLoader {
             .read()
             .expect("pricing envelope lock poisoned")
             .clone();
-        let Some(mut current) = current_envelope else {
+        let Some(mut refreshed_envelope) = current_envelope else {
             return self.refresh_failed(PricingError::InvalidCache);
         };
         if let Some(etag) = response
             .headers()
             .get(header::ETAG)
-            .and_then(|value| value.to_str().ok())
+            .and_then(|etag_header| etag_header.to_str().ok())
         {
-            current.etag = Some(etag.to_string());
+            refreshed_envelope.etag = Some(etag.to_string());
         }
         if let Some(last_modified) = response
             .headers()
             .get(header::LAST_MODIFIED)
-            .and_then(|value| value.to_str().ok())
+            .and_then(|last_modified_header| last_modified_header.to_str().ok())
         {
-            current.last_modified = Some(last_modified.to_string());
+            refreshed_envelope.last_modified = Some(last_modified.to_string());
         }
-        current.fetched_at_ms = now_ms();
-        current.stale = false;
-        let catalog = match current.catalog() {
-            Ok(catalog) => catalog,
-            Err(error) => return self.refresh_failed(error),
-        };
-        if let Err(error) = self.store.write_if_changed(&current) {
+        refreshed_envelope.fetched_at_ms = now_ms();
+        refreshed_envelope.stale = false;
+        let mut catalog = self.snapshot().as_ref().clone();
+        catalog.fetched_at_ms = Some(refreshed_envelope.fetched_at_ms);
+        catalog.stale = false;
+        if let Err(error) = self.store.write_retained(&refreshed_envelope) {
             return self.refresh_failed(error);
         }
         self.handle.replace(catalog);
+        let revision = refreshed_envelope.revision.clone();
         *self
             .envelope
             .write()
-            .expect("pricing envelope lock poisoned") = Some(current.clone());
+            .expect("pricing envelope lock poisoned") = Some(refreshed_envelope);
         self.set_status(CatalogStatus::Current, None);
         self.record_refresh_success();
-        Ok(CatalogRefreshOutcome::NotModified {
-            revision: current.revision,
-        })
+        Ok(CatalogRefreshOutcome::NotModified { revision })
     }
 
     pub(super) fn refresh_failed<T>(&self, error: PricingError) -> Result<T, PricingError> {
@@ -151,14 +153,14 @@ impl PricingCatalogLoader {
         if let Some(envelope) = current_envelope {
             let mut stale = envelope;
             stale.stale = true;
-            if let Ok(catalog) = stale.catalog() {
-                self.handle.replace(catalog);
-            }
+            let mut catalog = self.snapshot().as_ref().clone();
+            catalog.stale = true;
+            self.handle.replace(catalog);
             // Persist the marker so a restart does not mistake a catalog that
             // failed its last refresh for a current snapshot. The refresh
             // error remains the primary diagnostic even if this best-effort
             // write also fails.
-            let _ = self.store.write_if_changed(&stale);
+            let _ = self.store.write_retained(&stale);
             *self
                 .envelope
                 .write()
@@ -174,6 +176,32 @@ impl PricingCatalogLoader {
         self.schedule_changed.notify_one();
         Err(error)
     }
+
+    pub(super) fn catalog_for_envelope(
+        &self,
+        envelope: &PricingCacheEnvelope,
+    ) -> Result<PricingCatalog, PricingError> {
+        let unchanged = self
+            .envelope
+            .read()
+            .expect("pricing envelope lock poisoned")
+            .as_ref()
+            .is_some_and(|current| current.payload_sha256 == envelope.payload_sha256);
+        if unchanged {
+            let mut catalog = self.snapshot().as_ref().clone();
+            catalog.revision = Some(envelope.revision.clone());
+            catalog.fetched_at_ms = Some(envelope.fetched_at_ms);
+            catalog.stale = envelope.stale;
+            Ok(catalog)
+        } else {
+            PricingCatalog::from_litellm_payload(
+                &envelope.payload,
+                Some(envelope.revision.clone()),
+                Some(envelope.fetched_at_ms),
+                envelope.stale,
+            )
+        }
+    }
 }
 
 pub(super) fn map_catalog_io_error(error: CatalogIoError, cache: bool) -> PricingError {
@@ -188,9 +216,12 @@ pub(super) fn map_catalog_io_error(error: CatalogIoError, cache: bool) -> Pricin
 
 // Kept private so the compiler catches accidental use of a removed response
 // path; validators are read directly before body collection in `refresh`.
-fn header_string(headers: &reqwest::header::HeaderMap, name: header::HeaderName) -> Option<String> {
+fn header_string(
+    headers: &reqwest::header::HeaderMap,
+    header_name: header::HeaderName,
+) -> Option<String> {
     headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
+        .get(header_name)
+        .and_then(|header_value| header_value.to_str().ok())
         .map(str::to_string)
 }

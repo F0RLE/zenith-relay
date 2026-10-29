@@ -7,7 +7,6 @@
 @import "./styles/controls.css";
 @import "./styles/tables.css";
 @import "./styles/pages/gateway.css";
-@import "./styles/pages/usage.css";
 @import "./styles/pages/settings.css";
 @import "./styles/pages/connections.css";
 @import "./styles/dialogs.css";
@@ -16,10 +15,16 @@
 @import "./styles/pages/connections-workspace.css";
 @import "./styles/responsive.css";
 @import "./styles/pages/workspace.css";
+@import "./styles/pages/integrations.css";
+@import "./styles/pages/sources.css";
 
-/* The launcher uses no focus rings on controls or their field wrappers. */
-:focus,
-:focus-visible {
+/* Pointer focus stays quiet; keyboard focus is visible in both themes. */
+:focus {
   outline: none !important;
   box-shadow: none !important;
+}
+
+:focus-visible:not([role="dialog"]):not([role="alertdialog"]) {
+  outline: 2px solid var(--relay-accent) !important;
+  outline-offset: 3px;
 }

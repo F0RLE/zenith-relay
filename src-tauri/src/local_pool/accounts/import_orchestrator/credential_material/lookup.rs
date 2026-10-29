@@ -1,17 +1,18 @@
-use super::super::claims::ImportedIdentity;
 use super::super::MAX_ACCOUNT_PROFILE_RESPONSE_BYTES;
+use super::super::claims::ImportedIdentity;
 use super::ImportedCredentialMaterial;
 use crate::local_pool::accounts::import_orchestrator::{ImportItemError, ItemResult};
-use crate::local_pool::accounts::{collect_limited, LimitedBodyError};
+use crate::local_pool::accounts::{LimitedBodyError, collect_limited};
 use reqwest::header::{ACCEPT, AUTHORIZATION};
 use reqwest::redirect::Policy;
 use std::time::Duration;
 use url::Url;
+use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
-    push_account_id_hint, resolve_account_check_account_id, AccountCheckIdentityError,
+    AccountCheckIdentityError, CodexSubscriptionMetadata, merge_subscription_metadata,
+    push_account_id_hint, resolve_account_check_account_id,
 };
-use zenith_relay_core::ProxyConfig;
 
 pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     mut material: ImportedCredentialMaterial,
@@ -35,7 +36,14 @@ pub(in crate::local_pool::accounts) async fn resolve_import_account_identity(
     )
     .await
     {
-        Ok(account_id) => material.provider_account_id = Some(account_id),
+        Ok((account_id, metadata)) => {
+            material.provider_account_id = Some(account_id);
+            merge_subscription_metadata(
+                &mut material.plan_type,
+                &mut material.subscription_active_until_ms,
+                metadata,
+            );
+        }
         Err(error)
             if error.code != error_codes::ACCOUNT_IDENTITY_MISMATCH
                 && material
@@ -54,7 +62,9 @@ pub(in crate::local_pool::accounts) async fn lookup_import_account_id(
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
 ) -> ItemResult<String> {
-    lookup_import_account_id_with_hints(endpoint, access_token, &[], proxy, timeout).await
+    lookup_import_account_id_with_hints(endpoint, access_token, &[], proxy, timeout)
+        .await
+        .map(|(account_id, _)| account_id)
 }
 
 async fn lookup_import_account_id_with_hints(
@@ -63,7 +73,7 @@ async fn lookup_import_account_id_with_hints(
     claimed_account_ids: &[String],
     proxy: Option<&ProxyConfig>,
     timeout: Duration,
-) -> ItemResult<String> {
+) -> ItemResult<(String, CodexSubscriptionMetadata)> {
     let authorization = crate::local_pool::accounts::credentials::bearer_authorization(
         access_token,
     )
@@ -105,7 +115,7 @@ async fn lookup_import_account_id_with_hints(
         })?;
     drop(permit);
     let status = response.status();
-    let body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
+    let profile_response_body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
             LimitedBodyError::Transport => ImportItemError::new(
@@ -134,29 +144,37 @@ async fn lookup_import_account_id_with_hints(
         };
         return Err(ImportItemError::new(code, message));
     }
-    let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        ImportItemError::new(
-            error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
-            "ChatGPT account lookup returned invalid JSON",
-        )
-    })?;
+    let profile_payload: serde_json::Value = serde_json::from_slice(&profile_response_body)
+        .map_err(|_| {
+            ImportItemError::new(
+                error_codes::PROVIDER_ACCOUNT_LOOKUP_FAILED,
+                "ChatGPT account lookup returned invalid JSON",
+            )
+        })?;
     let claimed_account_ids = claimed_account_ids
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    resolve_account_check_account_id(&payload, &claimed_account_ids).map_err(|error| {
-        let (code, message) = match error {
-            AccountCheckIdentityError::Missing => (
-                error_codes::PROVIDER_ACCOUNT_ID_MISSING,
-                "ChatGPT account lookup did not return an account id",
-            ),
-            AccountCheckIdentityError::Mismatch => (
-                error_codes::ACCOUNT_IDENTITY_MISMATCH,
-                "imported account identity does not match the authenticated account",
-            ),
-        };
-        ImportItemError::new(code, message)
-    })
+    let account_id = resolve_account_check_account_id(&profile_payload, &claimed_account_ids)
+        .map_err(|error| {
+            let (code, message) = match error {
+                AccountCheckIdentityError::Missing => (
+                    error_codes::PROVIDER_ACCOUNT_ID_MISSING,
+                    "ChatGPT account lookup did not return an account id",
+                ),
+                AccountCheckIdentityError::Mismatch => (
+                    error_codes::ACCOUNT_IDENTITY_MISMATCH,
+                    "imported account identity does not match the authenticated account",
+                ),
+            };
+            ImportItemError::new(code, message)
+        })?;
+    let metadata = zenith_relay_core::providers::chatgpt::parse_account_check_subscription(
+        &profile_payload,
+        &account_id,
+    )
+    .unwrap_or_default();
+    Ok((account_id, metadata))
 }
 
 pub(super) fn account_id_hints(

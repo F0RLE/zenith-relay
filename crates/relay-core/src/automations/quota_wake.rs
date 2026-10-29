@@ -6,8 +6,8 @@ mod coordinator;
 mod policy;
 
 pub use policy::{
-    model_lightness_rank, AccountSelector, WakeAdapterPolicy, WakeExecutionPolicy, WakeModel,
-    WakeModelPolicy, WakePolicyAdapter, WakeTask, WakeTaskValidationError, WakeTrigger,
+    AccountSelector, WakeAdapterPolicy, WakeExecutionPolicy, WakeModel, WakeModelPolicy,
+    WakePolicyAdapter, WakeTask, WakeTaskValidationError, WakeTrigger, model_lightness_rank,
 };
 
 const MAX_WAKE_ATTEMPTS: u8 = 2;
@@ -247,8 +247,8 @@ pub struct WakeCompletion {
     pub error_code: Option<String>,
 }
 
-pub(super) fn is_safe_id(value: &str) -> bool {
-    crate::is_ascii_token(value.trim(), 64)
+pub(super) fn is_safe_id(identifier: &str) -> bool {
+    crate::is_ascii_token(identifier.trim(), 64)
 }
 
 #[cfg(test)]

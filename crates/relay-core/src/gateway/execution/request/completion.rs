@@ -1,13 +1,10 @@
 use super::prelude::*;
+use super::recovery::mark_adapter_failure;
 use super::recovery::{
     adapter_error_response, adapter_error_response_for_origin, replay_native_tool_continuation,
 };
-use super::retry::{
-    basis_points_relay_error_response, handle_basis_points_relay_retry, mark_adapter_failure,
-    BasisPointsRelayRetryContext,
-};
 use super::translate::{
-    translate_basis_points_completed, translate_completed_response, CompletedBasisPointsResponse,
+    CompletedBasisPointsResponse, translate_basis_points_completed, translate_completed_response,
 };
 use crate::gateway::errors::current_failure_state;
 
@@ -32,25 +29,20 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) status: StatusCode,
     pub(super) response_headers: &'a HeaderMap,
     pub(super) account_route: bool,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) requires_affinity_owner: &'a mut bool,
     pub(super) has_unpaired_tool_output: &'a mut bool,
     pub(super) last_failure: &'a mut Option<AttemptFailure>,
     pub(super) last_failure_origin: &'a mut ErrorOrigin,
     pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
     pub(super) has_previous_response_id: bool,
-    pub(super) basis_points_route: bool,
-    pub(super) basis_points_request: &'a Option<Value>,
+    pub(super) basis_points_request: &'a Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) basis_points_relay_retry_attempted: &'a mut bool,
-    pub(super) basis_points_relay_retry_parameter: &'a mut Option<&'static str>,
     pub(super) tried: &'a mut HashSet<String>,
-    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
@@ -80,25 +72,20 @@ pub(super) async fn complete_buffered_response(
         status,
         response_headers,
         account_route,
-        wire_api,
+        client_wire_api,
         request,
         adapter_is_passthrough,
         repairs,
-        response_affinity_key,
         requires_affinity_owner,
         has_unpaired_tool_output,
         last_failure,
         last_failure_origin,
         last_preserved_upstream_error,
         has_previous_response_id,
-        basis_points_route,
         basis_points_request,
         stream,
         adapter_request,
-        basis_points_relay_retry_attempted,
-        basis_points_relay_retry_parameter,
         tried,
-        last_adapter_error,
         selected_error_origin,
         response_affinity_hit,
         prompt_affinity_key,
@@ -124,6 +111,7 @@ pub(super) async fn complete_buffered_response(
             started.elapsed().as_millis() as u64,
         )
     };
+    let mut timing = crate::gateway::response::BufferedResponseTiming::default();
     let bytes = match read_completed_body(
         upstream,
         &mut CompletedBodyRead {
@@ -136,14 +124,14 @@ pub(super) async fn complete_buffered_response(
             request,
             response_headers,
             status,
-            wire_api,
+            client_wire_api,
             stream,
             account_route,
+            started,
             response_affinity_hit,
             has_previous_response_id,
             selected_error_origin,
             native_replay_attempted,
-            response_affinity_key,
             requires_affinity_owner,
             has_unpaired_tool_output,
             tried,
@@ -152,16 +140,62 @@ pub(super) async fn complete_buffered_response(
             last_preserved_upstream_error,
         },
         &usage,
+        &mut timing,
     )
     .await
     {
         Ok(bytes) => bytes,
         Err(step) => return step,
     };
-    let mut event = usage(true, status.as_u16(), None);
+    let completion_body = serde_json::from_slice::<Value>(&bytes).ok();
+    let completion = completion_body
+        .as_ref()
+        .map(|body| {
+            crate::protocol::completion::ResponseCompletion::for_protocol(
+                if account_route {
+                    WireApi::Responses
+                } else {
+                    route.adapter.upstream_protocol(client_wire_api).wire_api()
+                },
+                body,
+            )
+        })
+        .unwrap_or(crate::protocol::completion::ResponseCompletion::Invalid);
+    let completed = completion == crate::protocol::completion::ResponseCompletion::Completed;
+    let mut event = usage(
+        completed,
+        status.as_u16(),
+        (!completed).then(|| error_codes::RESPONSE_INCOMPLETE.to_string()),
+    );
+    if let Some(body) = completion_body
+        && basis_points_request.is_some()
+        && event.tool_use.upstream_tool_call_count.is_none()
+    {
+        event.tool_use.observe_upstream_response(&body);
+    }
+    if !route.basis_points_discovery {
+        // Catalog discovery has already buffered upstream bytes. A synthetic
+        // final body is not evidence of first/last-token arrival.
+        timing.apply(&mut event);
+    }
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
-    let basis_points_retry_body = basis_points_route.then(|| bytes.clone());
+    if basis_points_request.is_some() {
+        // Raw provider calls are not executable client output before validation.
+        event.tool_use.tool_call_count = 0;
+        event.tool_use.text_output = false;
+        event.tool_use.finish();
+    }
+    if completion == crate::protocol::completion::ResponseCompletion::Invalid {
+        let error = AdapterError::upstream_response_invalid();
+        emit_usage(runtime, mark_adapter_failure(event, &error));
+        lease.settle_rotation_unknown(now_ms());
+        return CompletionStep::Respond(adapter_error_response_for_origin(
+            error,
+            selected_error_origin,
+            Some(request_id),
+        ));
+    }
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
         translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
     } else {
@@ -180,75 +214,61 @@ pub(super) async fn complete_buffered_response(
     } = match translated {
         Ok(response) => response,
         Err(error) => {
-            if basis_points_route {
-                match handle_basis_points_relay_retry(
-                    error,
-                    basis_points_retry_body.as_deref().unwrap_or_default(),
-                    event,
-                    BasisPointsRelayRetryContext {
-                        attempted: basis_points_relay_retry_attempted,
-                        parameter: basis_points_relay_retry_parameter,
-                        runtime,
-                        tried,
-                        candidate_id: &route.candidate_id,
-                        lease,
-                        last_adapter_error,
-                    },
-                ) {
-                    Ok(()) => return CompletionStep::Continue,
-                    Err(pair) => {
-                        let (error, event) = *pair;
-                        return CompletionStep::Respond(basis_points_relay_error_response(
-                            error,
-                            event,
-                            runtime,
-                            lease,
-                            selected_error_origin,
-                        ));
-                    }
-                }
-            }
             emit_usage(runtime, mark_adapter_failure(event, &error));
             lease.settle_rotation_terminal(now_ms());
             return CompletionStep::Respond(adapter_error_response_for_origin(
                 error,
                 selected_error_origin,
+                Some(request_id),
             ));
         }
     };
-    if summarize {
-        if let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
-            emit_usage(runtime, mark_adapter_failure(event, &error));
-            lease.settle_rotation_terminal(now_ms());
-            return CompletionStep::Respond(adapter_error_response_for_origin(
-                error,
-                selected_error_origin,
-            ));
-        }
+    if summarize && let Err(error) = crate::protocol::wrap_compaction_response_bytes(&mut bytes) {
+        emit_usage(runtime, mark_adapter_failure(event, &error));
+        lease.settle_rotation_terminal(now_ms());
+        return CompletionStep::Respond(adapter_error_response_for_origin(
+            error,
+            selected_error_origin,
+            Some(request_id),
+        ));
     }
-    let recovered = runtime.record_success_with_metrics(
-        &route.candidate_id,
-        source_model,
-        now_ms(),
-        event.output_tokens,
-        event.generation_ms.unwrap_or(event.latency_ms),
-    );
-    event.consecutive_failures = recovered.then_some(0);
-    lease.settle_rotation_success(now_ms());
-    runtime.bind_prompt_affinity(
-        prompt_affinity_key.as_deref(),
-        &route.candidate_id,
-        now_ms(),
-    );
+    if basis_points_request.is_some()
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        event.tool_use.set_terminal_response(&response);
+        event
+            .tool_use
+            .observe_tool_calls_ready(started.elapsed().as_millis() as u64);
+    }
+    if completed
+        && let Some(transport) = event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+    {
+        transport.client_response_ready_ms = Some(started.elapsed().as_millis() as u64);
+    }
+    if completed {
+        let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
+        event.consecutive_failures = recovered.then_some(0);
+        runtime.bind_prompt_affinity(
+            prompt_affinity_key.as_deref(),
+            &route.candidate_id,
+            now_ms(),
+        );
+    } else {
+        lease.settle_rotation_terminal(now_ms());
+    }
     emit_usage(runtime, event);
     if let Some((response_id, continuation)) = bridge_response
         .as_ref()
+        .filter(|_| completed)
         .and_then(|response| response.continuation())
     {
-        runtime.save_messages_bridge_response(
+        runtime.save_adapter_response_for_route(
             &key.id,
-            &route.candidate_id,
-            &crate::MessagesBridgeResponse {
+            route,
+            &crate::TranslatedResponse {
                 response_body: bridge_response
                     .as_ref()
                     .expect("continuation response is present")
@@ -260,18 +280,48 @@ pub(super) async fn complete_buffered_response(
             now_ms(),
         );
     }
-    if wire_api == WireApi::Responses {
+    if adapter_is_passthrough
+        && client_wire_api == WireApi::Gemini
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        crate::gateway::continuation::gemini::bind_response(
+            runtime,
+            &key.id,
+            route,
+            request,
+            &response,
+            now_ms(),
+        );
+    }
+    if completed
+        && adapter_is_passthrough
+        && client_wire_api == WireApi::GeminiInteractions
+        && let Ok(response) = serde_json::from_slice::<Value>(&bytes)
+    {
+        crate::gateway::continuation::interactions::bind_response(
+            runtime,
+            &key.id,
+            route,
+            &response,
+            now_ms(),
+        );
+    }
+    if completed && client_wire_api == WireApi::Responses {
         bind_responses_turn(
             runtime,
             &key.id,
-            &route.candidate_id,
+            route,
             request,
             source_model,
             &bytes,
             adapter_is_passthrough,
         );
+    } else if completed && let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+        let mut calls = crate::gateway::request::ToolCallCapture::default();
+        calls.observe(&response, client_wire_api);
+        calls.bind(runtime, &key.id, route, now_ms());
     }
-    buffered_client_response(
+    buffered_client_response(BufferedClientResponse {
         status,
         response_headers,
         forwarded_headers,
@@ -282,14 +332,14 @@ pub(super) async fn complete_buffered_response(
         summarize,
         client_stream,
         selected_error_origin,
-    )
+        request_id,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn buffered_client_response(
+struct BufferedClientResponse<'a> {
     status: StatusCode,
-    response_headers: &HeaderMap,
-    forwarded_headers: &HeaderMap,
+    response_headers: &'a HeaderMap,
+    forwarded_headers: &'a HeaderMap,
     bytes: Vec<u8>,
     basis_points_stream: Option<Vec<u8>>,
     account_route: bool,
@@ -297,11 +347,28 @@ fn buffered_client_response(
     summarize: bool,
     client_stream: bool,
     selected_error_origin: ErrorOrigin,
-) -> CompletionStep {
+    request_id: &'a str,
+}
+
+fn buffered_client_response(input: BufferedClientResponse<'_>) -> CompletionStep {
+    let BufferedClientResponse {
+        status,
+        response_headers,
+        forwarded_headers,
+        bytes,
+        basis_points_stream,
+        account_route,
+        adapter_is_passthrough,
+        summarize,
+        client_stream,
+        selected_error_origin,
+        request_id,
+    } = input;
     if let Some(stream_body) = basis_points_stream {
-        let mut response = proxy_sse_response(status, response_headers, Body::from(stream_body));
-        relay_account_response_header(forwarded_headers, response_headers, &mut response);
-        return CompletionStep::Respond(response);
+        let mut stream_response =
+            proxy_sse_response(status, response_headers, Body::from(stream_body));
+        relay_account_response_header(forwarded_headers, response_headers, &mut stream_response);
+        return CompletionStep::Respond(stream_response);
     }
     if account_route || !adapter_is_passthrough {
         if summarize && client_stream {
@@ -311,21 +378,26 @@ fn buffered_client_response(
                     return CompletionStep::Respond(adapter_error_response_for_origin(
                         error,
                         selected_error_origin,
+                        Some(request_id),
                     ));
                 }
             };
-            let mut response =
+            let mut stream_response =
                 proxy_sse_response(status, response_headers, Body::from(stream_body));
             if account_route && adapter_is_passthrough {
-                relay_account_response_header(forwarded_headers, response_headers, &mut response);
+                relay_account_response_header(
+                    forwarded_headers,
+                    response_headers,
+                    &mut stream_response,
+                );
             }
-            return CompletionStep::Respond(response);
+            return CompletionStep::Respond(stream_response);
         }
-        let mut response = proxy_json_response(status, response_headers, Body::from(bytes));
+        let mut json_response = proxy_json_response(status, response_headers, Body::from(bytes));
         if account_route && adapter_is_passthrough {
-            relay_account_response_header(forwarded_headers, response_headers, &mut response);
+            relay_account_response_header(forwarded_headers, response_headers, &mut json_response);
         }
-        return CompletionStep::Respond(response);
+        return CompletionStep::Respond(json_response);
     }
     CompletionStep::Respond(proxy_response(status, response_headers, Body::from(bytes)))
 }
@@ -340,14 +412,14 @@ struct CompletedBodyRead<'a> {
     request: &'a mut Value,
     response_headers: &'a HeaderMap,
     status: StatusCode,
-    wire_api: WireApi,
+    client_wire_api: WireApi,
     stream: bool,
     account_route: bool,
+    started: Instant,
     response_affinity_hit: bool,
     has_previous_response_id: bool,
     selected_error_origin: ErrorOrigin,
     native_replay_attempted: &'a mut bool,
-    response_affinity_key: &'a mut Option<String>,
     requires_affinity_owner: &'a mut bool,
     has_unpaired_tool_output: &'a mut bool,
     tried: &'a mut HashSet<String>,
@@ -361,31 +433,53 @@ async fn read_completed_body(
     upstream: reqwest::Response,
     read: &mut CompletedBodyRead<'_>,
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
+    timing: &mut crate::gateway::response::BufferedResponseTiming,
 ) -> Result<Vec<u8>, CompletionStep> {
-    match collect_upstream_response(
-        upstream,
-        read.account_route,
-        (read.account_route && read.runtime.block_degraded_routes_enabled())
-            .then_some(read.route.source_model.as_str()),
-    )
-    .await
+    let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
+        .then_some(read.route.source_model.as_str());
+    let collected = if read.route.account_transport
+        == crate::runtime::AccountTransport::ExcelBasisPoints
     {
+        super::super::super::response::collect_basis_points_response(
+            upstream,
+            expected_model,
+            read.started,
+            timing,
+        )
+        .await
+    } else if read.route.account_transport == crate::runtime::AccountTransport::Siwc
+        && (read.request.get("generate") == Some(&Value::Bool(false))
+            || read.request.pointer("/prompt_cache_options/prewarm") == Some(&Value::Bool(true)))
+    {
+        super::super::super::response::collect_upstream_response_with_prewarm(
+            upstream,
+            read.account_route,
+            expected_model,
+            true,
+        )
+        .await
+    } else {
+        collect_upstream_response(upstream, read.account_route, expected_model).await
+    };
+    match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
-            let mut failure = upstream_failure.failure;
+            let mut failure = upstream_failure
+                .failure
+                .with_retry_headers(read.response_headers);
             failure.execution = upstream_failure.execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
-            let state = if matches!(
+            let failure_state = if matches!(
                 failure.category,
-                error_codes::UPSTREAM_BODY | error_codes::UPSTREAM_BODY_TOO_LARGE
+                error_codes::UPSTREAM_BODY | error_codes::STREAM_IDLE_TIMEOUT
             ) {
                 read.lease.settle_rotation_unknown(now_ms());
                 current_failure_state(read.runtime, &read.route.candidate_id, read.source_model)
             } else {
-                settle_attempt_failure(
+                settle_route_failure(
                     read.runtime,
                     read.lease,
-                    read.source_model,
+                    read.route,
                     &failure,
                     read.response_headers,
                 )
@@ -395,11 +489,13 @@ async fn read_completed_body(
                 failure.status.as_u16(),
                 Some(failure.category.to_string()),
             );
+            timing.apply(&mut event);
+            populate_tokens(&mut event, &upstream_failure.partial_body);
             event.upstream_error = upstream_failure.upstream_error.map(|mut details| {
                 details.http_status = Some(read.status.as_u16());
                 details
             });
-            if read.wire_api == WireApi::Responses
+            if read.client_wire_api == WireApi::Responses
                 && failure.execution.certainty == ExecutionCertainty::NotSent
                 && read.response_affinity_hit
                 && read.has_previous_response_id
@@ -415,8 +511,7 @@ async fn read_completed_body(
                     read.native_replay_attempted,
                 ) {
                     Ok(true) => {
-                        clear_materialized_continuation(
-                            read.response_affinity_key,
+                        retain_materialized_continuation_owner(
                             read.requires_affinity_owner,
                             read.has_unpaired_tool_output,
                         );
@@ -424,20 +519,27 @@ async fn read_completed_body(
                         read.lease.allow_rotation_repair();
                         event.error_category =
                             Some(error_codes::RESPONSE_AFFINITY_MISS.to_string());
-                        emit_usage(read.runtime, event);
+                        emit_repair(read.runtime, &mut event);
+                        read.lease.settle_rotation_repair(now_ms());
                         *read.last_failure = Some(failure);
                         *read.last_failure_origin = read.selected_error_origin;
                         return Err(CompletionStep::Continue);
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        return Err(CompletionStep::Respond(adapter_error_response(error)));
+                        emit_usage(read.runtime, mark_adapter_failure(event, &error));
+                        read.lease.settle_rotation_terminal(now_ms());
+                        return Err(CompletionStep::Respond(adapter_error_response(
+                            error,
+                            Some(read.request_id),
+                        )));
                     }
                 }
             }
-            apply_failure_state(&mut event, state);
+            apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
+                || route_forbids_fallback(read.route, failure.status, failure.category)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

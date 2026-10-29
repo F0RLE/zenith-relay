@@ -34,6 +34,7 @@ async fn image_generation_for_api_source_preserves_requested_image_model() {
                 name: "Synthetic image source".to_string(),
                 base_url: format!("{}/v1", upstream.base_url),
                 api_key: SOURCE_KEY.to_string(),
+                proxy_url: None,
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-image-1.5".to_string()],
             },
@@ -116,6 +117,7 @@ async fn models_are_discovered_with_the_source_credential() {
         name: "Synthetic upstream".into(),
         base_url: format!("{}/v1", upstream.base_url),
         api_key: SOURCE_KEY.into(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".into()],
     })
@@ -166,6 +168,7 @@ async fn root_openai_discovery_retries_v1_after_404_and_returns_resolved_url() {
             name: "Root OpenAI-compatible upstream".into(),
             base_url: upstream.base_url.clone(),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
         },
@@ -228,6 +231,7 @@ async fn root_openai_discovery_does_not_guess_v1_after_auth_or_rate_limit_failur
                 name: "Root OpenAI-compatible upstream".into(),
                 base_url: upstream.base_url.clone(),
                 api_key: SOURCE_KEY.into(),
+                proxy_url: None,
                 wire_api: WireApi::Responses,
                 models: Vec::new(),
             },
@@ -255,6 +259,7 @@ async fn native_messages_model_discovery_preserves_inventory_and_uses_anthropic_
             name: "Synthetic Anthropic upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Messages,
             models: vec!["claude-test".into(), "claude-hidden".into()],
         },
@@ -287,6 +292,7 @@ async fn responses_to_messages_discovery_keeps_responses_client_binding() {
             name: "Synthetic bridged upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
         },
@@ -329,6 +335,7 @@ async fn source_wide_catalog_binding_refreshes_new_models() {
             name: "Synthetic source-wide upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
         },
@@ -365,6 +372,7 @@ async fn native_responses_catalog_refreshes_after_models_are_split_to_a_messages
             name: "Synthetic mixed source-wide upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into(), "claude-test".into()],
         },
@@ -438,6 +446,7 @@ async fn native_model_discovery_keeps_each_protocol_catalog_separate() {
             name: "Synthetic mixed upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
         },
@@ -530,6 +539,7 @@ async fn discovery_retains_prices_outside_legacy_binding_lists() {
         name: "Synthetic priced catalog".into(),
         base_url: format!("{}/v1", upstream.base_url),
         api_key: SOURCE_KEY.into(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: Vec::new(),
     };
@@ -561,6 +571,7 @@ async fn configured_discovery_hints_union_physical_catalogs_without_filtering_ru
         name: "Synthetic mixed upstream".into(),
         base_url: format!("{}/v1", upstream.base_url),
         api_key: SOURCE_KEY.into(),
+        proxy_url: None,
         wire_api: WireApi::Responses,
         models: Vec::new(),
     };
@@ -608,10 +619,14 @@ async fn configured_discovery_hints_union_physical_catalogs_without_filtering_ru
         } else {
             WireApi::Responses
         };
-        assert!(routes
-            .iter()
-            .filter(|route| route.model_ids.contains(model))
-            .all(|route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream));
+        assert!(
+            routes
+                .iter()
+                .filter(|route| route.model_ids.contains(model))
+                .all(
+                    |route| route.adapter.upstream_protocol(route.wire_api).wire_api() == upstream
+                )
+        );
         assert_eq!(
             routes
                 .iter()
@@ -631,6 +646,7 @@ async fn native_and_bridged_responses_discovery_keep_route_catalogs_separate() {
             name: "Synthetic mixed Responses source".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
         },
@@ -701,6 +717,7 @@ async fn failed_native_binding_is_not_advertised_after_discovery() {
             name: "Partial mixed upstream".into(),
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
         },
@@ -740,16 +757,19 @@ async fn failed_native_binding_is_not_advertised_after_discovery() {
 #[tokio::test]
 async fn model_discovery_rejects_a_bad_source_key() {
     let (upstream, _) = spawn_upstream().await;
-    assert!(discover_source_models(&ProviderSource {
-        id: "source-1".into(),
-        name: "Synthetic upstream".into(),
-        base_url: format!("{}/v1", upstream.base_url),
-        api_key: "wrong-source-key".into(),
-        wire_api: WireApi::Responses,
-        models: vec!["gpt-test".into()],
-    })
-    .await
-    .is_err());
+    assert!(
+        discover_source_models(&ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: "wrong-source-key".into(),
+            proxy_url: None,
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+        })
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -765,14 +785,17 @@ async fn model_discovery_rejects_an_oversized_body() {
         }),
     ))
     .await;
-    assert!(discover_source_models(&ProviderSource {
-        id: "source-1".into(),
-        name: "Synthetic upstream".into(),
-        base_url: format!("{}/v1", upstream.base_url),
-        api_key: SOURCE_KEY.into(),
-        wire_api: WireApi::Responses,
-        models: vec![],
-    })
-    .await
-    .is_err());
+    assert!(
+        discover_source_models(&ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.into(),
+            proxy_url: None,
+            wire_api: WireApi::Responses,
+            models: vec![],
+        })
+        .await
+        .is_err()
+    );
 }

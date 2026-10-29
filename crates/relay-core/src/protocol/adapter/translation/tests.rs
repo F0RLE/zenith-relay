@@ -2,14 +2,33 @@ use super::*;
 use crate::{AdapterRequestContext, CacheWriteTtl, SourceAdapter};
 use serde_json::json;
 mod history;
+mod interleaved_regressions;
 mod matrix;
+mod responses_snapshots;
+mod responses_tool_search;
+mod responses_tools;
+mod responses_usage;
 mod terminal;
+mod tool_arguments;
 mod tools;
+mod validation;
+mod web_search;
 
+mod architecture;
+mod chains;
+mod chat_usage;
+mod citations;
+mod continuation_identity;
+mod documents;
+mod messages_options;
+mod messages_reasoning;
+mod messages_tool_search;
+mod output_formats;
 mod reasoning;
 
 fn input(protocol: WireApi) -> Value {
     match protocol {
+        WireApi::GeminiInteractions => json!({"model":"test","input":"Hello"}),
         WireApi::Responses => json!({"model":"test","input":"Hello"}),
         WireApi::ChatCompletions => {
             json!({"model":"test","messages":[{"role":"user","content":"Hello"}]})
@@ -23,6 +42,9 @@ fn input(protocol: WireApi) -> Value {
 
 fn output(protocol: WireApi) -> Value {
     match protocol {
+        WireApi::GeminiInteractions => {
+            json!({"id":"interaction_test","status":"completed","outputs":[{"type":"text","text":"Hi"}],"usage":{"total_input_tokens":3,"total_output_tokens":2}})
+        }
         WireApi::Responses => {
             json!({"id":"response_test","object":"response","model":"test","status":"completed","output":[{"type":"message","id":"msg_test","role":"assistant","content":[{"type":"output_text","text":"Hi","annotations":[]}]}],"usage":{"input_tokens":3,"output_tokens":2}})
         }
@@ -44,28 +66,39 @@ fn prepare(
     request: &Value,
     stream: bool,
 ) -> crate::PreparedAdapterRequest {
-    let adapter = SourceAdapter::between(client, upstream).unwrap();
-    adapter
-        .prepare_request(AdapterRequestContext {
-            client_wire_api: client,
-            request,
-            model: "test",
-            stream,
-            reasoning_mode: if adapter.is_passthrough() {
-                MessagesReasoningMode::Disabled
-            } else {
-                MessagesReasoningMode::Adaptive
-            },
-            cache_write_ttl: CacheWriteTtl::Provider,
-            previous: None,
-            response_scope: "source-test",
-            response_id_seed: "request-test",
-        })
+    try_convert(client, upstream, request, stream)
         .unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}: {error}"))
+}
+
+fn try_convert(
+    client: WireApi,
+    upstream: WireApi,
+    request: &Value,
+    stream: bool,
+) -> AdapterResult<crate::PreparedAdapterRequest> {
+    let adapter = SourceAdapter::between(client, upstream).unwrap();
+    adapter.prepare_request(AdapterRequestContext {
+        client_wire_api: client,
+        request,
+        model: "test",
+        stream,
+        reasoning_mode: if adapter.is_passthrough() {
+            MessagesReasoningMode::Disabled
+        } else {
+            MessagesReasoningMode::Adaptive
+        },
+        cache_write_ttl: CacheWriteTtl::Provider,
+        previous: None,
+        response_scope: "source-test",
+        response_id_seed: "request-test",
+    })
 }
 
 fn sse(protocol: WireApi) -> Vec<u8> {
     let events = match protocol {
+        WireApi::GeminiInteractions => {
+            vec![json!({"event_type":"interaction.completed","interaction":output(protocol)})]
+        }
         WireApi::Responses => vec![
             json!({"type":"response.created","response":{"id":"response_test","output":[]}}),
             json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_test","role":"assistant","content":[]}}),
@@ -101,6 +134,9 @@ fn sse(protocol: WireApi) -> Vec<u8> {
 fn tool_stream(protocol: WireApi) -> Vec<u8> {
     let mut events = Vec::new();
     match protocol {
+        WireApi::GeminiInteractions => {
+            unreachable!("native-only protocol does not enter conversion fixtures")
+        }
         WireApi::Responses => {
             events.push(json!({"type":"response.created","response":{"id":"resp_tools","output":[]}}));
             let mut output = Vec::new();
@@ -156,6 +192,9 @@ fn tool_stream(protocol: WireApi) -> Vec<u8> {
 
 fn tool_history(protocol: WireApi) -> Value {
     match protocol {
+        WireApi::GeminiInteractions => {
+            unreachable!("native-only protocol does not enter conversion fixtures")
+        }
         WireApi::Responses => json!({"model":"test","instructions":"Be brief","input":[
             {"role":"user","content":"Check the test value"},
             {"type":"function_call","call_id":"call_first","name":"lookup","arguments":"{\"value\":1}"},

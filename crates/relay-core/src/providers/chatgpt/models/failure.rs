@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelDiscoveryFailureCode {
     AgentTaskInvalid,
+    BasisPointsFreeAccountUnsupported,
     Forbidden,
     HttpStatus,
     InvalidAccessToken,
@@ -13,6 +14,7 @@ pub enum ModelDiscoveryFailureCode {
     InvalidResponse,
     RateLimited,
     ResponseTooLarge,
+    Timeout,
     Transport,
     Unauthorized,
     Upstream,
@@ -23,6 +25,9 @@ impl ModelDiscoveryFailureCode {
     pub fn management_code(self) -> &'static str {
         match self {
             Self::AgentTaskInvalid => error_codes::MODELS_AGENT_TASK_INVALID,
+            Self::BasisPointsFreeAccountUnsupported => {
+                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED
+            }
             Self::Forbidden => error_codes::MODELS_FORBIDDEN,
             Self::HttpStatus => error_codes::MODELS_HTTP_STATUS,
             Self::InvalidAccessToken => error_codes::MODELS_INVALID_ACCESS_TOKEN,
@@ -32,6 +37,7 @@ impl ModelDiscoveryFailureCode {
             Self::InvalidResponse => error_codes::MODELS_INVALID_RESPONSE,
             Self::RateLimited => error_codes::MODELS_RATE_LIMITED,
             Self::ResponseTooLarge => error_codes::MODELS_RESPONSE_TOO_LARGE,
+            Self::Timeout => error_codes::MODELS_TIMEOUT,
             Self::Transport => error_codes::MODELS_TRANSPORT,
             Self::Unauthorized => error_codes::MODELS_UNAUTHORIZED,
             Self::Upstream => error_codes::MODELS_UPSTREAM,
@@ -43,10 +49,6 @@ impl ModelDiscoveryFailureCode {
             self,
             Self::InvalidAccessToken | Self::InvalidAccountId | Self::Unauthorized
         )
-    }
-
-    pub fn blocks_account(self) -> bool {
-        self == Self::Forbidden
     }
 }
 
@@ -84,6 +86,9 @@ impl fmt::Display for ModelDiscoveryFailure {
             ModelDiscoveryFailureCode::AgentTaskInvalid => {
                 "Agent Identity task must be registered again"
             }
+            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported => {
+                super::super::BASIS_POINTS_FREE_ACCOUNT_MESSAGE
+            }
             ModelDiscoveryFailureCode::Forbidden => "model discovery is forbidden",
             ModelDiscoveryFailureCode::HttpStatus => "model discovery request was rejected",
             ModelDiscoveryFailureCode::InvalidAccessToken => "model access token is invalid",
@@ -93,6 +98,7 @@ impl fmt::Display for ModelDiscoveryFailure {
             ModelDiscoveryFailureCode::InvalidResponse => "model discovery response is invalid",
             ModelDiscoveryFailureCode::RateLimited => "model discovery is rate limited",
             ModelDiscoveryFailureCode::ResponseTooLarge => "model discovery response is too large",
+            ModelDiscoveryFailureCode::Timeout => "model discovery request timed out",
             ModelDiscoveryFailureCode::Transport => "model discovery request failed",
             ModelDiscoveryFailureCode::Unauthorized => "model discovery requires authentication",
             ModelDiscoveryFailureCode::Upstream => "model discovery service failed",

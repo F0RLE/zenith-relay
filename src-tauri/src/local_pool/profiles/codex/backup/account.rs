@@ -1,35 +1,72 @@
 use super::super::*;
 
+const MAX_ACCOUNT_BACKUP_BYTES: usize = 1024 * 1024;
+
+pub(in crate::local_pool::profiles::codex) fn account_backup_read_limit(
+    path: &Path,
+) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let prefix = name.get(..ACCOUNT_BACKUP_PREFIX.len())?;
+    let extension = path.extension()?.to_str()?;
+    // Case aliases must not select the generic reader on Windows.
+    (prefix.eq_ignore_ascii_case(ACCOUNT_BACKUP_PREFIX) && extension.eq_ignore_ascii_case("json"))
+        .then_some(MAX_ACCOUNT_BACKUP_BYTES as u64)
+}
+
+pub(in crate::local_pool::profiles::codex) fn read_account_backup(
+    path: &Path,
+) -> Result<AccountProfileBackup> {
+    let bytes = crate::files::read_regular_file_bounded(path, MAX_ACCOUNT_BACKUP_BYTES as u64)
+        .map_err(|error| io_error_at(path, error))?;
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "ChatGPT account profile backup is not UTF-8",
+        )
+    })?;
+    parse_account_backup(content, path)
+}
+
 pub(in crate::local_pool::profiles::codex) fn attach_account_config(document: &mut DocumentMut) {
-    // The login changes here. An official ChatGPT catalog stays untouched.
-    // Relay and any other selected provider are removed so the account uses
-    // the native ChatGPT route; a saved external catalog path is kept.
-    let official = matches!(
-        root_model_provider(document).as_deref(),
-        None | Some("openai")
-    );
-    remove_managed_provider(document, PROVIDER_ID);
-    if !official {
-        let catalog = root_model_catalog_json(document);
-        restore_config(document, PROVIDER_ID, None, catalog.as_deref());
-    }
-    document.remove("openai_base_url");
+    clear_account_routing_overrides(document);
 }
 
 pub(in crate::local_pool::profiles::codex) fn restore_account_config(
     document: &mut DocumentMut,
     backup: &AccountProfileBackup,
 ) {
-    let model_catalog = root_model_catalog_json(document);
-    restore_config(
+    remove_relay_provider_tables(document);
+    restore_root_string(
         document,
-        PROVIDER_ID,
+        "model_provider",
         backup.previous_model_provider.as_deref(),
-        model_catalog.as_deref(),
     );
-    if let Some(base_url) = backup.previous_openai_base_url.as_deref() {
-        document["openai_base_url"] = value(base_url);
-    }
+    restore_root_string(
+        document,
+        "model_catalog_json",
+        backup.previous_model_catalog_json.as_deref(),
+    );
+    restore_root_string(document, "model", backup.previous_model.as_deref());
+    restore_root_string(
+        document,
+        "review_model",
+        backup.previous_review_model.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "chatgpt_base_url",
+        backup.previous_chatgpt_base_url.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "openai_base_url",
+        backup.previous_openai_base_url.as_deref(),
+    );
+    restore_root_string(
+        document,
+        "model_reasoning_effort",
+        backup.previous_model_reasoning_effort.as_deref(),
+    );
 }
 
 pub(in crate::local_pool::profiles::codex) fn account_managed_config_matches(
@@ -37,8 +74,73 @@ pub(in crate::local_pool::profiles::codex) fn account_managed_config_matches(
 ) -> bool {
     matches!(
         root_model_provider(document).as_deref(),
-        None | Some("openai")
-    ) && !document_has_provider(document)
+        None | Some(NATIVE_PROVIDER_ID)
+    ) && root_model_catalog_json(document).is_none()
+        && document.get("model").is_none()
+        && document.get("review_model").is_none()
+        && document.get("chatgpt_base_url").is_none()
+        && root_openai_base_url(document).is_none()
+        && root_model_reasoning_effort(document).is_none()
+        && !document_has_provider(document)
+        && document
+            .get("profiles")
+            .and_then(Item::as_table_like)
+            .is_none_or(|profiles| {
+                profiles.iter().all(|(_, profile)| {
+                    let Some(profile) = profile.as_table_like() else {
+                        return true;
+                    };
+                    profile
+                        .get("model_provider")
+                        .and_then(Item::as_str)
+                        .is_none_or(|provider| provider == NATIVE_PROVIDER_ID)
+                        && profile.get("model_catalog_json").is_none()
+                        && profile.get("model").is_none()
+                        && profile.get("review_model").is_none()
+                        && profile.get("chatgpt_base_url").is_none()
+                        && profile.get("openai_base_url").is_none()
+                })
+            })
+}
+
+pub(in crate::local_pool::profiles::codex) fn fill_missing_account_config(
+    backup: &mut AccountProfileBackup,
+    document: &DocumentMut,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let previous_config = match backup.projection_secret_ref.as_deref() {
+        Some(secret_ref) => projection::config_before(secret_ref, secrets)?
+            .as_deref()
+            .map(parse_config)
+            .transpose()?,
+        None if !document_has_provider(document) => Some(document.clone()),
+        _ => None,
+    };
+    let Some(previous_config) = previous_config else {
+        return Ok(());
+    };
+    if backup.previous_model_provider.is_none() {
+        backup.previous_model_provider = root_model_provider(&previous_config);
+    }
+    if backup.previous_model_catalog_json.is_none() {
+        backup.previous_model_catalog_json = root_model_catalog_json(&previous_config);
+    }
+    if backup.previous_model.is_none() {
+        backup.previous_model = root_model(&previous_config);
+    }
+    if backup.previous_review_model.is_none() {
+        backup.previous_review_model = root_review_model(&previous_config);
+    }
+    if backup.previous_chatgpt_base_url.is_none() {
+        backup.previous_chatgpt_base_url = root_chatgpt_base_url(&previous_config);
+    }
+    if backup.previous_openai_base_url.is_none() {
+        backup.previous_openai_base_url = root_openai_base_url(&previous_config);
+    }
+    if backup.previous_model_reasoning_effort.is_none() {
+        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&previous_config);
+    }
+    Ok(())
 }
 
 pub(in crate::local_pool::profiles::codex) fn account_auth_content(
@@ -54,10 +156,16 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         "account_id".into(),
         serde_json::Value::String(provider_account_id.to_string()),
     );
-    token_values.insert(
-        "refresh_token".into(),
-        serde_json::Value::String(tokens.refresh_token().unwrap_or_default().to_string()),
-    );
+    // Access-only imports are valid until the access token expires, but an
+    // empty refresh token is not a token. Omitting it keeps auth.json in the
+    // native Codex shape and prevents the client from trying to parse an
+    // empty credential as a refresh secret.
+    if let Some(refresh_token) = tokens.refresh_token() {
+        token_values.insert(
+            "refresh_token".into(),
+            serde_json::Value::String(refresh_token.to_string()),
+        );
+    }
     if let Some(id_token) = tokens.id_token() {
         token_values.insert(
             "id_token".into(),
@@ -71,6 +179,7 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_content(
         .unwrap_or_else(Utc::now)
         .to_rfc3339_opts(SecondsFormat::Millis, true);
     super::serialize_pretty(&serde_json::json!({
+        "auth_mode": "chatgpt",
         "OPENAI_API_KEY": null,
         "last_refresh": last_refresh,
         "tokens": token_values,
@@ -91,12 +200,12 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_matches_snapshot(
     _path: &Path,
     expected_hash: &str,
 ) -> Result<bool> {
-    let Some(value) = auth_snapshot_json(snapshot) else {
+    let Some(auth_document) = auth_snapshot_json(snapshot) else {
         return Ok(false);
     };
     Ok(
-        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
-            && value
+        auth_credential_kind(&auth_document) == Some(ProfileCredentialKind::OAuthAccount)
+            && auth_document
                 .get("tokens")
                 .and_then(|tokens| tokens.get("access_token"))
                 .and_then(serde_json::Value::as_str)
@@ -113,14 +222,17 @@ pub(in crate::local_pool::profiles::codex) fn account_auth_matches_tokens(
     let Some(content) = snapshot_text(snapshot, path)? else {
         return Ok(false);
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth_document) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(false);
     };
-    let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
+    let Some(tokens) = auth_document
+        .get("tokens")
+        .and_then(serde_json::Value::as_object)
+    else {
         return Ok(false);
     };
     Ok(
-        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
+        auth_credential_kind(&auth_document) == Some(ProfileCredentialKind::OAuthAccount)
             && tokens
                 .get("account_id")
                 .and_then(serde_json::Value::as_str)
@@ -143,7 +255,13 @@ pub(in crate::local_pool::profiles::codex) fn account_backup_for_profile(
         return Ok(None);
     }
     let path = account_backup_path(backup_root, &canonical_profile_dir(codex_home)?);
-    Ok(path.exists().then_some(path))
+    // A dangling leaf link is an existing unsafe backup, not an absent one.
+    // Keep it on the strict reader's path rather than silently ignoring it.
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error_at(&path, error)),
+    }
 }
 
 pub(in crate::local_pool::profiles::codex) fn ensure_single_profile_backup(
@@ -177,27 +295,30 @@ pub(in crate::local_pool::profiles::codex) fn credential_kind_locked(
     let Some(content) = snapshot_text(&auth, &auth_path)? else {
         return Ok(None);
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(auth_document) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(None);
     };
-    Ok(auth_credential_kind(&value))
+    Ok(auth_credential_kind(&auth_document))
 }
 
 pub(in crate::local_pool::profiles::codex) fn auth_credential_kind(
-    value: &serde_json::Value,
+    auth_document: &serde_json::Value,
 ) -> Option<ProfileCredentialKind> {
-    match value.get("auth_mode").and_then(serde_json::Value::as_str) {
+    match auth_document
+        .get("auth_mode")
+        .and_then(serde_json::Value::as_str)
+    {
         Some("chatgpt") => Some(ProfileCredentialKind::OAuthAccount),
         Some("apikey") => Some(ProfileCredentialKind::ApiKey),
         Some(_) => None,
-        None if value
+        None if auth_document
             .get("OPENAI_API_KEY")
             .and_then(serde_json::Value::as_str)
             .is_some() =>
         {
             Some(ProfileCredentialKind::ApiKey)
         }
-        None if value
+        None if auth_document
             .get("tokens")
             .and_then(serde_json::Value::as_object)
             .is_some() =>
@@ -254,6 +375,9 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
     content: &str,
     path: &Path,
 ) -> Result<AccountProfileBackup> {
+    if content.len() > MAX_ACCOUNT_BACKUP_BYTES {
+        return Err(account_backup_too_large());
+    }
     let backup: AccountProfileBackup = serde_json::from_str(content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -265,8 +389,11 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
     })?;
     if backup.version != 1
         || backup.profile_dir.trim().is_empty()
+        || !Path::new(&backup.profile_dir).is_absolute()
         || backup.managed_account_id.trim().is_empty()
         || backup.managed_access_hash.len() != 64
+        || account_backup_path(Path::new(""), Path::new(&backup.profile_dir)).file_name()
+            != path.file_name()
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -279,7 +406,18 @@ pub(in crate::local_pool::profiles::codex) fn parse_account_backup(
 pub(in crate::local_pool::profiles::codex) fn serialize_account_backup(
     backup: &AccountProfileBackup,
 ) -> Result<String> {
-    super::serialize_pretty(backup)
+    let content = super::serialize_pretty(backup)?;
+    if content.len() > MAX_ACCOUNT_BACKUP_BYTES {
+        return Err(account_backup_too_large());
+    }
+    Ok(content)
+}
+
+fn account_backup_too_large() -> LocalPoolError {
+    LocalPoolError::new(
+        ErrorCode::RecoveryRequired,
+        "ChatGPT account profile backup exceeds 1 MiB",
+    )
 }
 
 pub(in crate::local_pool::profiles::codex) fn binding_from_backup(
@@ -297,6 +435,7 @@ pub(in crate::local_pool::profiles::codex) fn binding_from_backup(
 
 pub(in crate::local_pool::profiles::codex) fn rollback_account_backup(
     created: bool,
+    created_projection_secret: bool,
     backup_path: &Path,
     attempted_content: &str,
     previous_snapshot: &Option<Vec<u8>>,
@@ -304,20 +443,22 @@ pub(in crate::local_pool::profiles::codex) fn rollback_account_backup(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     rollback_file(backup_path, attempted_content, previous_snapshot)?;
-    cleanup_created_account_backup_secret(created, backup, secrets)
+    cleanup_account_attach_secrets(created, created_projection_secret, backup, secrets)
 }
 
-pub(in crate::local_pool::profiles::codex) fn cleanup_created_account_backup_secret(
-    created: bool,
+pub(in crate::local_pool::profiles::codex) fn cleanup_account_attach_secrets(
+    created_backup: bool,
+    created_projection_secret: bool,
     backup: &AccountProfileBackup,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
-    if !created {
-        return Ok(());
-    }
     super::delete_backup_secrets(
-        backup.previous_auth_secret_ref.as_deref(),
-        backup.projection_secret_ref.as_deref(),
+        created_backup
+            .then_some(backup.previous_auth_secret_ref.as_deref())
+            .flatten(),
+        created_projection_secret
+            .then_some(backup.projection_secret_ref.as_deref())
+            .flatten(),
         secrets,
     )
 }

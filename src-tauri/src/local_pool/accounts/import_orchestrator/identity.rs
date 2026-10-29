@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 
-pub(in crate::local_pool::accounts) fn masked_account_identity(value: &str) -> String {
-    let suffix = value
+pub(in crate::local_pool::accounts) fn masked_account_identity(account_identifier: &str) -> String {
+    let suffix = account_identifier
         .chars()
         .rev()
         .filter(|character| character.is_ascii_alphanumeric())
@@ -17,47 +17,50 @@ pub(in crate::local_pool::accounts) fn masked_account_identity(value: &str) -> S
     }
 }
 
-pub(in crate::local_pool::accounts) fn timestamp_from_ms(value: u64) -> Option<String> {
-    let value = i64::try_from(value).ok()?;
-    Utc.timestamp_millis_opt(value)
+pub(in crate::local_pool::accounts) fn timestamp_from_ms(timestamp_ms: u64) -> Option<String> {
+    let timestamp_ms = i64::try_from(timestamp_ms).ok()?;
+    Utc.timestamp_millis_opt(timestamp_ms)
         .single()
-        .map(|value| value.to_rfc3339())
+        .map(|timestamp| timestamp.to_rfc3339())
 }
 
 #[cfg(test)]
 pub(in crate::local_pool::accounts) fn account_id_from_check_response(
-    payload: &serde_json::Value,
+    check_response: &serde_json::Value,
 ) -> Option<String> {
-    zenith_relay_core::providers::chatgpt::account_ids_from_check_response(payload)
+    zenith_relay_core::providers::chatgpt::account_ids_from_check_response(check_response)
         .into_iter()
         .next()
 }
 
 #[cfg(test)]
 pub(in crate::local_pool::accounts) fn normalized_profile_account_id(
-    value: &str,
+    account_id: &str,
 ) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control))
-        .then(|| value.to_string())
+    let account_id = account_id.trim();
+    (!account_id.is_empty() && account_id.len() <= 512 && !account_id.chars().any(char::is_control))
+        .then(|| account_id.to_string())
 }
 
 pub(in crate::local_pool::accounts) fn provider_identity_key(
     provider_account_id: &str,
     provider_user_id: Option<&str>,
     email: Option<&str>,
+    kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
 ) -> String {
-    zenith_relay_core::accounts::chatgpt_token_identity_key(
-        Some(provider_account_id),
-        nonempty(provider_user_id),
-        nonempty(email),
+    kind.scope_identity_key(
+        &zenith_relay_core::accounts::chatgpt_token_identity_key(
+            Some(provider_account_id),
+            nonempty(provider_user_id),
+            nonempty(email),
+        )
+        .expect("provider account id produces an import identity"),
     )
-    .expect("provider account id produces an import identity")
 }
 
-fn nonempty(value: Option<&str>) -> Option<&str> {
-    match value.map(str::trim) {
-        Some(value) if !value.is_empty() => Some(value),
+fn nonempty(optional_text: Option<&str>) -> Option<&str> {
+    match optional_text.map(str::trim) {
+        Some(text) if !text.is_empty() => Some(text),
         _ => None,
     }
 }

@@ -1,7 +1,203 @@
 use super::*;
 
 #[tokio::test]
-async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_client_lite() {
+async fn full_responses_is_default_for_account_requests() {
+    let (upstream, state) = spawn_upstream(vec![
+        success_reply("parallel-full-response"),
+        compaction_reply("parallel-full-compact"),
+        success_reply("serial-full-response"),
+        compaction_reply("serial-full-compact"),
+        success_reply("default-full-response"),
+        compaction_reply("default-full-compact"),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let catalog = client
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(catalog.status(), StatusCode::OK);
+    let catalog: Value = catalog.json().await.unwrap();
+    assert_eq!(catalog["models"][0]["use_responses_lite"], false);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
+    let mut request = json!({
+        "model": MODEL,
+        "input": "preserve parallel tools",
+        "parallel_tool_calls": true,
+        "reasoning": {"effort": "high"},
+        "tools": [{
+            "type": "function", "name": "lookup",
+            "parameters": {"type": "object", "properties": {}}
+        }]
+    });
+    let policies = [Some(true), Some(false), None];
+    for parallel in policies {
+        match parallel {
+            Some(parallel) => request["parallel_tool_calls"] = json!(parallel),
+            None => {
+                request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("parallel_tool_calls");
+            }
+        }
+        for endpoint in ["responses", "responses/compact"] {
+            let response = client
+                .post(format!("{}/v1/{endpoint}", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        }
+    }
+    let requests = state.requests.lock().unwrap();
+    let generations = requests
+        .iter()
+        .filter(|request| request.path != "/v1/models")
+        .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 6);
+    for (index, sent) in generations.into_iter().enumerate() {
+        assert_eq!(sent.responses_lite, None);
+        assert_eq!(
+            sent.body.get("parallel_tool_calls"),
+            policies[index / 2].map(Value::Bool).as_ref()
+        );
+        assert_eq!(sent.body["reasoning"]["effort"], "high");
+        assert!(sent.body["reasoning"].get("context").is_none());
+        assert_eq!(sent.body["tools"][0]["name"], "lookup");
+    }
+}
+
+#[tokio::test]
+async fn websocket_continuations_default_to_full_and_follow_explicit_lite_metadata() {
+    let (upstream, state) = spawn_websocket_upstream_with_catalog(
+        WebSocketBehavior::Success,
+        default_upstream_model_catalog(),
+    )
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+                gateway.base_url
+            ))
+            .bearer_auth(LOCAL_KEY)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let upgraded = client
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    let mut previous_response_id = None;
+    let policies = [
+        (Some(true), None),
+        (Some(false), None),
+        (None, None),
+        (None, Some(true)),
+        (Some(false), Some(true)),
+        (Some(true), Some(false)),
+        (None, None),
+    ];
+    for (parallel, lite) in policies {
+        let mut request = json!({
+            "type": "response.create",
+            "model": MODEL,
+            "input": "preserve the selected tool policy",
+            "reasoning": {"effort": "high"},
+            "tools": [{
+                "type": "function", "name": "lookup",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        });
+        if let Some(parallel) = parallel {
+            request["parallel_tool_calls"] = json!(parallel);
+        }
+        if let Some(lite) = lite {
+            request["client_metadata"] = json!({
+                "ws_request_header_x_openai_internal_codex_responses_lite": lite
+            });
+        }
+        if let Some(id) = &previous_response_id {
+            request["previous_response_id"] = json!(id);
+        }
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let completed = receive_websocket_completion(&mut socket).await;
+        assert_eq!(completed["type"], "response.completed");
+        previous_response_id = Some(
+            completed["response"]["id"]
+                .as_str()
+                .expect("completed response should have an ID")
+                .to_owned(),
+        );
+    }
+    let requests = state.requests.lock().unwrap();
+    let headers = state.headers.lock().unwrap();
+    assert_eq!(requests.len(), policies.len());
+    assert_eq!(headers.len(), 3);
+    for (headers, lite) in headers.iter().zip([false, true, false]) {
+        assert_eq!(
+            header(headers, "x-openai-internal-codex-responses-lite").as_deref(),
+            lite.then_some("true")
+        );
+    }
+    for (index, sent) in requests.iter().enumerate() {
+        let (parallel, lite) = policies[index];
+        let lite = lite == Some(true);
+        assert_eq!(
+            sent.get("parallel_tool_calls"),
+            parallel.or(lite.then_some(false)).map(Value::Bool).as_ref()
+        );
+        assert_eq!(sent["reasoning"]["effort"], "high");
+        assert_eq!(sent["tools"][0]["name"], "lookup");
+        assert_eq!(
+            sent["reasoning"].get("context").and_then(Value::as_str),
+            lite.then_some("all_turns")
+        );
+    }
+}
+
+#[tokio::test]
+async fn mixed_responses_routes_default_to_full_and_preserve_explicit_client_lite() {
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("api-source-must-not-run")]).await;
     let mut account_catalog = default_upstream_model_catalog();
@@ -31,9 +227,8 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
     rotation_policy::set_order(&gateway, &["relay-account", "api-source"]);
     let client = reqwest::Client::new();
 
-    // Populate the account-owned catalog metadata that identifies this Codex
-    // model as a Lite-capable one. The same scoped key can still route it to
-    // the API source above, so automatic Lite must stay off.
+    // A native catalog advertising Lite does not change the full Responses
+    // default. An explicit client Lite request is still honored.
     assert_eq!(
         client
             .get(format!(
@@ -54,23 +249,24 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         "parallel_tool_calls": true,
         "reasoning": {"effort": "high"}
     });
-    assert_eq!(
-        client
-            .post(format!("{}/v1/responses", gateway.base_url))
-            .bearer_auth(LOCAL_KEY)
-            .json(&request_body)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+    let first_response = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_response = first_response.json::<Value>().await.unwrap();
+    let mut explicit_lite_body = request_body.clone();
+    explicit_lite_body["previous_response_id"] = first_response["id"].clone();
+    explicit_lite_body["parallel_tool_calls"] = json!(false);
     assert_eq!(
         client
             .post(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
             .header("x-openai-internal-codex-responses-lite", "true")
-            .json(&request_body)
+            .json(&explicit_lite_body)
             .send()
             .await
             .unwrap()
@@ -78,12 +274,14 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
         StatusCode::OK
     );
 
-    assert!(source_state
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|request| request.path == "/v1/models"));
+    assert!(
+        source_state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.path == "/v1/models")
+    );
     let requests = account_state.requests.lock().unwrap();
     let response_requests = requests
         .iter()
@@ -92,9 +290,11 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
     assert_eq!(response_requests.len(), 2);
     assert_eq!(response_requests[0].responses_lite, None);
     assert_eq!(response_requests[0].body["parallel_tool_calls"], true);
-    assert!(response_requests[0].body["reasoning"]
-        .get("context")
-        .is_none());
+    assert!(
+        response_requests[0].body["reasoning"]
+            .get("context")
+            .is_none()
+    );
     assert_eq!(response_requests[1].responses_lite.as_deref(), Some("true"));
     assert_eq!(response_requests[1].body["parallel_tool_calls"], false);
     assert_eq!(
@@ -104,17 +304,11 @@ async fn mixed_responses_routes_disable_automatic_lite_but_preserve_explicit_cli
 }
 
 #[tokio::test]
-async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
+async fn account_only_compaction_defaults_to_full_with_mixed_transport_cards() {
     let mut lite_catalog = default_upstream_model_catalog();
     lite_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
-    let (lite_upstream, lite_state) = spawn_upstream_with_catalog(
-        vec![success_reply_for_model(
-            "full-compact",
-            OFFICIAL_CODEX_MODEL,
-        )],
-        lite_catalog,
-    )
-    .await;
+    let (lite_upstream, lite_state) =
+        spawn_upstream_with_catalog(vec![compaction_reply("full-compact")], lite_catalog).await;
     let mut full_catalog = default_upstream_model_catalog();
     full_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
     full_catalog["models"][0]["use_responses_lite"] = Value::Bool(false);
@@ -138,9 +332,7 @@ async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
     rotation_policy::set_order(&gateway, &["lite-account", "full-account"]);
     let client = reqwest::Client::new();
 
-    // Both account manifests are needed: the selected account advertises Lite,
-    // but an eligible fallback does not. The compact path must therefore retain
-    // the full Responses contract just like regular HTTP and WebSocket calls.
+    // Mixed native Lite flags must not change the default compact contract.
     assert_eq!(
         client
             .get(format!(
@@ -179,9 +371,11 @@ async fn account_only_compaction_requires_unanimous_automatic_lite_support() {
     assert_eq!(compact_requests.len(), 1);
     assert_eq!(compact_requests[0].responses_lite, None);
     assert_eq!(compact_requests[0].body["parallel_tool_calls"], true);
-    assert!(compact_requests[0].body["reasoning"]
-        .get("context")
-        .is_none());
+    assert!(
+        compact_requests[0].body["reasoning"]
+            .get("context")
+            .is_none()
+    );
     drop(requests);
     let full_requests = full_state.requests.lock().unwrap();
     assert_eq!(full_requests.len(), 1);
@@ -234,7 +428,7 @@ async fn compact_account_requests_keep_compact_transport_separate_from_responses
 }
 
 #[tokio::test]
-async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_client_lite() {
+async fn mixed_websocket_routes_default_to_full_and_preserve_explicit_client_lite() {
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("api-source-must-not-run")]).await;
     let mut account_catalog = default_upstream_model_catalog();
@@ -257,9 +451,7 @@ async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_cli
     .await;
     let client = reqwest::Client::new();
 
-    // Fetching the native manifest marks the OAuth route as Lite-capable. The
-    // same key can nevertheless fall back to the API source, so the automatic
-    // path must use full Responses on both transports.
+    // A Lite-capable native catalog must not select Lite for the client.
     assert_eq!(
         client
             .get(format!(
@@ -310,8 +502,10 @@ async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_cli
         .unwrap();
     assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
     let mut socket = upgraded.into_websocket().await.unwrap();
+    let mut explicit_lite_request = request.clone();
+    explicit_lite_request["parallel_tool_calls"] = json!(false);
     socket
-        .send(ClientWsMessage::Text(request.to_string()))
+        .send(ClientWsMessage::Text(explicit_lite_request.to_string()))
         .await
         .unwrap();
     assert_eq!(
@@ -319,17 +513,21 @@ async fn mixed_websocket_routes_disable_automatic_lite_but_preserve_explicit_cli
         "response.completed"
     );
 
-    assert!(source_state
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|request| request.path == "/v1/models"));
+    assert!(
+        source_state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.path == "/v1/models")
+    );
     let headers = account_state.headers.lock().unwrap();
     assert_eq!(headers.len(), 2);
-    assert!(headers[0]
-        .get("x-openai-internal-codex-responses-lite")
-        .is_none());
+    assert!(
+        headers[0]
+            .get("x-openai-internal-codex-responses-lite")
+            .is_none()
+    );
     assert_eq!(
         header(&headers[1], "x-openai-internal-codex-responses-lite").as_deref(),
         Some("true")
@@ -362,22 +560,40 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let mut request_body = json!({
+        "model": MODEL,
+        "input": "hello",
+        "service_tier": "flex",
+        "parallel_tool_calls": true,
+        "reasoning": {"effort": "high"},
+        "tools": [
+            {"type": "function", "name": "local_tool"},
+            {"type": "web_search"},
+            {"type": "image_generation"}
+        ]
+    });
+    let client = reqwest::Client::new();
+    let rejected = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .header("x-openai-internal-codex-responses-lite", "true")
-        .json(&json!({
-            "model": MODEL,
-            "input": "hello",
-            "service_tier": "flex",
-            "parallel_tool_calls": true,
-            "reasoning": {"effort": "high"},
-            "tools": [
-                {"type": "function", "name": "local_tool"},
-                {"type": "web_search"},
-                {"type": "image_generation"}
-            ]
-        }))
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "invalid_request"
+    );
+    assert!(state.requests.lock().unwrap().is_empty());
+
+    request_body["parallel_tool_calls"] = json!(false);
+    let response = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .json(&request_body)
         .send()
         .await
         .unwrap();
@@ -402,8 +618,8 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         Reply::Json(
             StatusCode::OK,
             json!({
-                "type": "compaction",
-                "items": [],
+                "object": "response.compaction",
+                "output": [{"type": "compaction", "encrypted_content": "synthetic-checkpoint"}],
                 "usage": {
                     "input_tokens": 1200,
                     "input_tokens_details": {"cached_tokens": 800},
@@ -441,7 +657,10 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
         .await
         .unwrap();
     assert_eq!(compact.status(), StatusCode::OK);
-    assert_eq!(compact.json::<Value>().await.unwrap()["type"], "compaction");
+    assert_eq!(
+        compact.json::<Value>().await.unwrap()["object"],
+        "response.compaction"
+    );
 
     let search = client
         .post(format!("{}/v1/alpha/search", gateway.base_url))
@@ -486,9 +705,11 @@ async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
     assert_eq!(events[0].cached_input_tokens, Some(800));
     assert_eq!(events[0].output_tokens, Some(100));
     assert_eq!(events[0].total_tokens, Some(1300));
-    assert!(events
-        .iter()
-        .all(|event| event.account_id.as_deref() == Some("relay-account")));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.account_id.as_deref() == Some("relay-account"))
+    );
 }
 
 #[tokio::test]

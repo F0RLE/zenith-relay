@@ -1,30 +1,83 @@
-use super::{codex_model_is_picker_eligible, is_valid_model_token, reasoning_policy_key};
+use super::is_valid_model_token;
 use crate::DefaultServiceTier;
+use serde_json::Value;
 
-/// Relay's request-speed policy, not upstream entitlement discovery. Every
-/// OpenAI conversational model offers the same choices on accounts and API
-/// sources. Existing family identity handles future versions and namespaces;
-/// source tier lists, availability and cooldowns do not change these choices.
-pub fn model_service_tiers(model: &str, provider: Option<&str>) -> &'static [DefaultServiceTier] {
-    let model = model.trim();
-    if !is_valid_model_token(model) {
-        return &[];
+/// Stable picker order for modes explicitly published by a model reference.
+/// Standard is the baseline; unknown models do not acquire faster modes.
+pub fn model_service_tiers(
+    model: &str,
+    declared: &[DefaultServiceTier],
+) -> Vec<DefaultServiceTier> {
+    if !is_valid_model_token(model.trim()) {
+        return Vec::new();
     }
-    let openai = provider
-        .filter(|provider| !provider.trim().is_empty())
-        .map_or_else(
-            || reasoning_policy_key(model) == "group:openai",
-            |provider| provider.eq_ignore_ascii_case("openai"),
-        );
-    if openai && codex_model_is_picker_eligible(model) {
-        &[
-            DefaultServiceTier::Standard,
-            DefaultServiceTier::Fast,
-            DefaultServiceTier::Ultrafast,
-        ]
-    } else {
-        &[DefaultServiceTier::Standard]
-    }
+    [
+        DefaultServiceTier::Standard,
+        DefaultServiceTier::Fast,
+        DefaultServiceTier::Ultrafast,
+    ]
+    .into_iter()
+    .filter(|tier| *tier == DefaultServiceTier::Standard || declared.contains(tier))
+    .collect()
+}
+
+pub(crate) fn reference_service_tiers(record: &Value) -> Vec<DefaultServiceTier> {
+    let explicit = record
+        .get("service_tiers")
+        .and_then(Value::as_array)
+        .or_else(|| {
+            record
+                .get("supported_service_tiers")
+                .and_then(Value::as_array)
+        });
+    let explicit_names = explicit
+        .into_iter()
+        .flatten()
+        .filter_map(|tier| tier.as_str().or_else(|| tier.get("id")?.as_str()));
+    let modes = record
+        .pointer("/experimental/modes")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|_| explicit.is_none())
+        .filter_map(|(name, mode)| {
+            mode.pointer("/provider/body/service_tier")
+                .and_then(Value::as_str)
+                .or(Some(name.as_str()))
+        });
+    explicit_names
+        .chain(modes)
+        .filter_map(|name| match name.trim().to_ascii_lowercase().as_str() {
+            "standard" | "default" => Some(DefaultServiceTier::Standard),
+            "fast" | "priority" => Some(DefaultServiceTier::Fast),
+            "ultrafast" => Some(DefaultServiceTier::Ultrafast),
+            _ => None,
+        })
+        .fold(Vec::new(), |mut tiers, tier| {
+            if !tiers.contains(&tier) {
+                tiers.push(tier);
+            }
+            tiers
+        })
+}
+
+pub(crate) fn transport_supports_service_tier(
+    tier: DefaultServiceTier,
+    upstream: crate::WireApi,
+    basis_points: bool,
+    declared: Option<&[DefaultServiceTier]>,
+) -> bool {
+    let protocol_supports_tier = match tier {
+        DefaultServiceTier::Standard => return true,
+        DefaultServiceTier::Fast => {
+            matches!(
+                upstream,
+                crate::WireApi::Responses | crate::WireApi::ChatCompletions
+            )
+        }
+        DefaultServiceTier::Ultrafast => upstream == crate::WireApi::Responses,
+    };
+    !basis_points && protocol_supports_tier && declared.is_none_or(|tiers| tiers.contains(&tier))
 }
 
 #[cfg(test)]
@@ -32,30 +85,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn speed_policy_uses_model_family_without_a_version_allowlist() {
+    fn speed_choices_require_explicit_reference_declarations() {
+        let declared = [DefaultServiceTier::Fast, DefaultServiceTier::Ultrafast];
         for model in [
             "gpt-future",
             "provider/GPT-future",
             "codex-future",
             "o99-synthetic",
         ] {
-            assert_eq!(model_service_tiers(model, None).len(), 3, "{model}");
+            assert_eq!(model_service_tiers(model, &declared).len(), 3, "{model}");
         }
-        assert_eq!(model_service_tiers("future-name", Some("OpenAI")).len(), 3);
-        for (model, provider) in [
-            ("claude-future", None),
-            ("gemini-future", None),
-            ("grok-future", None),
-            ("unknown", None),
-            ("gpt-image-future", None),
-            ("gpt-realtime-future", None),
-            ("gpt-oss-synthetic", Some("other")),
+        for model in [
+            "gpt-future",
+            "claude-future",
+            "gemini-future",
+            "grok-future",
+            "unknown",
+            "gpt-image-future",
+            "gpt-realtime-future",
+            "gpt-oss-synthetic",
         ] {
             assert_eq!(
-                model_service_tiers(model, provider),
+                model_service_tiers(model, &[]),
                 [DefaultServiceTier::Standard]
             );
         }
-        assert!(model_service_tiers(" ", None).is_empty());
+        assert!(model_service_tiers(" ", &declared).is_empty());
     }
 }

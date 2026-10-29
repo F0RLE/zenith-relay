@@ -1,7 +1,7 @@
-import type { OperationalStatus } from "./common";
-import type { ApiEquivalentSummary, ApiModelPriceOverride } from "./pricing";
+import type { DefaultServiceTier, OperationalStatus } from "./common";
+import type { ApiEquivalentSummary, ApiModelPriceOverride, ResolvedModelPrice } from "./pricing";
 
-export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini";
+export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions";
 
 export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini"
   | "responses_to_chat_completions" | "chat_completions_to_responses" | "chat_completions_to_messages"
@@ -21,6 +21,7 @@ export type ModelEndpointCapability = {
   checkedAtMs: number;
   features: Partial<Record<ProtocolFeature, CapabilityStatus>>;
   reasoningEfforts: string[];
+  serviceTiers?: DefaultServiceTier[] | null;
 };
 export type SourceProtocolConfig = {
   revision: number;
@@ -28,17 +29,8 @@ export type SourceProtocolConfig = {
   endpointHint?: SourceWireApi | null;
 };
 
-export type SourceProbeInput = { modelId: string; wireApi: SourceWireApi; expectedRevision: number };
-export type SourceProbeResult = {
-  capability: ModelEndpointCapability;
-  revision: number;
-  httpStatus: number | null;
-  errorCode: string | null;
-};
-
 export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
 export type CacheWriteTtl = "provider" | "5m" | "1h";
-export type DocumentedCacheRetentionMinimum = "30m";
 
 export type SourceProtocolBinding = {
   wireApi: SourceWireApi;
@@ -62,6 +54,8 @@ export type SourceSummary = {
   baseUrl: string;
   pricingProvider?: string | null;
   officialProviderFamily?: string | null;
+  /** Stored proxy used for every request of this source; the URL stays in the proxy pool. */
+  proxyId?: string | null;
   wireApi: SourceWireApi;
   protocolBindings?: SourceProtocolBinding[];
   protocolConfig?: SourceProtocolConfig;
@@ -74,19 +68,21 @@ export type SourceSummary = {
   recoveryDelaySeconds: number;
   modelPriceOverrides?: Record<string, ApiModelPriceOverride>;
   detectedModelPrices?: Record<string, ApiModelPriceOverride>;
+  /** This source's resolver output. Never substitute a different pool member. */
+  resolvedModelPrices?: Record<string, ResolvedModelPrice>;
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
-  /** Non-secret scope for cached provider observations; absent on older servers. */
+  /** Non-secret revision of cached provider observations. */
   refreshRevision?: number | null;
-  /** Optional on older servers; models and balance have independent freshness. */
+  /** Models and balance have independent freshness. */
   refreshState?: { models: RefreshStatus; balance: RefreshStatus };
   /** Host runtime cache only; reading snapshots does not poll a provider. */
   providerStats?: SourceStats | null;
 };
 
 export type SourceStats = {
-  provider: "zenith" | "openrouter" | "sub2api" | "new_api" | "billing" | "deepseek" | "siliconflow" | "unsupported";
+  provider: "zenith" | "openrouter" | "sub2api" | "new_api" | "billing" | "deepseek" | "siliconflow" | "moonshot" | "unsupported";
   balanceMicroUsd: number | null;
   spentMicroUsd: number | null;
   requests: number | null;

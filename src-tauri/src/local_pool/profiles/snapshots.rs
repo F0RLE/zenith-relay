@@ -16,8 +16,8 @@ use io::SnapshotSecrets;
 
 mod record;
 use record::{
-    load_payload, normalize_name, read_record, summary, validate_profile_content, validate_record,
-    SnapshotPayload, SnapshotRecord,
+    SnapshotPayload, SnapshotRecord, load_payload, normalize_name, read_record, summary,
+    validate_profile_content, validate_record,
 };
 
 pub(super) const MAX_NAME_CHARS: usize = 80;
@@ -57,33 +57,37 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
     }
     let mut snapshots = Vec::new();
     let mut invalid_count = 0;
-    for entry in fs::read_dir(&root).map_err(io::io_error)? {
-        let entry = entry.map_err(io::io_error)?;
-        if !entry.file_type().map_err(io::io_error)?.is_file()
-            || entry.path().extension().and_then(|value| value.to_str()) != Some("json")
+    for directory_entry in fs::read_dir(&root).map_err(io::io_error)? {
+        let directory_entry = directory_entry.map_err(io::io_error)?;
+        if !directory_entry.file_type().map_err(io::io_error)?.is_file()
+            || directory_entry
+                .path()
+                .extension()
+                .and_then(|file_extension| file_extension.to_str())
+                != Some("json")
         {
             continue;
         }
-        let path = entry.path();
+        let path = directory_entry.path();
         let stem = path
             .file_stem()
-            .and_then(|value| value.to_str())
+            .and_then(|file_stem| file_stem.to_str())
             .unwrap_or_default();
-        let record = read_record(&path).and_then(|record| {
-            validate_record(&record, stem)?;
-            let payload = load_payload(&record, secrets)?;
-            if record.config_available != payload.config.is_some()
-                || record.auth_available != payload.auth.is_some()
+        let snapshot_record = read_record(&path).and_then(|snapshot_record| {
+            validate_record(&snapshot_record, stem)?;
+            let snapshot_payload = load_payload(&snapshot_record, secrets)?;
+            if snapshot_record.config_available != snapshot_payload.config.is_some()
+                || snapshot_record.auth_available != snapshot_payload.auth.is_some()
             {
                 return Err(LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
                     "ChatGPT snapshot metadata does not match its encrypted payload",
                 ));
             }
-            Ok(record)
+            Ok(snapshot_record)
         });
-        match record {
-            Ok(record) => snapshots.push(summary(&record)),
+        match snapshot_record {
+            Ok(snapshot_record) => snapshots.push(summary(&snapshot_record)),
             Err(_) => invalid_count += 1,
         }
     }
@@ -100,46 +104,56 @@ fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<Profi
     })
 }
 
-pub fn create(codex_home: &Path, backup_root: &Path, name: &str) -> Result<ProfileSnapshotSummary> {
-    create_with(codex_home, backup_root, name, false, &io::OsSnapshotSecrets)
+pub fn create(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot_name: &str,
+) -> Result<ProfileSnapshotSummary> {
+    create_with(
+        codex_home,
+        backup_root,
+        snapshot_name,
+        false,
+        &io::OsSnapshotSecrets,
+    )
 }
 
-pub fn restore_full(codex_home: &Path, backup_root: &Path, id: &str) -> Result<()> {
-    restore_full_with(codex_home, backup_root, id, &io::OsSnapshotSecrets)
+pub fn restore_full(codex_home: &Path, backup_root: &Path, snapshot_id: &str) -> Result<()> {
+    restore_full_with(codex_home, backup_root, snapshot_id, &io::OsSnapshotSecrets)
 }
 
-pub fn delete(backup_root: &Path, id: &str) -> Result<()> {
-    delete_with(backup_root, id, &io::OsSnapshotSecrets)
+pub fn delete(backup_root: &Path, snapshot_id: &str) -> Result<()> {
+    delete_with(backup_root, snapshot_id, &io::OsSnapshotSecrets)
 }
 
 fn create_with(
     codex_home: &Path,
     backup_root: &Path,
-    name: &str,
+    requested_name: &str,
     is_original: bool,
     secrets: &impl SnapshotSecrets,
 ) -> Result<ProfileSnapshotSummary> {
-    let name = normalize_name(name)?;
+    let snapshot_name = normalize_name(requested_name)?;
     fs::create_dir_all(codex_home).map_err(io::io_error)?;
     let profile_dir = fs::canonicalize(codex_home).map_err(io::io_error)?;
     let snapshot = codex::snapshot_user_profile(&profile_dir, backup_root)?;
     validate_profile_content(&snapshot)?;
-    let id = Uuid::new_v4().to_string();
-    let payload_secret_ref = io::payload_secret_ref(&id);
+    let snapshot_id = Uuid::new_v4().to_string();
+    let payload_secret_ref = io::payload_secret_ref(&snapshot_id);
     let config_available = snapshot.config.is_some();
     let auth_available = snapshot.auth.is_some();
-    let payload = serde_json::to_string(&SnapshotPayload {
+    let snapshot_payload_json = serde_json::to_string(&SnapshotPayload {
         version: PAYLOAD_VERSION,
         config: snapshot.config,
         auth: snapshot.auth,
     })
     .map_err(io::invalid_data)?;
-    secrets.save(&payload_secret_ref, &payload)?;
+    secrets.save(&payload_secret_ref, &snapshot_payload_json)?;
 
-    let record = SnapshotRecord {
+    let snapshot_record = SnapshotRecord {
         version: SNAPSHOT_VERSION,
-        id: id.clone(),
-        name,
+        id: snapshot_id.clone(),
+        name: snapshot_name,
         profile_dir: codex::portable_path_string(&profile_dir),
         created_at_ms: now_ms(),
         config_available,
@@ -147,47 +161,52 @@ fn create_with(
         is_original,
         payload_secret_ref: payload_secret_ref.clone(),
     };
-    let metadata = serde_json::to_string_pretty(&record).map_err(io::invalid_data)?;
-    let path = io::metadata_path(backup_root, &id)?;
+    let metadata = serde_json::to_string_pretty(&snapshot_record).map_err(io::invalid_data)?;
+    let path = io::metadata_path(backup_root, &snapshot_id)?;
     if let Err(error) =
         atomic_write(&path, &format!("{metadata}\n")).map_err(super::io_error_message)
     {
         return Err(io::with_cleanup(error, secrets.delete(&payload_secret_ref)));
     }
-    Ok(summary(&record))
+    Ok(summary(&snapshot_record))
 }
 
 fn restore_full_with(
     codex_home: &Path,
     backup_root: &Path,
-    id: &str,
+    snapshot_id: &str,
     secrets: &impl SnapshotSecrets,
 ) -> Result<()> {
-    let path = io::metadata_path(backup_root, id)?;
-    let record = read_record(&path)?;
-    validate_record(&record, id)?;
+    let path = io::metadata_path(backup_root, snapshot_id)?;
+    let snapshot_record = read_record(&path)?;
+    validate_record(&snapshot_record, snapshot_id)?;
     // A profile directory may have been removed while the snapshot was kept.
     // Recreate it before canonicalizing so a valid snapshot can repair the
     // profile instead of failing with an I/O error on a missing path.
     fs::create_dir_all(codex_home).map_err(io::io_error)?;
     let profile_dir = fs::canonicalize(codex_home).map_err(io::io_error)?;
-    if codex::portable_path_value(&record.profile_dir) != codex::portable_path_string(&profile_dir)
+    if codex::portable_path_value(&snapshot_record.profile_dir)
+        != codex::portable_path_string(&profile_dir)
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "ChatGPT snapshot belongs to another profile",
         ));
     }
-    let payload = load_payload(&record, secrets)?;
+    let snapshot_payload = load_payload(&snapshot_record, secrets)?;
     let snapshot = UserProfileSnapshot {
-        config: payload.config,
-        auth: payload.auth,
+        config: snapshot_payload.config,
+        auth: snapshot_payload.auth,
     };
     codex::restore_full_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
 }
 
-fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> Result<()> {
-    let path = io::metadata_path(backup_root, id)?;
+fn delete_with(
+    backup_root: &Path,
+    snapshot_id: &str,
+    secrets: &impl SnapshotSecrets,
+) -> Result<()> {
+    let path = io::metadata_path(backup_root, snapshot_id)?;
     let bytes = io::read_bounded(&path, MAX_METADATA_BYTES)?;
     let content = std::str::from_utf8(&bytes).map_err(|_| {
         LocalPoolError::new(
@@ -195,13 +214,14 @@ fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> 
             "ChatGPT snapshot metadata is not UTF-8",
         )
     })?;
-    let record: SnapshotRecord = serde_json::from_str(content).map_err(io::invalid_data)?;
-    validate_record(&record, id)?;
-    if fs::read(&path).map_err(io::io_error)? != bytes {
+    let snapshot_record: SnapshotRecord =
+        serde_json::from_str(content).map_err(io::invalid_data)?;
+    validate_record(&snapshot_record, snapshot_id)?;
+    if io::read_bounded(&path, MAX_METADATA_BYTES)? != bytes {
         return Err(io::snapshot_changed());
     }
     fs::remove_file(&path).map_err(io::io_error)?;
-    if let Err(error) = secrets.delete(&record.payload_secret_ref) {
+    if let Err(error) = secrets.delete(&snapshot_record.payload_secret_ref) {
         let rollback = atomic_write(&path, content).map_err(super::io_error_message);
         return Err(io::with_cleanup(error, rollback));
     }
@@ -217,11 +237,11 @@ mod tests {
     struct MemorySecrets(Mutex<HashMap<String, String>>);
 
     impl SnapshotSecrets for MemorySecrets {
-        fn save(&self, secret_ref: &str, value: &str) -> Result<()> {
+        fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()> {
             self.0
                 .lock()
                 .unwrap()
-                .insert(secret_ref.to_string(), value.to_string());
+                .insert(secret_ref.to_string(), secret_value.to_string());
             Ok(())
         }
 
@@ -237,8 +257,7 @@ mod tests {
 
     #[test]
     fn full_restore_replaces_the_profile_without_creating_an_extra_snapshot() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
+        let root = crate::files::test_temp_root("profile-snapshot-restore");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -270,8 +289,7 @@ mod tests {
 
     #[test]
     fn full_restore_does_not_save_the_current_profile() {
-        let root =
-            std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
+        let root = crate::files::test_temp_root("profile-snapshot-no-save");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -293,10 +311,7 @@ mod tests {
 
     #[test]
     fn full_restore_recreates_a_deleted_profile_directory() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-profile-snapshot-deleted-{}",
-            Uuid::new_v4()
-        ));
+        let root = crate::files::test_temp_root("profile-snapshot-deleted");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
@@ -323,10 +338,7 @@ mod tests {
 
     #[test]
     fn snapshot_list_keeps_valid_entries_when_one_payload_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-profile-snapshot-missing-{}",
-            Uuid::new_v4()
-        ));
+        let root = crate::files::test_temp_root("profile-snapshot-missing");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();

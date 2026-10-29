@@ -52,11 +52,11 @@ pub(in crate::local_pool::profiles::codex) fn restore_secret_snapshot(
     snapshot: &Option<(String, Option<String>)>,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
-    let Some((secret_ref, value)) = snapshot else {
+    let Some((secret_ref, secret_value)) = snapshot else {
         return Ok(());
     };
-    match value {
-        Some(value) => secrets.save(secret_ref, value),
+    match secret_value {
+        Some(secret_value) => secrets.save(secret_ref, secret_value),
         None => secrets.delete(secret_ref),
     }
 }
@@ -142,14 +142,21 @@ pub(in crate::local_pool::profiles::codex) fn delete_backup_secrets(
     let snapshots = [previous_auth_secret_ref, projection_secret_ref]
         .into_iter()
         .flatten()
-        .map(|secret_ref| secrets.load(secret_ref).map(|value| (secret_ref, value)))
+        .map(|secret_ref| {
+            secrets
+                .load(secret_ref)
+                .map(|secret_value| (secret_ref, secret_value))
+        })
         .collect::<Result<Vec<_>>>()?;
     for (index, (secret_ref, _)) in snapshots.iter().enumerate() {
         if let Err(error) = secrets.delete(secret_ref) {
             let mut rollback = Ok(());
-            for (deleted_ref, value) in &snapshots[..index] {
-                if let Some(value) = value {
-                    rollback = merge_rollbacks(rollback, secrets.save(deleted_ref, value));
+            for (deleted_secret_ref, deleted_secret_value) in &snapshots[..index] {
+                if let Some(deleted_secret_value) = deleted_secret_value {
+                    rollback = merge_rollbacks(
+                        rollback,
+                        secrets.save(deleted_secret_ref, deleted_secret_value),
+                    );
                 }
             }
             return Err(with_rollback(error, rollback));

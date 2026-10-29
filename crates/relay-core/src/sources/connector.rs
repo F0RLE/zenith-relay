@@ -1,8 +1,8 @@
 use super::{
-    normalized_base_url, ProviderSource, SourceProtocolBinding, SourceProtocolBindingKey, WireApi,
+    ProviderSource, SourceProtocolBinding, SourceProtocolBindingKey, WireApi, normalized_base_url,
 };
 use crate::{Error, Result, UpstreamProtocol};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use std::fmt;
 use url::Url;
 
@@ -19,10 +19,12 @@ pub struct SourceConnector {
     pub(crate) responses_url: Url,
     pub(crate) chat_completions_url: Url,
     pub(crate) messages_url: Url,
-    pub(crate) models_url: Url,
+    models_url: Url,
+    gemini_models_url: Url,
     bearer_authorization: HeaderValue,
     messages_api_key: HeaderValue,
     protocol_bindings: Vec<SourceProtocolBinding>,
+    pub(crate) proxy: Option<crate::ProxyConfig>,
 }
 
 impl SourceConnector {
@@ -37,6 +39,14 @@ impl SourceConnector {
             Error::Validation("source API key contains invalid header characters".to_string())
         })?;
         messages_api_key.set_sensitive(true);
+        let proxy = source
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|proxy_url| !proxy_url.is_empty())
+            .map(crate::ProxyConfig::parse)
+            .transpose()
+            .map_err(|message| Error::Validation(message.to_string()))?;
         Ok(Self {
             id: source.id.clone(),
             base_url: base_url.clone(),
@@ -52,9 +62,13 @@ impl SourceConnector {
             models_url: base_url
                 .join("models")
                 .map_err(|_| Error::Validation("source models URL is invalid".to_string()))?,
+            gemini_models_url: gemini_models_endpoint(&base_url).ok_or_else(|| {
+                Error::Validation("source Gemini models URL is invalid".to_string())
+            })?,
             bearer_authorization,
             messages_api_key,
             protocol_bindings: bindings.to_vec(),
+            proxy,
         })
     }
 
@@ -73,10 +87,12 @@ impl SourceConnector {
             chat_completions_url: base_url.join("chat/completions").ok()?,
             messages_url: base_url.join("messages").ok()?,
             models_url: base_url.join("models").ok()?,
+            gemini_models_url: gemini_models_endpoint(&base_url)?,
             base_url,
             bearer_authorization: self.bearer_authorization.clone(),
             messages_api_key: self.messages_api_key.clone(),
             protocol_bindings: bindings.to_vec(),
+            proxy: self.proxy.clone(),
         })
     }
 
@@ -89,7 +105,7 @@ impl SourceConnector {
             WireApi::Responses | WireApi::ChatCompletions => {
                 (AUTHORIZATION, self.bearer_authorization.clone())
             }
-            WireApi::Gemini => (
+            WireApi::Gemini | WireApi::GeminiInteractions => (
                 HeaderName::from_static("x-goog-api-key"),
                 self.messages_api_key.clone(),
             ),
@@ -102,7 +118,7 @@ impl SourceConnector {
                 HeaderName::from_static("x-api-key"),
                 self.messages_api_key.clone(),
             ),
-            UpstreamProtocol::GeminiGenerateContent => (
+            UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => (
                 HeaderName::from_static("x-goog-api-key"),
                 self.messages_api_key.clone(),
             ),
@@ -125,22 +141,23 @@ impl SourceConnector {
             UpstreamProtocol::ChatCompletions => Some(self.chat_completions_url.clone()),
             UpstreamProtocol::Messages => Some(self.messages_url.clone()),
             UpstreamProtocol::GeminiGenerateContent => self.gemini_endpoint(model, stream),
+            UpstreamProtocol::GeminiInteractions => self.base_url.join("interactions").ok(),
         }
     }
 
     fn gemini_endpoint(&self, model: &str, stream: bool) -> Option<Url> {
-        let model = model.strip_prefix("models/").unwrap_or(model);
-        if model.is_empty()
-            || !model
+        let model_id = model.strip_prefix("models/").unwrap_or(model);
+        if model_id.is_empty()
+            || !model_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
             return None;
         }
-        let mut url = self.base_url.clone();
+        let mut url = self.gemini_models_url.clone();
         {
             let mut segments = url.path_segments_mut().ok()?;
-            segments.pop_if_empty().push("models").push(model);
+            segments.pop_if_empty().push(model_id);
         }
         let path = format!(
             "{}:{}",
@@ -156,6 +173,15 @@ impl SourceConnector {
             url.query_pairs_mut().append_pair("alt", "sse");
         }
         Some(url)
+    }
+
+    pub(crate) fn models_endpoint_for_binding(&self, binding: &SourceProtocolBinding) -> &Url {
+        match binding.adapter.upstream_protocol(binding.wire_api) {
+            UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => {
+                &self.gemini_models_url
+            }
+            _ => &self.models_url,
+        }
     }
 
     pub fn canonical_model_for(
@@ -217,6 +243,17 @@ impl SourceConnector {
     }
 }
 
+fn gemini_models_endpoint(base_url: &Url) -> Option<Url> {
+    let mut root = base_url.clone();
+    if let Some(service) = root
+        .host_str()
+        .and_then(super::services::Service::from_host)
+    {
+        service.normalize_gemini_api_root(&mut root);
+    }
+    root.join("models").ok()
+}
+
 impl fmt::Debug for SourceConnector {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -243,6 +280,7 @@ mod tests {
             name: "Synthetic source".to_string(),
             base_url: "https://api.example.test/v1".to_string(),
             api_key: "source-secret".to_string(),
+            proxy_url: None,
             wire_api: WireApi::Responses,
             models: vec!["responses-model".to_string(), "messages-model".to_string()],
         }
@@ -268,16 +306,18 @@ mod tests {
         ];
         let connector = SourceConnector::new(&source(), &bindings).unwrap();
 
-        assert!(connector
-            .protocol_headers(bindings[0].key())
-            .unwrap()
-            .is_empty());
+        assert!(
+            connector
+                .protocol_headers(bindings[0].key())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             connector
                 .protocol_headers(bindings[1].key())
                 .unwrap()
                 .get("anthropic-version")
-                .and_then(|value| value.to_str().ok()),
+                .and_then(|header_value| header_value.to_str().ok()),
             Some("2023-06-01")
         );
     }
@@ -292,9 +332,9 @@ mod tests {
             model_ids: vec!["gemini-test".to_string()],
         }];
         let connector = SourceConnector::new(&source(), &bindings).unwrap();
-        let (name, value) = connector.authorization_for_binding(&bindings[0]);
+        let (name, api_key) = connector.authorization_for_binding(&bindings[0]);
         assert_eq!(name, HeaderName::from_static("x-goog-api-key"));
-        assert_eq!(value, "source-secret");
+        assert_eq!(api_key, "source-secret");
         assert_eq!(
             connector
                 .endpoint(bindings[0].key(), "gemini-test", false)
@@ -309,9 +349,11 @@ mod tests {
                 .as_str(),
             "https://api.example.test/v1/models/gemini-test:streamGenerateContent?alt=sse"
         );
-        assert!(connector
-            .endpoint(bindings[0].key(), "../not-a-model", false)
-            .is_none());
+        assert!(
+            connector
+                .endpoint(bindings[0].key(), "../not-a-model", false)
+                .is_none()
+        );
     }
 
     #[test]

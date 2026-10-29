@@ -5,24 +5,148 @@
 use super::*;
 use crate::DefaultServiceTier;
 
+/// Model identity and editable model policy share an owner, not a lock.
+/// Keep the existing lock granularity and shared visibility handle: active
+/// candidate leases must observe policy changes without replacing the runtime.
+pub(super) struct RuntimeModelState {
+    pub(super) registry: Mutex<ModelRegistry>,
+    pub(super) hidden_models: Arc<RwLock<BTreeSet<String>>>,
+    pub(super) reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    pub(super) context_policies: Mutex<BTreeMap<String, ModelContextPolicy>>,
+    pub(super) service_tier_overrides: Mutex<BTreeMap<String, DefaultServiceTier>>,
+    pub(super) display_order: Mutex<Vec<String>>,
+}
+
+impl RuntimeModelState {
+    pub(super) fn new(
+        registry: ModelRegistry,
+        hidden_models: BTreeSet<String>,
+        reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+        context_policies: BTreeMap<String, ModelContextPolicy>,
+    ) -> Self {
+        Self {
+            registry: Mutex::new(registry),
+            hidden_models: Arc::new(RwLock::new(hidden_models)),
+            reasoning_allowed_levels: Mutex::new(reasoning_allowed_levels),
+            context_policies: Mutex::new(context_policies),
+            service_tier_overrides: Mutex::new(BTreeMap::new()),
+            display_order: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 impl GatewayRuntime {
+    /// Resolve Desktop's reserved client namespace against configured model
+    /// identities only. Callers still apply key scope, rules, visibility and
+    /// route eligibility to the result. Never fall back to a raw provider model
+    /// with an alias-shaped name: it could shadow a different model's route.
+    fn desktop_requested_model<'a>(
+        &self,
+        key: &AuthenticatedKey,
+        requested: &'a str,
+    ) -> Option<std::borrow::Cow<'a, str>> {
+        let requested = requested.trim();
+        if !crate::catalog::is_claude_desktop_model_alias(requested) {
+            return Some(std::borrow::Cow::Borrowed(requested));
+        }
+        let scheduler = self.lock_scheduler();
+        let mut resolved: Option<String> = None;
+        for model in scheduler
+            .candidates()
+            .flat_map(|candidate| &candidate.models)
+        {
+            let displayed = match key.model_prefix.as_deref() {
+                Some(prefix) => format!("{prefix}/{model}"),
+                None => model.clone(),
+            };
+            if !crate::catalog::claude_desktop_model_alias_matches(requested, &displayed) {
+                continue;
+            }
+            if let Some(previous) = &resolved {
+                // A compact-hash collision must fail closed, never choose by pool order.
+                if crate::model_id_key(previous) != crate::model_id_key(&displayed) {
+                    return None;
+                }
+            } else {
+                resolved = Some(displayed);
+            }
+        }
+        resolved.map(std::borrow::Cow::Owned)
+    }
+
+    pub fn set_model_context_policies(
+        &self,
+        policies: std::collections::BTreeMap<String, crate::ModelContextPolicy>,
+    ) -> crate::Result<()> {
+        let policies = crate::normalize_model_context_policies(policies)
+            .map_err(|message| crate::Error::Validation(message.to_string()))?;
+        *crate::poison::mutex(&self.model_state.context_policies) = policies;
+        Ok(())
+    }
+
+    pub(crate) fn apply_model_context(
+        &self,
+        entry: &mut Value,
+        model: &str,
+        native: bool,
+        native_card: bool,
+        capabilities: &crate::model_metadata::ModelCapabilities,
+    ) {
+        let selected = crate::poison::mutex(&self.model_state.context_policies)
+            .get(&crate::model_id_key(model))
+            .copied()
+            .unwrap_or_default();
+        // A native account without an exact model card has no authoritative
+        // context window. Keep the identity-only fallback untouched unless
+        // the user explicitly selected a custom window for this model.
+        if native && !native_card && !selected.is_custom() {
+            return;
+        }
+        if !crate::catalog::context_policy::model_supports_text_context(
+            model,
+            None,
+            &capabilities.output_modalities,
+        ) {
+            return;
+        }
+        if native {
+            crate::catalog::context_policy::apply_native_model_context(
+                entry,
+                selected,
+                capabilities.input_limit,
+                capabilities.output_limit,
+            );
+        } else {
+            crate::catalog::context_policy::apply_model_context(
+                entry,
+                selected,
+                capabilities.context_limit,
+                capabilities.input_limit,
+                capabilities.output_limit,
+            );
+        }
+    }
+
     pub(crate) fn resolve_model(&self, key: &AuthenticatedKey, model: &str) -> Option<String> {
-        let model = model.trim();
-        if model.is_empty() {
+        let requested_model_id = model.trim();
+        if requested_model_id.is_empty() {
             return None;
         }
-        let model = match key.model_prefix.as_deref() {
-            Some(prefix) => strip_prefix_ignore_ascii_case(model, &format!("{prefix}/"))?,
-            None => model,
+        let scoped_model_id = match key.model_prefix.as_deref() {
+            Some(prefix) => {
+                strip_prefix_ignore_ascii_case(requested_model_id, &format!("{prefix}/"))?
+            }
+            None => requested_model_id,
         };
-        if self.degraded_route_blocked(model) {
+        if self.degraded_route_blocked(scoped_model_id) {
             return None;
         }
-        (key.model_rules.allows(model) && self.model_enabled(model)).then(|| model.to_string())
+        (key.model_rules.allows(scoped_model_id) && self.model_enabled(scoped_model_id))
+            .then(|| scoped_model_id.to_string())
     }
 
     pub(super) fn model_enabled(&self, model: &str) -> bool {
-        !crate::poison::read(&self.hidden_models).contains(&crate::model_id_key(model))
+        !crate::poison::read(&self.model_state.hidden_models).contains(&crate::model_id_key(model))
     }
 
     /// Apply global visibility without replacing the scheduler or interrupting
@@ -33,7 +157,7 @@ impl GatewayRuntime {
             .map(|model| crate::model_id_key(model))
             .filter(|model| !model.is_empty())
             .collect();
-        *crate::poison::write(&self.hidden_models) = hidden;
+        *crate::poison::write(&self.model_state.hidden_models) = hidden;
         self.candidate_availability.notify_waiters();
         self.admission_changed.notify_waiters();
     }
@@ -59,6 +183,8 @@ impl GatewayRuntime {
         model: &str,
         allowed_protocols: &[WireApi],
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, model)?;
+        let model = desktop_model.as_ref();
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         let resolve = |candidate: &str| {
@@ -68,7 +194,8 @@ impl GatewayRuntime {
                 .any(|candidate| candidate.is_configured(&resolved, allowed_protocols, &scope))
                 .then_some(resolved)
         };
-        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
+        resolve(model)
+            .or_else(|| decode_codex_model_alias(model).and_then(|model_id| resolve(&model_id)))
     }
 
     pub(crate) fn resolve_visible_account_model(
@@ -84,6 +211,8 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         model: &str,
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, model)?;
+        let model = desktop_model.as_ref();
         let resolve = |candidate: &str| {
             let resolved = self.resolve_model(key, candidate)?;
             (!self
@@ -91,7 +220,8 @@ impl GatewayRuntime {
                 .is_empty())
             .then_some(resolved)
         };
-        resolve(model).or_else(|| decode_codex_model_alias(model).and_then(|id| resolve(&id)))
+        resolve(model)
+            .or_else(|| decode_codex_model_alias(model).and_then(|model_id| resolve(&model_id)))
     }
 
     fn resolve_from_visible(
@@ -100,16 +230,18 @@ impl GatewayRuntime {
         requested: &str,
         visible: &[String],
     ) -> Option<String> {
+        let desktop_model = self.desktop_requested_model(key, requested)?;
+        let requested = desktop_model.as_ref();
         let resolve = |candidate: &str| {
             let resolved = self.resolve_model(key, candidate)?;
             visible
                 .iter()
-                .filter_map(|visible| self.resolve_model(key, visible))
-                .any(|visible| visible.eq_ignore_ascii_case(&resolved))
+                .filter_map(|visible_model_id| self.resolve_model(key, visible_model_id))
+                .any(|visible_model_id| visible_model_id.eq_ignore_ascii_case(&resolved))
                 .then_some(resolved)
         };
         resolve(requested)
-            .or_else(|| decode_codex_model_alias(requested).and_then(|id| resolve(&id)))
+            .or_else(|| decode_codex_model_alias(requested).and_then(|model_id| resolve(&model_id)))
     }
 
     pub(crate) fn visible_models(
@@ -119,25 +251,27 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Vec<String> {
         let scope = key.scope_snapshot();
+        let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
-        let mut models = crate::poison::mutex(&self.registry)
+        let mut models = crate::poison::mutex(&self.model_state.registry)
             .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| {
                 !self.degraded_route_blocked(model)
                     && key.model_rules.allows(model)
                     && self.model_enabled(model)
+                    && scheduler.candidates().any(|candidate| {
+                        candidate.is_catalog_visible(model, allowed_protocols, &scope)
+                            && basis_points_models.model_available(&candidate.id, model)
+                    })
             })
             .collect::<Vec<_>>();
-        let order = crate::poison::mutex(&self.model_display_order);
-        models = self.model_metadata_catalog.as_ref().map_or_else(
-            || crate::normalize_model_ids(models.iter()),
-            |catalog| {
-                catalog
-                    .snapshot()
-                    .merge_display_order(models.iter(), &order)
-            },
+        let order = crate::poison::mutex(&self.model_state.display_order);
+        let catalog = self.model_metadata_catalog.as_ref().map_or_else(
+            || Arc::new(crate::model_metadata::ModelMetadataCatalog::empty()),
+            |catalog| catalog.snapshot(),
         );
+        models = catalog.merge_display_order(models.iter(), &order);
         models
             .into_iter()
             .map(|model| match key.model_prefix.as_deref() {
@@ -175,6 +309,15 @@ impl GatewayRuntime {
                         .count();
                     if visible_models == 0 {
                         return None;
+                    }
+                    if self.is_basis_points_account(&account.id) {
+                        return Some((
+                            account.id.clone(),
+                            crate::providers::chatgpt::basis_points_access_url(
+                                &account.basis_points_url,
+                            )?,
+                            visible_models,
+                        ));
                     }
                     let mut url = account.responses_url.clone();
                     let mut segments = url.path_segments_mut().ok()?;
@@ -235,13 +378,90 @@ impl GatewayRuntime {
         self.model_supported_service_tiers(model).contains(&tier)
     }
 
-    pub(crate) fn model_supported_service_tiers(
+    pub(crate) fn model_supported_service_tiers(&self, model: &str) -> Vec<DefaultServiceTier> {
+        let tiers = crate::catalog::model_service_tiers(
+            model,
+            &self.model_capabilities(model).service_tiers,
+        );
+        // Standard is unconditional in service_tiers_for_routes. If reference
+        // metadata advertises no optional tier, resolving every executor route
+        // cannot change this result (including for an empty/offline pool).
+        if tiers
+            .iter()
+            .all(|tier| *tier == DefaultServiceTier::Standard)
+        {
+            return tiers;
+        }
+        let scope = CandidateScope::default();
+        let candidate_ids = self
+            .lock_scheduler()
+            .candidates()
+            .filter(|candidate| candidate.is_configured(model, &WireApi::ALL_NATIVE, &scope))
+            .map(|candidate| candidate.id.clone())
+            .collect::<Vec<_>>();
+        let routes = candidate_ids
+            .iter()
+            .filter_map(|id| self.executor_route(id, model, &scope, &WireApi::ALL_NATIVE, false))
+            .collect::<Vec<_>>();
+        self.service_tiers_for_routes(model, &routes)
+    }
+
+    pub(crate) fn client_service_tiers(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        client: WireApi,
+    ) -> Vec<DefaultServiceTier> {
+        self.service_tiers_for_routes(
+            model,
+            &self.configured_executor_routes(key, model, &[client], false),
+        )
+    }
+
+    pub(crate) fn account_service_tiers(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Vec<DefaultServiceTier> {
+        let routes = self
+            .configured_executor_routes(key, model, &[WireApi::Responses], false)
+            .into_iter()
+            .filter(|route| route.account_id.is_some())
+            .collect::<Vec<_>>();
+        self.service_tiers_for_routes(model, &routes)
+    }
+
+    fn service_tiers_for_routes(
         &self,
         model: &str,
-    ) -> &'static [DefaultServiceTier] {
-        self.model_metadata_catalog.as_ref().map_or_else(
-            || crate::catalog::model_service_tiers(model, None),
-            |catalog| catalog.snapshot().service_tiers_for(model),
+        routes: &[ExecutorRoute],
+    ) -> Vec<DefaultServiceTier> {
+        crate::catalog::model_service_tiers(model, &self.model_capabilities(model).service_tiers)
+            .into_iter()
+            .filter(|tier| {
+                *tier == DefaultServiceTier::Standard
+                    || routes
+                        .iter()
+                        .any(|route| Self::route_supports_service_tier(route, *tier))
+            })
+            .collect()
+    }
+
+    pub(crate) fn route_supports_service_tier(
+        route: &ExecutorRoute,
+        tier: DefaultServiceTier,
+    ) -> bool {
+        crate::catalog::transport_supports_service_tier(
+            tier,
+            route
+                .adapter
+                .upstream_protocol(route.client_wire_api)
+                .wire_api(),
+            route.account_transport == AccountTransport::ExcelBasisPoints,
+            route
+                .route_capability
+                .as_ref()
+                .and_then(|route| route.service_tiers.as_deref()),
         )
     }
 

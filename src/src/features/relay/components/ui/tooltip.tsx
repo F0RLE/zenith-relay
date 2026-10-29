@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { isTooltipFocusSuppressed } from "./focus";
 
 export function mergeDescribedBy(...values: Array<string | undefined>) {
-  const ids = new Set(values.flatMap((value) => value?.split(/\s+/).filter(Boolean) ?? []));
-  return ids.size ? [...ids].join(" ") : undefined;
+  const describedByIds = new Set(values.flatMap((describedByValue) => describedByValue?.split(/\s+/).filter(Boolean) ?? []));
+  return describedByIds.size ? [...describedByIds].join(" ") : undefined;
 }
 
 // Both component-owned and delegated hints share one visible tooltip.
@@ -28,7 +29,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     dismissActiveTooltip = hide;
     setInstant(immediate);
     setPosition(null);
-    setActivation((value) => value + 1);
+    setActivation((activation) => activation + 1);
     setVisible(true);
   }, [hide]);
   const showNow = useCallback(() => activate(true), [activate]);
@@ -74,6 +75,18 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     if (!visible) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
+      // A hint must not swallow an editor's Escape-to-cancel shortcut.
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, [contenteditable='true']")) {
+        hide();
+        return;
+      }
+      // A passive hint must not make closing a dialog require a second Escape.
+      // Dialogs and inner editors/menus retain their own dismissal ordering.
+      if (anchorRef.current?.closest("[data-relay-dialog]")
+        || event.target instanceof Element && event.target.closest("[data-relay-dialog]")) {
+        hide();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       hide();
@@ -124,7 +137,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     hideAfterHover: () => { if (!anchorRef.current?.matches(":focus-visible")) hide(); },
     show,
     showNow,
-    showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
+    showAfterFocus: () => { if (!isTooltipFocusSuppressed() && anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
   };

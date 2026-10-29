@@ -1,8 +1,8 @@
 use super::*;
+use crate::PoolRoutingMode;
 use crate::scheduler::rotation::{
     AttemptObservation, ExecutionObservation, HealthObservation, SharedRequestBudget,
 };
-use crate::PoolRoutingMode;
 
 pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option<&str>) -> String {
     let active_before = scheduler.rotation.active_leases();
@@ -51,7 +51,7 @@ pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option
 }
 
 #[test]
-fn reservations_keep_weighted_group_with_affinity_and_native_aliases() {
+fn manual_rotation_ignores_weights_and_soft_affinity_with_native_aliases() {
     let mut scheduler = policy::mixed(PoolRoutingMode::RoundRobin);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy
@@ -85,9 +85,9 @@ fn reservations_keep_weighted_group_with_affinity_and_native_aliases() {
     assert_eq!(
         counts,
         BTreeMap::from([
-            ("account".into(), 20),
-            ("api-a".into(), 20),
-            ("api-b".into(), 60)
+            ("account".into(), 34),
+            ("api-a".into(), 33),
+            ("api-b".into(), 33)
         ])
     );
 }
@@ -111,16 +111,18 @@ fn configured_order_and_operation_bindings_survive_rotation_admission() {
         })
         .unwrap();
     assert_eq!(compact.candidate_id, "account");
-    assert!(scheduler
-        .rotation
-        .select(
-            &RotationRequest::new(
-                RotationRequestId(99),
-                PoolScheduler::rotation_route_key("gpt-5", RotationOperation::Image),
-                "gpt-5"
+    assert!(
+        scheduler
+            .rotation
+            .select(
+                &RotationRequest::new(
+                    RotationRequestId(99),
+                    PoolScheduler::rotation_route_key("gpt-5", RotationOperation::Image),
+                    "gpt-5"
+                )
+                .with_operation(RotationOperation::Image),
+                100
             )
-            .with_operation(RotationOperation::Image),
-            100
-        )
-        .is_none());
+            .is_none()
+    );
 }

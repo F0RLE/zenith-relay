@@ -8,8 +8,8 @@ use std::net::IpAddr;
 pub(super) fn valid_local_host(headers: &HeaderMap) -> bool {
     let Some(host) = headers
         .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<axum::http::uri::Authority>().ok())
+        .and_then(|header_value| header_value.to_str().ok())
+        .and_then(|host_text| host_text.parse::<axum::http::uri::Authority>().ok())
     else {
         return false;
     };
@@ -57,12 +57,12 @@ pub(super) fn authenticate_client(
         .or_else(|| {
             let header = match protocol {
                 crate::WireApi::Messages => "x-api-key",
-                crate::WireApi::Gemini => "x-goog-api-key",
+                crate::WireApi::Gemini | crate::WireApi::GeminiInteractions => "x-goog-api-key",
                 _ => return None,
             };
             headers
                 .get(header)
-                .and_then(|value| value.to_str().ok())
+                .and_then(|header_value| header_value.to_str().ok())
                 .and_then(|secret| runtime.authenticate_secret(secret))
         })
 }

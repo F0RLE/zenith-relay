@@ -10,11 +10,43 @@ fn legacy_policy() -> PoolRoutingPolicy {
 }
 
 #[test]
+fn version_two_rotation_upgrades_safely_on_reopen() {
+    let root = crate::files::test_temp_root("rotation-v2");
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut gateway = store.gateway().clone();
+    gateway.enabled = true;
+    gateway.max_retry_candidates = 7;
+    gateway.pool_routing = Some(PoolRoutingPolicy {
+        version: 2,
+        mode: PoolRoutingMode::RoundRobin,
+        members: Vec::new(),
+    });
+    store.replace_gateway(gateway).unwrap();
+    drop(store);
+    let reopened = LocalPoolStore::open(root.clone()).unwrap();
+    let policy = reopened.gateway().pool_routing.as_ref().unwrap();
+    assert_eq!(policy.version, 3);
+    assert_eq!(policy.mode, PoolRoutingMode::RoundRobin);
+    assert!(reopened.gateway().enabled);
+    assert_eq!(reopened.gateway().max_retry_candidates, 7);
+    let saved: serde_json::Value = serde_json::from_str(
+        &reopened
+            .database
+            .state_json(STATE_GATEWAY)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["poolRouting"]["version"], 3);
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() {
     for enabled in [true, false] {
         for explicit in [true, false] {
-            let root =
-                std::env::temp_dir().join(format!("rotation-upgrade-{}", uuid::Uuid::new_v4()));
+            let root = crate::files::test_temp_root("rotation-upgrade");
             let mut store = LocalPoolStore::open(root.clone()).unwrap();
             let mut gateway = store.gateway().clone();
             gateway.enabled = enabled;
@@ -22,14 +54,14 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
             gateway.max_retry_candidates = 8;
             gateway.chatgpt_retry_until_available = true;
             store.replace_gateway(gateway).unwrap();
-            let mut old = serde_json::to_value(store.gateway()).unwrap();
-            old["cooldownAfterFailures"] = serde_json::json!(0);
-            old["keepLastCandidateAvailable"] = serde_json::json!(false);
-            old["routingStrategy"] = serde_json::json!("quota_highest");
-            old["subscriptionPlanOrder"] = serde_json::json!(["not a valid\nplan"]);
+            let mut legacy_gateway = serde_json::to_value(store.gateway()).unwrap();
+            legacy_gateway["cooldownAfterFailures"] = serde_json::json!(0);
+            legacy_gateway["keepLastCandidateAvailable"] = serde_json::json!(false);
+            legacy_gateway["routingStrategy"] = serde_json::json!("quota_highest");
+            legacy_gateway["subscriptionPlanOrder"] = serde_json::json!(["not a valid\nplan"]);
             store
                 .database
-                .replace_state_json(&[(STATE_GATEWAY, old.to_string())])
+                .replace_state_json(&[(STATE_GATEWAY, legacy_gateway.to_string())])
                 .unwrap();
             drop(store);
             for _ in 0..2 {
@@ -51,13 +83,16 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
                         .unwrap(),
                 )
                 .unwrap();
-                for old in [
+                for legacy_field in [
                     "cooldownAfterFailures",
                     "keepLastCandidateAvailable",
                     "routingStrategy",
                     "subscriptionPlanOrder",
                 ] {
-                    assert!(saved.get(old).is_none(), "obsolete {old} was reserialized");
+                    assert!(
+                        saved.get(legacy_field).is_none(),
+                        "obsolete {legacy_field} was reserialized"
+                    );
                 }
             }
             std::fs::remove_dir_all(root).unwrap();
@@ -68,8 +103,7 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
 #[test]
 fn startup_cleans_old_scalars_from_saved_rotation_policy_without_changing_controls() {
     for enabled in [true, false] {
-        let root =
-            std::env::temp_dir().join(format!("rotation-scalar-cleanup-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("rotation-scalar-cleanup");
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
         gateway.enabled = enabled;
@@ -104,13 +138,16 @@ fn startup_cleans_old_scalars_from_saved_rotation_policy_without_changing_contro
                     .unwrap(),
             )
             .unwrap();
-            for old in [
+            for legacy_field in [
                 "cooldownAfterFailures",
                 "keepLastCandidateAvailable",
                 "routingStrategy",
                 "subscriptionPlanOrder",
             ] {
-                assert!(saved.get(old).is_none(), "obsolete {old} was reserialized");
+                assert!(
+                    saved.get(legacy_field).is_none(),
+                    "obsolete {legacy_field} was reserialized"
+                );
             }
         }
         std::fs::remove_dir_all(root).unwrap();

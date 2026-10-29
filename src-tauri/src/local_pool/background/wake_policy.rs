@@ -1,9 +1,9 @@
 use super::{WAKE_OUTPUT_TOKEN_CAP, WAKE_VERIFICATION_DELAY_MS};
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
-    automations::{model_lightness_rank, WakeAdapterPolicy, WakeModel},
-    quota::QuotaAdapterCapabilities,
     ModelRules,
+    automations::{WakeAdapterPolicy, WakeModel, model_lightness_rank},
+    quota::QuotaAdapterCapabilities,
 };
 
 pub(in crate::local_pool) fn codex_wake_policy(

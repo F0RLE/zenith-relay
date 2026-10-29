@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands } from "../api/commands";
-import type { ProfileActivation, ProfileBinding } from "../api/types";
+import type { ProfileActivation } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
@@ -12,7 +12,7 @@ import { useRelayPreferences } from "./useRelayPreferences";
 import { useRelayRuntime } from "./useRelayRuntime";
 import { useRelayUsage } from "./useRelayUsage";
 import { RelayStateContexts, type PerformOptions, type RelayContextValue, type RelayUsageContextValue } from "./relayStateContext";
-import { projectRuntimeAccountLabels } from "./runtimeDisplay";
+import { createRuntimeAccountLabelProjector } from "./runtimeDisplay";
 
 export { useRelayState } from "./relayStateContext";
 export type { Feedback } from "./relayStateContext";
@@ -31,12 +31,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   } = useRelayOperations();
   const {
     loadLocalUsage,
-    loadRemoteUsage,
     localUsagePage,
-    remoteUsage,
-    remoteUsagePage,
+    localUsageQueryKey,
+    getCachedLocalUsage,
     resetUsage,
-    clearInactiveUsage,
+    invalidateLocalUsage,
+    invalidateUsageCache,
   } = useRelayUsage(relayCommands);
   const {
     mode,
@@ -44,40 +44,18 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     runtime,
+    runtimeReady,
     runtimeActivity,
     runtimeRevision,
     usageRevision,
-    readyState,
     loading,
     refresh,
   } = useRelayRuntime({
     cancelOperations,
-    clearInactiveUsage,
     resetUsage,
+    invalidateUsageCache,
     reportErrorFeedback,
   });
-  const prefetchedUsageMode = useRef<"local" | "remote" | null>(null);
-
-  // Warm the default Usage view once the runtime snapshot is ready. The
-  // result is retained by useRelayUsage, so opening the page is immediate;
-  // UsagePage still performs its normal background refresh afterwards.
-  useEffect(() => {
-    if (!runtime || mode === "zenith") return;
-    if (mode === "remote" && !runtime.capabilities.features.includes("usage")) return;
-    if (prefetchedUsageMode.current === mode) return;
-    prefetchedUsageMode.current = mode;
-    const query = {
-      page: 1,
-      pageSize: 50,
-      includeEvents: false,
-      includeModels: false,
-      includePoolMembers: false,
-    };
-    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    void load(query).catch(() => {
-      // UsagePage retries and reports the error when it is opened.
-    });
-  }, [loadLocalUsage, loadRemoteUsage, mode, runtime]);
   const {
     onboardingComplete,
     finishOnboarding,
@@ -86,6 +64,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
+    launchApplicationAfterConnect,
+    setLaunchApplicationAfterConnect,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
     accountIdentitiesVisible,
@@ -97,7 +77,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setPage,
     setRevealedAccountIdentities,
   });
-  const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
+  const canRevealAccountIdentities = mode === "local" && runtimeReady;
   const accountIdentitiesBusy = useAccountIdentityReveal({
     accounts: runtime?.accounts ?? [],
     canReveal: canRevealAccountIdentities,
@@ -106,17 +86,16 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setRevealedIdentities: setRevealedAccountIdentities,
   });
   const accountIndex = useMemo(() => buildAccountIdentityIndex(runtime?.accounts ?? []), [runtime?.accounts]);
-  const codexWebsocketsEnabled = runtime?.gateway.codexWebsocketsEnabled ?? true;
 
   const perform = useCallback(async (
-    id: string,
+    operationId: string,
     work: () => Promise<unknown>,
     successKey?: string,
     options?: PerformOptions,
-  ) => performOperation(id, work, refresh, successKey, options), [performOperation, refresh]);
+  ) => performOperation(operationId, work, refresh, successKey, options), [performOperation, refresh]);
 
   const activateCodexProfile = useCallback(async (
-    id: string,
+    profileOperationId: string,
     work: () => Promise<ProfileActivation>,
     launchAfter = false,
   ) => {
@@ -124,24 +103,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       title: t("profiles.switchBackupTitle"),
       confirmLabel: t("profiles.switchBackupAction"),
     })) return false;
-    return perform(id, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
+    return perform(profileOperationId, work, launchAfter ? "feedback.launched" : "feedback.profileAttached",
       { backgroundRefresh: true, ...(launchAfter ? { afterWork: relayCommands.launchManagedCodex } : {}) });
   }, [confirm, perform, profileSwitchBackupPrompt, t]);
-
-  const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
-    return perform("profile-launch", relayCommands.stopManagedCodex, "feedback.launched", {
-      backgroundRefresh: true,
-      afterWork: relayCommands.launchManagedCodex,
-    });
-  }, [perform]);
 
   const setCodexBackgroundTasksEnabled = useCallback((enabled: boolean) => perform(
     "codex-background-tasks",
     mode === "local"
       ? () => relayCommands.setCodexBackgroundTasks(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteCodexBackgroundTasks(enabled)
-        : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.chatgpt_background_tasks_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -151,43 +121,25 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (wasRunning) await relayCommands.launchManagedCodex();
   }, []);
 
-  const setCodexWebsocketsEnabled = useCallback((enabled: boolean) => perform(
-    "codex-websockets",
-    mode === "remote"
-      ? async () => {
-        const previous = codexWebsocketsEnabled;
-        await relayCommands.setRemoteCodexWebsockets(enabled);
-        try {
-          const result = await relayCommands.setCodexProfileWebsockets(enabled);
-          await restartManagedCodexIfRunning();
-          return result;
-        } catch (error) {
-          try {
-            await relayCommands.setRemoteCodexWebsockets(previous);
-          } catch {
-            // Keep the original profile error; the remote action is best-effort rollback.
-          }
-          throw error;
-        }
+  const setCodexWebsocketsEnabled = useCallback(async (enabled: boolean) => {
+    const saved = await perform("codex-websockets", async () => {
+      if (mode === "local") {
+        return relayCommands.setCodexWebsockets(enabled);
       }
-      : mode === "local"
-        ? async () => {
-          const result = await relayCommands.setCodexWebsockets(enabled);
-          await restartManagedCodexIfRunning();
-          return result;
-        }
-        : () => Promise.reject(new Error(t("errors.chatgpt_websockets_unavailable"))),
-    "feedback.saved",
-    { backgroundRefresh: true, uiLock: false },
-  ), [codexWebsocketsEnabled, mode, perform, restartManagedCodexIfRunning, t]);
+      throw new Error(t("errors.chatgpt_websockets_unavailable"));
+    }, undefined, { backgroundRefresh: true, uiLock: false });
+    if (!saved) return false;
+    // Restart failure must not undo a setting already saved in the local runtime and profile.
+    await perform("codex-websockets-restart", restartManagedCodexIfRunning,
+      "feedback.saved", { skipRefresh: true, uiLock: false });
+    return true;
+  }, [mode, perform, restartManagedCodexIfRunning, t]);
 
   const setRouteRecoveryEnabled = useCallback((enabled: boolean) => perform(
     "route-recovery",
     mode === "local"
       ? () => relayCommands.setChatgptRetryUntilAvailable(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteChatgptRetryUntilAvailable(enabled)
-        : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.chatgpt_retry_until_available_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -196,9 +148,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "block-degraded-routes",
     mode === "local"
       ? () => relayCommands.setBlockDegradedRoutes(enabled)
-      : mode === "remote"
-        ? () => relayCommands.setRemoteBlockDegradedRoutes(enabled)
-        : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
+      : () => Promise.reject(new Error(t("errors.block_degraded_routes_unavailable"))),
     "feedback.saved",
     { backgroundRefresh: true, uiLock: false },
   ), [mode, perform, t]);
@@ -208,7 +158,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     const applyTheme = () => {
       document.documentElement.dataset["theme"] = theme;
       const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
-      void setWindowBackgroundColor(dark ? "#121719" : "#f2f5f6");
+      void setWindowBackgroundColor(dark ? "#141414" : "#f4f3ee");
     };
     applyTheme();
     if (theme !== "system") return;
@@ -228,16 +178,18 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     });
   }, [accountIdentitiesVisible, accountIndex, canRevealAccountIdentities, mode, revealedAccountIdentities]);
 
+  const projectAccountLabels = useMemo(createRuntimeAccountLabelProjector, []);
   const displayRuntime = useMemo(
-    () => projectRuntimeAccountLabels(runtime, accountDisplayName),
-    [accountDisplayName, runtime],
+    () => projectAccountLabels(runtime, accountDisplayName),
+    [accountDisplayName, projectAccountLabels, runtime],
   );
-  const value = useMemo<RelayContextValue>(() => ({
+  const relayContextValue = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
     page,
     setPage,
     runtime: displayRuntime,
+    runtimeReady,
     runtimeRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
@@ -246,14 +198,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    readyState,
     loading,
     busy,
     feedback,
     refresh,
     perform,
     activateCodexProfile,
-    launchCodexProfile,
     clearFeedback,
     onboardingComplete,
     finishOnboarding,
@@ -262,6 +212,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
+    launchApplicationAfterConnect,
+    setLaunchApplicationAfterConnect,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
     codexBackgroundTasksEnabled: displayRuntime?.gateway.codexBackgroundTasksEnabled ?? true,
@@ -278,6 +230,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     displayRuntime,
+    runtimeReady,
     runtimeRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
@@ -286,14 +239,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountValueVisible,
     setAccountValueVisible,
     accountDisplayName,
-    readyState,
     loading,
     busy,
     feedback,
     refresh,
     perform,
     activateCodexProfile,
-    launchCodexProfile,
     clearFeedback,
     onboardingComplete,
     finishOnboarding,
@@ -302,6 +253,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
+    launchApplicationAfterConnect,
+    setLaunchApplicationAfterConnect,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
     setCodexBackgroundTasksEnabled,
@@ -312,16 +265,16 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
 
   const usage = useMemo<RelayUsageContextValue>(() => ({
     localUsagePage,
+    localUsageQueryKey,
+    getCachedLocalUsage,
     loadLocalUsage,
-    remoteUsage,
-    remoteUsagePage,
-    loadRemoteUsage,
-    revision: usageRevision,
-  }), [loadLocalUsage, loadRemoteUsage, localUsagePage, remoteUsage, remoteUsagePage, usageRevision]);
+    invalidateLocalUsage,
+    usageRevision,
+  }), [getCachedLocalUsage, invalidateLocalUsage, loadLocalUsage, localUsagePage, localUsageQueryKey, usageRevision]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
   }, [i18n.language]);
 
-  return <RelayStateContexts value={value} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;
+  return <RelayStateContexts contextValue={relayContextValue} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;
 }

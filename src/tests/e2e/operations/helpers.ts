@@ -12,17 +12,18 @@ export async function settleConfirmation(page: Page, accept = true) {
 }
 
 export async function openGatewayApi(page: Page) {
-  await page.getByRole("button", { name: "API", exact: true }).click();
+  await page.getByRole("button", { name: "Access", exact: true }).click();
+  await page.getByRole("tab", { name: /^(Local|Server) API$/ }).click();
 }
 
 export async function openGatewayApplication(page: Page) {
-  await openGatewayApi(page);
+  await page.getByRole("button", { name: "Access", exact: true }).click();
+  await page.getByRole("tab", { name: "Applications", exact: true }).click();
   await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
 }
 
-export async function connectPoolToChatGPT(page: Page, launchAfterConnect = false) {
+export async function connectPoolToChatGPT(page: Page) {
   await page.getByRole("button", { name: "Connect", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "What do you want to connect?" });
-  if (launchAfterConnect) await dialog.getByLabel("Launch application after connecting").check({ force: true });
+  const dialog = page.getByRole("dialog", { name: "Connect an application" });
   await dialog.getByRole("button", { name: "ChatGPT", exact: true }).click();
 }

@@ -1,13 +1,13 @@
-use super::super::{credential_item_error, ImportItemError, ItemResult};
+use super::super::{ImportItemError, ItemResult, credential_item_error};
 use super::ImportedAccountCommit;
 use crate::local_pool::accounts::{
+    NativeSecretBackend,
     authority::{ProcessAccountLocks, ProcessLockConfig},
     credentials::{CredentialStore, StoredCodexCredentials},
-    NativeSecretBackend,
 };
-use crate::local_pool::commands::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::local_pool::models::LocalAccountRecord;
+use crate::local_pool::runtime::{current_time_ms, fence_runtime_candidates, restart_or_rollback};
 use crate::local_pool::state::DesktopState;
 use zenith_relay_core::error_codes;
 
@@ -36,6 +36,22 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     let previous_credentials = credential_store
         .load(&account_id)
         .map_err(credential_item_error)?;
+    if state
+        .store()
+        .map_err(|_| ImportItemError::recovery("account store is unavailable"))?
+        .account_trash()
+        .iter()
+        .any(|entry| {
+            entry.record.account.id == account_id
+                || entry.record.account.identity.identity_hash
+                    == account.account.identity.identity_hash
+        })
+    {
+        return Err(ImportItemError::new(
+            error_codes::ACCOUNT_CHANGED,
+            "account is in trash; restore it before importing",
+        ));
+    }
     if !StoredCodexCredentials::snapshots_match(previous_credentials.as_ref(), old_credential) {
         return Err(ImportItemError::new(
             error_codes::ACCOUNT_CHANGED,
@@ -55,14 +71,14 @@ pub(in crate::local_pool::accounts) async fn persist_imported_account(
     let runtime_sync_required = account.account.in_pool
         || previous_account
             .as_ref()
-            .is_some_and(|previous| previous.account.in_pool);
+            .is_some_and(|previous_account| previous_account.account.in_pool);
     let mut attempted_account = account;
     // A CDP login observation is presentation-only. It may legitimately arrive
     // while the import is committed and must not be erased by the account row.
-    if let Some(current) = previous_account.as_ref() {
-        attempted_account.client_auth_status = current.client_auth_status.clone();
+    if let Some(previous_account_snapshot) = previous_account.as_ref() {
+        attempted_account.client_auth_status = previous_account_snapshot.client_auth_status.clone();
         attempted_account.last_client_login_redirect_at_ms =
-            current.last_client_login_redirect_at_ms;
+            previous_account_snapshot.last_client_login_redirect_at_ms;
     }
     // Re-import may replace an existing login and executor. Close pending
     // final dispatches before the first credential write, not only when the

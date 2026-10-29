@@ -4,8 +4,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use zenith_relay_core::{
     pricing::pricing_refresh_delay,
     providers::chatgpt::{
-        configure_codex_client_version, refresh_codex_client_release,
-        CODEX_RELEASE_REFRESH_INTERVAL,
+        CODEX_RELEASE_REFRESH_INTERVAL, configure_codex_client_version,
+        refresh_codex_client_release,
     },
     unix_time_ms as current_time_ms,
 };
@@ -13,18 +13,11 @@ use zenith_relay_core::{
 /// Keeps Relay's own OAuth identity aligned with the newest published Rust
 /// Codex release. This is intentionally independent of pool activity: a
 /// paused or empty pool must still pick up a newer identity for its next use.
-pub(super) async fn codex_release_loop(_app: AppHandle) {
+pub(super) async fn codex_release_loop() {
     loop {
         match refresh_codex_client_release().await {
             Ok(release) => {
-                if !configure_codex_client_version(release.version()) {
-                    crate::diagnostics::record_error(
-                        "background-codex-release",
-                        Some("configure_failed"),
-                        "published Codex release could not be applied",
-                        &[],
-                    );
-                }
+                let _ = configure_codex_client_version(release.version());
             }
             Err(error) => crate::diagnostics::record_error(
                 "background-codex-release",
@@ -34,6 +27,31 @@ pub(super) async fn codex_release_loop(_app: AppHandle) {
             ),
         }
         tokio::time::sleep(CODEX_RELEASE_REFRESH_INTERVAL).await;
+    }
+}
+
+pub(super) async fn usage_maintenance_loop(app: AppHandle) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let state = app.state::<DesktopState>().inner().clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            zenith_relay_core::gateway::release_expired_cache_entries();
+            state.telemetry.maintain_usage()
+        })
+        .await
+        {
+            Ok(Ok(removed)) if removed > 0 => {
+                let _ = app.emit("zenith-usage-recorded", ());
+                let _ = app.emit("zenith-state-changed", ());
+            }
+            Ok(Ok(_)) => {}
+            _ => crate::diagnostics::record_error(
+                "usage-maintenance",
+                Some("retention_failed"),
+                "Usage history maintenance did not complete",
+                &[],
+            ),
+        }
     }
 }
 
@@ -62,6 +80,9 @@ pub(super) async fn model_metadata_loop(app: AppHandle) {
                     &[],
                 );
             }
+            // Reference metadata participates in historical pricing, unlike
+            // ordinary account/quota state changes.
+            let _ = app.emit("zenith-usage-recorded", ());
             let _ = app.emit("zenith-state-changed", ());
         }
     }
@@ -98,6 +119,7 @@ pub(super) async fn pricing_loop(app: AppHandle) {
             // Refresh failures update the catalog status too. Notify the UI
             // for every attempt so snapshot consumers can recalculate derived
             // pricing data without waiting for another background event.
+            let _ = app.emit("zenith-usage-recorded", ());
             let _ = app.emit("zenith-state-changed", ());
         }
     }

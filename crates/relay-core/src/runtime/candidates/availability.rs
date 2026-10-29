@@ -2,6 +2,25 @@ use super::super::GatewayRuntime;
 use crate::{CandidateHealth, CandidateQuota, CandidateQuotaState};
 
 impl GatewayRuntime {
+    pub fn invalidate_account_quota_reference_source(&self, account_id: &str) {
+        if self
+            .lock_scheduler()
+            .invalidate_quota_reference_source(account_id)
+        {
+            self.candidate_availability.notify_waiters();
+        }
+    }
+
+    pub fn set_account_quota_references(
+        &self,
+        mut references: std::collections::BTreeMap<String, crate::CandidateQuotaReference>,
+    ) {
+        references.retain(|id, _| self.is_siwc_account(id));
+        if self.lock_scheduler().set_quota_references(references) {
+            self.candidate_availability.notify_waiters();
+        }
+    }
+
     pub fn update_candidate_availability(
         &self,
         candidate_id: &str,

@@ -1,42 +1,40 @@
+pub(crate) mod account_routes;
 pub(crate) mod automations;
 pub(crate) mod connections;
 pub(crate) mod gateway;
 pub(crate) mod oauth;
-pub(crate) mod opencode;
 pub(crate) mod pool;
 pub(crate) mod profiles;
 pub(crate) mod proxies;
 pub(crate) mod recovery;
-pub(crate) mod remote_server;
 pub(crate) mod state;
 pub(crate) mod usage;
 
 #[cfg(test)]
 mod rotation_regression_test;
-mod runtime;
+use super::runtime;
 
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
-    store::secret_store,
 };
 use std::collections::BTreeMap;
 use zenith_relay_core::{
-    cache_write_model_ids, model_id_key, PriceEvidence, PricingContext, SourcePricingMetadata,
-    TokenPrice,
+    PriceEvidence, PricingContext, SourcePricingMetadata, SourceProtocolResolution, TokenPrice,
+    cache_write_model_ids, model_id_key, model_metadata::ModelMetadataCatalog,
 };
 
-pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
-    secret_store::delete(secret_ref).map_err(|cleanup| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; secret cleanup failed: {}",
-                cause.message, cleanup.message
-            ),
-        )
-    })
+/// Move owned local I/O off both the window thread and async executor. Await
+/// completion so callers retain the operation's result and error semantics.
+pub(in crate::local_pool) async fn run_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> LocalResult<T> + Send + 'static,
+) -> LocalResult<T> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Local operation was interrupted"))?
 }
+
+pub(super) use super::store::secret_store::cleanup_created_secret;
 
 /// Builds the immutable pricing identity used by all desktop projections.
 /// Storage records contain only redacted/local identifiers and explicit
@@ -45,6 +43,7 @@ pub(super) fn pricing_context(
     gateway: &GatewaySettings,
     sources: &[ProviderSourceRecord],
     accounts: &[LocalAccountRecord],
+    reference_catalog: &ModelMetadataCatalog,
 ) -> PricingContext {
     let account_provider_families = accounts
         .iter()
@@ -67,7 +66,11 @@ pub(super) fn pricing_context(
                 pricing_provider: source.pricing_provider.clone(),
                 official_provider_family: source.official_provider_family.clone(),
                 cache_write_models: cache_write_model_ids(
-                    source.effective_protocol_bindings().unwrap_or_default(),
+                    SourceProtocolResolution::resolved_protocol_bindings_with_catalog(
+                        source,
+                        Some(reference_catalog),
+                    )
+                    .unwrap_or_default(),
                 ),
             },
         );
@@ -96,12 +99,65 @@ pub(super) fn pricing_context(
 }
 
 pub(in crate::local_pool) use runtime::{
-    apply_account_policy_if_running, apply_local_gateway_key_scope,
-    apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,
-    fail_closed, fence_runtime_candidates, record_catalog_refresh_result,
+    apply_local_gateway_key_scope, apply_source_policies_if_running,
+    apply_source_policy_if_running, core_error, current_time_ms, fail_closed,
+    fence_runtime_candidates, queue_active_client_catalog_refresh, record_catalog_refresh_result,
     refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
     restart_after_secret_change, restart_or_rollback, runtime_account_policy, runtime_from_store,
-    sync_account_or_rollback, sync_account_state_if_running, sync_gateway_or_rollback,
-    sync_records_or_rollback, sync_refreshed_account_or_rollback, sync_running_account_states,
-    sync_runtime_account_state,
+    sync_gateway_or_rollback, sync_records_or_rollback, sync_running_account_states,
 };
+
+#[cfg(test)]
+mod blocking_command_tests {
+    use super::*;
+    use std::{
+        future::Future,
+        sync::mpsc,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_io_yields_without_waiting_on_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let (release, wait) = mpsc::channel();
+        let mut operation = Box::pin(run_blocking(move || {
+            // The watchdog prevents a synchronous regression from hanging CI.
+            let released = wait.recv_timeout(Duration::from_secs(2)).is_ok();
+            Ok((std::thread::current().id(), released))
+        }));
+        let first_poll = operation
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        let yielded = first_poll.is_pending();
+        let _ = release.send(());
+        let result = match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => operation.await,
+        }
+        .unwrap();
+        assert!(
+            yielded,
+            "local I/O must yield while the operation is blocked"
+        );
+        assert_ne!(result.0, caller);
+        assert!(
+            result.1,
+            "the caller must run before the operation finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_io_preserves_structured_errors() {
+        let error = run_blocking(|| {
+            Err::<(), _>(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "synthetic conflict",
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.message, "synthetic conflict");
+    }
+}

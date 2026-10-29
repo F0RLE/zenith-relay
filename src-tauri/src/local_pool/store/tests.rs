@@ -3,34 +3,25 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
+mod account_trash;
+mod fixture_ownership;
 mod refresh;
+mod retired_accounts;
 mod rotation_upgrade;
 mod source_refresh;
+mod usage;
 use super::*;
-use crate::local_pool::models::{OwnershipOperationKind, OwnershipOperationPhase};
 use std::collections::{BTreeMap, BTreeSet};
-use std::{
-    env,
-    sync::atomic::{AtomicU64, Ordering},
-};
 use zenith_relay_core::{
+    WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     quota::{QuotaSnapshot, Subscription},
-    WireApi,
 };
 
-static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
-
 fn temp_root() -> PathBuf {
-    let root = env::temp_dir().join(format!(
-        "zenith-relay-store-{}-{}",
-        std::process::id(),
-        NEXT_DIR.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&root);
-    root
+    crate::files::test_temp_root("store")
 }
 
 #[test]
@@ -38,7 +29,10 @@ fn fresh_store_is_versioned_and_restart_safe() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.gateway().port, 14998);
-    assert_eq!(store.database().state_count().unwrap(), 9);
+    assert_eq!(store.database().state_count().unwrap(), 8);
+    for retired in ["remote_target", "ownership_operation"] {
+        assert!(store.database().state_json(retired).unwrap().is_none());
+    }
     assert!(root.join("data/database/relay.sqlite").exists());
     assert!(!root.join("data/metadata.json").exists());
     drop(store);
@@ -46,6 +40,85 @@ fn fresh_store_is_versioned_and_restart_safe() {
         LocalPoolStore::open(root.clone()).unwrap().gateway().port,
         14998
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_model_block_is_repaired_durably_without_changing_account_policy() {
+    let root = temp_root();
+    let mut legacy = account_record("legacy-models");
+    legacy.account.health = AccountHealthState::Blocked;
+    legacy.account.last_error_code = Some("models_forbidden".into());
+    legacy.account.enabled = false;
+    legacy.account.in_pool = false;
+    legacy.models.clear();
+    let mut disabled = account_record("provider-disabled");
+    disabled.account.health = AccountHealthState::Blocked;
+    disabled.account.last_error_code = Some("workspace_disabled".into());
+    let mut reauth = legacy.clone();
+    reauth.account.id = "reauth".into();
+    reauth.account.auth_state =
+        AccountAuthState::RequiresReauth(zenith_relay_core::accounts::ReauthReason::InvalidGrant);
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    store
+        .replace_accounts_and_keys(
+            vec![legacy.clone(), disabled.clone(), reauth.clone()],
+            vec![],
+        )
+        .unwrap();
+    drop(store);
+
+    legacy.account.health = AccountHealthState::Degraded;
+    for _ in 0..2 {
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(store.account("legacy-models"), Some(&legacy));
+        assert_eq!(store.account("provider-disabled"), Some(&disabled));
+        assert_eq!(store.account("reauth"), Some(&reauth));
+        let persisted: Vec<LocalAccountRecord> = serde_json::from_str(
+            &store
+                .database()
+                .state_json(STATE_ACCOUNTS)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|record| record.account.id == "legacy-models"),
+            Some(&legacy)
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn retired_manual_timezone_settings_are_removed_without_changing_other_controls() {
+    let root = temp_root();
+    let store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut saved = serde_json::to_value(store.gateway()).unwrap();
+    saved["requestTimezone"] = serde_json::json!({
+        "enabled": true, "accountTimezones": { "synthetic": "Invalid/Legacy" },
+        "accountTimezoneBindings": { "synthetic": false }
+    });
+    store
+        .database()
+        .replace_state_json(&[(STATE_GATEWAY, saved.to_string())])
+        .unwrap();
+    let expected = store.gateway().clone();
+    drop(store);
+    let reopened = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(reopened.gateway(), &expected);
+    let persisted: serde_json::Value = serde_json::from_str(
+        &reopened
+            .database()
+            .state_json(STATE_GATEWAY)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(persisted.get("requestTimezone").is_none());
+    drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -68,6 +141,7 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         },
     );
     store.replace_gateway(gateway).unwrap();
@@ -101,64 +175,9 @@ fn quota_and_routing_policy_survive_restart() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 7_500_000,
+            ..Default::default()
         })
     );
-    drop(reopened);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn remote_target_survives_restart() {
-    let root = temp_root();
-    let target = RemoteTargetRecord {
-        origin: "https://relay.example.test".into(),
-        server_id: "server_1".into(),
-        identity_fingerprint: "sha256:test".into(),
-        server_version: "1.1.0".into(),
-        protocol_version: 1,
-        allow_insecure_http: false,
-        secret_ref: "remote:server_1".into(),
-        connected_at_ms: 123,
-    };
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    store.replace_remote_target(Some(target.clone())).unwrap();
-    drop(store);
-
-    let reopened = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(reopened.remote_target(), Some(&target));
-    drop(reopened);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn ownership_operation_survives_restart_without_secret_material() {
-    let root = temp_root();
-    let operation = OwnershipOperationRecord {
-        id: "ownership_0123456789abcdef0123456789abcdef".into(),
-        kind: OwnershipOperationKind::MoveToRemote,
-        phase: OwnershipOperationPhase::MoveRemoteCommitted,
-        server_id: "server_1".into(),
-        local_account_ids: vec!["account_local".into()],
-        remote_account_ids: vec!["account_remote".into()],
-        created_remote_account_ids: vec!["account_remote".into()],
-        created_at_ms: 100,
-        updated_at_ms: 200,
-    };
-    let mut store = LocalPoolStore::open(root.clone()).unwrap();
-    store
-        .replace_ownership_operation(Some(operation.clone()))
-        .unwrap();
-    drop(store);
-
-    let reopened = LocalPoolStore::open(root.clone()).unwrap();
-    assert_eq!(reopened.ownership_operation(), Some(&operation));
-    let stored = reopened
-        .database()
-        .state_json(STATE_OWNERSHIP_OPERATION)
-        .unwrap()
-        .unwrap();
-    assert!(!stored.contains("access_token"));
-    assert!(!stored.contains("refresh_token"));
     drop(reopened);
     fs::remove_dir_all(root).unwrap();
 }
@@ -204,10 +223,26 @@ fn current_json_store_is_imported_once_and_removed() {
         &data.join("automations.json"),
         &AutomationRecords::default(),
     );
+    let target = serde_json::json!({
+        "origin": "https://retired.example.test", "secretRef": "synthetic-old-ref"
+    });
+    write_json(
+        &data.join("remote-target.json"),
+        &serde_json::json!({ "active": target }),
+    );
     rusqlite::Connection::open(data.join("usage.sqlite")).unwrap();
 
     let store = LocalPoolStore::open(root.clone()).unwrap();
     assert_eq!(store.accounts()[0].account.id, "imported");
+    let archived: serde_json::Value = serde_json::from_str(
+        &store
+            .database()
+            .state_json("retired_server_state")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(archived["target"], target);
     assert!(data.join("database/relay.sqlite").exists());
     assert!(!data.join("usage.sqlite").exists());
     for name in LEGACY_STATE_FILES {
@@ -322,6 +357,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -341,6 +377,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
                     cache_write_5m_micro_usd_per_million: None,
                     cache_write_1h_micro_usd_per_million: None,
                     output_micro_usd_per_million: 2_000_000,
+                    ..Default::default()
                 },
             )]),
             last_used_at: None,
@@ -372,6 +409,7 @@ fn source_and_key_records_survive_restart_without_secret_values() {
             cache_write_5m_micro_usd_per_million: None,
             cache_write_1h_micro_usd_per_million: None,
             output_micro_usd_per_million: 2_000_000,
+            ..Default::default()
         })
     );
     assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
@@ -398,6 +436,7 @@ fn failed_transaction_preserves_all_state_and_memory() {
         base_url: "https://example.test/v1".into(),
         secret_ref: "source:source_1".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -432,9 +471,11 @@ fn failed_transaction_preserves_all_state_and_memory() {
     let mut changed_key = key;
     changed_key.label = "x".repeat(17 * 1024 * 1024);
 
-    assert!(store
-        .replace_records(vec![changed_source], vec![changed_key])
-        .is_err());
+    assert!(
+        store
+            .replace_records(vec![changed_source], vec![changed_key])
+            .is_err()
+    );
     assert_eq!(store.sources()[0].name, "Before");
     drop(store);
     assert_eq!(
@@ -526,9 +567,10 @@ fn account_record(id: &str) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: vec!["gpt-test".into()],
         discovered_models: None,
@@ -551,20 +593,24 @@ fn client_auth_observation_is_durable_and_does_not_change_account_policy() {
     account.account.in_pool = true;
     store.upsert_account(account).unwrap();
 
-    assert!(store
-        .update_client_auth_observation(
-            "observed-account",
-            Some("login_required".into()),
-            Some(123),
-        )
-        .unwrap());
-    assert!(!store
-        .update_client_auth_observation(
-            "observed-account",
-            Some("login_required".into()),
-            Some(123),
-        )
-        .unwrap());
+    assert!(
+        store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .update_client_auth_observation(
+                "observed-account",
+                Some("login_required".into()),
+                Some(123),
+            )
+            .unwrap()
+    );
     let observed = store.account("observed-account").unwrap();
     assert_eq!(
         observed.client_auth_status.as_deref(),
@@ -602,9 +648,11 @@ fn conditional_account_rollback_keeps_other_account_changes_and_watchdog_state()
         .update_client_auth_observation("rollback-target", Some("login_required".into()), Some(123))
         .unwrap();
 
-    assert!(store
-        .restore_account_if_current(&previous, &attempted)
-        .unwrap());
+    assert!(
+        store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap()
+    );
     let restored = store.account("rollback-target").unwrap();
     assert_eq!(restored.account.label, previous.account.label);
     assert_eq!(
@@ -617,9 +665,11 @@ fn conditional_account_rollback_keeps_other_account_changes_and_watchdog_state()
     let mut newer = attempted.clone();
     newer.account.token_generation = newer.account.token_generation.saturating_add(1);
     store.upsert_account(newer.clone()).unwrap();
-    assert!(!store
-        .restore_account_if_current(&previous, &attempted)
-        .unwrap());
+    assert!(
+        !store
+            .restore_account_if_current(&previous, &attempted)
+            .unwrap()
+    );
     assert_eq!(store.account("rollback-target"), Some(&newer));
 
     drop(store);

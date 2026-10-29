@@ -1,24 +1,148 @@
 use super::*;
 
 #[tokio::test]
+async fn failed_live_websocket_response_with_generated_usage_is_not_repaired() {
+    assert_live_websocket_terminal_repair(
+        json!({"usage":{"input_tokens":5,"output_tokens":7}}),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn failed_live_websocket_response_with_output_is_not_repaired() {
+    assert_live_websocket_terminal_repair(
+        json!({"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"already generated"}]}]}),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn live_websocket_missing_response_without_generation_keeps_safe_repair() {
+    assert_live_websocket_terminal_repair(json!({}), true).await;
+}
+
+async fn assert_live_websocket_terminal_repair(evidence: Value, repair: bool) {
+    let mut failed_response = json!({
+        "id":"failed-live-response","status":"failed","output":[],
+        "error":{"code":"previous_response_not_found","message":"Account: Previous response not found"}
+    });
+    failed_response
+        .as_object_mut()
+        .unwrap()
+        .extend(evidence.as_object().unwrap().clone());
+    let initial = json!({"type":"response.completed","response":{
+        "id":"live-initial","status":"completed","model":MODEL,
+        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic first response"}]}]
+    }});
+    let replayed = json!({"type":"response.completed","response":{
+        "id":"must-not-repeat-executed-turn","status":"completed","model":MODEL,"output":[]
+    }});
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from([
+            vec![initial],
+            vec![json!({"type":"response.failed","response":failed_response})],
+            vec![replayed],
+        ]))),
+    ))
+    .await;
+    let authority = ready_authority("live-account", "synthetic-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("live-account", "provider-live", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    for previous in [None, Some("live-initial")] {
+        let mut request =
+            json!({"type":"response.create","model":MODEL,"input":"synthetic continuation"});
+        if let Some(previous) = previous {
+            request["previous_response_id"] = json!(previous);
+        }
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let response = receive_websocket_json(&mut socket).await;
+        assert_eq!(
+            response["type"],
+            if previous.is_some() && !repair {
+                "response.failed"
+            } else {
+                "response.completed"
+            }
+        );
+    }
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        if repair { 3 } else { 2 }
+    );
+    let events = events.lock().unwrap();
+    let attempts = usage_observations::physical_attempts(&events);
+    assert_eq!(attempts.len(), if repair { 3 } else { 2 });
+    if !repair {
+        assert!(!attempts[1].success);
+        if evidence.get("usage").is_some() {
+            assert_eq!(attempts[1].input_tokens, Some(5));
+            assert_eq!(attempts[1].output_tokens, Some(7));
+        }
+    }
+}
+
+#[tokio::test]
 async fn failed_initial_websocket_response_with_output_is_not_retried() {
     let failure = json!({
         "type": "response.failed",
         "response": {
             "status": "failed",
-            "error": {"code": "insufficient_quota", "message": "quota exhausted"},
+            "error": {"code": "insufficient_quota", "message": "Account: quota exhausted"},
             "output": [{"type": "message", "content": [{"type": "output_text", "text": "already generated"}]}]
         }
     });
+    assert_failed_initial_response_is_not_retried(failure).await;
+}
+
+#[tokio::test]
+async fn failed_initial_websocket_response_with_generated_usage_is_not_retried() {
+    for usage in [
+        json!({"output_tokens": 7}),
+        json!({"output_tokens": 0, "output_tokens_details": {"reasoning_tokens": 7}}),
+    ] {
+        assert_failed_initial_response_is_not_retried(json!({
+            "type": "response.failed",
+            "response": {
+                "status": "failed", "output": [], "usage": usage,
+                "error": {"code": "insufficient_quota", "message": "Account: synthetic quota refusal"}
+            }
+        }))
+        .await;
+    }
+}
+
+async fn assert_failed_initial_response_is_not_retried(failure: Value) {
     let (first, first_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
-            failure.clone()
+            failure.clone(),
         ])))
         .await;
     let (second, second_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "response.completed",
-            "response": {"id": "must-not-replay", "model": MODEL, "output": []}
+            "response": {"id": "must-not-replay", "status": "completed", "model": MODEL, "output": []}
         })])))
         .await;
     let authority = ready_authority("first", "synthetic-first").await;
@@ -164,9 +288,9 @@ async fn websocket_discards_late_response_frames_after_terminal() {
     let (upstream, state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
             json!({"type":"response.output_text.delta","delta":"once"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
             json!({"type":"response.output_text.delta","delta":"duplicate"}),
-            json!({"type":"response.completed","response":{"id":"ws-once"}}),
+            json!({"type":"response.completed","response":{"id":"ws-once","status":"completed","output":[]}}),
         ])))
         .await;
     let authority = ready_authority("once-account", "once-access").await;
@@ -285,9 +409,11 @@ async fn account_websocket_retries_rejection_but_stops_after_unknown_disconnect(
         events.iter().map(|event| event.attempt).collect::<Vec<_>>(),
         [1, 2]
     );
-    assert!(events[..2]
-        .iter()
-        .all(|event| event.request_id == events[0].request_id));
+    assert!(
+        events[..2]
+            .iter()
+            .all(|event| event.request_id == events[0].request_id)
+    );
     assert_eq!(
         events[0].http_status,
         StatusCode::TOO_MANY_REQUESTS.as_u16()
@@ -540,16 +666,18 @@ async fn account_websocket_does_not_commit_on_a_setup_frame_before_disconnect() 
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "setup-primary", "setup-primary-access").await;
     register_ready(&authority, "setup-reserve", "setup-reserve-access").await;
+    let mut reserve = account(
+        "setup-reserve",
+        "provider-setup-reserve",
+        &reserve_upstream,
+        100,
+    );
+    reserve.models = vec!["reserve-only-model".to_string()];
     let (gateway, events, _, _) = spawn_mixed_gateway(
         Vec::new(),
         vec![
             account("setup-primary", "provider-setup-primary", &upstream, 200),
-            account(
-                "setup-reserve",
-                "provider-setup-reserve",
-                &reserve_upstream,
-                100,
-            ),
+            reserve,
         ],
         vec![mixed_key(None, None)],
         authority,

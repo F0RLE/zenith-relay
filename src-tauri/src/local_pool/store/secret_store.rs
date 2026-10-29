@@ -3,15 +3,15 @@ use crate::{
     key_storage::{delete_named_secret_result, load_named_secret_result, save_named_secret},
     local_pool::error::{ErrorCode, LocalPoolError, Result},
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -31,6 +31,21 @@ static SECRET_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn generation() -> u64 {
     SECRET_GENERATION.load(Ordering::Acquire)
+}
+
+pub(in crate::local_pool) fn cleanup_created_secret(
+    secret_ref: &str,
+    cause: &LocalPoolError,
+) -> Result<()> {
+    delete(secret_ref).map_err(|cleanup| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "{}; secret cleanup failed: {}",
+                cause.message, cleanup.message
+            ),
+        )
+    })
 }
 
 fn bump_generation() {
@@ -68,9 +83,9 @@ pub fn initialize(vault_root: &Path, migration_root: &Path) -> Result<()> {
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "failed to initialize secret vault"))
 }
 
-pub fn save(secret_ref: &str, value: &str) -> Result<()> {
+pub fn save(secret_ref: &str, secret_value: &str) -> Result<()> {
     validate_secret_ref(secret_ref)?;
-    if value.trim().is_empty() {
+    if secret_value.trim().is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "secret value must not be empty",
@@ -79,15 +94,38 @@ pub fn save(secret_ref: &str, value: &str) -> Result<()> {
     if let Some(configured) = VAULT.get() {
         configured
             .vault
-            .save(secret_ref, value)
+            .save(secret_ref, secret_value)
             .map_err(vault_error)?;
         let _ = delete_keyring_secret(secret_ref);
         bump_generation();
         return Ok(());
     }
-    save_keyring_secret(secret_ref, value)?;
+    save_keyring_secret(secret_ref, secret_value)?;
     bump_generation();
     Ok(())
+}
+
+pub(in crate::local_pool) fn agent_message_key(vault_root: &Path) -> Result<[u8; 32]> {
+    configured_agent_message_key(VAULT.get(), vault_root)
+}
+
+fn configured_agent_message_key(
+    configured: Option<&ConfiguredVault>,
+    vault_root: &Path,
+) -> Result<[u8; 32]> {
+    let configured = configured.ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::SecretStoreUnavailable,
+            "agent-message key requires the initialized protected vault",
+        )
+    })?;
+    if configured.root != canonical_root(vault_root)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "agent-message key belongs to another data directory",
+        ));
+    }
+    configured.vault.agent_message_key().map_err(vault_error)
 }
 
 pub fn load(secret_ref: &str) -> Result<Option<String>> {
@@ -95,18 +133,18 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
     let Some(configured) = VAULT.get() else {
         return load_keyring_secret(secret_ref);
     };
-    if let Some(value) = configured.vault.load(secret_ref).map_err(vault_error)? {
-        return Ok(Some(value));
+    if let Some(vault_secret) = configured.vault.load(secret_ref).map_err(vault_error)? {
+        return Ok(Some(vault_secret));
     }
-    let Some(value) = load_keyring_secret(secret_ref)? else {
+    let Some(keyring_secret) = load_keyring_secret(secret_ref)? else {
         return Ok(None);
     };
     configured
         .vault
-        .save(secret_ref, &value)
+        .save(secret_ref, &keyring_secret)
         .map_err(vault_error)?;
     let _ = delete_keyring_secret(secret_ref);
-    Ok(Some(value))
+    Ok(Some(keyring_secret))
 }
 
 /// Presence check for snapshots. A vault hit does not clone the secret.
@@ -130,14 +168,14 @@ fn migrate_legacy_keyring_once(migration_root: &Path, vault: &Vault) -> Result<(
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("keyring migration marker is unsafe: {}", marker.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(LocalPoolError::new(
                 ErrorCode::Io,
                 format!("failed to inspect keyring migration marker: {error}"),
-            ))
+            ));
         }
     }
     let Ok(secret_refs) = vault.secret_refs() else {
@@ -221,8 +259,8 @@ fn load_or_create_vault_key(vault_root: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn decode_vault_key(value: &str) -> Result<[u8; 32]> {
-    let bytes = URL_SAFE_NO_PAD.decode(value.trim()).map_err(|_| {
+fn decode_vault_key(encoded_key: &str) -> Result<[u8; 32]> {
+    let bytes = URL_SAFE_NO_PAD.decode(encoded_key.trim()).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "encrypted secret vault master key is invalid",
@@ -236,33 +274,33 @@ fn decode_vault_key(value: &str) -> Result<[u8; 32]> {
     })
 }
 
-fn save_keyring_secret(secret_ref: &str, value: &str) -> Result<()> {
-    save_named_secret(&keyring_user(secret_ref)?, value)
+fn save_keyring_secret(secret_ref: &str, secret_value: &str) -> Result<()> {
+    save_named_secret(&keyring_user(secret_ref)?, secret_value)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))
 }
 
 fn load_keyring_secret(secret_ref: &str) -> Result<Option<String>> {
-    if let Some(value) = load_named_secret_result(&keyring_user(secret_ref)?)
+    if let Some(current_keyring_secret) = load_named_secret_result(&keyring_user(secret_ref)?)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?
     {
-        return Ok(Some(value));
+        return Ok(Some(current_keyring_secret));
     }
     let legacy_user = legacy_keyring_user(secret_ref)?;
-    let Some(value) = load_named_secret_result(&legacy_user)
+    let Some(legacy_keyring_secret) = load_named_secret_result(&legacy_user)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?
     else {
         return Ok(None);
     };
-    save_keyring_secret(secret_ref, &value)?;
+    save_keyring_secret(secret_ref, &legacy_keyring_secret)?;
     delete_named_secret_result(&legacy_user)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))?;
-    Ok(Some(value))
+    Ok(Some(legacy_keyring_secret))
 }
 
 fn delete_keyring_secret(secret_ref: &str) -> Result<()> {
-    let current = delete_named_secret_result(&keyring_user(secret_ref)?);
+    let primary_delete_result = delete_named_secret_result(&keyring_user(secret_ref)?);
     let legacy = delete_named_secret_result(&legacy_keyring_user(secret_ref)?);
-    current
+    primary_delete_result
         .and(legacy)
         .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))
 }
@@ -297,6 +335,26 @@ fn validate_secret_ref(secret_ref: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_key_requires_the_initialized_matching_vault_without_keyring_fallback() {
+        let root = crate::files::test_temp_root("agent-key-scope");
+        let other = crate::files::test_temp_root("agent-key-other-profile");
+        assert!(configured_agent_message_key(None, &root).is_err());
+        let configured = ConfiguredVault {
+            root: canonical_root(&root).unwrap(),
+            vault: Vault::open(&root, [3; 32]).unwrap(),
+        };
+        assert!(configured_agent_message_key(Some(&configured), &other).is_err());
+        assert!(!root.join("secrets.enc").exists());
+        let key = configured_agent_message_key(Some(&configured), &root).unwrap();
+        assert_eq!(
+            configured_agent_message_key(Some(&configured), &root).unwrap(),
+            key
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(other).unwrap();
+    }
 
     #[test]
     fn secret_refs_cannot_escape_the_storage_namespace() {

@@ -1,6 +1,347 @@
 use super::*;
 use serde_json::json;
 
+#[tokio::test]
+async fn final_websocket_continuation_rejection_is_recorded_without_dispatch() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let runtime = runtime_with_events(Arc::new(move |event| {
+        captured.lock().unwrap().push(event);
+    }));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    route.client_transport = crate::UsageTransport::Websocket;
+    let now = crate::unix_time_ms();
+    runtime.bind_response_route_affinity(Some("resp_synthetic"), &route, now);
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&json!({
+            "type": "response.create",
+            "model": "relay/upstream-model",
+            "previous_response_id": "resp_synthetic",
+            "input": "private-synthetic-context"
+        }))
+        .unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let (_, admitted) = request
+        .compatible_routes(&runtime, &key)
+        .unwrap_or_else(|error| panic!("request should be admitted: {}", error.message));
+    assert!(admitted.contains_key("source"));
+    let authorization = runtime
+        .prepare_route_authorization(&route, now)
+        .await
+        .unwrap();
+    request
+        .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+        .unwrap_or_else(|error| panic!("original route should prepare: {}", error.message));
+    assert!(events.lock().unwrap().is_empty());
+
+    // The final guard must still reject a route differing from the admitted
+    // predecessor, and report the local failure even before a send/usage event.
+    route.source_model = "other-model".into();
+    let failure = request
+        .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+        .err()
+        .expect("a different model must not inherit the opaque predecessor");
+    assert_eq!(failure.category, "adapter_continuation_mismatch");
+    assert_eq!(request.budget.dispatches(), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "the final rejection must reach usage diagnostics"
+    );
+    let event = &events[0];
+    assert_eq!(event.request_id, request.request_id);
+    assert_eq!(event.source_id, "relay");
+    assert_eq!(event.error_category.as_deref(), Some(failure.category));
+    assert_eq!(event.transport, crate::UsageTransport::Websocket);
+    assert_eq!(event.attempt, 0);
+    assert_eq!(event.http_status, 400);
+    assert!(!event.success);
+    assert!(event.candidate_id.is_none());
+    assert!(event.account_id.is_none());
+    assert!(event.routing.is_none());
+    assert!(event.input_tokens.is_none());
+    assert!(event.output_tokens.is_none());
+    let details = event.upstream_error.as_ref().unwrap();
+    assert_eq!(details.http_status, Some(400));
+    assert_eq!(details.code.as_deref(), Some(failure.category));
+    assert_eq!(details.error_type.as_deref(), Some("relay_adapter"));
+    assert_eq!(
+        details.message.as_deref(),
+        Some("the continuation belongs to a different model or source route")
+    );
+    assert!(details.parameter.is_none());
+    assert!(
+        !serde_json::to_string(event)
+            .unwrap()
+            .contains("private-synthetic-context")
+    );
+    assert!(event.cooldown_scope.is_none());
+}
+
+#[test]
+fn websocket_continuation_admission_rejection_is_recorded_once() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let runtime = runtime_with_events(Arc::new(move |event| {
+        captured.lock().unwrap().push(event);
+    }));
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut original_route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    original_route.source_model = "other-model".into();
+    runtime.bind_tool_call_route_affinity(
+        &key.id,
+        "call_synthetic",
+        &original_route,
+        crate::unix_time_ms(),
+    );
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&json!({
+            "type": "response.create",
+            "model": "relay/upstream-model",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_synthetic",
+                "output": "private-synthetic-result"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let failure = request
+        .compatible_routes(&runtime, &key)
+        .err()
+        .expect("an orphan result must retain its original model");
+    assert_eq!(failure.category, "adapter_continuation_mismatch");
+    assert_eq!(request.budget.dispatches(), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].request_id, request.request_id);
+    assert_eq!(events[0].error_category.as_deref(), Some(failure.category));
+}
+
+#[tokio::test]
+async fn prepared_websocket_diagnostics_match_the_exact_sent_body() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let body = json!({
+        "type":"response.create",
+        "model":"relay/upstream-model",
+        "input":[{"role":"user","content":"synthetic input\n".repeat(65536)}],
+        "reasoning":{"effort":"high"},
+        "tools":[{"type":"function","name":"fixture","parameters":{"type":"object"}}]
+    });
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let mut route = runtime
+        .executor_route(
+            "source",
+            &request.resolved_model,
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    let expected_payload = request
+        .payload_for(&route)
+        .unwrap_or_else(|error| panic!("payload should serialize: {}", error.message));
+    let expected_reasoning = request.reasoning_effort_for(&route);
+    let expected_tools = request.tool_use_for(&route);
+    let authorization = runtime
+        .prepare_route_authorization(&route, crate::unix_time_ms())
+        .await
+        .unwrap();
+    let prepared = request
+        .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+        .unwrap_or_else(|error| panic!("payload should prepare: {}", error.message));
+    assert_eq!(prepared.payload, expected_payload);
+    assert_eq!(prepared.reasoning_effort, expected_reasoning);
+    assert_eq!(
+        prepared.tool_use.forwarded_tool_count,
+        expected_tools.forwarded_tool_count
+    );
+    assert_eq!(
+        prepared.tool_use.forwarded_schema_bytes,
+        expected_tools.forwarded_schema_bytes
+    );
+    let sent: Value = serde_json::from_str(&prepared.payload).unwrap();
+    assert_eq!(
+        prepared.tool_use.upstream_context,
+        Some(crate::usage::RequestContextSize::capture(&sent))
+    );
+    assert_eq!(sent["input"], body["input"]);
+    assert_eq!(sent["reasoning"], body["reasoning"]);
+}
+
+#[tokio::test]
+async fn websocket_continuation_accepts_paired_history_from_an_earlier_route() {
+    let runtime = GatewayRuntime::from_pool(
+        ["earlier", "current"]
+            .map(|id| {
+                RuntimeSource::unrestricted(ProviderSource {
+                    id: id.into(),
+                    name: id.into(),
+                    base_url: "https://example.test/v1".into(),
+                    api_key: "synthetic-secret".into(),
+                    wire_api: WireApi::Responses,
+                    models: vec!["upstream-model".into()],
+                    proxy_url: None,
+                })
+            })
+            .to_vec(),
+        vec![RuntimeLocalKey::unrestricted(crate::LocalGatewayKey {
+            id: "key".into(),
+            secret: "local-secret".into(),
+        })],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let route = |candidate| {
+        runtime
+            .executor_route(
+                candidate,
+                "upstream-model",
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .unwrap()
+    };
+    let earlier = route("earlier");
+    let mut current = route("current");
+    let now = crate::unix_time_ms();
+    runtime.bind_tool_call_route_affinity("key", "call_earlier", &earlier, now);
+    runtime.bind_response_route_affinity(Some("resp_http"), &current, now);
+    let body = json!({
+        "type": "response.create",
+        "model": "upstream-model",
+        "previous_response_id": "resp_http",
+        "input": [
+            {"type": "function_call", "call_id": "call_earlier", "name": "lookup", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_earlier", "output": "synthetic result"},
+            {"role": "user", "content": "continue"}
+        ]
+    });
+    let request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        &serde_json::to_vec(&body).unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let (_, admitted) = request
+        .compatible_routes(&runtime, &key)
+        .unwrap_or_else(|error| panic!("request should be routable: {}", error.message));
+    assert!(
+        admitted.contains_key("current"),
+        "the predecessor's owner must accept complete tool history"
+    );
+    assert!(
+        !admitted.contains_key("earlier"),
+        "the opaque predecessor still pins its own route"
+    );
+    current.client_transport = crate::UsageTransport::Websocket;
+    let prepared = runtime
+        .prepare_route_authorization(&current, now)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(
+        &request
+            .observed_payload_for(&runtime, &mut current, &HeaderMap::new(), &prepared)
+            .unwrap_or_else(|error| panic!("continuation should serialize: {}", error.message))
+            .payload,
+    )
+    .unwrap();
+    assert_eq!(
+        payload["previous_response_id"],
+        body["previous_response_id"]
+    );
+    assert_eq!(payload["input"], body["input"]);
+
+    let mut orphan = body;
+    orphan["input"].as_array_mut().unwrap().remove(0);
+    assert_eq!(
+        runtime
+            .validate_continuation_route(&current, "key", &orphan, now)
+            .unwrap_err()
+            .code(),
+        "adapter_continuation_mismatch"
+    );
+}
+
+#[test]
+fn websocket_frame_identity_keeps_root_affinity_and_child_context_separate() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let parse = |thread, cache_key| {
+        let body = serde_json::to_vec(&json!({
+            "type": "response.create", "model": "relay/upstream-model", "input": "synthetic",
+            "client_metadata": {"session_id": "synthetic-root", "thread_id": thread},
+            "prompt_cache_key": cache_key
+        }))
+        .unwrap();
+        ClientRequest::parse(&runtime, &key, &HeaderMap::new(), &body)
+            .unwrap_or_else(|_| panic!("synthetic WebSocket request must parse"))
+    };
+    let first = parse("child-a", None::<&str>);
+    let second = parse("child-b", None::<&str>);
+    assert!(first.prompt_affinity_key.is_some());
+    assert_eq!(first.prompt_affinity_key, second.prompt_affinity_key);
+    assert_ne!(first.client_context_id, second.client_context_id);
+    assert!(!first.requires_affinity_owner);
+    assert!(!second.requires_affinity_owner);
+    let cached = parse("child-a", Some("explicit-cache"));
+    assert_ne!(first.prompt_affinity_key, cached.prompt_affinity_key);
+    assert!(
+        cached
+            .prompt_affinity_key
+            .as_deref()
+            .unwrap()
+            .starts_with("cache:")
+    );
+}
+
 #[test]
 fn client_request_resolves_the_visible_model_before_upstream_serialization() {
     let runtime = runtime();
@@ -131,7 +472,7 @@ fn client_request_rejects_an_unknown_tool_continuation_before_selection() {
 }
 
 #[test]
-fn websocket_lite_contract_is_normalized_before_non_account_routing() {
+fn websocket_lite_marker_preserves_parallel_policy_on_non_account_routes() {
     let runtime = runtime();
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
@@ -173,8 +514,18 @@ fn websocket_lite_contract_is_normalized_before_non_account_routing() {
     let payload: serde_json::Value =
         serde_json::from_str(&payload_bytes).expect("payload should be valid JSON");
 
-    assert_eq!(payload["parallel_tool_calls"], false);
-    assert!(request.responses_lite_for(&route));
+    assert_eq!(payload["parallel_tool_calls"], true);
+    assert!(request.responses_lite);
+    let mut native_route = route.clone();
+    native_route.account_id = Some("synthetic-native-account".into());
+    native_route.account_transport = crate::runtime::AccountTransport::NativeResponses;
+    let error = request.payload_for(&native_route).unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error
+            .message
+            .contains("does not support parallel_tool_calls: true")
+    );
 }
 
 #[test]
@@ -396,4 +747,84 @@ fn websocket_request_repairs_legacy_call_ids_and_recomputes_affinity() {
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["call_id"], input[1]["call_id"]);
     assert!(!request.repair_legacy_call_ids());
+}
+#[test]
+fn account_websocket_cache_key_matches_http_without_changing_api_source_requests() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-codex-session-id",
+        HeaderValue::from_static("synthetic-session"),
+    );
+    for explicit in [None, Some("client-cache-key")] {
+        let mut body =
+            serde_json::json!({"model":"relay/upstream-model","input":"Synthetic question"});
+        if let Some(explicit) = explicit {
+            body["prompt_cache_key"] = serde_json::json!(explicit);
+        }
+        let request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_or_else(|_| panic!("synthetic request must parse"));
+        let mut route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+                false,
+            )
+            .unwrap();
+        let source_payload: Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|_| panic!("synthetic source request must serialize")),
+        )
+        .unwrap();
+        assert_eq!(
+            source_payload.get("prompt_cache_key"),
+            body.get("prompt_cache_key")
+        );
+        route.account_id = Some("synthetic-account".into());
+        route.account_transport = crate::runtime::AccountTransport::NativeResponses;
+        let account_payload: Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|_| panic!("synthetic account request must serialize")),
+        )
+        .unwrap();
+        let mut http_fields = body.as_object().unwrap().clone();
+        crate::gateway::request::apply_account_prompt_cache_key(
+            &mut http_fields,
+            &key.id,
+            &request.resolved_model,
+            request.client_context_id.as_deref(),
+        );
+        assert_eq!(
+            account_payload["prompt_cache_key"],
+            http_fields["prompt_cache_key"]
+        );
+        assert!(account_payload["prompt_cache_key"].as_str().is_some());
+        assert_eq!(
+            account_payload["input"].as_array().unwrap()[0]["content"][0]["text"],
+            "Synthetic question"
+        );
+        let fallback: Value = serde_json::from_slice(
+            &request
+                .http_payload()
+                .unwrap_or_else(|_| panic!("synthetic fallback must serialize")),
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.get("prompt_cache_key"),
+            body.get("prompt_cache_key")
+        );
+        assert_eq!(fallback["input"], body["input"]);
+    }
 }

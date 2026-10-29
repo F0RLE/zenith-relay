@@ -10,6 +10,7 @@ async fn native_catalogs_details_and_generation_share_key_model_permissions() {
                 name: "Synthetic catalog".into(),
                 base_url: "http://127.0.0.1:1/v1".into(),
                 api_key: SOURCE_KEY.into(),
+                proxy_url: None,
                 wire_api,
                 models: vec!["shown".into(), "hidden".into()],
             })
@@ -141,7 +142,68 @@ async fn responses_websocket_falls_back_to_http_sse_upstream() {
     }
     assert!(saw_completed, "HTTP/SSE upstream was not bridged to WS");
     assert_eq!(state.requests.lock().unwrap().len(), 1);
-    assert!(events.lock().unwrap().iter().any(|event| event.success));
+    let events = events.lock().unwrap();
+    let completed = events.iter().find(|event| event.success).unwrap();
+    assert_eq!(
+        completed.transport,
+        zenith_relay_core::UsageTransport::Websocket
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_keeps_converted_continuation_and_client_transport() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let (gateway, events) =
+        spawn_messages_bridge_gateway(&upstream.base_url, &state, MessagesReasoningMode::Disabled)
+            .await;
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    let mut previous_response_id = None::<String>;
+    for input in ["First turn", "Continue"] {
+        let mut request = json!({
+            "type": "response.create", "model": "claude-test",
+            "input": input, "max_output_tokens": 64,
+        });
+        if let Some(id) = &previous_response_id {
+            request["previous_response_id"] = id.clone().into();
+        }
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(message) = socket.next().await {
+                let ClientWsMessage::Text(text) = message.unwrap() else {
+                    continue;
+                };
+                let event: Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_ne!(event["type"], "response.failed", "{event}");
+                if event["type"] == "response.completed" {
+                    return event;
+                }
+            }
+            panic!("converted response must complete without closing the client socket");
+        })
+        .await
+        .unwrap();
+        previous_response_id = Some(completed["response"]["id"].as_str().unwrap().to_owned());
+    }
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[1]["messages"].as_array().unwrap().len(), 3);
+    assert!(bodies.iter().all(|body| body["stream"] == true));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success
+        && event.transport == zenith_relay_core::UsageTransport::Websocket
+        && event.wire_api == WireApi::Responses));
 }
 
 #[tokio::test]
@@ -286,8 +348,8 @@ async fn responses_rejects_unknown_opaque_previous_response_before_upstream_exec
 }
 
 #[tokio::test]
-async fn responses_websocket_fallback_does_not_append_error_after_partial_output() {
-    let (upstream, _) = spawn_upstream().await;
+async fn responses_websocket_fallback_reports_interruption_without_replaying_output() {
+    let (upstream, state) = spawn_upstream().await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let upgraded = reqwest::Client::new()
         .get(format!("{}/v1/responses", gateway.base_url))
@@ -310,9 +372,9 @@ async fn responses_websocket_fallback_does_not_append_error_after_partial_output
         .await
         .unwrap();
 
-    let mut saw_partial = false;
-    let mut saw_error = false;
-    let mut saw_close = false;
+    let mut partial_count = 0;
+    let mut failure = None;
+    let mut saw_completed = false;
     for _ in 0..8 {
         let message = match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
             Ok(Some(Ok(message))) => message,
@@ -321,24 +383,29 @@ async fn responses_websocket_fallback_does_not_append_error_after_partial_output
         match message {
             ClientWsMessage::Text(text) => {
                 let value: Value = serde_json::from_str(text.as_ref()).unwrap();
-                saw_partial |= value["type"] == "response.output_text.delta";
-                saw_error |= value["type"] == "error" || value["type"] == "response.failed";
+                partial_count += usize::from(value["type"] == "response.output_text.delta");
+                saw_completed |= value["type"] == "response.completed";
+                if value["type"] == "response.failed" {
+                    failure = Some(value);
+                    break;
+                }
             }
             ClientWsMessage::Close { .. } => {
-                saw_close = true;
                 break;
             }
             _ => {}
         }
     }
-    assert!(saw_partial, "fallback did not forward the partial output");
-    assert!(
-        !saw_error,
-        "fallback appended an error after partial output"
-    );
-    assert!(
-        saw_close,
-        "fallback did not close after an incomplete stream"
+    assert_eq!(partial_count, 1, "partial output was lost or duplicated");
+    let failure = failure.expect("fallback closed without an explicit terminal failure");
+    assert_eq!(failure["response"]["id"], "partial-response");
+    assert_eq!(failure["response"]["status"], "failed");
+    assert_eq!(failure["response"]["error"]["code"], "stream_incomplete");
+    assert!(!saw_completed, "interruption was presented as completion");
+    assert_eq!(
+        state.requests.lock().unwrap().len(),
+        1,
+        "interrupted execution was replayed"
     );
 }
 
@@ -423,9 +490,11 @@ async fn responses_websocket_fallback_locks_the_first_later_stream_id() {
     let rejection = rejection.expect("fallback did not emit an error event");
     assert_eq!(rejection["stream_id"], "stream-b");
     assert_eq!(rejection["error"]["code"], "invalid_request");
-    assert!(rejection["error"]["message"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("only one WebSocket stream_id is supported per connection"));
+    assert!(
+        rejection["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only one WebSocket stream_id is supported per connection")
+    );
     assert_eq!(state.requests.lock().unwrap().len(), 2);
 }

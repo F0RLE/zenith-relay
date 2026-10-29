@@ -5,7 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 use zenith_relay_core::accounts::{TokenRefreshFailure, TokenRefreshFailureKind};
 use zenith_relay_core::error_codes;
@@ -246,8 +246,8 @@ pub(super) fn lock_path(lock_dir: &Path, local_account_id: &str) -> PathBuf {
     lock_dir.join(format!("{}.refresh.lock", &digest[..32]))
 }
 
-fn validate_local_account_id(value: &str) -> Result<(), ProcessLockError> {
-    if zenith_relay_core::is_ascii_token(value, 128) {
+fn validate_local_account_id(account_id: &str) -> Result<(), ProcessLockError> {
+    if zenith_relay_core::is_ascii_token(account_id, 128) {
         Ok(())
     } else {
         Err(ProcessLockError::InvalidIdentity)

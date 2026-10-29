@@ -5,6 +5,34 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
+mod recovery;
+
+#[tokio::test]
+async fn siwc_catalog_uses_only_bearer_and_preserves_visible_server_order() {
+    let router = Router::new().route("/v1/models", get(|headers: HeaderMap, uri: axum::http::Uri| async move {
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer synthetic-token");
+        assert!(!headers.contains_key("chatgpt-account-id"));
+        assert!(!headers.contains_key("originator"));
+        assert!(uri.query().is_none());
+        Json(json!({"models":[{"slug":"z-model","display_name":"Z model","visibility":"list"},{"slug":"hidden","visibility":"hide"},{"slug":"a-model","visibility":"list"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Url::parse(&format!(
+        "http://{}/v1/models",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let models = AccountModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .with_oauth_client_kind(super::super::OAuthClientKind::Siwc)
+        .discover("synthetic-token", "synthetic-registration", "ignored")
+        .await
+        .unwrap();
+    assert_eq!(models, vec!["z-model", "a-model"]);
+    task.abort();
+}
+
 #[test]
 fn discovery_failure_codes_keep_the_management_contract_stable() {
     let cases = [
@@ -12,86 +40,121 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
             ModelDiscoveryFailureCode::AgentTaskInvalid,
             "models_agent_task_invalid",
             false,
+        ),
+        (
+            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
+            "basis_points_free_account_unsupported",
             false,
         ),
         (
             ModelDiscoveryFailureCode::Forbidden,
             "models_forbidden",
             false,
-            true,
         ),
         (
             ModelDiscoveryFailureCode::HttpStatus,
             "models_http_status",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidAccessToken,
             "models_invalid_access_token",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidAccountId,
             "models_invalid_account_id",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidClientVersion,
             "models_invalid_client_version",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidEndpoint,
             "models_invalid_endpoint",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::InvalidResponse,
             "models_invalid_response",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::RateLimited,
             "models_rate_limited",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::ResponseTooLarge,
             "models_response_too_large",
-            false,
             false,
         ),
         (
             ModelDiscoveryFailureCode::Transport,
             "models_transport",
             false,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::Unauthorized,
             "models_unauthorized",
             true,
-            false,
         ),
         (
             ModelDiscoveryFailureCode::Upstream,
             "models_upstream",
             false,
-            false,
         ),
     ];
 
-    for (code, management_code, authentication_failure, blocks_account) in cases {
+    for (code, management_code, authentication_failure) in cases {
         assert_eq!(code.management_code(), management_code);
         assert_eq!(code.is_authentication_failure(), authentication_failure);
-        assert_eq!(code.blocks_account(), blocks_account);
+    }
+}
+
+#[tokio::test]
+async fn bps_free_token_claims_do_not_replace_provider_access_checks() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let token = format!(
+        "e30.{}.synthetic",
+        URL_SAFE_NO_PAD.encode(
+            json!({
+                "https://api.openai.com/auth": {"chatgpt_plan_type":"chatgpt_free_tier"}
+            })
+            .to_string()
+        )
+    );
+    for status in [StatusCode::OK, StatusCode::FORBIDDEN] {
+        let (mut endpoint, server) = spawn(Router::new().route(
+            "/basispoints/api/responses/access",
+            get(move || async move {
+                (
+                    status,
+                    Json(
+                        json!({"allowed": true, "model_catalog": {"models": [{"id": "gpt-bps"}]}}),
+                    ),
+                )
+            }),
+        ))
+        .await;
+        endpoint.set_path("/basispoints/api/responses/access");
+        let client = AccountModelsClient::with_endpoint(endpoint)
+            .unwrap()
+            .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps);
+        let result = client
+            .discover(&token, "synthetic-account", "ignored")
+            .await;
+        if status == StatusCode::OK {
+            assert_eq!(result.unwrap(), vec!["gpt-bps"]);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, ModelDiscoveryFailureCode::Forbidden);
+            assert!(!error.retryable);
+            assert_eq!(error.http_status, Some(403));
+        }
+        server.abort();
     }
 }
 
@@ -108,7 +171,7 @@ async fn discovery_retains_provider_retry_after_for_the_shared_scheduler() {
         }),
     ))
     .await;
-    let failure = CodexModelsClient::with_endpoint(endpoint)
+    let failure = AccountModelsClient::with_endpoint(endpoint)
         .unwrap()
         .discover("synthetic-access", "synthetic-account", "1.0.0")
         .await
@@ -122,7 +185,7 @@ async fn discovery_retains_provider_retry_after_for_the_shared_scheduler() {
 async fn discovers_unique_account_slugs_with_codex_request_contract() {
     let (endpoint, server) =
         spawn(Router::new().route("/backend-api/codex/models", get(successful_models))).await;
-    let models = CodexModelsClient::with_endpoint(endpoint)
+    let models = AccountModelsClient::with_endpoint(endpoint)
         .unwrap()
         .discover(
             "access-secret",
@@ -149,6 +212,29 @@ async fn discovers_unique_account_slugs_with_codex_request_contract() {
 }
 
 #[tokio::test]
+async fn discovers_models_from_a_catalog_larger_than_512_kib() {
+    let (endpoint, server) = spawn(Router::new().route(
+        "/backend-api/codex/models",
+        get(|| async {
+            Json(json!({
+                "models": [{
+                    "slug": "gpt-5",
+                    "base_instructions": "x".repeat(600 * 1024)
+                }]
+            }))
+        }),
+    ))
+    .await;
+    let models = AccountModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .discover("synthetic-access", "synthetic-account", "1.0.0")
+        .await
+        .unwrap();
+    assert_eq!(models, vec!["gpt-5"]);
+    server.abort();
+}
+
+#[tokio::test]
 async fn malformed_oversized_and_http_errors_are_redacted() {
     for (handler, expected, retryable) in [
         (
@@ -169,7 +255,7 @@ async fn malformed_oversized_and_http_errors_are_redacted() {
     ] {
         let (endpoint, server) =
             spawn(Router::new().route("/backend-api/codex/models", handler)).await;
-        let error = CodexModelsClient::with_endpoint(endpoint)
+        let error = AccountModelsClient::with_endpoint(endpoint)
             .unwrap()
             .discover(
                 "access-secret",
@@ -237,6 +323,52 @@ async fn successful_models(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
             { "slug": "" },
             { "slug": "gpt-5-mini" }
         ]
+    }))
+}
+
+#[tokio::test]
+async fn bps_discovery_keeps_custom_fixture_endpoint_and_uses_access_contract() {
+    let (mut endpoint, server) = spawn(Router::new().route(
+        "/basispoints/api/responses/access",
+        get(successful_basis_points_access),
+    ))
+    .await;
+    endpoint.set_path("/basispoints/api/responses/access");
+    let models = AccountModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps)
+        .discover("access-secret", "account-123", "ignored")
+        .await
+        .unwrap();
+    assert_eq!(models, vec!["gpt-bps"]);
+    server.abort();
+}
+
+async fn successful_basis_points_access(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
+    assert_eq!(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer access-secret")
+    );
+    assert_eq!(
+        headers
+            .get("x-basispoints-auth-mode")
+            .and_then(|value| value.to_str().ok()),
+        Some("chatgpt")
+    );
+    assert_eq!(
+        headers
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("account-123")
+    );
+    assert_eq!(uri.query(), Some("include_models=true"));
+    Json(json!({
+        "allowed": true,
+        "model_catalog": {
+            "models": [{"id": "gpt-bps"}]
+        }
     }))
 }
 

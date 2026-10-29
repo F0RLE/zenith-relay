@@ -1,9 +1,9 @@
 use super::{
     account_model_state_is_valid, credential_local_error, normalize_models, validate_label,
 };
+use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::credentials::CredentialStore;
 use crate::local_pool::accounts::mutations::UpdateAccountInput;
-use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::accounts::MAX_PURCHASE_COST_MICRO_USD;
@@ -35,7 +35,7 @@ pub(in crate::local_pool::accounts) fn apply_account_patch(
         account.excluded_models = normalize_models(models)?;
     }
     if let Some(in_pool) = input.in_pool {
-        account.account.in_pool = in_pool;
+        super::super::records::set_pool_membership(account, in_pool)?;
     }
     if let Some(draining) = input.draining {
         account.account.draining = draining;
@@ -57,19 +57,11 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     account: &LocalAccountRecord,
 ) -> LocalResult<()> {
     validate_label(&account.account.label)?;
-    if let Some(location) = &account.remote_location {
-        if location.server_id.is_empty() || location.remote_account_id.is_empty() {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "remote account location is invalid",
-            ));
-        }
-        if account.account.enabled || account.account.in_pool {
-            return Err(LocalPoolError::new(
-                ErrorCode::Conflict,
-                "an account managed by a remote server cannot run locally",
-            ));
-        }
+    if account.recovery.is_some() && (account.account.enabled || account.account.in_pool) {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account requires local recovery before use",
+        ));
     }
     if !account_model_state_is_valid(account) {
         return Err(LocalPoolError::new(
@@ -83,6 +75,9 @@ pub(in crate::local_pool::accounts) fn validate_account_record(
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .require(&account.account.id)
         .map_err(credential_local_error)?;
+    if account.account.in_pool {
+        super::super::records::validate_pool_account(&credentials, account.image_pool_enabled)?;
+    }
     if credentials.provider_account_id().is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,

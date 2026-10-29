@@ -1,10 +1,14 @@
 export type {
+  CodexMemoryStage,
+  ModelCatalogIdentity,
+} from "./types/runtime";
+
+export type {
   RelayMode,
   PageId,
   DefaultServiceTier,
   ToolPolicyMode,
   ToolPolicy,
-  ToolPolicyUpdate,
   ObservedServiceTier,
   OperationalStatus,
 } from "./types/common";
@@ -17,7 +21,6 @@ export type {
   ApiEquivalentSummary,
   PricingSourceSummary,
   CatalogStatus,
-  CatalogRefreshOutcome,
   PricingMetadata,
   QuotaWindowUsage,
   ApiModelPriceOverride,
@@ -32,11 +35,8 @@ export type {
   ProtocolFeature,
   ModelEndpointCapability,
   SourceProtocolConfig,
-  SourceProbeInput,
-  SourceProbeResult,
   MessagesReasoningMode,
   CacheWriteTtl,
-  DocumentedCacheRetentionMinimum,
   SourceProtocolBinding,
   SourceSummary,
   SourceStats,
@@ -45,8 +45,8 @@ export type {
 } from "./types/source";
 
 export type {
+  TrashedAccountSummary,
   AccountSummary,
-  CredentialRefreshResult,
   RevealedAccountIdentity,
   AccountLoginDetails,
   AccountLoginUpdate,
@@ -54,18 +54,18 @@ export type {
   AccountExportFormat,
   AccountExportInput,
   AccountExportResult,
-  MoveAccountsToRemoteResult,
   ImportSession,
   ConfirmAccountImportResponse,
   AccountImportProgress,
-  AccountTransferProgress,
   OAuthFlowStatus,
+  OAuthClientKind,
   OAuthFlow,
   OAuthFlowEvent,
   OAuthCompletion,
 } from "./types/account";
 
 export type {
+  ModelContextPolicy,
   ModelSummary,
   ImageRequestPrice,
 } from "./types/model";
@@ -93,10 +93,15 @@ export type {
   ProxyPoolSummary,
   ProxyPoolImportResult,
   ProxyCheckResult,
+  ProxySpeedTestResult,
   StoredProxyAssignmentResult,
 } from "./types/proxy";
 
 export type {
+  LaunchApplication,
+  LaunchPathSetting,
+  ClaudeDesktopStatus,
+  ClaudeDesktopConnection,
   OpenCodeConfigStatus,
   ProfileSnapshot,
   ProfileSnapshotList,
@@ -115,9 +120,15 @@ export type {
 } from "./types/runtime";
 
 export type {
+  CacheAffinityDiagnostics,
+  CacheAffinityMember,
+  CacheContextDiagnostics,
+  CacheContextSection,
+  CacheHistoryDiagnostics,
   RoutingDiagnostics,
   ToolUseDiagnostics,
   ErrorOrigin,
+  UsageTransport,
   UpstreamErrorDetails,
   ReasoningEffort,
   LocalUsage,
@@ -126,17 +137,12 @@ export type {
   UsageBucket,
   CacheSessionRecord,
   LocalUsagePage,
+  UsageFilterOptions,
   UsageExportRow,
-  SupportExportContext,
-  RemoteUsage,
-  RemoteUsageQuery,
-  RemoteUsagePage,
+  UsageQuery,
 } from "./types/usage";
 
 export type {
-  RemoteTarget,
-  SupportBundlePreview,
   RelayStorageInfo,
-  DiagnosticPaths,
   DiagnosticSettings,
 } from "./types/diagnostics";

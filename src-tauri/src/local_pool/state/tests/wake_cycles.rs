@@ -4,31 +4,43 @@ use super::*;
 fn weekly_reset_fingerprint_is_persisted_per_account_and_cycle() {
     let root = temp_root("weekly-reset-fingerprint");
     let state = DesktopState::open(root.clone()).unwrap();
-    assert!(!state
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
+    assert!(
+        !state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
     state
         .mark_weekly_reset_applied("account-1", "cycle-1")
         .unwrap();
-    assert!(state
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
-    assert!(!state
-        .weekly_reset_was_applied("account-1", "cycle-2")
-        .unwrap());
+    assert!(
+        state
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
+    assert!(
+        !state
+            .weekly_reset_was_applied("account-1", "cycle-2")
+            .unwrap()
+    );
     drop(state);
 
     let reopened = DesktopState::open(root.clone()).unwrap();
-    assert!(reopened
-        .weekly_reset_was_applied("account-1", "cycle-1")
-        .unwrap());
+    assert!(
+        reopened
+            .weekly_reset_was_applied("account-1", "cycle-1")
+            .unwrap()
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
 fn usage_callback_persists_before_returning() {
-    let root = std::env::temp_dir().join(format!("zenith-relay-state-{}", uuid::Uuid::new_v4()));
+    let root = crate::files::test_temp_root("zenith-relay-state");
     let state = DesktopState::open(root.clone()).unwrap();
+    assert!(Arc::ptr_eq(
+        &state.usage_callback(),
+        &state.clone().usage_callback()
+    ));
     state
         .store()
         .unwrap()
@@ -41,6 +53,7 @@ fn usage_callback_persists_before_returning() {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             pricing_provider: None,
+            proxy_id: None,
             official_provider_family: None,
             wire_api: WireApi::Responses,
             protocol_config: Default::default(),
@@ -88,6 +101,7 @@ fn usage_callback_persists_before_returning() {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -109,6 +123,7 @@ fn usage_callback_persists_before_returning() {
         total_tokens: Some(5),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     });
 
     let logs = state.telemetry.list(10).unwrap();
@@ -160,9 +175,11 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
             |_| {
                 Box::pin(async {
                     RefreshResult {
-                        value: Err(crate::local_pool::error::LocalPoolError::invalid_state(
-                            "synthetic read",
-                        )),
+                        refresh_value: Err(
+                            crate::local_pool::error::LocalPoolError::invalid_state(
+                                "synthetic read",
+                            ),
+                        ),
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -173,6 +190,7 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
     quota.primary.as_mut().unwrap().observed_at_ms = now;
     quota.primary.as_mut().unwrap().reset_at_ms = None;
     quota.updated_at_ms = Some(now);
+    quota.provider_credits_observed_at_ms = Some(now);
     let mut event = account_usage_event("req-passive", true);
     event.quota_snapshot = Some(quota.clone());
     (state.usage_callback())(event);
@@ -197,6 +215,33 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
     state.refresh.shutdown().await;
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn queued_usage_never_rolls_back_a_newer_credit_read() {
+    let mut account = account_record("account-1");
+    account.account.quota.available_credits_micro_units = Some(20);
+    account.account.quota.provider_credits_available = true;
+    account.account.quota.provider_credits_observed_at_ms = Some(200);
+    account.account.quota.updated_at_ms = Some(200);
+    let mut event = account_usage_event("req-queued-ledger", true);
+    event.quota_snapshot = Some(zenith_relay_core::quota::QuotaSnapshot {
+        available_credits_micro_units: Some(100),
+        provider_credits_available: true,
+        provider_credits_observed_at_ms: Some(100),
+        updated_at_ms: Some(300),
+        ..Default::default()
+    });
+    apply_account_usage_state(&mut account, &event, 300, None, None, false);
+    assert_eq!(account.account.quota.updated_at_ms, Some(300));
+    assert_eq!(
+        account.account.quota.provider_credits_observed_at_ms,
+        Some(200)
+    );
+    assert_eq!(
+        account.account.quota.available_credits_micro_units,
+        Some(20)
+    );
 }
 #[test]
 fn quota_classification_queues_refresh_without_blocking_the_account() {
@@ -276,43 +321,51 @@ fn account_usage_persists_natural_wake_completion_across_restart() {
     (state.usage_callback())(account_usage_event("req-failed", false));
     {
         let store = state.store().unwrap();
-        assert!(store
-            .account("account-1")
-            .unwrap()
-            .account
-            .last_used_at_ms
-            .is_none());
-        assert!(wake_coordinator(store.automations())
-            .unwrap()
-            .pending()
-            .is_empty());
+        assert!(
+            store
+                .account("account-1")
+                .unwrap()
+                .account
+                .last_used_at_ms
+                .is_none()
+        );
+        assert!(
+            wake_coordinator(store.automations())
+                .unwrap()
+                .pending()
+                .is_empty()
+        );
     }
     assert!(state.is_wake_permit_active(&permit).unwrap());
     (state.usage_callback())(account_usage_event("req-natural-use", true));
     assert!(!state.is_wake_permit_active(&permit).unwrap());
-    assert!(!state
-        .complete_wake(
-            permit,
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Unconfirmed,
-                completed_at_ms: now_ms(),
-                latency_ms: Some(1),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
+    assert!(
+        !state
+            .complete_wake(
+                permit,
+                WakeCompletion {
+                    outcome: zenith_relay_core::automations::WakeCompletionOutcome::Unconfirmed,
+                    completed_at_ms: now_ms(),
+                    latency_ms: Some(1),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    error_code: None,
+                },
+            )
+            .unwrap()
+    );
     drop(state);
 
     let reopened = DesktopState::open(root.clone()).unwrap();
     let store = reopened.store().unwrap();
-    assert!(store
-        .account("account-1")
-        .unwrap()
-        .account
-        .last_used_at_ms
-        .is_some());
+    assert!(
+        store
+            .account("account-1")
+            .unwrap()
+            .account
+            .last_used_at_ms
+            .is_some()
+    );
     assert!(store.key("key-1").unwrap().last_used_at.is_some());
     let coordinator = wake_coordinator(store.automations()).unwrap();
     assert!(coordinator.pending().is_empty());
@@ -378,10 +431,12 @@ fn reopening_migrates_manual_rules_and_their_pending_cycles_to_automatic() {
     assert_eq!(permits.len(), 1);
     assert_eq!(permits[0].task_id, task.id);
     assert!(!permits[0].requires_confirmation);
-    assert!(reopened
-        .claim_due_automatic_wakes(110, 2)
-        .unwrap()
-        .is_empty());
+    assert!(
+        reopened
+            .claim_due_automatic_wakes(110, 2)
+            .unwrap()
+            .is_empty()
+    );
     drop(reopened);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -429,35 +484,23 @@ fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
     assert_eq!(permits.len(), 1);
     assert_eq!(permits[0].task_id, automatic.id);
     assert_eq!(state.next_automatic_wake_due().unwrap(), None);
-    let mut confirmation_permits = state.claim_due_confirmation_wakes(110, 8).unwrap();
-    assert_eq!(confirmation_permits.len(), 1);
-    assert_eq!(confirmation_permits[0].task_id, confirmation.id);
-    assert!(state
-        .complete_wake(
-            permits.remove(0),
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
-                completed_at_ms: 120,
-                latency_ms: Some(10),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
-    assert!(state
-        .complete_wake(
-            confirmation_permits.remove(0),
-            WakeCompletion {
-                outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
-                completed_at_ms: 120,
-                latency_ms: Some(10),
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                error_code: None,
-            },
-        )
-        .unwrap());
+    let pending = state.wake_snapshot().unwrap().pending();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        state
+            .complete_wake(
+                permits.remove(0),
+                WakeCompletion {
+                    outcome: zenith_relay_core::automations::WakeCompletionOutcome::Confirmed,
+                    completed_at_ms: 120,
+                    latency_ms: Some(10),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    error_code: None,
+                },
+            )
+            .unwrap()
+    );
     assert_eq!(
         state
             .remove_pending_wakes_for_account("missing-account")
@@ -468,7 +511,7 @@ fn automatic_wake_claim_does_not_claim_confirmation_cycle() {
         state
             .remove_pending_wakes_for_task(&confirmation.id)
             .unwrap(),
-        0
+        1
     );
     assert!(state.next_automatic_wake_due().unwrap().is_none());
     drop(state);

@@ -1,7 +1,7 @@
 use super::{state::now_ms, store::telemetry_db::TelemetryDb};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use zenith_relay_core::{ResponseAffinityBinding, ResponseAffinityStore};
 

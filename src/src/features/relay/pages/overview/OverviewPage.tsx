@@ -1,29 +1,28 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, CircleAlert, Play, RefreshCw, Server, Square, Users } from "lucide-react";
+import { Activity, ArrowRight, CircleAlert, Play, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { SourceSummary } from "../../api/types";
-import { Button, EmptyState, OptionMenu, PageHeader } from "../../components/Ui";
+import type { LaunchApplication } from "../../api/types";
+import { Button, PageHeader } from "../../components/Ui";
 import { ApplicationPickerDialog } from "../../components/ApplicationPickerDialog";
-import { SourceStatsPanel } from "../../components/SourceStatsPanel";
-import { useSourceStats } from "../../hooks/useSourceStats";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { useSavedChoice } from "../../state/usePendingFlag";
 import { useRelayUsageContext } from "../../state/relayStateContext";
+import { readRelayPreference, removeRelayPreference, writeRelayPreference } from "../../state/relayPreferences";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
-import { sourceHost } from "../../sourceUrl";
 import { getCachedOverviewAnalytics, isOverviewAnalyticsFresh, loadOverviewAnalytics } from "./overviewAnalyticsCache";
-import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, remoteSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
+import { analyticsFromPage, chartWindows, DAY_MS, HOUR_MS, localSamples, type Analytics, type AnalyticsScope, type Range } from "./overviewAnalyticsModel";
 import AnalyticsPanel from "./OverviewAnalytics";
+import WeeklyCapacityChart from "./WeeklyCapacityChart";
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, setPage, perform, busy } = useRelayState();
-  const { revision: usageRevision } = useRelayUsageContext();
+  const { mode, runtime, runtimeReady, perform, busy } = useRelayState();
+  const { usageRevision } = useRelayUsageContext();
   const [applicationDialog, setApplicationDialog] = useState(false);
   const [range, setRange] = useState<Range>("today");
   const [analyticsScopeSelection, setAnalyticsScopeSelection] = useState<AnalyticsScope>(() => {
-    const stored = localStorage.getItem("relay.overviewAnalyticsScope");
+    const stored = readRelayPreference("relay.overviewAnalyticsScope", "");
     return stored?.startsWith("source:") || stored?.startsWith("account:") ? stored as AnalyticsScope : "";
   });
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -34,84 +33,74 @@ export function OverviewPage() {
     ? Math.floor(now.getTime() / HOUR_MS)
     : `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   const windows = useMemo(() => chartWindows(range, locale), [range, locale, windowRevision]);
-  const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
-  const runtimeReady = runtime !== null;
+  const usageAvailable = mode === "local";
   const windowStartMs = windows[0]?.startMs ?? 0;
   const windowEndMs = windows[windows.length - 1]?.endMs ?? windowStartMs;
-  const usageScope = `${mode}:${range}:${analyticsScopeSelection}:${windowStartMs}:${windowEndMs}`;
-  const [overviewData, setOverviewData] = useState<Analytics | null>(() => getCachedOverviewAnalytics(usageScope));
+  const runtimeIdentity = mode;
+  const usageScope = JSON.stringify([runtimeIdentity, range, analyticsScopeSelection, windowStartMs, windowEndMs]);
+  const [overviewData, setOverviewData] = useState<{ scope: string; data: Analytics | null }>(() => ({ scope: usageScope, data: getCachedOverviewAnalytics(usageScope) }));
   const analyticsScope = useRef<string | null>(null);
   const appliedUsageRevision = useRef(usageRevision);
-  const mounted = useRef(false);
   const analyticsScopeQuery = analyticsScopeSelection
     ? analyticsScopeSelection.slice(analyticsScopeSelection.indexOf(":") + 1)
     : undefined;
   const analyticsScopeOptions = useMemo(() => [
     { value: "", label: t("overview.scopeAll") },
-    ...(runtime?.sources ?? []).map((source) => ({ value: `source:${source.id}`, label: `${t("overview.scopeApi")} · ${source.name}` })),
+    ...(runtime?.sources ?? []).map((apiSource) => ({ value: `source:${apiSource.id}`, label: `${t("overview.scopeApi")} · ${apiSource.name}` })),
     ...(runtime?.accounts ?? []).map((account) => ({ value: `account:${account.id}`, label: `${t("overview.scopeAccount")} · ${account.label}` })),
   ], [runtime?.accounts, runtime?.sources, t]);
-  const analytics = overviewData;
+  const analytics = overviewData.scope === usageScope ? overviewData.data : getCachedOverviewAnalytics(usageScope);
   const gatewayRunning = useSavedChoice(Boolean(runtime?.gateway.running));
   const running = gatewayRunning.value;
-  const setAnalyticsScope = useCallback((value: string) => {
-    const next = value as AnalyticsScope;
-    setAnalyticsScopeSelection(next);
-    localStorage.setItem("relay.overviewAnalyticsScope", next);
+  const setAnalyticsScope = useCallback((scopeValue: string) => {
+    const selectedScope = scopeValue as AnalyticsScope;
+    setAnalyticsScopeSelection(selectedScope);
+    writeRelayPreference("relay.overviewAnalyticsScope", selectedScope);
   }, []);
-  const connectOpenCode = async (launchAfterConnect: boolean) => {
-    const connected = await perform("opencode-connect", relayCommands.connectOpenCode, "feedback.saved", { backgroundRefresh: true });
-    if (connected && launchAfterConnect) await perform("opencode-launch", relayCommands.restartOpenCode, "feedback.launched", { backgroundRefresh: true });
-  };
+  const launchApplication = (application: LaunchApplication) => perform(`${application}-launch`, () => relayCommands.launchApplication(application), "feedback.launched", {
+    skipRefresh: true,
+  });
 
   useEffect(() => {
-    if (!runtime) return;
+    if (!runtimeReady) return;
     if (analyticsScopeSelection && !analyticsScopeOptions.some((option) => option.value === analyticsScopeSelection)) {
       setAnalyticsScopeSelection("");
-      localStorage.removeItem("relay.overviewAnalyticsScope");
+      removeRelayPreference("relay.overviewAnalyticsScope");
     }
-  }, [analyticsScopeOptions, analyticsScopeSelection, runtime]);
+  }, [analyticsScopeOptions, analyticsScopeSelection, runtimeReady]);
 
   useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     const scopeChanged = analyticsScope.current !== usageScope;
     analyticsScope.current = usageScope;
     if (scopeChanged) {
       // Re-entry can reuse the last complete snapshot immediately. The same
       // scope is refreshed below, so the cached value is only a stale view.
       const cached = getCachedOverviewAnalytics(usageScope);
-      if (cached) startTransition(() => setOverviewData(cached));
+      startTransition(() => setOverviewData({ scope: usageScope, data: cached }));
     }
     setAnalyticsError(false);
     const stopLoading = () => {
       setAnalyticsLoading(false);
     };
-    if (mode === "zenith") {
+    if (!runtimeReady) {
       stopLoading();
-      return () => { active = false; };
-    }
-    if (!runtime) {
-      stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     if (!usageAvailable) {
-      startTransition(() => setOverviewData(null));
+      startTransition(() => setOverviewData({ scope: usageScope, data: null }));
       stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     const usageChanged = appliedUsageRevision.current !== usageRevision;
     appliedUsageRevision.current = usageRevision;
     if (!usageChanged && isOverviewAnalyticsFresh(usageScope)) {
       stopLoading();
-      return () => { active = false; };
+      return () => controller.abort();
     }
     setAnalyticsLoading(true);
-    const input = {
+    const usageQuery = {
       page: 1,
       pageSize: 1,
       range: "custom" as const,
@@ -123,165 +112,83 @@ export function OverviewPage() {
       includePoolMembers: false,
       ...(analyticsScopeQuery ? { sourceOrAccountQuery: analyticsScopeQuery } : {}),
     };
-    const load = () => mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
-      : relayCommands.remoteUsage(input).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
-    loadOverviewAnalytics(usageScope, load)
-      .then((result) => {
-        if (!result) {
-          if (active) setAnalyticsError(true);
+    const load = () => relayCommands.localUsagePage(usageQuery).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows));
+    loadOverviewAnalytics(usageScope, load, usageChanged, signal)
+      .then((analyticsResult) => {
+        if (!analyticsResult) {
+          if (!signal.aborted) setAnalyticsError(true);
           return;
         }
-        if (!active) return;
-        startTransition(() => setOverviewData(result));
+        if (signal.aborted) return;
+        startTransition(() => setOverviewData({ scope: usageScope, data: analyticsResult }));
       })
-      .catch(() => active && setAnalyticsError(true))
+      .catch(() => !signal.aborted && setAnalyticsError(true))
       .finally(() => {
-        // A same-scope refresh may supersede this effect while its request is still in flight.
-        if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(false);
+        if (!signal.aborted) setAnalyticsLoading(false);
       });
-    return () => { active = false; };
+    return () => controller.abort();
   }, [mode, range, runtimeReady, usageRevision, usageAvailable, usageScope, analyticsScopeQuery, windowEndMs, windowStartMs, windows]);
-
-  if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} perform={perform} />;
 
   const totals = analytics?.totals ?? emptyUsageTotals();
   const requests = totals.requests;
   const models = runtime?.gateway.visibleModelIds.length ?? 0;
-  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
+  const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? []).filter((account) => !account.routeInactive)].filter((poolMember) => poolMember.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
 
-  const primary = mode === "local" ? <>
+  const primary = <>
     <Button
       variant={running ? "secondary" : "primary"}
       busy={busy === "gateway"}
       icon={running ? <Square aria-hidden /> : <Play aria-hidden />}
       onClick={() => {
-        const next = !running;
+        const shouldRunGateway = !running;
         void perform("gateway", async () => {
-          if (next) await relayCommands.startGateway();
+          if (shouldRunGateway) await relayCommands.startGateway();
           else await relayCommands.stopGateway();
-          gatewayRunning.confirm(next);
-        }, next ? "feedback.started" : "feedback.stopped", { backgroundRefresh: true });
+          gatewayRunning.confirm(shouldRunGateway);
+        }, shouldRunGateway ? "feedback.started" : "feedback.stopped", { backgroundRefresh: true });
       }}
     >
       {running ? t("gateway.stop") : t("gateway.start")}
     </Button>
     <Button
       variant={running ? "primary" : "secondary"}
-      busy={busy === "chatgpt-launch" || busy === "opencode-connect" || busy === "opencode-launch"}
+      busy={busy === "chatgpt-launch" || busy === "opencode-launch" || busy === "claude-desktop-launch"}
       icon={<Play aria-hidden />}
-      disabled={!running}
-      title={!running ? t("gateway.start") : undefined}
       onClick={() => setApplicationDialog(true)}
     >
       {t("overview.launchApplication")}
     </Button>
-  </> : (
-    <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>
-      {runtime ? t("overview.openServer") : t("remote.connect")}
-    </Button>
-  );
+  </>;
 
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
-    {!running && !runtime ? (
-      <EmptyState
-        title={t("overview.emptyTitle")}
-        description={t("overview.emptyDescription")}
-        action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>}
-      />
-    ) : <>
+  return <section className="relay-page"><PageHeader title={t("nav.overview")} actions={runtimeReady ? primary : undefined} />
       <div className="metric-band overview-metrics">
-        <div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div>
-        <div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div>
-        <div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div>
-        <div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div>
+        <div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{analytics ? formatCompactNumber(requests, locale) : "—"}</strong></div>
+        <div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{runtime ? healthy : "—"}</strong></div>
+        <div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{runtime ? models || "-" : "—"}</strong></div>
+        <div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{analytics ? formatCompactNumber(errors, locale) : "—"}</strong></div>
       </div>
       <AnalyticsPanel
         range={range}
         setRange={setRange}
         windows={windows}
         analytics={analytics}
-        loading={analyticsLoading}
+        loading={analyticsLoading || (!analytics && !analyticsError)}
         error={analyticsError}
         scope={analyticsScopeSelection}
         setScope={setAnalyticsScope}
         scopeOptions={analyticsScopeOptions}
+        capacity={mode === "local" && runtimeReady && !analyticsScopeSelection.startsWith("source:")
+          ? <WeeklyCapacityChart windows={windows} revision={runtime?.weeklyCapacityRevision ?? 0} {...(analyticsScopeQuery ? { accountId: analyticsScopeQuery } : {})} /> : null}
       />
-    </>}
     {applicationDialog ? (
       <ApplicationPickerDialog
         title={t("overview.applicationPickerTitle")}
-        showLaunchToggle={false}
         onClose={() => setApplicationDialog(false)}
-        onChatGPT={() => { void perform("chatgpt-launch", relayCommands.launchManagedCodex, "feedback.launched", { backgroundRefresh: true }); }}
-        onOpenCode={() => void connectOpenCode(false)}
+        onChatGPT={() => void launchApplication("chatgpt")}
+        onOpenCode={() => void launchApplication("opencode")}
+        onClaudeDesktop={() => void launchApplication("claude-desktop")}
       />
     ) : null}
-  </section>;
-}
-function DirectApiOverview({ sources, onOpen, perform }: { sources: SourceSummary[]; onOpen: () => void; perform: (id: string, work: () => Promise<unknown>, successKey?: string, options?: { backgroundRefresh?: boolean }) => Promise<boolean> }) {
-  const { t } = useTranslation();
-  const { busy } = useRelayState();
-  const [selection, setSelection] = useState(() => localStorage.getItem("relay.directSourceId") ?? "");
-  const source = sources.find((item) => item.id === selection) ?? sources[0] ?? null;
-  const { stats: sourceStats, refresh: readSourceStats } = useSourceStats("zenith", source ? [source] : []);
-  const stats = source ? sourceStats[source.id] : undefined;
-
-  const select = (sourceId: string) => {
-    localStorage.setItem("relay.directSourceId", sourceId);
-    setSelection(sourceId);
-  };
-  const refreshSourceData = async () => {
-    if (!source) return;
-    await perform("source-data-refresh", () => relayCommands.refreshSourceData(source.id), "feedback.refreshed", { backgroundRefresh: true });
-    await readSourceStats(source.id, true);
-  };
-  const sourceRefreshBusy = busy === "source-data-refresh";
-  const actions = (
-    <>
-      <Button
-        variant="secondary"
-        icon={<RefreshCw aria-hidden />}
-        busy={stats?.loading || sourceRefreshBusy}
-        disabled={!source || sourceRefreshBusy}
-        onClick={() => void refreshSourceData()}
-      >
-        {t("common.refresh")}
-      </Button>
-      <Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button>
-    </>
-  );
-
-  return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
-    {!source ? (
-      <EmptyState
-        title={t("sources.emptyTitle")}
-        description={t("sources.emptyDescription")}
-        action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>}
-      />
-    ) : <div className="direct-api-overview">
-      <div className="direct-api-toolbar">
-        <div><strong>{source.name}</strong><code>{source.baseUrl}</code></div>
-        <OptionMenu
-          className="direct-api-source-menu"
-          label={t("overview.selectedSource")}
-          value={source.id}
-          onChange={select}
-          options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))}
-        />
-      </div>
-      <SourceStatsPanel source={source} {...(stats ? { state: stats } : {})} overview />
-      <section className="direct-api-models">
-        <header>
-          <div>
-            <h2>{t("overview.availableModels")}</h2>
-            <p>{t("overview.availableModelsHint")}</p>
-          </div>
-          <strong>{source.models.length}</strong>
-        </header>
-        <ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul>
-      </section>
-    </div>}
   </section>;
 }

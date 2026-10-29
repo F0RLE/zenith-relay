@@ -3,67 +3,100 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
     tags:
       - "v*"
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
 
 permissions:
   contents: read
 
+# Pull requests, main and release branches run checks only. Installers are built for a manual
+# run or a pushed v* tag. Only that tag push publishes.
+concurrency:
+  group: build-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
-    name: Check
+  check-plan:
+    name: Plan release-branch checks
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run-checks: ${{ steps.plan.outputs.run-checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Confirm independent PR coverage
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/check/ci-plan.mjs >> "$GITHUB_OUTPUT"
+
+  check-runtime:
+    name: Check runtime
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: ubuntu-latest
     env:
-      RUSTFLAGS: "-Dwarnings"
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.2
-      - name: Test proposed PR metadata policy
-        run: bun test ./.github/tools/pr-metadata.test.mjs
-      - uses: dtolnay/rust-toolchain@1.98.1
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+        working-directory: src
+      - name: Test development scripts
+        run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
+      - name: Check documentation links
+        run: bun ./scripts/check/check-docs.mjs
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri -> target
+      - uses: taiki-e/install-action@59a357c0513d39d45e24a79eb9489a3a28086290 # cargo-audit
+        with:
+          tool: cargo-audit
       - name: Prepare RustSec advisory database
         run: |
           RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
           echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
           git init --quiet "$RUSTSEC_ADVISORY_DB"
           git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
-          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin refs/heads/main
           git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
-      - run: bun install --frozen-lockfile
-        working-directory: src
+          git -C "$RUSTSEC_ADVISORY_DB" show -s --format='RustSec snapshot: %H (%cI)' HEAD
       - name: Install Linux Tauri dependencies
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -name '*microsoft*' -o -name '*azure*' \) -delete
+          sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-      - run: bunx playwright install chromium
-        timeout-minutes: 10
-        working-directory: src
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
       - name: Agent guardrails
-        shell: pwsh
-        run: ./scripts/check-agent-guardrails.ps1
+        run: bun ./scripts/check/check-agent-guardrails.mjs
       - name: No new duplicate code
-        shell: pwsh
-        run: ./scripts/check-duplicate-code.ps1
+        run: bun ./scripts/check/check-duplicate-code.mjs
       - run: cargo fmt --manifest-path crates/relay-core/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path crates/relay-core/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked
+      - name: Bounded pool admission under contention
+        run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file crates/relay-core/Cargo.lock
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file src-tauri/Cargo.lock
-      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
       - run: bun audit
         working-directory: src
       - name: Run verification with Linux Secret Service
@@ -71,19 +104,116 @@ jobs:
           dbus-run-session -- bash -euc '
             mkdir -p "$HOME/.local/share/keyrings"
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            bun run verify
+            bun run test:unit
+            bun run build
+            bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
           '
         working-directory: src
-      - run: bun run test:e2e
+
+  check-ui:
+    name: Check UI (${{ matrix.shard }}/4)
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
         working-directory: src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Use canonical Ubuntu archive
+        run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+      - name: Install test browser
+        run: bunx --no-install playwright install --with-deps chromium
+        timeout-minutes: 10
+      - name: Run browser tests
+        run: bun run test:e2e --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      - name: Retain failed browser traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: playwright-failure-${{ matrix.shard }}
+          path: src/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  check:
+    name: Check
+    needs: [check-plan, check-runtime, check-ui, check-windows, check-web]
+    if: always() && needs.check-plan.outputs.run-checks != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require runtime, every browser shard, Windows and web
+        shell: pwsh
+        env:
+          PLAN_RESULT: ${{ needs.check-plan.result }}
+          RUNTIME_RESULT: ${{ needs.check-runtime.result }}
+          UI_RESULT: ${{ needs.check-ui.result }}
+          WINDOWS_RESULT: ${{ needs.check-windows.result }}
+          WEB_RESULT: ${{ needs.check-web.result }}
+        run: |
+          if ($env:PLAN_RESULT -notin @('success', 'skipped')) { exit 1 }
+          $results = @($env:RUNTIME_RESULT, $env:UI_RESULT, $env:WINDOWS_RESULT, $env:WEB_RESULT)
+          if (@($results | Where-Object { $_ -ne 'success' }).Count -gt 0) {
+            exit 1
+          }
+
+  check-windows:
+    name: Check Windows
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Compile Windows Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --timings
+      - name: Run Windows Rust tests
+        # The test keyring is process-global, so its system key must not be mutated concurrently.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+
+  check-web:
+    name: Check web preview
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run test
+      - run: bun audit
+      - run: bun run build
+      - name: Use canonical Ubuntu archive
+        run: sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+      - name: Install preview test browser
+        run: bunx --no-install playwright install --with-deps chromium
+        timeout-minutes: 10
+      - run: bun run test:e2e
 
   build:
     name: ${{ matrix.name }}
-    needs: check
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.os }}
     env:
-      RUSTFLAGS: "-Dwarnings"
+      RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
     strategy:
       fail-fast: false
       matrix:
@@ -102,12 +232,14 @@ jobs:
             os: ubuntu-24.04-arm
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.2
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: Swatinem/rust-cache@v2
+          bun-version: 1.4.4
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
         working-directory: src
       - name: Install Linux Tauri dependencies
@@ -128,7 +260,7 @@ jobs:
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
             cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
           '
-      - uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -175,7 +307,7 @@ jobs:
           mkdir -p "$mount_point"
           # The DMG license agreement cancels a non-interactive attach. The
           # helper answers it, and this watchdog covers a helper that itself hangs.
-          python3 -B .github/tools/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
+          python3 -B scripts/release/attach-macos-dmg.py "$mount_point" "${dmgs[0]}" &
           attach_pid=$!
           (
             sleep 120
@@ -249,7 +381,7 @@ jobs:
           if (!(Test-Path "$portable.sig")) {
             throw "Portable updater signature was not created"
           }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: zenith-relay-${{ matrix.name }}
           path: artifacts/*
@@ -257,14 +389,14 @@ jobs:
 
   publish-release:
     name: Publish verified release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [check, check-windows, check-web, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts
       - name: Prepare release body
@@ -351,13 +483,13 @@ jobs:
   publish-updater-manifest:
     name: Publish updater manifest
     needs: publish-release
-    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts
       - name: Prepare updater assets
@@ -369,7 +501,7 @@ jobs:
           if (-not $releaseNotes) {
             throw "Release notes are empty"
           }
-          .github/tools/publish-updater-manifest.ps1 `
+          scripts/release/publish-updater-manifest.ps1 `
             -TagName "${{ github.ref_name }}" `
             -Repository "${{ github.repository }}" `
             -ArtifactsDir "release-artifacts" `

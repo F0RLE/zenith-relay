@@ -1,14 +1,19 @@
-import { Clock3, Cloud, ListMinus, Loader2, Pencil, RefreshCw, UserRound } from "lucide-react";
+import { Check, Cloud, ListMinus, Loader2, Pencil, RefreshCw, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, CandidateRuntimeSnapshot, PoolRoutingMode } from "../../api/types";
-import { accountQuotaRefreshState, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
+import { rotationModeName } from "./rotationModes";
+import { poolMemberDisplayStatus } from "./poolMembersModel";
+import { accountQuotaRefreshState, accountSurfaceTone, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
+import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
-import { AccountPlanBadge, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
+import { AccountBadges, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
 import { AccountProviderQuotaStrip } from "../../components/AccountProviderQuotaStrip";
 import { AccountQuotaPanel } from "../../components/AccountQuotaPanel";
 import { AccountSubscriptionLine } from "../../components/AccountSubscriptionLine";
+import { AccountTokenExpiry } from "../../components/AccountTokenExpiry";
+import { AccountRouteSelector } from "../../components/AccountRouteSelector";
 import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { activeRequestCount, upcomingModelRetries } from "../../routingOrder";
 import type { PoolMember } from "../../poolHelpers";
@@ -21,6 +26,8 @@ type PoolMemberCardProps = {
   nowMs: number;
   runtimeState: CandidateRuntimeSnapshot | undefined;
   selected: boolean;
+  checked: boolean;
+  onToggleSelected: () => void;
   isNext: boolean;
   isLastUsed: boolean;
   sourceState: SourceStatsState | undefined;
@@ -31,7 +38,7 @@ type PoolMemberCardProps = {
   onRemove: () => void;
   onConfirmRemove: () => void;
   onRefreshSource: () => void;
-  onReauthenticate: (account: AccountSummary) => void;
+  onReauthenticate: (account: AccountSummary, automatic?: boolean) => void;
 };
 
 export function PoolMemberCard({
@@ -39,6 +46,8 @@ export function PoolMemberCard({
   nowMs,
   runtimeState,
   selected,
+  checked,
+  onToggleSelected,
   isNext,
   isLastUsed,
   sourceState,
@@ -51,17 +60,21 @@ export function PoolMemberCard({
   onRefreshSource,
   onReauthenticate,
 }: PoolMemberCardProps) {
-  const { t } = useTranslation();
-  const { mode, perform, refresh, busy, accountValueVisible, codexPoolOauthSelection } = useRelayState();
-  const statusKey = member.operationalStatus;
-  const statusTone = operationalStatusTone(statusKey);
+  const { t, i18n } = useTranslation();
+  const { mode, runtime, perform, refresh, busy, accountValueVisible, codexPoolOauthSelection } = useRelayState();
+  const metadata = member.kind === "account" ? accountMetadataSources(member, runtime?.accounts ?? []) : null;
+  const subscription = member.kind === "account" ? accountSubscriptionSource(member, runtime?.accounts ?? []) : null;
+  const statusKey = poolMemberDisplayStatus(member, runtimeState);
+  const statusTone = statusKey === "draining" ? "disabled"
+    : statusKey === "cooldown" || statusKey === "busy" ? "warning" : operationalStatusTone(statusKey);
   const quotaStatus = member.kind === "account" ? accountQuotaRefreshState(member) : "updated";
   const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
   const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
   const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
-  const detail = member.kind === "source" ? `${member.wireApi} · ${member.baseUrl}` : member.label;
-  const isCurrent = activeRequestCount(runtimeState) > 0;
+  const detail = member.kind === "source" ? member.baseUrl : member.label;
+  const activeRequests = activeRequestCount(runtimeState);
+  const isCurrent = activeRequests > 0;
   const modelRetries = upcomingModelRetries(runtimeState, nowMs);
   const firstModelRetry = modelRetries[0];
   const modelRetryHint = firstModelRetry
@@ -79,54 +92,52 @@ export function PoolMemberCard({
         ? "warning"
         : transientCandidateTone(runtimeState, nowMs, false)
     : null;
-  const indicatorTone = visibleMemberErrorCode
-    ? "error"
-    : statusKey === "unavailable" || statusKey === "disabled"
+  const surfaceTone = member.kind === "account"
+    ? accountSurfaceTone(member)
+    : visibleMemberErrorCode ? "error" : statusTone;
+  const indicatorTone = statusKey === "disabled" || statusKey === "draining" || statusKey === "cooldown" || statusKey === "busy" || statusKey === "unavailable"
     ? statusTone
-    : quotaStatus === "refreshing"
-      ? "disabled"
-      : quotaStatus === "failed" || quotaStatus === "requires_reauth"
-        ? "error"
-        : quotaStatus === "pending"
-          ? "disabled"
-          : runtimeTone ?? statusTone;
+    : surfaceTone === "ready" ? runtimeTone ?? statusTone : surfaceTone;
   const runtimeHint = runtimeState?.halfOpen
     ? t("pool.recoveryProbe")
     : modelRetryHint
       ? modelRetryHint
-      : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
+      : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
       ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
       : undefined;
-  const parallelRequests = activeRequestCount(runtimeState);
-  const name = member.kind === "source" ? member.name : member.label;
-  const editLabel = `${t("pool.editMember")}: ${name}`;
-  const removeLabel = `${t("pool.removeMember")}: ${name}`;
+  const memberName = member.kind === "source" ? member.name : member.label;
+  const editLabel = `${t("pool.editMember")}: ${memberName}`;
+  const removeLabel = `${t("pool.removeMember")}: ${memberName}`;
   const removing = busy === `pool-remove-${member.id}`;
   const statusLabel = t(`pool.memberStatus.${statusKey}`);
-  const indicatorLabel = visibleMemberErrorCode
+  const errorLabel = visibleMemberErrorCode
     ? member.kind === "account" ? accountErrorLabel(visibleMemberErrorCode, t) : t("pool.runtimeError", { code: visibleMemberErrorCode })
-    : quotaStatus === "updated" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
+    : null;
+  const indicatorLabel = errorLabel
+    ? statusKey === "rotation" || statusKey === "unavailable" ? errorLabel : `${statusLabel} · ${errorLabel}`
+    : quotaStatus === "updated" || quotaStatus === "not_available" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
   const indicatorHint = member.kind === "source"
     ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
     : [runtimeHint, indicatorLabel].filter(Boolean).join(" · ");
 
   return (
     <article
-      className={`pool-member-card${selected ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
+      className={`pool-member-card${selected || checked ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
       role="listitem"
-      data-member-label={name}
+      data-member-label={memberName}
       data-current={isCurrent ? "true" : "false"}
       data-next={isNext ? "true" : "false"}
       data-last-used={isLastUsed ? "true" : "false"}
       data-member-kind={member.kind}
+      data-selected={checked}
     >
       <header className="pool-member-card-header">
         {member.kind === "account" && displayedErrorCode
           ? (
             <IconButton
               className="pool-member-kind-icon"
-              data-status="error"
-              label={indicatorLabel}
+              data-status={indicatorTone}
+              label={indicatorHint}
               icon={<UserRound aria-hidden />}
               onClick={() => onShowError(member)}
             />
@@ -150,9 +161,18 @@ export function PoolMemberCard({
           </strong>
           <div className="pool-member-meta">
             {member.kind === "account"
-              ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} />
+              ? <AccountBadges planType={metadata!.plan.subscription.planType} oauthClientKind={member.oauthClientKind} unknown={t("common.unknown")} poolScope codexTextModelsEnabled={runtime?.gateway.codexTextModelsEnabled}
+                planHint={metadata!.plan.id !== member.id ? accountMetadataHint(metadata!.plan, "plan", nowMs, t, i18n.language) : undefined}
+                planStale={metadata!.plan.id !== member.id && accountMetadataIsStale(metadata!.plan, "plan", nowMs)}
+                routeControl={<AccountRouteSelector account={member} />} />
               : <small data-relay-tooltip={detail}>{detail}</small>}
           </div>
+        </div>
+        <div className="account-card-header-actions">
+          <IconButton className="account-select-button"
+            label={t(checked ? "accounts.deselect" : "accounts.select", { name: memberName })}
+            icon={checked ? <Check aria-hidden /> : <Square aria-hidden />}
+            aria-pressed={checked} disabled={Boolean(busy)} onClick={onToggleSelected} />
         </div>
       </header>
       <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>
@@ -164,18 +184,15 @@ export function PoolMemberCard({
       {member.kind === "account" ? <AccountProviderQuotaStrip account={member} /> : null}
       {member.kind === "account" ? (
         <>
-          <AccountSubscriptionLine activeUntilMs={member.subscription.activeUntilMs} nowMs={nowMs} />
-          {runtimeHint ? (
-            <div className="account-runtime-line" data-warning={modelRetries.length > 0}>
-              <Clock3 aria-hidden /><span>{runtimeHint}</span>
-            </div>
-          ) : null}
+          <AccountTokenExpiry account={member} nowMs={nowMs} />
+          <AccountSubscriptionLine activeUntilMs={subscription!.subscription.activeUntilMs} nowMs={nowMs}
+            hint={subscription!.id !== member.id ? accountMetadataHint(subscription!, "plan", nowMs, t, i18n.language) : undefined} />
         </>
       ) : (
         <div className="pool-member-context" data-kind="source">
           <div className="pool-member-runtime-meta">
-            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationMode}`)}</strong></div> : null}
-            <div><span>{t("pool.parallelism")}</span><strong>{parallelRequests}</strong></div>
+            {rotationMode ? <div><span>{t("pool.operationMode")}</span><strong>{t(`pool.rotationModes.${rotationModeName(rotationMode)}`)}</strong></div> : null}
+            <div><span>{t("pool.activeRequestCount")}</span><strong>{activeRequests}</strong></div>
           </div>
         </div>
       )}
@@ -212,7 +229,7 @@ export function PoolMemberCard({
               disabled={!canRefreshQuota || !member.secretAvailable || busy === `pool-account-quota-${member.id}`}
               onClick={() => void perform(
                 `pool-account-quota-${member.id}`,
-                () => refreshOneAccountQuota(mode, member.id),
+                () => refreshOneAccountQuota(mode, metadata!.quota.id),
                 "feedback.refreshed",
                 { backgroundRefresh: true },
               )}

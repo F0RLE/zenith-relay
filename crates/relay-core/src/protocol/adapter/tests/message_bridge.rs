@@ -30,9 +30,11 @@ fn messages_cache_write_lifetime_marks_stable_prefix_and_latest_turn() {
 
     assert_eq!(request["system"][0]["cache_control"]["ttl"], "1h");
     assert!(request["tools"][0].get("cache_control").is_none());
-    assert!(request["messages"][0]["content"][0]
-        .get("cache_control")
-        .is_none());
+    assert!(
+        request["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
     assert_eq!(
         request["messages"][1]["content"][0]["cache_control"]["ttl"],
         "1h"
@@ -139,7 +141,7 @@ fn messages_stream_bridge_emits_responses_tool_events_and_completion() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_stream","usage":{"input_tokens":4,"output_tokens":0}}}
@@ -188,7 +190,7 @@ fn messages_stream_bridge_emits_custom_tool_events_and_completion() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_custom_stream","usage":{"input_tokens":4,"output_tokens":0}}}
@@ -256,7 +258,7 @@ fn messages_bridge_preserves_output_limit_and_rejects_unknown_terminal_reason() 
         limited.response_body["incomplete_details"]["reason"],
         "max_output_tokens"
     );
-    for reason in [None, Some("pause_turn")] {
+    for reason in [None, Some("unknown_terminal_reason")] {
         let mut upstream = json!({"id":"msg_unknown","content":[{"type":"text","text":"partial"}]});
         if let Some(reason) = reason {
             upstream["stop_reason"] = reason.into();
@@ -286,14 +288,15 @@ fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
         &json!({"id":"msg_empty_refusal","stop_reason":"refusal","content":[]}),
     )
     .unwrap();
-    assert_eq!(json.response_body["status"], "incomplete");
-    assert_eq!(json.response_body["output"], json!([]));
+    assert_eq!(json.response_body["status"], "completed");
     assert_eq!(
-        json.response_body["incomplete_details"]["reason"],
-        "content_filter"
+        json.response_body["output"][0]["content"][0],
+        json!({"type":"refusal","refusal":""})
     );
+    assert!(json.response_body["incomplete_details"].is_null());
+    assert!(!json.continuation.is_reusable());
 
-    let mut stream = MessagesStreamBridge::new(make_request(true));
+    let mut stream = TranslationStream::new(make_request(true));
     for event in [
         json!({"type":"message_start","message":{"id":"msg_empty_refusal","usage":{"input_tokens":2}}}),
         json!({"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":1}}),
@@ -302,16 +305,18 @@ fn messages_bridge_accepts_empty_refusal_in_json_and_stream() {
         stream.push(format!("data: {event}\n\n").as_bytes());
     }
     let completed = stream.completed().expect("empty refusal should complete");
-    assert_eq!(completed.response_body["status"], "incomplete");
-    assert_eq!(completed.response_body["output"], json!([]));
+    assert_eq!(completed.response_body["status"], "completed");
     assert_eq!(
-        completed.response_body["incomplete_details"]["reason"],
-        "content_filter"
+        completed.response_body["output"][0]["content"][0],
+        json!({"type":"refusal","refusal":""})
     );
+    assert!(completed.response_body["incomplete_details"].is_null());
+    assert!(!completed.continuation.is_reusable());
     let events = std::iter::from_fn(|| stream.pop_output())
         .map(|chunk| String::from_utf8(chunk).unwrap())
         .collect::<String>();
-    assert!(events.contains("response.incomplete"));
+    assert!(events.contains("response.refusal.done"));
+    assert!(events.contains("event: response.completed"));
     assert!(!events.contains("response.failed"));
 }
 #[test]
@@ -324,7 +329,7 @@ fn messages_stream_bridge_emits_text_done_and_accepts_metadata_events() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"event: message_start
 data: {"type":"message_start","message":{"id":"msg_text","usage":{"input_tokens":1}}}
@@ -337,9 +342,6 @@ data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}
-
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location"}}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
@@ -372,7 +374,7 @@ fn messages_stream_bridge_keeps_text_tool_text_order_and_response_item_ids() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_interleaved"}}
 
@@ -466,7 +468,7 @@ fn messages_stream_bridge_rejects_unclosed_blocks_before_message_stop() {
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_incomplete"}}
 
@@ -495,7 +497,7 @@ fn messages_stream_bridge_preserves_initial_and_incremental_thinking_signature()
         None,
     )
     .unwrap();
-    let mut bridge = MessagesStreamBridge::new(request);
+    let mut bridge = TranslationStream::new(request);
     bridge.push(
         br#"data: {"type":"message_start","message":{"id":"msg_thinking"}}
 
@@ -521,7 +523,7 @@ data: {"type":"message_stop"}
     );
 
     let completed = bridge.completed().expect("thinking stream should complete");
-    let messages = &completed.continuation.messages;
-    assert_eq!(messages[1]["content"][0]["thinking"], "initial more");
-    assert_eq!(messages[1]["content"][0]["signature"], "sig-part");
+    let native = &completed.continuation.native_turns[&1];
+    assert_eq!(native[0]["thinking"], "initial more");
+    assert_eq!(native[0]["signature"], "sig-part");
 }

@@ -1,6 +1,7 @@
 use super::super::import_session::SecretBackendError;
+use super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS;
 use super::callback::MAX_REQUEST_HEADER_BYTES;
-use super::callback::{callback_language, callback_success_html, CallbackLanguage};
+use super::callback::{CallbackLanguage, callback_language, callback_success_html};
 use super::snapshot::validate_snapshot;
 use super::snapshot::{ensure_pending_directory, pending_directory};
 use super::*;
@@ -14,12 +15,87 @@ use url::Url;
 
 static TEST_OAUTH_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn diagnostic_events_have_closed_fields_and_stop_after_cancellation() {
+    let root = test_root("safe-stage-diagnostics");
+    let events = Events::default();
+    let manager = OAuthFlowManager::new(root.clone(), MemorySecrets::default(), events.clone());
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::ExcelBps, None).unwrap();
+    let start = manager.start_for_account(&oauth, None, None).await.unwrap();
+    let mut progress = OAuthFlowProgress::new();
+    manager.advance_diagnostic(
+        &start.login_id,
+        &mut progress,
+        OAuthFlowStage::TokenExchange,
+    );
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    manager.report_diagnostic(
+        &start.login_id,
+        progress.diagnostic(Some(OAuthFlowFailureReason::TokenExchangeFailed)),
+    );
+    let event = lock(&events.0).last().unwrap().clone();
+    assert_eq!(event.status, OAuthFlowStatus::Pending);
+    assert!(event.diagnostic.as_ref().unwrap().elapsed_ms >= 2);
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(encoded["diagnostic"]["stage"], "token_exchange");
+    assert_eq!(encoded["diagnostic"]["reason"], "token_exchange_failed");
+    assert_eq!(encoded.as_object().unwrap().len(), 3);
+    assert_eq!(encoded["diagnostic"].as_object().unwrap().len(), 3);
+    manager.cancel(&start.login_id).await.unwrap();
+    let event_count = lock(&events.0).len();
+    manager.report_diagnostic(&start.login_id, progress.diagnostic(None));
+    assert_eq!(lock(&events.0).len(), event_count);
+    remove_root(&root);
+}
+
+#[tokio::test]
+async fn route_notes_context_is_not_a_reauthentication_target_and_survives_resume() {
+    let root = test_root("route-notes-context");
+    let manager = OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(
+        super::super::oauth::OAuthClientKind::ExcelBps,
+        None,
+    )
+    .unwrap();
+    let first = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_one"))
+        .await
+        .unwrap();
+    assert_eq!(first.notes_account_id.as_deref(), Some("source_one"));
+    assert!(first.target_account_id.is_none());
+    let same = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_one"))
+        .await
+        .unwrap();
+    assert_eq!(first.login_id, same.login_id);
+    let other = manager
+        .start_for_account_with_notes(&oauth, None, None, Some("source_two"))
+        .await
+        .unwrap();
+    let ordinary = manager.start_for_account(&oauth, None, None).await.unwrap();
+    assert_ne!(first.login_id, other.login_id);
+    assert_ne!(first.login_id, ordinary.login_id);
+    let resumed = manager.resume(&first.login_id).await.unwrap();
+    assert_eq!(resumed.notes_account_id, first.notes_account_id);
+    assert!(resumed.target_account_id.is_none());
+    let mut snapshot = read_snapshot(&root, &first.login_id).unwrap();
+    snapshot.target_account_id = Some("foreign_target".into());
+    assert!(validate_snapshot(&snapshot, &first.login_id).is_err());
+    snapshot.target_account_id = None;
+    snapshot.notes_account_id = Some(" ".into());
+    assert!(validate_snapshot(&snapshot, &first.login_id).is_err());
+    for started in [first, other, ordinary] {
+        manager.cancel(&started.login_id).await.unwrap();
+    }
+    remove_root(&root);
+}
+
 #[derive(Clone, Default)]
 struct MemorySecrets(Arc<Mutex<BTreeMap<String, String>>>);
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
-        lock(&self.0).insert(secret_ref.to_string(), value.to_string());
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
+        lock(&self.0).insert(secret_ref.to_string(), secret_value.to_string());
         Ok(())
     }
 
@@ -67,8 +143,10 @@ async fn loopback_callback_validates_state_and_stores_only_secret_material() {
         .start_for_account(&CodexOAuthClient::new().unwrap(), None, None)
         .await
         .unwrap();
-    assert!(CODEX_OAUTH_CALLBACK_PORTS
-        .contains(&Url::parse(&start.redirect_uri).unwrap().port().unwrap()));
+    assert!(
+        CODEX_OAUTH_CALLBACK_PORTS
+            .contains(&Url::parse(&start.redirect_uri).unwrap().port().unwrap())
+    );
     let callback = callback_url_for(&start, "authorization-code", None);
 
     let response = send_callback(&start.redirect_uri, &request_target(&callback)).await;
@@ -112,6 +190,128 @@ fn callback_success_page_uses_supported_browser_language() {
     assert!(
         callback_success_html(CallbackLanguage::English).contains("You can close this window now.")
     );
+}
+
+#[tokio::test]
+async fn siwc_start_resume_and_loopback_callback_preserve_the_issuing_client() {
+    let root = test_root("siwc-callback");
+    let secrets = MemorySecrets::default();
+    let events = Events::default();
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::Siwc, None)
+        .unwrap()
+        .with_siwc_registration("urn:uuid:synthetic-flow-host".into(), None)
+        .unwrap();
+    let first = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    let start = first.start_for_account(&oauth, None, None).await.unwrap();
+    assert_eq!(start.client_kind, OAuthClientKind::Siwc);
+    assert_eq!(
+        Url::parse(&start.redirect_uri).unwrap().host_str(),
+        Some("127.0.0.1")
+    );
+    assert_eq!(
+        first
+            .start_for_account(&oauth, None, None)
+            .await
+            .unwrap()
+            .login_id,
+        start.login_id
+    );
+    first.shutdown().await;
+
+    let second = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    let resumed = second.resume(&start.login_id).await.unwrap();
+    assert_eq!(resumed.redirect_uri, start.redirect_uri);
+    let mut callback = callback_url_for(&resumed, "synthetic-siwc-code", None);
+    callback
+        .query_pairs_mut()
+        .append_pair("client_id", "oaiapp_synthetic_flow");
+    let mut foreign_host = callback.clone();
+    foreign_host.set_host(Some("localhost")).unwrap();
+    assert_eq!(
+        second
+            .submit_manual_callback(&start.login_id, foreign_host.as_str())
+            .await
+            .unwrap_err()
+            .code,
+        OAuthFlowErrorCode::CallbackInvalid
+    );
+    let redirect = Url::parse(&resumed.redirect_uri).unwrap();
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        request_target(&callback),
+        redirect.port().unwrap()
+    );
+    let response = send_raw(&resumed.redirect_uri, &request).await;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    wait_until(|| events.has(&start.login_id, OAuthFlowStatus::CallbackReceived)).await;
+    assert!(secrets.contains(&callback_secret_ref(&start.login_id)));
+    let (pending, _) = second
+        .exchange_material(&start.login_id)
+        .unwrap()
+        .into_parts();
+    assert_eq!(pending.client_kind(), OAuthClientKind::Siwc);
+    second.complete(&start.login_id).await.unwrap();
+    assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+    remove_root(&root);
+}
+
+#[tokio::test]
+async fn siwc_webview_callback_keeps_state_validation_and_cancellation_fences() {
+    let root = test_root("siwc-webview-callback");
+    let secrets = MemorySecrets::default();
+    let events = Events::default();
+    let oauth = CodexOAuthClient::new_with_proxy_for_kind(OAuthClientKind::Siwc, None)
+        .unwrap()
+        .with_siwc_registration("urn:uuid:synthetic-webview-host".into(), None)
+        .unwrap();
+    let manager = OAuthFlowManager::new(root.clone(), secrets.clone(), events.clone());
+    for cancel in [false, true] {
+        let start = manager.start_for_account(&oauth, None, None).await.unwrap();
+        let wrong_state = callback_url_for(&start, "synthetic-code", Some("wrong-state"));
+        assert_eq!(
+            manager
+                .submit_manual_callback(&start.login_id, wrong_state.as_str())
+                .await
+                .unwrap_err()
+                .code,
+            OAuthFlowErrorCode::CallbackInvalid
+        );
+        assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+        let mut callback = callback_url_for(&start, "synthetic-code", None);
+        callback
+            .query_pairs_mut()
+            .append_pair("client_id", "oaiapp_synthetic_webview");
+        if cancel {
+            manager.cancel(&start.login_id).await.unwrap();
+            assert!(
+                manager
+                    .submit_manual_callback(&start.login_id, callback.as_str())
+                    .await
+                    .is_err()
+            );
+            assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+        } else {
+            manager
+                .submit_manual_callback(&start.login_id, callback.as_str())
+                .await
+                .unwrap();
+            assert!(events.has(&start.login_id, OAuthFlowStatus::CallbackReceived));
+            let (pending, _) = manager
+                .exchange_material(&start.login_id)
+                .unwrap()
+                .into_parts();
+            assert_eq!(pending.client_kind(), OAuthClientKind::Siwc);
+            assert!(
+                manager
+                    .submit_manual_callback(&start.login_id, callback.as_str())
+                    .await
+                    .is_err()
+            );
+            manager.complete(&start.login_id).await.unwrap();
+        }
+        assert!(!secrets.contains(&callback_secret_ref(&start.login_id)));
+    }
+    remove_root(&root);
 }
 
 #[tokio::test]
@@ -265,6 +465,7 @@ fn persisted_authorization_url_is_strictly_validated() {
         callback_secret_ref: callback_secret_ref(&login_id),
         status: OAuthFlowStatus::Pending,
         target_account_id: None,
+        notes_account_id: None,
         sign_in_proxy_id: None,
         pending,
     };
@@ -276,34 +477,34 @@ fn persisted_authorization_url_is_strictly_validated() {
         OAuthFlowErrorCode::RecoveryRequired
     );
 
-    let redirect_uri = snapshot.pending.redirect_uri();
-    let mut wrong_host = Url::parse("https://attacker.invalid/oauth/authorize").unwrap();
-    wrong_host
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
-    let mut credentials = Url::parse("https://user:pass@auth.openai.com/oauth/authorize").unwrap();
-    credentials
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
-    let mut fragment = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
-    fragment
-        .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri);
+    let authorization = Url::parse(&snapshot.authorization_url).unwrap();
+    let mut wrong_host = authorization.clone();
+    wrong_host.set_host(Some("attacker.invalid")).unwrap();
+    let mut credentials = authorization.clone();
+    credentials.set_username("user").unwrap();
+    credentials.set_password(Some("pass")).unwrap();
+    let mut fragment = authorization.clone();
     fragment.set_fragment(Some("callback"));
-    let mut sensitive = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
+    let mut sensitive = authorization.clone();
     sensitive
         .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri)
         .append_pair("access_token", "secret");
-    let mut wrong_redirect = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
-    wrong_redirect
-        .query_pairs_mut()
-        .append_pair("redirect_uri", "http://localhost:9999/auth/callback");
-    let mut duplicate_redirect = Url::parse(AUTHORIZATION_ENDPOINT).unwrap();
+    let mut wrong_redirect = authorization.clone();
+    wrong_redirect.set_query(None);
+    for (key, value) in authorization.query_pairs() {
+        wrong_redirect.query_pairs_mut().append_pair(
+            &key,
+            if key == "redirect_uri" {
+                "http://localhost:9999/auth/callback"
+            } else {
+                &value
+            },
+        );
+    }
+    let mut duplicate_redirect = authorization;
     duplicate_redirect
         .query_pairs_mut()
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("redirect_uri", redirect_uri);
+        .append_pair("redirect_uri", snapshot.pending.redirect_uri());
 
     for authorization_url in [
         wrong_host,
@@ -461,12 +662,7 @@ async fn wait_until(condition: impl Fn() -> bool) {
 }
 
 fn test_root(label: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-oauth-flow-{label}-{}",
-        Uuid::new_v4()
-    ));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("oauth-flow-{label}"))
 }
 
 fn remove_root(root: &Path) {

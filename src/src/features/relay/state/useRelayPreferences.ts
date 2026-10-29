@@ -4,9 +4,12 @@ import {
   RELAY_STORAGE_KEYS,
   readAccountValueVisibility,
   readCodexPoolOauthSelection,
+  readLaunchApplicationAfterConnect,
   readRelayPreference,
   removeRelayPreference,
   writeAccountValueVisibility,
+  writeCodexPoolOauthSelection,
+  writeLaunchApplicationAfterConnect,
   writeRelayPreference,
 } from "./relayPreferences";
 
@@ -31,6 +34,7 @@ export function useRelayPreferences({
   const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(
     () => readRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, "1") !== "0",
   );
+  const [launchApplicationAfterConnect, setLaunchApplicationAfterConnectState] = useState(readLaunchApplicationAfterConnect);
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(
     readCodexPoolOauthSelection,
   );
@@ -51,9 +55,9 @@ export function useRelayPreferences({
     setPage("overview");
   }, [setPage]);
 
-  const setTheme = useCallback((next: "system" | "light" | "dark") => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.theme, next);
-    setThemeState(next);
+  const setTheme = useCallback((themeMode: "system" | "light" | "dark") => {
+    writeRelayPreference(RELAY_STORAGE_KEYS.theme, themeMode);
+    setThemeState(themeMode);
   }, []);
 
   const setProfileSwitchBackupPrompt = useCallback((enabled: boolean) => {
@@ -61,9 +65,13 @@ export function useRelayPreferences({
     setProfileSwitchBackupPromptState(enabled);
   }, []);
 
+  const setLaunchApplicationAfterConnect = useCallback((enabled: boolean) => {
+    writeLaunchApplicationAfterConnect(enabled);
+    setLaunchApplicationAfterConnectState(enabled);
+  }, []);
+
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
-    writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection);
-    removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection);
+    writeCodexPoolOauthSelection(selection);
     setCodexPoolOauthSelectionState(selection);
   }, []);
 
@@ -86,6 +94,8 @@ export function useRelayPreferences({
     setTheme,
     profileSwitchBackupPrompt,
     setProfileSwitchBackupPrompt,
+    launchApplicationAfterConnect,
+    setLaunchApplicationAfterConnect,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
     accountIdentitiesVisible,

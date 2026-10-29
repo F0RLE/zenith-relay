@@ -20,6 +20,7 @@ type AnalyticsPanelProps = {
   scope: string;
   setScope: (scope: string) => void;
   scopeOptions: Array<{ value: string; label: string }>;
+  capacity?: ReactNode;
 };
 
 function AnalyticsPanel({
@@ -32,15 +33,16 @@ function AnalyticsPanel({
   scope,
   setScope,
   scopeOptions,
+  capacity,
 }: AnalyticsPanelProps) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const hasAnalytics = analytics !== null;
   const buckets = useMemo(() => analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals), [analytics, windows]);
-  const requestValues = useMemo(() => buckets.map((totals) => totals.requests || null), [buckets]);
-  const apiValues = useMemo(() => buckets.map((totals) => pricedUsd(totals.apiEquivalent)), [buckets]);
-  const generationSpeedValues = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs)), [buckets]);
-  const e2eSpeedValues = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs)), [buckets]);
+  const requestSeries = useMemo(() => buckets.map((totals) => totals.requests || null), [buckets]);
+  const apiCostSeries = useMemo(() => buckets.map((totals) => pricedUsd(totals.apiEquivalent)), [buckets]);
+  const generationSpeedSeries = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs)), [buckets]);
+  const endToEndSpeedSeries = useMemo(() => buckets.map((totals) => observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs)), [buckets]);
   const totals = useMemo(() => analytics?.totals ?? emptyUsageTotals(), [analytics]);
   const averageGenerationSpeed = observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs);
   const averageE2eSpeed = observedTokensPerSecond(totals.speedOutputTokens, totals.speedDurationMs);
@@ -52,91 +54,88 @@ function AnalyticsPanel({
       <h2>{t("overview.analytics")}</h2>
       <div className="overview-analytics-controls">
         <OptionMenu className="overview-scope-menu" label={t("overview.scopeLabel")} value={scope} onChange={setScope} options={scopeOptions} />
-        <Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} />
+        <Tabs value={range} onChange={(selectedRange) => setRange(selectedRange as Range)} label={t("overview.period")} items={rangeTabs} />
       </div>
     </header>
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
-    <div className="overview-chart-stack">
-      <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} loading={loading && !hasAnalytics} />
+    {hasAnalytics ? <div className="overview-chart-stack">
+      <TokenUsageTrend buckets={buckets} totals={totals} windows={windows} />
       <OverviewChart
         icon={<CreditCard aria-hidden />}
         title={t("usage.apiEquivalent")}
         summary={formatApproximateUsd(pricedUsd(apiTotal), locale)}
-        values={apiValues}
+        seriesValues={apiCostSeries}
         windows={windows}
         variant="bars"
         tone="cost"
-        formatValue={(value) => formatApproximateUsd(value, locale)}
-        formatAxis={(value) => formatScaledUsd(value, locale)}
-        loading={loading && !hasAnalytics}
+        formatValue={(chartValue) => formatApproximateUsd(chartValue, locale)}
+        formatAxis={(axisValue) => formatScaledUsd(axisValue, locale)}
       />
       <OverviewChart
         icon={<Activity aria-hidden />}
         title={t("usage.requests")}
         summary={formatCompactNumber(totals.requests, locale)}
-        values={requestValues}
+        seriesValues={requestSeries}
         windows={windows}
         variant="bars"
         tone="requests"
-        formatValue={(value) => formatFullNumber(value, locale)}
-        formatAxis={(value) => formatFullNumber(value, locale)}
-        loading={loading && !hasAnalytics}
+        formatValue={(chartValue) => formatFullNumber(chartValue, locale)}
+        formatAxis={(axisValue) => formatFullNumber(axisValue, locale)}
       />
       <OverviewChart
         icon={<Gauge aria-hidden />}
         title={t("usage.generationSpeed")}
         summary={formatTokenSpeed(averageGenerationSpeed, locale, t("usage.tokensPerSecondUnit"))}
-        values={generationSpeedValues}
+        seriesValues={generationSpeedSeries}
         windows={windows}
         variant="line"
         tone="speed"
-        formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))}
-        formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })}
-        loading={loading && !hasAnalytics}
+        formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
+        formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
       />
       <OverviewChart
         icon={<Timer aria-hidden />}
         title={t("usage.summaryMetrics.e2eSpeed")}
         summary={formatTokenSpeed(averageE2eSpeed, locale, t("usage.tokensPerSecondUnit"))}
-        values={e2eSpeedValues}
+        seriesValues={endToEndSpeedSeries}
         windows={windows}
         variant="line"
         tone="e2e-speed"
-        formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))}
-        formatAxis={(value) => formatNumber(value, locale, { maximumFractionDigits: 1 })}
-        loading={loading && !hasAnalytics}
+        formatValue={(chartValue) => formatTokenSpeed(chartValue, locale, t("usage.tokensPerSecondUnit"))}
+        formatAxis={(axisValue) => formatNumber(axisValue, locale, { maximumFractionDigits: 1 })}
       />
-    </div>
+      {capacity}
+    </div> : capacity ? <div className="overview-chart-stack">{capacity}</div> : null}
   </section>;
 }
 
 export default memo(AnalyticsPanel);
-function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[]; loading: boolean }) {
+function TokenUsageTrend({ buckets, totals, windows }: { buckets: UsageTotals[]; totals: UsageTotals; windows: WindowBucket[] }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const tokenSeries = [
-    { key: "input", label: t("overview.tokenTrend.input"), color: "input", values: buckets.map((totals) => totals.requests > 0 ? totals.inputTokens : null) },
-    { key: "output", label: t("overview.tokenTrend.output"), color: "output", values: buckets.map((totals) => totals.requests > 0 ? totals.outputTokens : null) },
-    { key: "cacheWrite", label: t("overview.tokenTrend.cacheWrite"), color: "cache-write", values: buckets.map((totals) => totals.cacheWriteInputSamples ? totals.cacheWriteInputTokens ?? 0 : null) },
-    { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", values: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
+    { key: "input", label: t("overview.tokenTrend.input"), color: "input", points: buckets.map((totals) => totals.requests > 0 ? totals.inputTokens : null) },
+    { key: "output", label: t("overview.tokenTrend.output"), color: "output", points: buckets.map((totals) => totals.requests > 0 ? totals.outputTokens : null) },
+    { key: "cacheWrite", label: t("overview.tokenTrend.cacheWrite"), color: "cache-write", points: buckets.map((totals) => totals.cacheWriteInputSamples ? totals.cacheWriteInputTokens ?? 0 : null) },
+    { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", points: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
   ];
-  const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.values.filter((value): value is number => value != null))) || 1;
+  const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.points.filter((tokenValue): tokenValue is number => tokenValue != null))) || 1;
   const cacheRateValues = buckets.map((totals) => totals.requests > 0 && totals.inputTokens > 0 && totals.cachedInputSamples ? Math.min(100, totals.cachedInputTokens / totals.inputTokens * 100) : null);
-  const cacheTotals = buckets.reduce((result, totals) => {
+  const cacheTotals = buckets.reduce((tokenTotals, totals) => {
     if (totals.cachedInputSamples > 0 && totals.inputTokens > 0) {
-      result.inputTokens += totals.inputTokens;
-      result.cachedInputTokens += Math.min(totals.cachedInputTokens, totals.inputTokens);
+      tokenTotals.inputTokens += totals.inputTokens;
+      tokenTotals.cachedInputTokens += Math.min(totals.cachedInputTokens, totals.inputTokens);
     }
-    return result;
+    return tokenTotals;
   }, { inputTokens: 0, cachedInputTokens: 0 });
   const averageCacheRate = cacheTotals.inputTokens > 0
     ? Math.min(100, cacheTotals.cachedInputTokens / cacheTotals.inputTokens * 100)
     : null;
-  const hasData = tokenSeries.some((series) => series.values.some((value) => value != null && value > 0));
+  const hasData = tokenSeries.some((series) => series.points.some((tokenValue) => tokenValue != null && tokenValue > 0));
   return <article className="overview-chart tokens overview-token-trend">
     <header className="overview-token-trend-header">
       <div className="overview-chart-title"><Database aria-hidden /><span><strong>{t("overview.tokenUsage")}</strong></span></div>
-      <div className="overview-token-trend-summary"><strong className="overview-chart-summary">{loading ? "—" : formatCompactNumber(totals.totalTokens, locale)}</strong><small>{loading || averageCacheRate == null ? "—" : `${averageCacheRate.toFixed(0)}% ${t("overview.tokenTrend.cacheRateShort")}`}</small></div>
+      <div className="overview-token-trend-summary"><strong className="overview-chart-summary">{formatCompactNumber(totals.totalTokens, locale)}</strong><small>{averageCacheRate == null ? "—" : `${averageCacheRate.toFixed(0)}% ${t("overview.tokenTrend.cacheRateShort")}`}</small></div>
     </header>
     <div className="overview-token-trend-legend" aria-label={t("overview.tokenTrend.legend")}>
       {tokenSeries.map((series) => <span key={series.key} className={`is-${series.color}`}><i aria-hidden />{series.label}</span>)}
@@ -148,7 +147,7 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
         <div className="overview-token-trend-canvas">
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none">
             <path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />
-            {tokenSeries.map((series) => lineSegments(series.values, maxTokens).map((path, index) => (
+            {tokenSeries.map((series) => lineSegments(series.points, maxTokens).map((path, index) => (
               <path className={`overview-token-trend-line is-${series.color}`} d={path} key={`${series.key}-${index}`} />
             )))}
             {lineSegments(cacheRateValues, 100).map((path, index) => (
@@ -161,15 +160,15 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
               return (
                 <li key={window.startMs}>
                   {tokenSeries.map((series) => {
-                    const value = series.values[index];
-                    if (value == null) return null;
-                    const amount = formatCompactNumber(value, locale);
+                    const tokenValue = series.points[index];
+                    if (tokenValue == null) return null;
+                    const amount = formatCompactNumber(tokenValue, locale);
                     return (
                       <span
                         key={series.key}
                         tabIndex={0}
                         className={`overview-token-trend-dot is-${series.color}`}
-                        style={{ top: `${(1 - value / maxTokens) * 100}%` }}
+                        style={{ top: `${(1 - tokenValue / maxTokens) * 100}%` }}
                         aria-label={`${window.fullLabel}: ${series.label} ${amount}`}
                       >
                         <span role="tooltip">{window.fullLabel}<strong>{series.label}: {amount}</strong></span>
@@ -190,7 +189,7 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
               );
             })}
           </ol>
-          {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
+          {!hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>
@@ -198,70 +197,86 @@ function TokenUsageTrend({ buckets, totals, windows, loading }: { buckets: Usage
     </div>
   </article>;
 }
-function OverviewChart({
+export function OverviewChart({
   icon,
   title,
   summary,
-  values,
+  seriesValues,
   windows,
   variant,
   tone,
   formatValue,
   formatAxis,
-  loading,
+  controls,
+  bandValues,
+  details,
+  markers,
+  emptyLabel,
+  summaryHint,
 }: {
   icon: ReactNode;
   title: string;
   summary: string;
-  values: Array<number | null>;
+  seriesValues: Array<number | null>;
   windows: WindowBucket[];
   variant: "bars" | "line";
   tone: string;
-  formatValue: (value: number) => string;
-  formatAxis: (value: number) => string;
-  loading: boolean;
+  formatValue: (chartValue: number) => string;
+  formatAxis: (axisValue: number) => string;
+  controls?: ReactNode;
+  bandValues?: Array<{ low: number; high: number } | null>;
+  details?: (index: number) => ReactNode;
+  markers?: Array<string | null>;
+  emptyLabel?: string;
+  summaryHint?: string;
 }) {
   const { t } = useTranslation();
-  const measured = values.filter((value): value is number => value != null);
-  const max = Math.max(0, ...measured) || 1;
-  const hasData = measured.some((value) => value > 0);
-  const segments = lineSegments(values, max);
+  const measured = seriesValues.filter((chartValue): chartValue is number => chartValue != null);
+  const max = Math.max(0, ...measured, ...(bandValues?.map((value) => value?.high ?? 0) ?? [])) || 1;
+  const axisLabels = [formatAxis(max), formatAxis(max / 2), "0"];
+  const hasData = measured.some((chartValue) => chartValue > 0);
+  const segments = lineSegments(seriesValues, max);
   return <article className={`overview-chart ${tone}`}>
-    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div><strong className="overview-chart-summary">{loading ? "—" : summary}</strong></header>
+    <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div>{controls}<strong className="overview-chart-summary" data-relay-tooltip={summaryHint} tabIndex={summaryHint ? 0 : undefined} aria-label={summaryHint ? `${summary}: ${summaryHint}` : undefined}>{summary}</strong></header>
     <div className="overview-chart-body">
-      <div className="overview-chart-y-axis" aria-hidden><span>{formatAxis(max)}</span><span>{formatAxis(max / 2)}</span><span>0</span></div>
+      <div className="overview-chart-y-axis" aria-hidden>{axisLabels.map((label, index) => <span key={index}>{label}</span>)}</div>
       <div className="overview-chart-plot">
         <div className="overview-chart-canvas">
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none">
             <path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />
             {variant === "line" ? segments.map((path, index) => <path className="overview-chart-line" d={path} key={index} />) : null}
           </svg>
-          <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${values.length}, minmax(0, 1fr))` }}>
-            {values.map((value, index) => {
+          <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${seriesValues.length}, minmax(0, 1fr))` }}>
+            {seriesValues.map((chartValue, index) => {
               const window = windows[index];
               if (!window) return null;
-              const ratio = value == null ? 0 : value / max;
-              const label = value == null ? t("common.unknown") : formatValue(value);
+              const ratio = chartValue == null ? 0 : chartValue / max;
+              const label = chartValue == null ? t("common.unknown") : formatValue(chartValue);
               return (
                 <li key={window.startMs}>
-                  {variant === "bars" && value != null ? (
+                  {variant === "bars" && chartValue != null ? (
                     <span tabIndex={0} className="overview-chart-bar" style={{ height: `${Math.max(3, ratio * 100)}%` }} aria-label={`${window.fullLabel}: ${label}`}>
-                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
+                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong>{details?.(index)}</span>
                     </span>
                   ) : null}
-                  {variant === "line" && value != null ? (
-                    <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}>
-                      <span role="tooltip">{window.fullLabel}<strong>{label}</strong></span>
-                    </span>
+                  {variant === "line" && chartValue != null ? (
+                    <>
+                      {bandValues?.[index] ? <span aria-hidden className="overview-capacity-band" style={{ top: `${(1 - bandValues[index]!.high / max) * 100}%`, height: `${Math.max(2, (bandValues[index]!.high - bandValues[index]!.low) / max * 100)}%` }} /> : null}
+                      <span tabIndex={0} className="overview-chart-dot" style={{ top: `${(1 - ratio) * 100}%` }} aria-label={`${window.fullLabel}: ${label}`}>
+                        <span role="tooltip">{window.fullLabel}<strong>{label}</strong>{details?.(index)}</span>
+                      </span>
+                    </>
                   ) : null}
+                  {markers?.[index] ? <span tabIndex={0} className="overview-chart-dot overview-capacity-event" aria-label={markers[index] ?? undefined}><span role="tooltip">{window.fullLabel}<strong>{markers[index]}</strong></span></span> : null}
                 </li>
               );
             })}
           </ol>
-          {!loading && !hasData ? <span className="overview-chart-empty">{t("overview.noMeasurements")}</span> : null}
+          {!hasData ? <span className="overview-chart-empty">{emptyLabel ?? t("overview.noMeasurements")}</span> : null}
         </div>
         <div className="overview-chart-x-axis" style={{ gridTemplateColumns: `repeat(${windows.length}, minmax(0, 1fr))` }} aria-hidden>{windows.map((window) => <span key={window.startMs} data-visible={window.showLabel}>{window.label}</span>)}</div>
       </div>
+      <div className="overview-chart-y-axis overview-chart-y-axis-right" aria-hidden>{axisLabels.map((label, index) => <span key={index}>{label}</span>)}</div>
     </div>
   </article>;
 }

@@ -3,8 +3,8 @@ const PROXY_ID = /^[A-Za-z0-9_-]{1,80}$/;
 
 export function rememberedSignInProxyId() {
   try {
-    const value = localStorage.getItem(STORAGE_KEY)?.trim() ?? "";
-    return PROXY_ID.test(value) ? value : null;
+    const storedProxyId = localStorage.getItem(STORAGE_KEY)?.trim() ?? "";
+    return PROXY_ID.test(storedProxyId) ? storedProxyId : null;
   } catch {
     return null;
   }

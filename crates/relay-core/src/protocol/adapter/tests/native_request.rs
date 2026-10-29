@@ -32,10 +32,12 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
     assert_eq!(prepared.upstream_body()["model"], "resolved-model");
     assert_eq!(prepared.upstream_body()["reasoning"], request["reasoning"]);
     assert_eq!(prepared.upstream_body()["tools"], request["tools"]);
-    assert!(prepared
-        .translate_response_bytes(br#"{}"#)
-        .unwrap()
-        .is_none());
+    assert!(
+        prepared
+            .translate_response_bytes(br#"{}"#)
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn native_context_management_remains_client_owned() {
@@ -193,6 +195,7 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
         "tools": [{
             "type": "function",
             "name": "root_tool",
+            "description": "Current declaration",
             "parameters": {"type": "object"}
         }],
         "input": [
@@ -201,6 +204,11 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
                 "tools": [{
                     "type": "function",
                     "name": "deferred_tool",
+                    "parameters": {"type": "object"}
+                }, {
+                    "type": "function",
+                    "name": "root_tool",
+                    "description": "Historical declaration",
                     "parameters": {"type": "object"}
                 }]
             },
@@ -224,10 +232,18 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
             response_id_seed: "messages-tools",
         })
         .unwrap();
-    assert_eq!(messages.upstream_body()["tools"][0]["name"], "root_tool");
     assert_eq!(
-        messages.upstream_body()["tools"][1]["name"],
+        messages.upstream_body()["tools"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        messages.upstream_body()["tools"][0]["name"],
         "deferred_tool"
+    );
+    assert_eq!(messages.upstream_body()["tools"][1]["name"], "root_tool");
+    assert_eq!(
+        messages.upstream_body()["tools"][1]["description"],
+        "Current declaration"
     );
 
     let gemini = SourceAdapter::ResponsesToGemini
@@ -244,12 +260,23 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
         })
         .unwrap();
     assert_eq!(
+        gemini.upstream_body()["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
         gemini.upstream_body()["tools"][0]["functionDeclarations"][0]["name"],
-        "root_tool"
+        "deferred_tool"
     );
     assert_eq!(
         gemini.upstream_body()["tools"][0]["functionDeclarations"][1]["name"],
-        "deferred_tool"
+        "root_tool"
+    );
+    assert_eq!(
+        gemini.upstream_body()["tools"][0]["functionDeclarations"][1]["description"],
+        "Current declaration"
     );
 }
 #[test]
@@ -283,10 +310,10 @@ fn scoped_bridge_ids_keep_same_upstream_id_isolated_between_routes() {
     assert_ne!(first.response_id, second.response_id);
     assert_eq!(
         first.response_body["output"][0]["id"],
-        format!("msg_{}", first.response_id)
+        format!("msg_{}_0", first.response_id)
     );
     assert_eq!(
         second.response_body["output"][0]["id"],
-        format!("msg_{}", second.response_id)
+        format!("msg_{}_0", second.response_id)
     );
 }

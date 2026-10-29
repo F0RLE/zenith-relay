@@ -2,73 +2,134 @@
 
 use super::{AdapterError, AdapterResult};
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use serde_json::{Map, Value, json};
+use std::{collections::BTreeSet, sync::Arc};
+
+#[cfg(test)]
+#[path = "replay/performance_tests.rs"]
+mod performance;
 
 /// Local history for native Responses recovery before client-visible output.
 ///
-/// The initial request and completed output are kept in memory so the next
+/// The initial input and completed output are kept in memory so the next
 /// request can replay the conversation without pretending that the upstream
 /// response id is portable across transports. This is deliberately separate
 /// from `ResponsesToMessages`: no protocol conversion happens here.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct NativeResponsesReplayState {
-    pub(super) model: String,
-    request: Value,
-    output: Vec<Value>,
+    // Store lookups share immutable history instead of deep-cloning it while
+    // the cache mutex is held. Serialization still counts the complete history.
+    history: Arc<NativeResponsesReplayHistory>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct NativeResponsesReplayHistory {
+    model: String,
+    initial_input: Value,
+    completed_output: Vec<Value>,
 }
 
 impl NativeResponsesReplayState {
     pub(crate) fn model(&self) -> &str {
-        &self.model
+        &self.history.model
     }
 
-    pub fn from_response(request: &Value, model: &str, upstream: &Value) -> Option<(String, Self)> {
-        let response = upstream
+    /// Normalize the newly constructed snapshot before it is shared. All
+    /// replay paths then see canonical arguments, not client-only carriers.
+    pub(crate) fn restore_agent_messages(
+        &mut self,
+        context: &crate::protocol::agent_messages::AgentMessageContext,
+    ) -> AdapterResult<()> {
+        let history =
+            Arc::get_mut(&mut self.history).ok_or_else(AdapterError::continuation_mismatch)?;
+        context.restore_input(&mut history.initial_input)?;
+        for item in &mut history.completed_output {
+            context.restore_input(item)?;
+        }
+        Ok(())
+    }
+
+    /// Retention hint only: the next snapshot already contains this complete
+    /// native turn. Keep older response IDs usable until a store limit needs
+    /// room, but prefer evicting them over unrelated conversations' heads.
+    pub(crate) fn is_materialized_predecessor_of(&self, next: &Self) -> bool {
+        if !self.model().eq_ignore_ascii_case(next.model()) {
+            return false;
+        }
+        let Some(next_input) = next.history.initial_input.as_array() else {
+            return false;
+        };
+        let prefix_len = match &self.history.initial_input {
+            Value::Array(input) if next_input.starts_with(input) => input.len(),
+            Value::Object(_) if next_input.first() == Some(&self.history.initial_input) => 1,
+            Value::String(text)
+                if next_input
+                    .first()
+                    .is_some_and(|input| is_replay_text_message(input, text)) =>
+            {
+                1
+            }
+            _ => return false,
+        };
+        next_input[prefix_len..].starts_with(&self.history.completed_output)
+    }
+
+    pub fn from_response(
+        initial_request: &Value,
+        model: &str,
+        upstream_response: &Value,
+    ) -> Option<(String, Self)> {
+        let response_body = upstream_response
             .pointer("/response/response")
-            .or_else(|| upstream.get("response"))
-            .unwrap_or(upstream);
-        let response_id = response
+            .or_else(|| upstream_response.get("response"))
+            .unwrap_or(upstream_response);
+        let response_id = response_body
             .get("id")
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|id| !id.is_empty())?
+            .filter(|response_id_value| !response_id_value.is_empty())?
             .to_string();
-        if native_replay_has_provider_state(request) {
+        if native_replay_has_provider_state(initial_request) {
             return None;
         }
-        let request = request.as_object()?.clone();
-        if !request.contains_key("input") {
-            return None;
-        }
-        let input = request.get("input")?;
-        let items = input
+        let initial_request = initial_request.as_object()?;
+        let initial_input = initial_request.get("input")?;
+        let input_items = initial_input
             .as_array()
             .map(Vec::as_slice)
-            .unwrap_or_else(|| std::slice::from_ref(input));
-        if !native_tool_outputs_are_materialized(items) {
+            .unwrap_or_else(|| std::slice::from_ref(initial_input));
+        if !native_tool_outputs_are_materialized(input_items) {
             return None;
         }
         // The stored request must already be self-contained. If a predecessor
         // was unavailable, retaining this opaque id would create a replay that
         // appears valid while silently losing the earlier conversation.
-        if request
+        if initial_request
             .get("previous_response_id")
             .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
+            .is_some_and(|response_id_value| !response_id_value.trim().is_empty())
         {
             return None;
         }
         // A native replay is safe only when the completed response contains
         // its output items. Never store a request-only snapshot: replaying it
         // after a quota handoff would silently drop tool/context output.
-        let output = response.get("output").and_then(Value::as_array)?.clone();
+        let completed_output = response_body
+            .get("output")
+            .and_then(Value::as_array)?
+            .clone();
         Some((
             response_id,
             Self {
-                model: model.to_string(),
-                request: Value::Object(request),
-                output,
+                history: Arc::new(NativeResponsesReplayHistory {
+                    model: model.to_string(),
+                    // Replay uses the current turn's options, never the old tool
+                    // catalog or instructions. Retaining those unused fields can
+                    // evict otherwise valid history from the bounded store.
+                    initial_input: initial_input.clone(),
+                    completed_output,
+                }),
             },
         ))
     }
@@ -82,52 +143,73 @@ impl NativeResponsesReplayState {
         model: &str,
         stream: bool,
     ) -> AdapterResult<Value> {
-        if !self.model.eq_ignore_ascii_case(model) || native_replay_has_provider_state(continuation)
+        if !self.model().eq_ignore_ascii_case(model)
+            || native_replay_has_provider_state(continuation)
         {
             return Err(AdapterError::continuation_mismatch());
         }
-        let continuation = continuation
+        let continuation_request = continuation
             .as_object()
             .ok_or_else(AdapterError::invalid_request)?;
-        let initial_input = self
-            .request
+        let current_input = continuation_request
             .get("input")
             .ok_or_else(AdapterError::invalid_request)?;
-        let current_input = continuation
-            .get("input")
-            .ok_or_else(AdapterError::invalid_request)?;
-        let mut input = Vec::new();
-        append_replay_input(&mut input, initial_input)?;
-        input.extend(self.output.iter().cloned());
-        append_replay_input(&mut input, current_input)?;
-        if input.is_empty() {
+        let mut replay_input = Vec::new();
+        append_replay_input(&mut replay_input, &self.history.initial_input)?;
+        replay_input.extend(self.history.completed_output.iter().cloned());
+        append_replay_input(&mut replay_input, current_input)?;
+        if replay_input.is_empty() {
             return Err(AdapterError::invalid_request());
         }
-        if !native_tool_outputs_are_materialized(&input) {
+        if !native_tool_outputs_are_materialized(&replay_input) {
             return Err(AdapterError::continuation_mismatch());
         }
 
         // Only history crosses turns. Reusing the old request template would
         // revive old instructions, output settings or transport control fields.
-        let mut request = continuation.clone();
-        request.remove("previous_response_id");
-        request.insert("model".to_string(), Value::String(model.to_string()));
-        request.insert("stream".to_string(), Value::Bool(stream));
-        request.insert("input".to_string(), Value::Array(input));
-        Ok(Value::Object(request))
+        let mut replay_request = continuation_request.clone();
+        replay_request.remove("previous_response_id");
+        replay_request.insert("model".to_string(), Value::String(model.to_string()));
+        replay_request.insert("stream".to_string(), Value::Bool(stream));
+        replay_request.insert("input".to_string(), Value::Array(replay_input));
+        Ok(Value::Object(replay_request))
     }
 }
 
-fn native_tool_outputs_are_materialized(items: &[Value]) -> bool {
+// Match the exact message produced by append_replay_input for a string without
+// allocating another copy of its text. Extra fields must still prevent a match.
+fn is_replay_text_message(input: &Value, text: &str) -> bool {
+    let Some(message) = input.as_object() else {
+        return false;
+    };
+    if message.len() != 2 || message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some([content]) = message
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+    else {
+        return false;
+    };
+    let Some(content) = content.as_object() else {
+        return false;
+    };
+    content.len() == 2
+        && content.get("type").and_then(Value::as_str) == Some("input_text")
+        && content.get("text").and_then(Value::as_str) == Some(text)
+}
+
+fn native_tool_outputs_are_materialized(input_items: &[Value]) -> bool {
     let mut calls = BTreeSet::new();
-    for item in items {
-        let Some(kind) = item.get("type").and_then(Value::as_str) else {
+    for input_item in input_items {
+        let Some(kind) = input_item.get("type").and_then(Value::as_str) else {
             continue;
         };
-        let call_id = item
+        let call_id = input_item
             .get("call_id")
             .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty());
+            .filter(|call_id_value| !call_id_value.trim().is_empty());
         let output_call_kind = if kind == "tool_search_output" {
             Some("tool_search_call")
         } else if kind.ends_with("_call_output") {
@@ -136,72 +218,72 @@ fn native_tool_outputs_are_materialized(items: &[Value]) -> bool {
             None
         };
         if let Some(call_kind) = output_call_kind {
-            if !call_id.is_some_and(|id| calls.remove(&(call_kind, id))) {
+            if !call_id.is_some_and(|call_id_value| calls.remove(&(call_kind, call_id_value))) {
                 return false;
             }
-        } else if kind.ends_with("_call") {
-            if let Some(id) = call_id {
-                calls.insert((kind, id));
-            }
+        } else if kind.ends_with("_call")
+            && let Some(call_id_value) = call_id
+        {
+            calls.insert((kind, call_id_value));
         }
     }
     true
 }
 
-fn native_replay_has_provider_state(request: &Value) -> bool {
-    if request
+fn native_replay_has_provider_state(request_body: &Value) -> bool {
+    if request_body
         .get("conversation")
-        .is_some_and(|value| !value.is_null())
+        .is_some_and(|conversation_value| !conversation_value.is_null())
     {
         return true;
     }
-    let is_reference = |item: &Value| {
-        item.get("type").and_then(Value::as_str) == Some("item_reference")
-            || (item.get("id").is_some()
-                && item.get("type").is_none()
-                && item.get("role").is_none())
+    let is_reference = |input_item: &Value| {
+        input_item.get("type").and_then(Value::as_str) == Some("item_reference")
+            || (input_item.get("id").is_some()
+                && input_item.get("type").is_none()
+                && input_item.get("role").is_none())
     };
-    match request.get("input") {
-        Some(Value::Array(items)) => items.iter().any(is_reference),
-        Some(item @ Value::Object(_)) => is_reference(item),
+    match request_body.get("input") {
+        Some(Value::Array(input_items)) => input_items.iter().any(is_reference),
+        Some(input_item @ Value::Object(_)) => is_reference(input_item),
         _ => false,
     }
 }
 
-fn append_replay_input(target: &mut Vec<Value>, input: &Value) -> AdapterResult<()> {
-    match input {
-        Value::String(text) => target.push(json!({
+fn append_replay_input(replay_input: &mut Vec<Value>, input_value: &Value) -> AdapterResult<()> {
+    match input_value {
+        Value::String(text) => replay_input.push(json!({
             "role": "user",
             "content": [{"type": "input_text", "text": text}],
         })),
-        Value::Array(items) => target.extend(items.iter().cloned()),
-        Value::Object(item) => target.push(Value::Object(item.clone())),
+        Value::Array(input_items) => replay_input.extend(input_items.iter().cloned()),
+        Value::Object(input_item) => replay_input.push(Value::Object(input_item.clone())),
         _ => return Err(AdapterError::invalid_request()),
     }
     Ok(())
 }
 
-fn prefixed_id(id: &str, prefix: &str) -> String {
-    if id.starts_with(prefix) {
-        id.to_string()
+fn prefixed_id(identifier: &str, prefix: &str) -> String {
+    if identifier.starts_with(prefix) {
+        identifier.to_string()
     } else {
-        format!("{prefix}{id}")
+        format!("{prefix}{identifier}")
     }
 }
 
 fn repair_input_item_ids(
-    request: &mut Value,
-    mut repair_item: impl FnMut(&mut Map<String, Value>) -> bool,
+    request_body: &mut Value,
+    mut repair_input_item: impl FnMut(&mut Map<String, Value>) -> bool,
 ) -> bool {
-    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+    let Some(input_items) = request_body.get_mut("input").and_then(Value::as_array_mut) else {
         return false;
     };
     let mut repaired = false;
-    for item in input {
-        let Some(item) = item.as_object_mut() else {
+    for input_item in input_items {
+        let Some(input_item) = input_item.as_object_mut() else {
             continue;
         };
-        repaired |= repair_item(item);
+        repaired |= repair_input_item(input_item);
     }
     repaired
 }
@@ -215,18 +297,18 @@ fn repair_input_item_ids(
 /// require the function item identifier to use their `fc_` namespace. Keeping
 /// this repair narrow lets native routes stay byte-for-byte passthrough until
 /// an upstream proves that its stricter item contract is required.
-pub(crate) fn repair_call_prefixed_function_item_ids(request: &mut Value) -> bool {
-    repair_input_item_ids(request, |item| {
-        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+pub(crate) fn repair_call_prefixed_function_item_ids(request_body: &mut Value) -> bool {
+    repair_input_item_ids(request_body, |input_item| {
+        if input_item.get("type").and_then(Value::as_str) != Some("function_call") {
             return false;
         }
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
+        let Some(item_id) = input_item.get("id").and_then(Value::as_str) else {
             return false;
         };
-        if id.starts_with("fc_") || id.is_empty() {
+        if item_id.starts_with("fc_") || item_id.is_empty() {
             return false;
         }
-        item.insert("id".to_string(), Value::String(prefixed_id(id, "fc_")));
+        input_item.insert("id".to_string(), Value::String(prefixed_id(item_id, "fc_")));
         true
     })
 }
@@ -241,19 +323,19 @@ pub(in crate::protocol::adapter) fn custom_tool_item_id(call_id: &str) -> String
 /// Repairs a historic Responses custom-tool item only after a strict upstream
 /// has rejected its item-id namespace. This is deliberately separate from the
 /// function-call repair because the two item types have different namespaces.
-pub(crate) fn repair_custom_tool_item_ids(request: &mut Value) -> bool {
-    repair_input_item_ids(request, |item| {
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
+pub(crate) fn repair_custom_tool_item_ids(request_body: &mut Value) -> bool {
+    repair_input_item_ids(request_body, |input_item| {
+        let Some(item_id) = input_item.get("id").and_then(Value::as_str) else {
             return false;
         };
-        if item.get("type").and_then(Value::as_str) != Some("custom_tool_call") {
+        if input_item.get("type").and_then(Value::as_str) != Some("custom_tool_call") {
             return false;
         }
-        let normalized = custom_tool_item_id(id);
-        if normalized == id {
+        let normalized = custom_tool_item_id(item_id);
+        if normalized == item_id {
             return false;
         }
-        item.insert("id".to_string(), Value::String(normalized));
+        input_item.insert("id".to_string(), Value::String(normalized));
         true
     })
 }
@@ -263,22 +345,22 @@ pub(crate) fn repair_custom_tool_item_ids(request: &mut Value) -> bool {
 /// server-owned, so Relay must not fabricate a `msg_` replacement. Preserve
 /// native `msg_` IDs and every non-message item (especially reasoning and
 /// tool-call links) exactly as the client supplied them.
-pub(crate) fn remove_item_prefixed_message_ids(request: &mut Value) -> bool {
-    repair_input_item_ids(request, |item| {
-        let is_message = item.get("type").and_then(Value::as_str) == Some("message")
+pub(crate) fn remove_item_prefixed_message_ids(request_body: &mut Value) -> bool {
+    repair_input_item_ids(request_body, |input_item| {
+        let is_message = input_item.get("type").and_then(Value::as_str) == Some("message")
             || matches!(
-                item.get("role").and_then(Value::as_str),
+                input_item.get("role").and_then(Value::as_str),
                 Some("user" | "assistant" | "developer" | "system")
             );
         if !is_message
-            || !item
+            || !input_item
                 .get("id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("item_"))
+                .is_some_and(|item_id| item_id.starts_with("item_"))
         {
             return false;
         }
-        item.remove("id");
+        input_item.remove("id");
         true
     })
 }
