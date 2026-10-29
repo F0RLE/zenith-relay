@@ -317,8 +317,14 @@ dependency audits; it is not a release gate.
 
 Without `--quick`, verification also runs formatting, Clippy and tests for both
 Rust packages, both browser suites, both Bun audits, and audits of both Cargo
-lockfiles. Commands run sequentially and stop on the first failure. Desktop Rust
-tests use one test thread. `bun run verify` from `src` calls the same root runner.
+lockfiles. Script/documentation/guardrail checks run first. Independent Desktop
+UI, web and Rust lanes then run with a maximum of two concurrent commands; each
+lane stays sequential. Use `--jobs 1` for sequential execution or `--jobs 3` to
+allow all three lanes. After a failure, no new command starts, and already-started
+commands finish before verification exits unsuccessfully. Desktop Rust tests keep
+one test thread. `bun run verify` from `src` calls the same root runner. Each
+command reports elapsed time. Both Rust packages reuse `src-tauri/target` by
+default; explicit Cargo target-directory overrides still apply.
 
 Full verification needs the pinned Rust toolchain and native build libraries,
 locked dependencies in `src` and `web`, Playwright Chromium, `cargo-audit`, and
@@ -337,6 +343,11 @@ a release, restart Desktop, or establish installed-app acceptance.
 ### Required CI and dependency maintenance
 
 The Build workflow checks pull requests and pushes to `main` and `release/**`.
+A release-branch push omits its duplicate suite only after confirming an open PR
+for that exact commit and a separate, non-cancelled PR Build run. Standalone
+release pushes, PRs, `main`, tags and manual runs retain their checks; API lookup
+failures or an unconfirmed PR run also retain the complete suite. Windows CI
+reports test compilation (`--no-run --timings`) separately from execution.
 Its `Check` status succeeds only when runtime checks, every Desktop browser
 shard, Windows Rust tests, and web-preview checks all succeed; a skipped or
 cancelled dependency is not a pass. The `main` ruleset requires `Check` and

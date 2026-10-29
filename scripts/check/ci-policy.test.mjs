@@ -15,9 +15,11 @@ function needs(job) {
   return Array.isArray(job.needs) ? job.needs : [job.needs];
 }
 
-test("Rust caches use the nested Cargo workspaces and their own target directories", () => {
+test("Rust checks share Desktop's target directory without changing packaging paths", () => {
+  const config = Bun.TOML.parse(readFileSync(new URL("../../.cargo/config.toml", import.meta.url), "utf8"));
+  expect(config.build["target-dir"]).toBe("src-tauri/target");
   const cases = [
-    ["build.yml", "check-runtime", ["src-tauri", "crates/relay-core"]],
+    ["build.yml", "check-runtime", ["src-tauri"]],
     ["build.yml", "check-windows", ["src-tauri"]],
     ["build.yml", "build", ["src-tauri"]],
   ];
@@ -36,6 +38,20 @@ test("Rust caches use the nested Cargo workspaces and their own target directori
 
 describe("desktop CI", () => {
   const build = workflow("build.yml");
+
+  test("only confirmed duplicate release pushes may omit the independent check suite", () => {
+    const plan = build.jobs["check-plan"];
+    expect(plan.if).toBe("github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')");
+    expect(plan.permissions).toEqual({ contents: "read", actions: "read", "pull-requests": "read" });
+    expect(plan.outputs["run-checks"]).toBe("${{ steps.plan.outputs.run-checks }}");
+    expect(plan.steps.at(-1).run).toBe('bun scripts/check/ci-plan.mjs >> "$GITHUB_OUTPUT"');
+    expect(plan.steps.at(-1)["continue-on-error"]).toBeUndefined();
+    for (const name of ["check-runtime", "check-windows", "check-ui", "check-web"]) {
+      expect(needs(build.jobs[name])).toEqual(["check-plan"]);
+      expect(build.jobs[name].if).toBe("${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}");
+      expect(build.jobs[name]["continue-on-error"]).toBeUndefined();
+    }
+  });
 
   test("documentation checks use locked dependencies and cannot be skipped silently", () => {
     const steps = build.jobs["check-runtime"].steps;
@@ -66,6 +82,12 @@ describe("desktop CI", () => {
 
   test("pull requests and main run checks, including the Windows Rust tests", () => {
     expect(build.jobs["check-windows"]["runs-on"]).toBe("windows-latest");
+    const steps = build.jobs["check-windows"].steps;
+    const compile = steps.findIndex((step) => step.name === "Compile Windows Rust tests");
+    const run = steps.findIndex((step) => step.name === "Run Windows Rust tests");
+    expect(compile).toBeGreaterThan(-1);
+    expect(run).toBeGreaterThan(compile);
+    expect(steps[compile].run).toBe("cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --timings");
     expect(build.jobs["check-windows"].steps.at(-1).run)
       .toContain("cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1");
     expect(build.jobs.build.needs).toBeUndefined();
@@ -76,7 +98,6 @@ describe("desktop CI", () => {
     const web = build.jobs["check-web"];
     expect(web).toBeDefined();
     expect(web.defaults.run["working-directory"]).toBe("web");
-    expect(web.if).toBeUndefined();
     expect(web["continue-on-error"]).toBeUndefined();
     for (const command of [
       "bun install --frozen-lockfile",
@@ -97,8 +118,7 @@ describe("desktop CI", () => {
 
   test("browser shards run independently without cancelling the remaining coverage", () => {
     const ui = build.jobs["check-ui"];
-    expect(ui.needs).toBeUndefined();
-    expect(ui.if).toBeUndefined();
+    expect(needs(ui)).toEqual(["check-plan"]);
     expect(ui["continue-on-error"]).toBeUndefined();
     expect(ui.strategy["fail-fast"]).toBe(false);
     expect(ui.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
@@ -113,19 +133,21 @@ describe("desktop CI", () => {
   test("the existing Check status fails closed on failed, skipped or cancelled dependencies", () => {
     const gate = build.jobs.check;
     expect(gate.name).toBe("Check");
-    expect(needs(gate)).toEqual(["check-runtime", "check-ui", "check-windows", "check-web"]);
-    expect(gate.if).toBe("always()");
+    expect(needs(gate)).toEqual(["check-plan", "check-runtime", "check-ui", "check-windows", "check-web"]);
+    expect(gate.if).toBe("always() && needs.check-plan.outputs.run-checks != 'false'");
     expect(gate["continue-on-error"]).toBeUndefined();
     expect(gate.steps).toHaveLength(1);
     const step = gate.steps[0];
     expect(step.shell).toBe("pwsh");
     expect(step.env).toEqual({
+      PLAN_RESULT: "${{ needs.check-plan.result }}",
       RUNTIME_RESULT: "${{ needs.check-runtime.result }}",
       UI_RESULT: "${{ needs.check-ui.result }}",
       WINDOWS_RESULT: "${{ needs.check-windows.result }}",
       WEB_RESULT: "${{ needs.check-web.result }}",
     });
     expect(step.run.trim()).toBe([
+      "if ($env:PLAN_RESULT -notin @('success', 'skipped')) { exit 1 }",
       "$results = @($env:RUNTIME_RESULT, $env:UI_RESULT, $env:WINDOWS_RESULT, $env:WEB_RESULT)",
       "if (@($results | Where-Object { $_ -ne 'success' }).Count -gt 0) {",
       "  exit 1",

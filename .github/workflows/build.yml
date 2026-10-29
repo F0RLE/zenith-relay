@@ -19,8 +19,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  check-plan:
+    name: Plan release-branch checks
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run-checks: ${{ steps.plan.outputs.run-checks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Confirm independent PR coverage
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/check/ci-plan.mjs >> "$GITHUB_OUTPUT"
+
   check-runtime:
     name: Check runtime
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
@@ -42,9 +65,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: |
-            src-tauri -> target
-            crates/relay-core -> target
+          workspaces: src-tauri -> target
       - uses: taiki-e/install-action@59a357c0513d39d45e24a79eb9489a3a28086290 # cargo-audit
         with:
           tool: cargo-audit
@@ -91,6 +112,8 @@ jobs:
 
   check-ui:
     name: Check UI (${{ matrix.shard }}/4)
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -123,18 +146,20 @@ jobs:
 
   check:
     name: Check
-    needs: [check-runtime, check-ui, check-windows, check-web]
-    if: always()
+    needs: [check-plan, check-runtime, check-ui, check-windows, check-web]
+    if: always() && needs.check-plan.outputs.run-checks != 'false'
     runs-on: ubuntu-latest
     steps:
       - name: Require runtime, every browser shard, Windows and web
         shell: pwsh
         env:
+          PLAN_RESULT: ${{ needs.check-plan.result }}
           RUNTIME_RESULT: ${{ needs.check-runtime.result }}
           UI_RESULT: ${{ needs.check-ui.result }}
           WINDOWS_RESULT: ${{ needs.check-windows.result }}
           WEB_RESULT: ${{ needs.check-web.result }}
         run: |
+          if ($env:PLAN_RESULT -notin @('success', 'skipped')) { exit 1 }
           $results = @($env:RUNTIME_RESULT, $env:UI_RESULT, $env:WINDOWS_RESULT, $env:WEB_RESULT)
           if (@($results | Where-Object { $_ -ne 'success' }).Count -gt 0) {
             exit 1
@@ -142,6 +167,8 @@ jobs:
 
   check-windows:
     name: Check Windows
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: windows-latest
     env:
       RUSTFLAGS: "-Dwarnings --cfg reqwest_unstable"
@@ -151,12 +178,16 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
+      - name: Compile Windows Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --timings
       - name: Run Windows Rust tests
         # The test keyring is process-global, so its system key must not be mutated concurrently.
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
   check-web:
     name: Check web preview
+    needs: check-plan
+    if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:

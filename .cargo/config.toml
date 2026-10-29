@@ -1,3 +1,6 @@
 [build]
+# Reuse compatible dependency artifacts across Desktop and standalone core checks.
+# Keep the existing Desktop output path used by packaging and build markers.
+target-dir = "src-tauri/target"
 # reqwest's HTTP/3 API requires this cfg on stable Rust as well.
 rustflags = ["--cfg", "reqwest_unstable"]
