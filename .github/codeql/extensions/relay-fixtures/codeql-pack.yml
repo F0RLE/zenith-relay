@@ -3,6 +3,7 @@
 # same-user paths for ignored read-only public-catalog probes. Generic readers,
 # environment functions, production inputs and similarly named helpers stay
 # unmodeled. The catalog selectors are trusted operator choices, not sanitizers.
+# The optional FIFO root has both whole-value and Some-payload flows in CodeQL.
 name: f0rle/zenith-relay-fixtures
 version: 0.0.1
 library: true

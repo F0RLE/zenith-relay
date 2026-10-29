@@ -5,6 +5,7 @@ const modelsRoot = new URL("../../.github/codeql/extensions/relay-fixtures/", im
 const targets = [
   ["zenith_relay_core::test_support::temp_root", "ReturnValue"],
   ["zenith-relay::files::test_support::temp_root", "ReturnValue"],
+  ["zenith-relay::local_pool::profiles::codex::tests::binding_safety::direct_reads::fifo_child_root", "ReturnValue"],
   ["zenith-relay::local_pool::profiles::codex::tests::binding_safety::direct_reads::fifo_child_root", "ReturnValue.Field[core::option::Option::Some(0)]"],
   ["zenith_relay_core::model_metadata::memory::benchmark_tests::reference_catalog_path", "ReturnValue"],
   ["zenith_relay_core::pricing::memory::benchmark_tests::reference_catalog_directory", "ReturnValue"],
