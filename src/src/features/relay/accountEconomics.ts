@@ -1,5 +1,5 @@
 import type { ApiEquivalentSummary, QuotaSnapshot, QuotaWindowUsage } from "./api/types";
-import type { TFunction } from "i18next";
+import type { FormatText } from "./formatText";
 import { formatNumber } from "./numberFormatting";
 import { formatAccountValueMicroUsd } from "./poolFormatting";
 
@@ -30,7 +30,7 @@ export function formatAccountPayback(payback: number | null, locale: string, app
   return `${approximate ? "≈" : ""}${formatted}`;
 }
 
-export function accountPaybackHint(usage: Pick<ApiEquivalentSummary, "microUsd">, purchaseCost: number | null, locale: string, t: TFunction) {
+export function accountPaybackHint(usage: Pick<ApiEquivalentSummary, "microUsd">, purchaseCost: number | null, locale: string, t: FormatText) {
   return purchaseCost == null
     ? t("accounts.accountValue.purchaseMissing")
     : t("accounts.accountValue.paybackHint", {
@@ -126,7 +126,7 @@ export function estimateRemainingApiEquivalent(
   };
 }
 
-export function remainingValueHint(value: RemainingApiEquivalentEstimate | null, locale: string, t: TFunction) {
+export function remainingValueHint(value: RemainingApiEquivalentEstimate | null, locale: string, t: FormatText) {
   if (!value) return t("accounts.accountValue.remainingMissing");
   if (!value.calibration) return t("accounts.accountValue.remainingDirectHint");
   const profile = value.calibration;

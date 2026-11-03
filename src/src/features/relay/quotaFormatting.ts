@@ -1,8 +1,8 @@
-import type { TFunction } from "i18next";
+import type { FormatText } from "./formatText";
 import type { DefaultServiceTier, QuotaWindow } from "./api/types";
 import { formatNumber } from "./numberFormatting";
 
-export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
+export function formatRemainingTime(targetMs: number, nowMs: number, t: FormatText) {
   const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
   if (totalSeconds >= 86_400) return t("timeShort.days", { count: Math.floor(totalSeconds / 86_400) });
   if (totalSeconds >= 3_600) return `${t("timeShort.hours", { count: Math.floor(totalSeconds / 3_600) })} ${t("timeShort.minutes", { count: Math.floor(totalSeconds % 3_600 / 60) })}`;
@@ -10,7 +10,7 @@ export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunctio
   return t("timeShort.seconds", { count: totalSeconds });
 }
 
-export function formatDetailedRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
+export function formatDetailedRemainingTime(targetMs: number, nowMs: number, t: FormatText) {
   const totalMinutes = Math.max(0, Math.floor((targetMs - nowMs) / 60_000));
   if (totalMinutes < 1_440) return formatRemainingTime(targetMs, nowMs, t);
   return `${t("timeShort.days", { count: Math.floor(totalMinutes / 1_440) })} ${t("timeShort.hours", { count: Math.floor(totalMinutes % 1_440 / 60) })} ${t("timeShort.minutes", { count: totalMinutes % 60 })}`;
@@ -34,7 +34,7 @@ export function isFastSupplementalQuota(item: { label: string; serviceTier?: Def
     || /\b(priority|fast|ultrafast)\b/i.test(item.label);
 }
 
-export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
+export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: FormatText) {
   const minutes = window?.windowMinutes;
   if (!minutes) return t(`quota.${kind}`);
   if (minutes % 10_080 === 0) {
@@ -49,7 +49,7 @@ export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "
 export function formatSupplementalQuotaLabel(
   label: string,
   serviceTier: DefaultServiceTier | null | undefined,
-  t: TFunction,
+  t: FormatText,
 ) {
   const normalized = label.trim();
   if (serviceTier !== "fast" && serviceTier !== "ultrafast") return normalized;
