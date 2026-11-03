@@ -323,8 +323,7 @@ mod tests {
     #[test]
     fn diagnostic_vault_reads_do_not_create_recover_or_change_files() {
         let root = crate::files::test_temp_root("vault-diagnostic-read");
-        let mut key = [0; 32];
-        rand::rng().fill_bytes(&mut key);
+        let key = rand::random::<[u8; 32]>();
         let vault = Vault::open(&root, key).unwrap();
         vault.save("proxy:pool", "synthetic-proxy-data").unwrap();
         let path = root.join("secrets.enc");
