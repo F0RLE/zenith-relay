@@ -3,22 +3,26 @@ use std::time::Instant;
 
 use super::super::super::execution::AttemptRepairs;
 use super::super::*;
-use super::handshake::{upgrade_with_authorization_refresh, AuthorizationUpgrade};
-use super::open::{open_upgraded_socket, OpenedSocket};
+use super::handshake::{
+    AuthorizationUpgrade, can_use_optional_fast_path, upgrade_with_authorization_refresh,
+};
+use super::open::{OpenedSocket, open_upgraded_socket};
 use super::telemetry::record_connect_failure;
-use super::upgrade_reject::{handle_upgrade_rejection, UpgradeAction};
-use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected};
-use crate::runtime::AccountTransport;
+use super::upgrade_reject::{UpgradeAction, handle_upgrade_rejection};
+use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected, HttpFallback};
+use crate::runtime::{AccountTransport, WebsocketTransportPreference};
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum DrivenConnect {
     Continue(ClientRequest),
     Break(ClientRequest),
     Ready(Connected),
+    Http(Box<HttpFallback>),
 }
 
 pub(super) struct DriveCandidateInput<'a> {
     pub(super) selected: crate::Selection,
+    pub(super) route: ExecutorRoute,
     pub(super) lease: CandidateLease,
     pub(super) request: ClientRequest,
     pub(super) runtime: &'a GatewayRuntime,
@@ -35,10 +39,11 @@ pub(super) struct DriveCandidateInput<'a> {
 /// Drive one reserved WebSocket candidate through upgrade. Continue and break
 /// hand the same request back; a ready socket consumes it.
 pub(super) async fn drive_selected_candidate(
-    input: DriveCandidateInput<'_>,
+    connect_input: DriveCandidateInput<'_>,
 ) -> Result<DrivenConnect, GatewayFailure> {
     let DriveCandidateInput {
         selected,
+        mut route,
         lease,
         mut request,
         runtime,
@@ -50,60 +55,44 @@ pub(super) async fn drive_selected_candidate(
         confirmed_response_missing,
         last_failure,
         http_fallback_origin: websocket_http_fallback_origin,
-    } = input;
+    } = connect_input;
     tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
-    let Some(mut route) = runtime.executor_route(
-        &selected.candidate_id,
-        &request.resolved_model,
-        &key.scope_snapshot(),
-        WEBSOCKET_PROTOCOLS,
-        false,
-    ) else {
-        return Ok(DrivenConnect::Continue(request));
-    };
-    request.apply_service_tier_for_route(runtime, &route);
-    route.service_tier = request.service_tier(runtime, &route);
+    runtime.set_route_streaming(&mut route, false);
+    route.client_transport = crate::UsageTransport::Websocket;
+    request.apply_service_tier();
+    route.service_tier = request.service_tier();
     route.half_open_probe = selected.half_open_probe;
-    route.routing = Some(selected.diagnostics);
-    route.client_context_id = client_context_fingerprint(client_headers);
+    route.client_context_id = request.client_context_id.clone();
     let source_error_origin = route_error_origin(&route);
-    if route.wire_api != WireApi::Responses {
+    if route.client_wire_api != WireApi::Responses {
         return Ok(DrivenConnect::Continue(request));
     }
-    // Basis Points speaks HTTP on its responses URL. Upgrading that URL as a
-    // native Responses socket is rejected with 502 Invalid request body, so
-    // this client socket must go through the HTTP executor instead.
+    // These account transports use HTTP/SSE. Keep their admission when handing
+    // off to the HTTP executor: reservation already advanced the pool cursor.
     let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
-    if basis_points || !route.adapter.is_passthrough() {
-        if !basis_points {
-            runtime.mark_websocket_http_only(
-                &route.candidate_id,
-                &request.resolved_model,
-                now_ms(),
-            );
-        }
-        drop(lease);
-        *websocket_http_fallback_origin = Some(source_error_origin);
-        *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
-        return Ok(if basis_points {
-            DrivenConnect::Break(request)
-        } else {
-            DrivenConnect::Continue(request)
-        });
+    let siwc = route.account_transport == AccountTransport::Siwc;
+    if basis_points || siwc {
+        let reserved_candidate = super::super::super::execution::ReservedCandidate {
+            local_key_id: key.id.clone(),
+            model: request.resolved_model.clone(),
+            selection: selected,
+            lease,
+        };
+        return Ok(DrivenConnect::Http(Box::new(HttpFallback {
+            request,
+            reserved_candidate,
+        })));
     }
-    if runtime.websocket_is_http_only(&route.candidate_id, &request.resolved_model, now_ms()) {
+    route.routing = Some(selected.diagnostics);
+    if !route.adapter.is_passthrough() {
         drop(lease);
         *websocket_http_fallback_origin = Some(source_error_origin);
         *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
         return Ok(DrivenConnect::Continue(request));
     }
-    let Some(_wire_attempt) = request.budget.start_wire_attempt() else {
-        drop(lease);
-        return Ok(DrivenConnect::Break(request));
-    };
     let started = Instant::now();
-    // Reads the current attempt. The dispatch number changes after the payload is sent.
+    // Reads the current attempt. The dispatch number changes after the request is sent.
     macro_rules! connect_trace {
         () => {
             &ConnectTrace {
@@ -117,10 +106,7 @@ pub(super) async fn drive_selected_candidate(
             }
         };
     }
-    let prepared = match runtime
-        .prepare_authorization(&route.candidate_id, now_ms())
-        .await
-    {
+    let prepared = match runtime.prepare_route_authorization(&route, now_ms()).await {
         Ok(prepared) => prepared,
         Err(error) => {
             let failure = GatewayFailure::prepare(error, source_error_origin);
@@ -129,13 +115,32 @@ pub(super) async fn drive_selected_candidate(
             return Ok(DrivenConnect::Continue(request));
         }
     };
-    let payload = request.payload_for(&route)?;
+    let capability_scope = GatewayRuntime::websocket_capability_scope(&route, &prepared);
+    let transport_preference = runtime.websocket_transport_preference(
+        &capability_scope,
+        &request.resolved_model,
+        &prepared.incarnation(),
+        now_ms(),
+    );
+    if transport_preference == WebsocketTransportPreference::SlowHandshake
+        && can_use_optional_fast_path(&route, &request)
+    {
+        return Err(GatewayFailure::websocket_slow_handshake(
+            source_error_origin,
+        ));
+    }
+    if transport_preference == WebsocketTransportPreference::HttpOnly {
+        drop(lease);
+        *websocket_http_fallback_origin = Some(source_error_origin);
+        *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
+        return Ok(DrivenConnect::Continue(request));
+    }
     let mut prepared = prepared;
     let upgrade = match upgrade_with_authorization_refresh(
         runtime,
         client_headers,
         key,
-        &route,
+        &mut route,
         &request,
         &lease,
         *attempt,
@@ -147,6 +152,12 @@ pub(super) async fn drive_selected_candidate(
     .await
     {
         AuthorizationUpgrade::ContinueCandidate => return Ok(DrivenConnect::Continue(request)),
+        AuthorizationUpgrade::BudgetExhausted => return Ok(DrivenConnect::Break(request)),
+        AuthorizationUpgrade::FastPathMissed => {
+            return Err(GatewayFailure::websocket_slow_handshake(
+                source_error_origin,
+            ));
+        }
         AuthorizationUpgrade::Upgraded(upgrade) => upgrade,
     };
     // The final prepared authorization may differ from the first attempt
@@ -156,13 +167,26 @@ pub(super) async fn drive_selected_candidate(
     route.account_token_generation = prepared.token_generation;
     let status = upgrade.status();
     let response_headers = upgrade.headers().clone();
-    runtime.observe_codex_quota_headers(&route.candidate_id, status, &response_headers, now_ms());
+    runtime.observe_codex_quota_headers(
+        &route.candidate_id,
+        prepared.token_generation,
+        status,
+        &response_headers,
+        now_ms(),
+    );
     if status == StatusCode::SWITCHING_PROTOCOLS {
+        runtime.observe_codex_models_etag(
+            &route.candidate_id,
+            &route.upstream_url,
+            &response_headers,
+            &prepared,
+        );
         let turn_scope = request_scope(
             &key.id,
             client_headers,
             route.account_id.as_deref(),
             &route.source_model,
+            route.upstream_url.as_str(),
         );
         runtime.observe_turn_state(&response_headers, turn_scope.as_ref(), &prepared);
     }
@@ -189,6 +213,7 @@ pub(super) async fn drive_selected_candidate(
             upgrade,
             status,
             &response_headers,
+            &prepared,
             &mut scope,
             &mut progress,
         )
@@ -199,6 +224,10 @@ pub(super) async fn drive_selected_candidate(
             UpgradeAction::Fail(failure) => return Err(failure),
         }
     }
+    // A 401 during upgrade may have replaced the credential. Scope the body
+    // against the final authorization immediately before sending response.create.
+    let request_payload =
+        request.observed_payload_for(runtime, &mut route, client_headers, &prepared)?;
     match open_upgraded_socket(
         runtime,
         key,
@@ -206,7 +235,7 @@ pub(super) async fn drive_selected_candidate(
         route,
         lease,
         upgrade,
-        payload,
+        request_payload,
         prepared,
         attempt,
         started,

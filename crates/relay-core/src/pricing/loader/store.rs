@@ -1,5 +1,8 @@
 use super::refresh::map_catalog_io_error;
-use super::{PricingCacheEnvelope, PricingCatalog, PricingError, MAX_CATALOG_RESPONSE_BYTES};
+use super::{
+    MAX_CATALOG_RESPONSE_BYTES, PricingCacheEnvelope, PricingCatalog, PricingError,
+    RetainedPricingEnvelope,
+};
 use crate::catalog_io;
 use std::path::{Path, PathBuf};
 
@@ -36,9 +39,22 @@ impl PricingCacheStore {
     pub fn read_catalog(
         &self,
     ) -> Result<Option<(PricingCacheEnvelope, PricingCatalog)>, PricingError> {
-        self.read()?
+        // catalog() validates the envelope; do not validate/hash it twice.
+        catalog_io::read_json::<PricingCacheEnvelope>(&self.path, MAX_CATALOG_RESPONSE_BYTES)
+            .map_err(|error| map_catalog_io_error(error, true))?
             .map(|envelope| envelope.catalog().map(|catalog| (envelope, catalog)))
             .transpose()
+    }
+
+    /// The source payload was validated before compaction and is immutable.
+    /// Validate changed freshness/HTTP headers without rebuilding its JSON tree.
+    pub(super) fn write_retained(
+        &self,
+        envelope: &RetainedPricingEnvelope,
+    ) -> Result<bool, PricingError> {
+        envelope.validate_header()?;
+        catalog_io::write_json_if_changed(&self.path, envelope, MAX_CATALOG_RESPONSE_BYTES)
+            .map_err(|error| map_catalog_io_error(error, true))
     }
 
     pub fn write(&self, envelope: &PricingCacheEnvelope) -> Result<(), PricingError> {

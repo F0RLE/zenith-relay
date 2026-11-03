@@ -2,46 +2,8 @@ import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 import { viewports, expectTopLevelEmptyCentered } from "./fixtures";
 
-test("remote connection choices use clear switches in a centered dialog", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
-  await page.setViewportSize({ width: 840, height: 560 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Подключения", exact: true }).click();
-  await page.getByRole("button", { name: "Подключить существующий сервер" }).click();
-  await page.getByLabel("Адрес сервера").fill("http://127.0.0.1:14999");
 
-  const dialog = page.getByRole("dialog", { name: "Подключить существующий сервер" });
-  await expect(dialog.locator(".setting-toggle")).toHaveCount(2);
-  await expect(dialog.getByLabel("Разрешить HTTP без шифрования")).toBeVisible();
-  await expect(dialog.getByLabel("Доверять новой идентичности")).toBeVisible();
-  await expect(dialog.getByText("Токен и трафик передаются открыто. Используйте только в доверенной локальной сети.", { exact: true })).toBeVisible();
-  const [backdropBox, dialogBox] = await Promise.all([page.locator(".relay-modal-backdrop").boundingBox(), dialog.boundingBox()]);
-  expect(backdropBox).not.toBeNull();
-  expect(dialogBox).not.toBeNull();
-  expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - (backdropBox!.y + backdropBox!.height / 2))).toBeLessThanOrEqual(2);
-  expect(await dialog.locator(".setting-toggle").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
-  await page.screenshot({ path: "output/playwright/remote-connect-options-ru-dark-840x560.png" });
-});
 
-test("unconfigured API empty state uses the available page center", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "API", exact: true }).click();
-  await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
-  await expectTopLevelEmptyCentered(page);
-  await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });
-});
-
-test("unsupported usage empty state uses the available page center", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteFeatures: ["accounts"] });
-  await page.setViewportSize({ width: 1160, height: 760 });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Использование", exact: true }).click();
-  await expect(page.getByText("Не поддерживается", { exact: true })).toBeVisible();
-  await expectTopLevelEmptyCentered(page);
-  await page.screenshot({ path: "output/playwright/usage-unsupported-centered-ru-dark-1160x760.png" });
-});
 
 test("automation list fits the standard window without horizontal scrolling", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
@@ -130,14 +92,14 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 
   await page.locator(".mode-picker > button").click();
   const modeMenu = page.getByRole("menu");
-  await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
+  await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(2);
   expect(await modeMenu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/shell-mode-menu-ru-840x560.png" });
   await page.keyboard.press("Escape");
 
   await page.locator(".relay-sidebar nav button").nth(1).click();
   await page.getByRole("tab", { name: "Источники API" }).click();
-  await page.locator(".relay-table .row-actions summary").click();
+  await page.locator(".source-card .account-row-menu summary").click();
   let menu = page.getByRole("menu");
   expect(await menu.locator("span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/source-actions-ru-840x560.png" });
@@ -155,15 +117,15 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 
-  await page.locator(".relay-sidebar nav button").nth(4).click();
+  await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
+  await expect(dialog).toContainText("РазмышлениеМаксимальное→Низкое");
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("РазмышлениеЗапрошено: Максимальное, передано: Низкое");
-  await dialog.getByRole("tab", { name: "Маршрут", exact: true }).click();
-  await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
-  await expect(dialog).toContainText("Доступных участников4");
-  await expect(dialog).toContainText("Квота при выборе63.00%");
+  await expect(dialog.locator(".request-route-section")).toHaveCount(0);
+  await expect(dialog.locator(".request-context-section")).toHaveCount(0);
+  await expect(dialog).not.toContainText("Квота при выборе");
   expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
@@ -174,35 +136,55 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
 });
 
 for (const scenario of [
-  { locale: "en" as const, theme: "light" as const, width: 1160, label: "First / total", file: "usage-timing-en-light-1160x760.png" },
-  { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый / всего", file: "usage-timing-ru-dark-840x560.png" },
+  { locale: "en" as const, theme: "light" as const, width: 1160, label: "First output / response", file: "usage-timing-en-light-1160x760.png" },
+  { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый вывод / ответ", file: "usage-timing-ru-dark-840x560.png" },
 ]) {
-  test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
-    await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
+  test(`usage timing unknown first ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true,
+      accountOAuthClientKind: "excel_bps",
+      usageTiming: { latencyMs: 20_900, ttftMs: null, generationMs: null },
+    });
     await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
     await page.goto("/");
-    await page.locator(".relay-sidebar nav button").nth(4).click();
-
-    if (scenario.width === 840) {
-      await page.locator(".usage-metrics > div").nth(2).evaluate((card) => {
-        card.querySelector("strong")!.textContent = "49,3 млн";
-        card.querySelector("small")!.textContent = "Вх. 49,2 млн · Кэш ↓ 43,6 млн · Вых. 137,3 тыс.";
-      });
-      await page.locator(".usage-metrics > div").nth(3).evaluate((card) => {
-        card.querySelector("strong")!.textContent = "≈54,0431 $";
-        card.querySelector("small")!.textContent = "Оценено токенов: 49,3 млн";
-      });
-    }
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 3);
+    const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
+    await expect(timing).toHaveText(scenario.locale === "ru" ? "— / 20,9 с" : "— / 20.9 s");
+    expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await timing.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `output/playwright/unknown-first-${scenario.file}` });
+  });
+
+  test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
+    await installTauriMock(page, {
+      locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true,
+      ...(scenario.width === 840 ? { usageSummaryTotals: {
+        totalTokens: 49_337_300, inputTokens: 49_200_000, outputTokens: 137_300,
+        cachedInputTokens: 43_600_000,
+        apiEquivalent: { microUsd: 54_043_100, pricedTokens: 49_337_300, unpricedTokens: 0 },
+      } } : {}),
+    });
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
+    await page.goto("/");
+    await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+
+    await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
+    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 4);
     if (scenario.width === 1160) {
-      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(2);
+      expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top))).size)).toBe(1);
     }
     expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
-    expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
-    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "left"))).toBe(true);
-    expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
-    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
+    expect(await page.locator(".usage-metrics strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
+    const primarySize = await page.locator(".usage-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
+    const secondarySize = await page.locator(".usage-secondary-metrics strong").first().evaluate((value) => parseFloat(getComputedStyle(value).fontSize));
+    expect(secondarySize).toBeLessThan(primarySize);
+    expect(await page.locator(".usage-metrics > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    for (const column of ["model", "connection", "timing", "equivalent", "status"]) {
+      expect(await page.locator(`.usage-request-table th[data-column="${column}"], .usage-request-table td[data-column="${column}"]`)
+        .evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    }
+    const timing = page.locator('.usage-request-table tbody td[data-column="timing"]');
     await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));
@@ -221,27 +203,28 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Использование", exact: true }).click();
 
     const filters = page.locator(".usage-filter-panel");
+    const scope = page.locator(".usage-scope-controls");
     await expect(page.locator(".usage-range-menu").getByRole("button", { name: /^Период:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Модель:/ })).toBeVisible();
-    await expect(filters.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Модель:/ })).toBeVisible();
+    await expect(scope.getByRole("button", { name: /^Участник пула:/ })).toBeVisible();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
-    await filters.getByRole("button", { name: "Другие фильтры" }).click();
+    await scope.getByRole("button", { name: "Другие фильтры" }).click();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
     await expect(filters.getByRole("button", { name: /^Категория ошибки:/ })).toBeVisible();
     const protocol = filters.getByRole("button", { name: /^Протокол:/ });
     await protocol.click();
     await expect(protocol).toHaveAttribute("aria-expanded", "true");
     await page.getByRole("option", { name: "Responses", exact: true }).click();
-    await expect(filters.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
-    await filters.getByRole("button", { name: "Сбросить фильтры" }).click();
+    await expect(scope.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
+    await scope.getByRole("button", { name: "Сбросить фильтры" }).click();
     await expect(filters.getByRole("button", { name: "Протокол: Любой протокол" })).toBeVisible();
-    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
+    await expect(scope.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/usage-filters-open-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await page.getByRole("tab", { name: "Модели" }).click();
     const aggregate = page.locator(".usage-aggregate-table");
-    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы", "Входные токены", "Выходные токены", "Прочитано из кэша", "API-экв."]);
+    await expect(aggregate.getByRole("columnheader")).toHaveText(["Модель", "Запросы клиента", "Входные токены", "Выходные токены", "Прочитано из кэша", "API-экв."]);
     expect(await aggregate.locator("th, td").evaluateAll((cells) => cells.every((cell) => cell.scrollWidth <= cell.clientWidth && cell.scrollHeight <= cell.clientHeight + 1))).toBe(true);
     expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: `output/playwright/usage-models-ru-dark-${viewport.width}x${viewport.height}.png` });

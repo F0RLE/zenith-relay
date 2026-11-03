@@ -17,7 +17,12 @@ async fn compacted_history_resets_stale_ids_for_http_and_account_compact() {
         ("/v1/responses/compact", false),
         ("/v1/responses", true),
     ] {
-        let (upstream, state) = spawn_upstream(vec![success_reply("compacted-response")]).await;
+        let reply = if path == "/v1/responses/compact" {
+            compaction_reply("compacted-response")
+        } else {
+            success_reply("compacted-response")
+        };
+        let (upstream, state) = spawn_upstream(vec![reply]).await;
         let authority = ready_authority("compact-account", "synthetic-access").await;
         let (sources, accounts) = if api_source {
             (

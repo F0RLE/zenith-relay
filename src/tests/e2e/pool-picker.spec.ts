@@ -1,18 +1,18 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} pool picker preserves selections across sections and searches only visible connections`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 4, sourceCount: 3, poolMembers: false });
+    await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 4, accountOAuthClientKind: "siwc", sourceCount: 3, poolMembers: false });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("button", { name: "Add member", exact: true }).first().click();
     const dialog = page.getByRole("dialog", { name: "Add connections to pool" });
     const search = dialog.getByRole("searchbox", { name: "Find a connection" });
     const status = dialog.getByRole("group", { name: "Status" });
-    await status.getByRole("button", { name: /^Unavailable/ }).click();
+    await status.getByRole("button", { name: /^Cooldown/ }).click();
     await expect(dialog.getByText("Backup account", { exact: true })).toBeVisible();
-    await expect(dialog.getByText("Personal Plus", { exact: true })).toHaveCount(0);
+    await expect(dialog.getByText("Personal Plus", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Example compatible API", { exact: true })).toHaveCount(0);
     await status.getByRole("button", { name: /^Working/ }).click();
     await expect(dialog.getByText("Example compatible API", { exact: true })).toBeVisible();
@@ -33,6 +33,7 @@ for (const mode of ["local", "remote"] as const) {
     await dialog.getByRole("navigation").getByRole("button", { name: /^Selected/ }).click();
     await expect(dialog.locator(".pool-picker-option")).toHaveCount(3);
     await dialog.getByRole("button", { name: "Add selected (3)" }).click();
+    await expect(page.getByRole("dialog", { name: "Add a regular account to the pool?", exact: true })).toHaveCount(0);
     await expect(dialog).toHaveCount(0);
     await expect(page.locator(".pool-member-card")).toHaveCount(3);
     await expect(page.locator(".pool-member-card").filter({ hasText: "Example compatible API" })).toHaveCount(0);
@@ -62,7 +63,7 @@ for (const theme of ["light", "dark"] as const) {
       await expect(dialog.getByRole("button", { name: "Добавить выбранные (1)" })).toBeInViewport();
       await dialog.screenshot({ path: `output/playwright/pool-picker-${theme}-${viewport.width}.png` });
       await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-      await expect(dialog.getByText("Backup API 7", { exact: true })).toBeInViewport();
+      await expect(list.locator(".pool-picker-option").last()).toBeInViewport();
       await expect(dialog.getByRole("searchbox")).toBeInViewport();
       await expect(dialog.getByRole("button", { name: "Добавить выбранные (1)" })).toBeInViewport();
     });

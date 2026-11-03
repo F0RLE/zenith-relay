@@ -2,12 +2,12 @@ use super::*;
 use crate::local_pool::models::LocalAccountRecord;
 use std::collections::BTreeSet;
 use zenith_relay_core::{
+    WireApi,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
     automations::{WakeExecutionRequest, WakeTrigger, WakeVerificationMetadata},
     quota::{QuotaAdapterCapabilities, QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
-    WireApi,
 };
 
 #[test]
@@ -77,10 +77,7 @@ fn verification_uses_only_normalized_before_and_after_windows() {
 
 #[tokio::test]
 async fn inactive_wake_permit_is_skipped_before_credentials_or_http() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-inactive-wake-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let root = crate::files::test_temp_root("inactive-wake");
     let state = DesktopState::open(root.clone()).unwrap();
     assert!(
         execute_wake_permit(&state, &wake_permit(full_window(Some(10_000), 100)))
@@ -92,7 +89,7 @@ async fn inactive_wake_permit_is_skipped_before_credentials_or_http() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn account_record() -> LocalAccountRecord {
+pub(super) fn account_record() -> LocalAccountRecord {
     LocalAccountRecord {
         account: AccountRecord {
             id: "account-1".into(),
@@ -123,9 +120,10 @@ fn account_record() -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
+        image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,
-        remote_location: None,
+        recovery: None,
         wire_api: WireApi::Responses,
         models: Vec::new(),
         discovered_models: None,

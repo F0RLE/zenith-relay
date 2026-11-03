@@ -1,0 +1,908 @@
+{
+  "$schema": "model-order.schema.json",
+  "schemaVersion": 1,
+  "revision": "1",
+  "ignoredSuffixes": ["-non-reasoning", "-extra-high", "-very-high", "-xhigh", "-minimal", "-medium", "-high", "-low", "-none"],
+  "providers": [
+    {
+      "id": "openai",
+      "aliases": ["open-ai"],
+      "patterns": ["^(?:gpt-|chatgpt-|codex-|dall-e|text-|tts-|whisper-|sora-|computer-use-|o[0-9]).*$"],
+      "families": [
+        {
+          "id": "gpt",
+          "patterns": ["^(?:gpt|chatgpt)-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-?(?P<variant>[a-z].*))?$"],
+          "classes": [
+            {"id": "astra", "aliases": ["astra"]},
+            {"id": "sol", "aliases": ["sol"]},
+            {"id": "terra", "aliases": ["terra"]},
+            {"id": "luna", "aliases": ["luna"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "pro", "codex", "codex-spark", "mini", "nano", "chat", "instruct", "audio", "realtime", "preview", "latest"]
+        },
+        {
+          "id": "o",
+          "patterns": ["^o(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "pro", "mini", "preview", "latest"]
+        },
+        {
+          "id": "codex",
+          "patterns": ["^codex-(?P<variant>.*?)(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<suffix>.*))?$", "^codex(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "max", "mini", "preview", "latest"]
+        },
+        {
+          "id": "gpt-image",
+          "patterns": ["^gpt-image-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["sunburst", "flare", "", "mini", "preview", "latest"]
+        },
+        {
+          "id": "dall-e",
+          "patterns": ["^dall-e-(?P<version>[0-9]+)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "sora",
+          "patterns": ["^sora-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "pro"]
+        },
+        {
+          "id": "tts",
+          "patterns": ["^tts-(?P<version>[0-9]+)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "hd"]
+        },
+        {
+          "id": "whisper",
+          "patterns": ["^whisper-(?P<version>[0-9]+)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "aliases": [],
+      "patterns": ["^claude-.*$"],
+      "families": [
+        {
+          "id": "claude",
+          "patterns": [
+            "^claude-(?P<variant>[a-z][a-z-]*?)-(?P<version>[0-9]+(?:[.-][0-9]+)*)(?:-(?P<suffix>.*))?$",
+            "^claude-(?P<version>[0-9]+(?:[.-][0-9]+)*)(?:-(?P<variant>.*))?$",
+            "^claude-(?P<variant>.*)$"
+          ],
+          "classes": [
+            {"id": "fable", "aliases": ["fable"]},
+            {"id": "opus", "aliases": ["opus"]},
+            {"id": "sonnet", "aliases": ["sonnet"]},
+            {"id": "haiku", "aliases": ["haiku"]}
+          ],
+          "variants": ["", "thinking", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "google",
+      "aliases": ["google-ai", "google-ai-studio"],
+      "patterns": ["^(?:gemini-|gemma-|imagen-|veo-).*$"],
+      "families": [
+        {
+          "id": "gemini",
+          "patterns": ["^gemini-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$", "^gemini-(?P<variant>.*)$"],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "flash-lite", "aliases": ["flash-lite"]}
+          ],
+          "variants": ["", "preview", "latest", "thinking", "image", "image-preview", "live"]
+        },
+        {
+          "id": "gemma",
+          "patterns": ["^gemma-?(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "imagen",
+          "patterns": ["^imagen-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["ultra", "", "fast", "generate"]
+        },
+        {
+          "id": "veo",
+          "patterns": ["^veo-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "fast", "generate", "preview"]
+        }
+      ]
+    },
+    {
+      "id": "xai",
+      "aliases": ["x-ai", "x_ai"],
+      "patterns": ["^grok-.*$"],
+      "families": [
+        {
+          "id": "grok",
+          "patterns": ["^grok-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$", "^grok-(?P<variant>.*)$"],
+          "classes": [],
+          "variants": ["", "heavy", "fast", "mini", "code", "vision", "image", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "aliases": ["deep-seek"],
+      "patterns": ["^deepseek-.*$"],
+      "families": [
+        {
+          "id": "deepseek-v",
+          "patterns": [
+            "^deepseek-(?:chat-)?v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*?))??(?:-(?P<snapshot_day>[0-9]{4}))?$",
+            "^deepseek-(?P<variant>chat|latest)$"
+          ],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "chat", "latest", "terminus", "thinking", "vision", "vision-exp", "exp"]
+        },
+        {
+          "id": "deepseek-r",
+          "patterns": [
+            "^deepseek-r(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<snapshot_day>[0-9]{4}))?(?:-(?P<variant>.*))?$",
+            "^deepseek-(?P<variant>reasoner)$"
+          ],
+          "classes": [],
+          "variants": ["", "reasoner", "thinking", "distill"]
+        },
+        {
+          "id": "deepseek-coder",
+          "patterns": ["^deepseek-coder(?:-v(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "instruct", "lite", "base"]
+        },
+        {
+          "id": "deepseek-math",
+          "patterns": ["^deepseek-math(?:-v(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "instruct", "base"]
+        },
+        {
+          "id": "deepseek-ocr",
+          "patterns": ["^deepseek-ocr(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        }
+      ]
+    },
+    {
+      "id": "zai",
+      "aliases": ["z-ai", "z_ai", "zhipuai", "zhipu-ai"],
+      "patterns": ["^(?:glm-|autoglm-).*$"],
+      "families": [
+        {
+          "id": "glm",
+          "patterns": ["^glm-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "prime", "aliases": ["prime"]},
+            {"id": "base", "aliases": []},
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "air", "aliases": ["air"]},
+            {"id": "flashx", "aliases": ["flashx"]},
+            {"id": "flash", "aliases": ["flash"]}
+          ],
+          "variants": ["", "thinking", "preview", "latest"]
+        },
+        {
+          "id": "glm-vision",
+          "patterns": ["^glm-(?P<version>[0-9]+(?:\\.[0-9]+)*)v(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "base", "aliases": []},
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "flash", "aliases": ["flash"]}
+          ],
+          "variants": ["", "thinking", "preview", "latest"]
+        },
+        {
+          "id": "autoglm",
+          "patterns": ["^autoglm-(?P<variant>.*)$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "glm-image",
+          "patterns": ["^glm-image(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        }
+      ]
+    },
+    {
+      "id": "alibaba",
+      "aliases": ["qwen", "alibaba-cloud", "dashscope", "aliyun"],
+      "patterns": ["^(?:qwen-?[0-9]|qwen-|qwq-|qvq-|wan-).*$"],
+      "families": [
+        {
+          "id": "qwen",
+          "patterns": [
+            "^qwen-?(?P<version>[0-9]+(?:[.-][0-9]{1,2})*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<variant>(?:max|plus|turbo|flash|next|instruct|thinking)(?:-.*?)??))??(?:-(?:(?P<snapshot>[2-9][0-9](?:0[1-9]|1[0-2]))|(?P<snapshot_day>[0-1][0-9]-?[0-3][0-9])))?$",
+            "^qwen-(?P<variant>(?:max|plus|turbo|flash)(?:-.*?)??)(?:-(?P<snapshot>[0-9]{4}))?$"
+          ],
+          "classes": [
+            {"id": "max", "aliases": ["max"]},
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["prime", "", "next", "instruct", "thinking", "preview", "latest"]
+        },
+        {
+          "id": "qwen-coder",
+          "patterns": [
+            "^qwen-?(?P<version>[0-9]+(?:[.-][0-9]{1,2})*)-coder(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<variant>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$",
+            "^qwen-coder(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["next", "", "instruct", "thinking", "preview", "latest"]
+        },
+        {
+          "id": "qwen-vl",
+          "patterns": [
+            "^qwen-?(?P<version>[0-9]+(?:[.-][0-9]{1,2})*)-vl(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<variant>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$",
+            "^qwen-vl(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [
+            {"id": "max", "aliases": ["max"]},
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "instruct", "thinking", "ocr", "preview", "latest"]
+        },
+        {
+          "id": "qwen-omni",
+          "patterns": [
+            "^qwen-?(?P<version>[0-9]+(?:[.-][0-9]+)*)-omni(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<variant>.*))?$",
+            "^qwen-omni(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "thinking", "realtime", "preview", "latest"]
+        },
+        {
+          "id": "qwen-mt",
+          "patterns": ["^qwen-mt(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": [""]
+        },
+        {
+          "id": "qwq",
+          "patterns": ["^qwq(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["plus", "", "preview"]
+        },
+        {
+          "id": "qvq",
+          "patterns": ["^qvq(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["max", "", "preview"]
+        },
+        {
+          "id": "qwen-embedding",
+          "patterns": ["^qwen-?(?P<version>[0-9]+(?:\\.[0-9]+)*)-embedding(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "qwen-reranker",
+          "patterns": ["^qwen-?(?P<version>[0-9]+(?:\\.[0-9]+)*)-reranker(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "qwen-image",
+          "patterns": ["^qwen-image(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "edit", "preview"]
+        },
+        {
+          "id": "wan",
+          "patterns": ["^wan-v?(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["video-prime", "video", "t2v", "i2v", "r2v"]
+        }
+      ]
+    },
+    {
+      "id": "moonshotai",
+      "aliases": ["moonshot", "moonshot-ai", "kimi"],
+      "patterns": ["^(?:kimi-|moonshot-).*$"],
+      "families": [
+        {
+          "id": "kimi",
+          "patterns": [
+            "^(?:moonshot-)?kimi-k(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*?))??(?:-(?P<snapshot_day>[0-1][0-9]-?[0-3][0-9]))?$",
+            "^kimi(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [],
+          "variants": ["", "code", "code-highspeed", "instruct", "thinking", "thinking-turbo", "turbo", "highspeed", "preview", "latest"]
+        },
+        {
+          "id": "moonshot",
+          "patterns": ["^moonshot-v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "128k", "32k", "8k", "auto"]
+        }
+      ]
+    },
+    {
+      "id": "minimax",
+      "aliases": ["mini-max"],
+      "patterns": ["^minimax-.*$"],
+      "families": [
+        {
+          "id": "minimax-m",
+          "patterns": ["^minimax-m(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "highspeed", "turbo", "lightning", "flash", "her", "preview", "latest"]
+        },
+        {
+          "id": "minimax-h",
+          "patterns": ["^minimax-h(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "max", "aliases": ["max"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "minimax",
+          "patterns": ["^minimax-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "minimax-text",
+          "patterns": ["^(?:minimax-)?text-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "minimax-image",
+          "patterns": ["^(?:minimax-)?image-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "minimax-speech",
+          "patterns": ["^(?:minimax-)?speech-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["hd", "", "turbo"]
+        }
+      ]
+    },
+    {
+      "id": "xiaomi",
+      "aliases": [],
+      "patterns": ["^mimo-.*$"],
+      "families": [
+        {
+          "id": "mimo",
+          "patterns": ["^mimo-v?(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "base", "aliases": []},
+            {"id": "flash", "aliases": ["flash"]},
+            {"id": "omni", "aliases": ["omni"]}
+          ],
+          "variants": ["", "ultraspeed", "thinking", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "mistral",
+      "aliases": ["mistralai", "mistral-ai"],
+      "patterns": ["^(?:(?:open-|labs-)?(?:mistral|ministral|mixtral|magistral|devstral|codestral|leanstral|pixtral|voxtral)).*$"],
+      "families": [
+        {
+          "id": "mistral",
+          "patterns": [
+            "^mistral-(?P<variant>large|medium|small|tiny)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>instruct))?-(?P<snapshot>[0-9]{4})$",
+            "^mistral-(?P<variant>large|medium|small|tiny)(?:-(?P<version>[0-9]+(?:[.-][0-9]{1,2})*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"
+          ],
+          "classes": [
+            {"id": "large", "aliases": ["large"]},
+            {"id": "medium", "aliases": ["medium"]},
+            {"id": "small", "aliases": ["small"]},
+            {"id": "tiny", "aliases": ["tiny"]}
+          ],
+          "variants": ["", "instruct", "latest", "preview"]
+        },
+        {
+          "id": "magistral",
+          "patterns": [
+            "^magistral-(?P<variant>medium|small)-(?P<snapshot>[0-9]{4})$",
+            "^magistral-(?P<variant>medium|small)(?:-(?P<version>[0-9]+(?:[.-][0-9]{1,2})*))?(?:-(?P<suffix>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"
+          ],
+          "classes": [
+            {"id": "medium", "aliases": ["medium"]},
+            {"id": "small", "aliases": ["small"]}
+          ],
+          "variants": ["", "thinking", "latest", "preview"]
+        },
+        {
+          "id": "devstral",
+          "patterns": [
+            "^(?:labs-)?devstral(?:-(?P<variant>medium|small))?-(?P<snapshot>[0-9]{4})$",
+            "^(?:labs-)?devstral(?:-(?P<variant>medium|small))?(?:-(?P<version>[0-9]+(?:[.-][0-9]{1,2})*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"
+          ],
+          "classes": [
+            {"id": "base", "aliases": []},
+            {"id": "medium", "aliases": ["medium"]},
+            {"id": "small", "aliases": ["small"]}
+          ],
+          "variants": ["", "instruct", "latest", "preview"]
+        },
+        {
+          "id": "leanstral",
+          "patterns": ["^(?:labs-)?leanstral-(?P<version>[0-9]+(?:[.-][0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "latest"]
+        },
+        {
+          "id": "codestral",
+          "patterns": [
+            "^codestral-(?P<snapshot>[0-9]{4})$",
+            "^codestral(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-v?(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [],
+          "variants": ["", "latest", "mamba", "preview"]
+        },
+        {
+          "id": "ministral",
+          "patterns": [
+            "^ministral-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-(?P<variant>instruct))?-(?P<snapshot>[0-9]{4})$",
+            "^ministral(?:-(?P<version>[0-9]+(?:[.-][0-9]{1,2})*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"
+          ],
+          "classes": [],
+          "variants": ["", "instruct", "latest", "preview"]
+        },
+        {
+          "id": "mixtral",
+          "patterns": ["^(?:open-)?mixtral-(?P<parameters>[0-9]+x[0-9]+(?:\\.[0-9]+)*[bt])(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "instruct", "latest"]
+        },
+        {
+          "id": "pixtral",
+          "patterns": [
+            "^pixtral-(?P<variant>large)-(?P<snapshot>[0-9]{4})$",
+            "^pixtral(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [
+            {"id": "large", "aliases": ["large"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "latest", "preview"]
+        },
+        {
+          "id": "voxtral",
+          "patterns": ["^voxtral-(?P<variant>small|mini)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"],
+          "classes": [
+            {"id": "small", "aliases": ["small"]},
+            {"id": "mini", "aliases": ["mini"]}
+          ],
+          "variants": ["", "transcribe", "transcribe-realtime", "realtime", "tts", "latest"]
+        },
+        {
+          "id": "mistral-ocr",
+          "patterns": [
+            "^mistral-ocr-(?P<snapshot>[0-9]{4})$",
+            "^mistral-ocr(?:-(?P<version>[0-9]+(?:[.-][0-9]+)*))?(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [],
+          "variants": ["", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "tencent",
+      "aliases": ["hunyuan"],
+      "patterns": ["^(?:hy[0-9]|hy-mt|hunyuan-).*$"],
+      "families": [
+        {
+          "id": "hunyuan",
+          "patterns": [
+            "^(?:hy|hunyuan-?)(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$",
+            "^hunyuan-(?P<variant>.*)$"
+          ],
+          "classes": [],
+          "variants": ["", "instruct", "preview", "latest"]
+        },
+        {
+          "id": "hunyuan-mt",
+          "patterns": ["^hy-mt(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "base", "aliases": []},
+            {"id": "lite", "aliases": ["lite"]}
+          ],
+          "variants": ["", "instruct", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "nvidia",
+      "aliases": [],
+      "patterns": ["^(?:nemotron-|llama-[0-9._]+-nemotron-|cosmos-).*$", "^switchyard(?:-.*)?$"],
+      "families": [
+        {
+          "id": "nemotron",
+          "patterns": [
+            "^nemotron-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>(?:ultra|super|lightning|nano)(?:-omni)?))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-a[0-9]+(?:\\.[0-9]+)*[bt])?)?(?:-(?P<suffix>reasoning|instruct|base|reward|preview|latest))?$",
+            "^llama-[0-9]+(?:\\.[0-9]+)*-nemotron(?:-(?P<variant>ultra|super|nano))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-v(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<suffix>.*))?$"
+          ],
+          "classes": [
+            {"id": "ultra", "aliases": ["ultra"]},
+            {"id": "super", "aliases": ["super"]},
+            {"id": "lightning", "aliases": ["lightning"]},
+            {"id": "nano", "aliases": ["nano"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "instruct", "reasoning", "omni", "omni-reasoning", "reward", "preview", "latest"]
+        },
+        {
+          "id": "nemotron-safety",
+          "patterns": ["^nemotron-(?P<version>[0-9]+(?:\\.[0-9]+)*)-(?P<variant>content-safety)(?:-(?P<suffix>.*))?$"],
+          "classes": [],
+          "variants": ["content-safety"]
+        },
+        {
+          "id": "switchyard",
+          "patterns": ["^switchyard(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "cosmos",
+          "patterns": [
+            "^cosmos-(?P<variant>reason|predict|transfer)-?(?P<version>[0-9]+(?:[._][0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*))?$",
+            "^cosmos-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"
+          ],
+          "classes": [
+            {"id": "reason", "aliases": ["reason"]},
+            {"id": "predict", "aliases": ["predict"]},
+            {"id": "transfer", "aliases": ["transfer"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "stepfun",
+      "aliases": ["stepfun-ai", "step-fun"],
+      "patterns": ["^(?:step-|gelab-zero-).*$"],
+      "families": [
+        {
+          "id": "step",
+          "patterns": ["^step-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*?))??(?:-(?P<snapshot>[0-9]{4}))?$"],
+          "classes": [],
+          "variants": ["", "pro", "flash", "turbo", "mini", "preview", "latest", "128k", "32k", "16k"]
+        },
+        {
+          "id": "gelab-zero",
+          "patterns": ["^gelab-zero(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "meta",
+      "aliases": ["meta-llama", "meta_llama", "meta-ai"],
+      "patterns": ["^(?:(?:meta-llama-)?llama-|muse-).*$"],
+      "families": [
+        {
+          "id": "muse",
+          "patterns": ["^muse-(?P<variant>spark|glimmer)(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*))?$"],
+          "classes": [
+            {"id": "spark", "aliases": ["spark"]},
+            {"id": "glimmer", "aliases": ["glimmer"]}
+          ],
+          "variants": ["", "contributor", "preview", "latest"]
+        },
+        {
+          "id": "llama",
+          "patterns": ["^(?:meta-llama-)?llama-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "maverick", "aliases": ["maverick"]},
+            {"id": "scout", "aliases": ["scout"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "instruct", "chat", "vision", "vision-instruct", "base", "preview", "latest"]
+        },
+        {
+          "id": "muse-image",
+          "patterns": ["^muse-image(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "muse-voice",
+          "patterns": ["^muse-voice-(?P<variant>transcribe|tts)(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<suffix>.*))?$"],
+          "classes": [],
+          "variants": ["transcribe", "tts"]
+        },
+        {
+          "id": "llama-guard",
+          "patterns": ["^(?:meta-llama-)?llama-guard-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[mbt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "vision", "preview", "latest"]
+        },
+        {
+          "id": "prompt-guard",
+          "patterns": ["^(?:llama-)?prompt-guard(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[mbt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        }
+      ]
+    },
+    {
+      "id": "bytedance",
+      "aliases": ["bytedance-seed", "byte-dance"],
+      "patterns": ["^(?:seed-|seedance-|ui-tars-).*$"],
+      "families": [
+        {
+          "id": "seed",
+          "patterns": ["^seed-(?P<version>[0-9]+(?:[.-][0-9]{1,2})*)(?:-(?P<variant>.*?))??(?:-(?P<snapshot>[0-9]{6}))?$"],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "code", "aliases": ["code"]},
+            {"id": "base", "aliases": []},
+            {"id": "turbo", "aliases": ["turbo"]},
+            {"id": "lite", "aliases": ["lite"]},
+            {"id": "mini", "aliases": ["mini"]},
+            {"id": "flash", "aliases": ["flash"]}
+          ],
+          "variants": ["", "instruct", "thinking", "preview", "latest"]
+        },
+        {
+          "id": "seed-oss",
+          "patterns": ["^seed-oss(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "instruct", "base"]
+        },
+        {
+          "id": "ui-tars",
+          "patterns": ["^ui-tars-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "instruct", "preview"]
+        },
+        {
+          "id": "seedance",
+          "patterns": ["^seedance-v?(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "pro-fast", "aliases": ["pro-fast"]},
+            {"id": "base", "aliases": []},
+            {"id": "fast", "aliases": ["fast"]},
+            {"id": "mini", "aliases": ["mini"]},
+            {"id": "lite", "aliases": ["lite"]}
+          ],
+          "variants": ["", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "perplexity",
+      "aliases": ["perplexity-ai"],
+      "patterns": ["^(?:sonar|decider)(?:-.*)?$", "^pplx-.*$"],
+      "families": [
+        {
+          "id": "sonar",
+          "patterns": ["^sonar(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "deep-research", "aliases": ["deep-research"]},
+            {"id": "reasoning-pro", "aliases": ["reasoning-pro"]},
+            {"id": "pro-search", "aliases": ["pro-search"]},
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "reasoning", "aliases": ["reasoning"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "decider",
+          "patterns": ["^(?:pplx-)?decider(?:-v?(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "pplx",
+          "patterns": ["^pplx-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["online", "chat", ""]
+        },
+        {
+          "id": "pplx-embed",
+          "patterns": ["^pplx-embed(?:-(?P<variant>context))?-v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?$"],
+          "classes": [],
+          "variants": ["", "context"]
+        }
+      ]
+    },
+    {
+      "id": "cohere",
+      "aliases": [],
+      "patterns": ["^(?:command-|north-|(?:c4ai-)?aya-|tiny-aya-|embed-v|rerank-|parse-v).*$"],
+      "families": [
+        {
+          "id": "command-a",
+          "patterns": ["^command-a(?:-(?P<variant>.*?))??(?:-(?P<snapshot_month>(?:0[1-9]|1[0-2])-[0-9]{4}))?$"],
+          "classes": [
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "base", "aliases": []},
+            {"id": "reasoning", "aliases": ["reasoning"]},
+            {"id": "vision", "aliases": ["vision"]},
+            {"id": "translate", "aliases": ["translate"]}
+          ],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "command-r",
+          "patterns": ["^command-r(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt])?(?:-(?P<variant>.*?))??(?:-(?P<snapshot_month>(?:0[1-9]|1[0-2])-[0-9]{4}))?$"],
+          "classes": [
+            {"id": "plus", "aliases": ["plus"]},
+            {"id": "base", "aliases": []}
+          ],
+          "variants": ["", "arabic", "preview", "latest"]
+        },
+        {
+          "id": "command",
+          "patterns": ["^command(?:-(?P<variant>.*))?$"],
+          "classes": [
+            {"id": "base", "aliases": []},
+            {"id": "light", "aliases": ["light"]}
+          ],
+          "variants": ["", "nightly", "latest"]
+        },
+        {
+          "id": "north",
+          "patterns": ["^north-(?P<variant>small|mini)(?:-(?P<suffix>code|translate))?(?:-(?P<version>[0-9]+(?:[.-][0-9]+)*))?$"],
+          "classes": [
+            {"id": "small", "aliases": ["small"]},
+            {"id": "mini", "aliases": ["mini"]}
+          ],
+          "variants": ["", "code", "translate"]
+        },
+        {
+          "id": "aya",
+          "patterns": ["^(?:c4ai-)?aya(?:-(?P<variant>expanse|vision))?(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*))?$"],
+          "classes": [],
+          "variants": ["", "expanse", "vision"]
+        },
+        {
+          "id": "tiny-aya",
+          "patterns": ["^tiny-aya(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["global", "earth", "fire", "water"]
+        },
+        {
+          "id": "parse",
+          "patterns": ["^parse-v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": [""]
+        },
+        {
+          "id": "embed",
+          "patterns": [
+            "^embed-v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$",
+            "^embed-(?P<variant>.*)-v(?P<version>[0-9]+(?:\\.[0-9]+)*)$"
+          ],
+          "classes": [],
+          "variants": ["", "multilingual", "english", "multilingual-light", "english-light"]
+        },
+        {
+          "id": "rerank",
+          "patterns": [
+            "^rerank-v(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>.*))?$",
+            "^rerank-(?P<variant>.*)-v(?P<version>[0-9]+(?:\\.[0-9]+)*)$"
+          ],
+          "classes": [],
+          "variants": ["pro", "", "fast", "multilingual", "english"]
+        }
+      ]
+    },
+    {
+      "id": "amazon",
+      "aliases": [],
+      "patterns": ["^(?:nova-|titan-).*$"],
+      "families": [
+        {
+          "id": "nova",
+          "patterns": [
+            "^(?:amazon--)?nova(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?-(?P<variant>premier|pro|lite|micro)(?:-v[0-9]+(?:\\.[0-9]+)*)?(?:-(?P<suffix>.*))?$",
+            "^(?:amazon--)?nova-(?P<variant>premier|pro|lite|micro)-(?P<version>[0-9]+(?:\\.[0-9]+)*)$"
+          ],
+          "classes": [
+            {"id": "premier", "aliases": ["premier"]},
+            {"id": "pro", "aliases": ["pro"]},
+            {"id": "lite", "aliases": ["lite"]},
+            {"id": "micro", "aliases": ["micro"]}
+          ],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "nova-sonic",
+          "patterns": ["^nova(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?-sonic(?:-v[0-9]+(?:\\.[0-9]+)*)?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "titan",
+          "patterns": ["^titan-(?P<variant>.*)$"],
+          "classes": [],
+          "variants": ["text", "embed", "image", "image-generator"]
+        }
+      ]
+    },
+    {
+      "id": "nousresearch",
+      "aliases": ["nous-research", "nous"],
+      "patterns": ["^(?:nous-)?hermes-.*$"],
+      "families": [
+        {
+          "id": "hermes",
+          "patterns": ["^(?:nous-)?hermes-(?P<version>[0-9]+(?:\\.[0-9]+)*)(?:-(?P<variant>pro|thinking))?(?:-llama-?[0-9]+(?:\\.[0-9]+)*)?(?:-(?P<parameters>[0-9]+(?:\\.[0-9]+)*[bt]))?(?:-(?P<suffix>.*))?$"],
+          "classes": [],
+          "variants": ["", "pro", "instruct", "thinking", "preview", "latest"]
+        }
+      ]
+    },
+    {
+      "id": "inception",
+      "aliases": [],
+      "patterns": ["^mercury(?:-.*)?$"],
+      "families": [
+        {
+          "id": "mercury",
+          "patterns": ["^mercury(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>preview|latest))?$"],
+          "classes": [],
+          "variants": ["", "preview", "latest"]
+        },
+        {
+          "id": "mercury-coder",
+          "patterns": ["^mercury-coder(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "small", "preview", "latest"]
+        },
+        {
+          "id": "mercury-edit",
+          "patterns": ["^mercury-edit(?:-(?P<version>[0-9]+(?:\\.[0-9]+)*))?(?:-(?P<variant>.*))?$"],
+          "classes": [],
+          "variants": ["", "preview", "latest"]
+        }
+      ]
+    }
+  ]
+}

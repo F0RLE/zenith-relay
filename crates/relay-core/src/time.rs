@@ -2,8 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Parses an RFC3339 timestamp into Unix milliseconds.
 /// Blank, invalid, and pre-epoch values are absent rather than zero.
-pub fn unix_time_ms_from_rfc3339(value: &str) -> Option<u64> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(value.trim()).ok()?;
+pub fn unix_time_ms_from_rfc3339(timestamp_text: &str) -> Option<u64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp_text.trim()).ok()?;
     u64::try_from(parsed.timestamp_millis()).ok()
 }
 

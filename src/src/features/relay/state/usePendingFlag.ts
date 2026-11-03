@@ -10,15 +10,15 @@ export function usePendingFlag(saved: boolean) {
     if (pending !== null && pending === saved) setPending(null);
   }, [pending, saved]);
   const select = (enabled: boolean, save: () => Promise<boolean>) => {
-    const current = ++ticket.current;
+    const requestTicket = ++ticket.current;
     setPending(enabled);
     setSaving(true);
     void Promise.resolve().then(save).catch(() => false).then((ok) => {
-      if (ticket.current !== current || ok) return;
-      setPending((value) => value === enabled ? null : value);
+      if (ticket.current !== requestTicket || ok) return;
+      setPending((pendingValue) => pendingValue === enabled ? null : pendingValue);
     }).finally(() => {
       // A newer choice owns the flag; its own save releases it.
-      if (ticket.current === current) setSaving(false);
+      if (ticket.current === requestTicket) setSaving(false);
     });
   };
   return { checked: pending ?? saved, saving, select };

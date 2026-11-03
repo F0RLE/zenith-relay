@@ -20,21 +20,21 @@ impl<T> Default for CandidateIndex<'_, T> {
 }
 
 impl<'a, T> CandidateIndex<'a, T> {
-    fn insert(&mut self, id: &'a str, version: &str, value: &'a T) {
-        if !id.contains(':') {
+    fn insert(&mut self, model_id: &'a str, version: &str, metadata_record: &'a T) {
+        if !model_id.contains(':') {
             self.unsuffixed
                 .entry(version.to_owned())
                 .and_modify(|candidate| *candidate = None)
-                .or_insert(Some(value));
+                .or_insert(Some(metadata_record));
         }
         self.versions
             .entry(version.to_owned())
             .and_modify(|candidate| *candidate = None)
-            .or_insert(Some(value));
+            .or_insert(Some(metadata_record));
         self.leaves
-            .entry(model_leaf(id))
+            .entry(model_leaf(model_id))
             .and_modify(|candidate| *candidate = None)
-            .or_insert(Some(value));
+            .or_insert(Some(metadata_record));
     }
 }
 
@@ -54,23 +54,23 @@ impl<'a, T> RecordIndex<'a, T> {
             all: CandidateIndex::default(),
             providers: BTreeMap::new(),
         };
-        for (id, value) in records {
-            let version = version_match_id(id);
-            index.all.insert(id, &version, value);
-            let provider = id.split_once('/').map(|(provider, _)| provider);
-            index
-                .providers
-                .entry(provider)
-                .or_default()
-                .insert(id, &version, value);
+        for (model_id, metadata_record) in records {
+            let version = version_match_id(model_id);
+            index.all.insert(model_id, &version, metadata_record);
+            let provider = model_id.split_once('/').map(|(provider, _)| provider);
+            index.providers.entry(provider).or_default().insert(
+                model_id,
+                &version,
+                metadata_record,
+            );
         }
         index
     }
 
-    pub(super) fn get(&self, id: &str) -> Option<&'a T> {
-        let key = normalize(id);
-        if let Some(value) = self.exact.get(&key) {
-            return Some(value);
+    pub(super) fn get(&self, model_id: &str) -> Option<&'a T> {
+        let key = normalize(model_id);
+        if let Some(metadata_record) = self.exact.get(&key) {
+            return Some(metadata_record);
         }
         let provider = key.split_once('/').map(|(provider, _)| provider);
         let index = provider.map_or(Some(&self.all), |provider| {
@@ -79,11 +79,11 @@ impl<'a, T> RecordIndex<'a, T> {
         if let Some(index) = index {
             let version = version_match_id(&key);
             // A base row wins over :free/:batch variants of the same version.
-            if let Some(value) = index.unsuffixed.get(&version) {
-                return *value;
+            if let Some(metadata_record) = index.unsuffixed.get(&version) {
+                return *metadata_record;
             }
-            if let Some(value) = index.versions.get(&version) {
-                return *value;
+            if let Some(metadata_record) = index.versions.get(&version) {
+                return *metadata_record;
             }
         }
         let leaf = model_leaf(&key);
@@ -92,7 +92,7 @@ impl<'a, T> RecordIndex<'a, T> {
             .and_then(|_| self.providers.get(&None))
             .and_then(|index| index.leaves.get(leaf));
         match (local, unqualified) {
-            (Some(value), None) | (None, Some(value)) => *value,
+            (Some(metadata_record), None) | (None, Some(metadata_record)) => *metadata_record,
             _ => None,
         }
     }
@@ -100,10 +100,11 @@ impl<'a, T> RecordIndex<'a, T> {
 
 // Normalize only decimal release separators; provider boundaries and other
 // punctuation remain significant. Variant suffixes are compared separately.
-fn version_match_id(id: &str) -> String {
-    let id = id.split_once(':').map_or(id, |(base, _)| base);
-    let bytes = id.as_bytes();
-    id.char_indices()
+fn version_match_id(model_id: &str) -> String {
+    let base_model_id = model_id.split_once(':').map_or(model_id, |(base, _)| base);
+    let bytes = base_model_id.as_bytes();
+    base_model_id
+        .char_indices()
         .map(|(index, character)| {
             if character == '.'
                 && index > 0

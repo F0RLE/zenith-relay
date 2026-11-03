@@ -1,7 +1,7 @@
-use crate::{DefaultServiceTier, UsageCallback, UsageEvent, WireApi};
+use crate::{DefaultServiceTier, UsageCallback, UsageEvent, UsageTransport, WireApi};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_TRACKED_REQUEST_ORIGINS: usize = 4096;
 pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;
@@ -10,22 +10,28 @@ pub(crate) const DEFAULT_ROUTE_RECOVERY_WINDOW_MS: u64 = 30_000;
 /// routing graph itself remains immutable for the lifetime of a runtime.
 pub(crate) struct RuntimeControl {
     codex_background_tasks_enabled: AtomicBool,
+    codex_memory_extraction_enabled: AtomicBool,
+    codex_memory_consolidation_enabled: AtomicBool,
     codex_websockets_enabled: AtomicBool,
     block_degraded_routes_enabled: AtomicBool,
     route_recovery_enabled: AtomicBool,
     route_recovery_window_ms: AtomicU64,
     request_origins: Mutex<BTreeMap<String, &'static str>>,
+    pub(super) request_usage: Mutex<super::request_usage::RequestUsageRegistry>,
 }
 
 impl Default for RuntimeControl {
     fn default() -> Self {
         Self {
             codex_background_tasks_enabled: AtomicBool::new(true),
+            codex_memory_extraction_enabled: AtomicBool::new(true),
+            codex_memory_consolidation_enabled: AtomicBool::new(true),
             codex_websockets_enabled: AtomicBool::new(true),
             block_degraded_routes_enabled: AtomicBool::new(true),
             route_recovery_enabled: AtomicBool::new(false),
             route_recovery_window_ms: AtomicU64::new(DEFAULT_ROUTE_RECOVERY_WINDOW_MS),
             request_origins: Mutex::new(BTreeMap::new()),
+            request_usage: Mutex::default(),
         }
     }
 }
@@ -37,6 +43,26 @@ impl RuntimeControl {
 
     pub(crate) fn set_codex_background_tasks_enabled(&self, enabled: bool) {
         self.codex_background_tasks_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn codex_background_request_enabled(&self, kind: &str) -> bool {
+        match kind {
+            "memory_extraction" => self.codex_memory_extraction_enabled.load(Ordering::Acquire),
+            "memory_consolidation" => self
+                .codex_memory_consolidation_enabled
+                .load(Ordering::Acquire),
+            _ => self.codex_background_tasks_enabled(),
+        }
+    }
+
+    pub(crate) fn set_codex_memory_extraction_enabled(&self, enabled: bool) {
+        self.codex_memory_extraction_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn set_codex_memory_consolidation_enabled(&self, enabled: bool) {
+        self.codex_memory_consolidation_enabled
             .store(enabled, Ordering::Release);
     }
 
@@ -71,9 +97,9 @@ impl RuntimeControl {
         self.route_recovery_window_ms.load(Ordering::Acquire)
     }
 
-    pub(crate) fn set_route_recovery_window_ms(&self, value: u64) {
+    pub(crate) fn set_route_recovery_window_ms(&self, window_ms: u64) {
         self.route_recovery_window_ms
-            .store(value.max(1_000), Ordering::Release);
+            .store(window_ms.max(1_000), Ordering::Release);
     }
 
     pub(crate) fn mark_request_origin(&self, request_id: &str, origin: &'static str) {
@@ -81,8 +107,8 @@ impl RuntimeControl {
         origins.insert(request_id.to_string(), origin);
         if origins.len() > MAX_TRACKED_REQUEST_ORIGINS {
             let excess = origins.len() - MAX_TRACKED_REQUEST_ORIGINS;
-            let old = origins.keys().take(excess).cloned().collect::<Vec<_>>();
-            for request_id in old {
+            let expired_request_ids = origins.keys().take(excess).cloned().collect::<Vec<_>>();
+            for request_id in expired_request_ids {
                 origins.remove(&request_id);
             }
         }
@@ -94,6 +120,8 @@ impl RuntimeControl {
             .copied()
     }
 
+    // These independent request attributes map directly to one usage event.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn blocked_codex_background_event(
         &self,
         usage: &UsageCallback,
@@ -101,8 +129,10 @@ impl RuntimeControl {
         local_key_id: &str,
         requested_model: &str,
         wire_api: WireApi,
+        transport: UsageTransport,
         origin: &'static str,
     ) {
+        let memory = matches!(origin, "memory_extraction" | "memory_consolidation");
         let event = UsageEvent {
             request_id: request_id.to_string(),
             attempt: 1,
@@ -118,10 +148,11 @@ impl RuntimeControl {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api,
+            transport,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
-            success: true,
-            http_status: 200,
+            success: !memory,
+            http_status: if memory { 403 } else { 200 },
             error_category: Some(format!("codex_background_blocked_{origin}")),
             tool_use: Default::default(),
             cooldown_scope: None,
@@ -139,6 +170,7 @@ impl RuntimeControl {
             total_tokens: Some(0),
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         };
         usage(event);
     }
@@ -147,6 +179,23 @@ impl RuntimeControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_policies_are_independent_and_preserve_existing_defaults() {
+        let control = RuntimeControl::default();
+        control.set_codex_background_tasks_enabled(false);
+        assert!(!control.codex_background_request_enabled("task_title"));
+        assert!(control.codex_background_request_enabled("memory_extraction"));
+        assert!(control.codex_background_request_enabled("memory_consolidation"));
+        control.set_codex_memory_extraction_enabled(false);
+        assert!(!control.codex_background_request_enabled("memory_extraction"));
+        assert!(control.codex_background_request_enabled("memory_consolidation"));
+        control.set_codex_memory_consolidation_enabled(false);
+        control.set_codex_memory_extraction_enabled(true);
+        assert!(control.codex_background_request_enabled("memory_extraction"));
+        assert!(!control.codex_background_request_enabled("memory_consolidation"));
+        assert!(!control.codex_background_tasks_enabled());
+    }
 
     #[test]
     fn controls_default_to_enabled() {

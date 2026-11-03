@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 mod auth_refresh;
+mod auth_revision;
 mod generations;
 mod rotation;
 mod slot_removal;

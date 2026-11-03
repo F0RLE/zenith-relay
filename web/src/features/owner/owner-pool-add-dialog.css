@@ -1,0 +1,76 @@
+/* AddMembersDialog geometry from Desktop; Hosted tokens and native dialog. */
+.hosted-app .request-dialog.owner-pool-add-dialog { width: min(820px, calc(100% - 32px)); height: min(620px, calc(100dvh - 84px)); border: 0; overflow: hidden; }
+.hosted-app .owner-pool-add-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.hosted-app .request-dialog.owner-pool-add-dialog > .dialog-header { min-height: 64px; padding: 12px 24px; border-bottom: 0; }
+.hosted-app .request-dialog.owner-pool-add-dialog > .dialog-body { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; gap: 0; padding: 0; overflow: hidden; }
+.hosted-app .owner-pool-member-picker { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; }
+.hosted-app .owner-pool-picker-sidebar { display: flex; flex-direction: column; gap: 16px; min-height: 0; padding: 18px 12px 12px; border-right: 1px solid var(--border); background: var(--subtle); }
+.hosted-app .owner-pool-picker-sidebar nav { display: grid; gap: 4px; }
+.hosted-app .owner-pool-picker-sidebar button { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 9px 10px; border: 0; border-radius: 6px; color: var(--secondary); background: transparent; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.hosted-app .owner-pool-picker-sidebar button:hover { background: var(--surface); }
+.hosted-app .owner-pool-picker-sidebar button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.hosted-app .owner-pool-picker-sidebar svg { width: 16px; height: 16px; flex-shrink: 0; }
+.hosted-app .owner-pool-picker-sidebar small { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.hosted-app .owner-pool-picker-sidebar .owner-pool-picker-new { margin-top: auto; font-weight: 550; }
+.hosted-app .owner-pool-picker-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 20px 20px 8px; }
+.hosted-app .owner-pool-picker-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-shrink: 0; }
+.hosted-app .owner-pool-picker-search { position: relative; flex: 1; min-width: 0; }
+.hosted-app .owner-pool-picker-search > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--secondary); pointer-events: none; }
+.hosted-app .owner-pool-picker-search input { width: 100%; height: 38px; min-width: 0; padding: 8px 10px 8px 36px; border: 1px solid var(--control-border); border-radius: 6px; background: var(--subtle); color: var(--text); font: inherit; font-size: 12px; font-weight: 400; }
+.hosted-app .owner-pool-picker-search input::placeholder { color: var(--secondary); }
+.hosted-app .owner-pool-picker-toolbar .option-trigger { max-width: 150px; min-height: 38px; }
+.hosted-app .owner-pool-picker-selection { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; flex-shrink: 0; color: var(--secondary); font-size: 12px; }
+.hosted-app .owner-pool-picker-selection > label { display: flex; align-items: center; gap: 8px; min-height: 32px; font-weight: 400; cursor: pointer; }
+.hosted-app .owner-pool-picker-selection > button { min-height: 32px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--secondary); font: inherit; cursor: pointer; }
+.hosted-app .owner-pool-picker-selection > button:hover { background: var(--subtle); color: var(--text); }
+.hosted-app .owner-pool-picker-list { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: auto; scrollbar-color: var(--control-border) transparent; padding-bottom: 8px; }
+.hosted-app .owner-pool-picker-list::-webkit-scrollbar { width: 8px; height: 8px; }
+.hosted-app .owner-pool-picker-list::-webkit-scrollbar-thumb { border: 2px solid var(--surface); border-radius: 6px; background: var(--control-border); }
+.hosted-app .owner-pool-member-options { display: grid; gap: 4px; }
+.hosted-app .owner-pool-member-options + .owner-pool-member-options { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.hosted-app .owner-pool-picker-option { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; min-height: 62px; padding: 10px; border-radius: 7px; cursor: pointer; }
+.hosted-app .owner-pool-picker-option:hover { background: var(--subtle); }
+.hosted-app .owner-pool-picker-option[data-selected="true"] { background: var(--accent-soft); }
+.hosted-app .owner-pool-picker-avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; color: var(--secondary); background: var(--subtle); }
+.hosted-app .owner-pool-picker-avatar svg { width: 17px; height: 17px; }
+.hosted-app .owner-pool-picker-avatar[data-status="error"] { background: var(--error-soft); color: var(--error); }
+.hosted-app .owner-pool-picker-copy { min-width: 0; display: grid; gap: 4px; }
+.hosted-app .owner-pool-picker-copy strong, .hosted-app .owner-pool-picker-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosted-app .owner-pool-picker-copy strong { font-size: 13px; font-weight: 550; }
+.hosted-app .owner-pool-picker-copy small { color: var(--secondary); font-size: 11px; font-weight: 400; }
+.hosted-app .owner-pool-picker-copy [data-status="error"] { color: var(--error); }
+.hosted-app .owner-pool-picker-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 150px; }
+.hosted-app .owner-pool-picker-badges > span { padding: 3px 6px; border-radius: 4px; background: var(--subtle); color: var(--secondary); font-size: 10px; overflow-wrap: anywhere; }
+.hosted-app .owner-pool-picker-badges > .owner-pool-picker-route { color: var(--accent); background: var(--accent-soft); }
+.hosted-app .owner-pool-picker-option > input { grid-column: 4; margin: 0; }
+.hosted-app .owner-pool-add-dialog input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+.hosted-app .owner-pool-picker-empty { padding: 32px 12px; margin: 0; text-align: center; color: var(--secondary); font-size: 13px; }
+.hosted-app .owner-pool-picker-footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; min-height: 68px; padding: 4px 24px 24px; }
+.hosted-app .owner-pool-picker-footer .button { min-height: 40px; padding: 9px 14px; font-size: 12px; }
+.hosted-app .owner-pool-picker-footer .primary-button:disabled { border-color: transparent; background: var(--border); color: var(--secondary); opacity: 1; }
+.hosted-app .owner-pool-picker-summary { display: flex; align-items: center; gap: 10px; margin-right: auto; color: var(--secondary); font-size: 12px; }
+.hosted-app .owner-pool-picker-summary-icon { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%; background: var(--subtle); }
+.hosted-app .owner-pool-picker-summary-icon[data-active="true"] { color: var(--accent); background: var(--accent-soft); }
+.hosted-app .owner-pool-picker-summary-icon svg { width: 14px; height: 14px; }
+@media (max-width: 640px) {
+  .hosted-app .request-dialog.owner-pool-add-dialog { width: calc(100% - 16px); height: min(720px, calc(100dvh - 16px)); }
+  .hosted-app .request-dialog.owner-pool-add-dialog > .dialog-header { padding: 8px 16px; }
+  .hosted-app .owner-pool-member-picker { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .hosted-app .owner-pool-picker-sidebar { flex-direction: row; flex-wrap: wrap; gap: 4px; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .hosted-app .owner-pool-picker-sidebar nav { flex: 1 1 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hosted-app .owner-pool-picker-sidebar button { font-size: 12px; padding: 6px 8px; gap: 8px; }
+  .hosted-app .owner-pool-picker-sidebar .owner-pool-picker-new { margin-top: 0; }
+  .hosted-app .owner-pool-picker-content { padding: 12px 12px 4px; }
+  .hosted-app .owner-pool-picker-toolbar { gap: 6px; }
+  .hosted-app .owner-pool-picker-search { flex-basis: 100%; }
+  .hosted-app .owner-pool-picker-option { grid-template-columns: 28px minmax(0, 1fr) auto; gap: 6px 8px; padding-inline: 6px; }
+  .hosted-app .owner-pool-picker-avatar { width: 28px; height: 28px; border-radius: 7px; }
+  .hosted-app .owner-pool-picker-option > input { grid-column: 3; grid-row: 1; }
+  .hosted-app .owner-pool-picker-badges { grid-column: 2; grid-row: 2; justify-content: flex-start; max-width: none; }
+  .hosted-app .owner-pool-picker-footer { flex-wrap: wrap; gap: 8px; padding: 8px 16px 16px; }
+  .hosted-app .owner-pool-picker-summary { flex-basis: 100%; padding-bottom: 2px; }
+  .hosted-app .owner-pool-picker-selection { align-items: flex-start; flex-wrap: wrap; gap: 0 8px; }
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .hosted-app .owner-pool-picker-sidebar button, .hosted-app .owner-pool-picker-search input, .hosted-app .owner-pool-picker-toolbar .option-trigger, .hosted-app .owner-pool-picker-selection > label, .hosted-app .owner-pool-picker-selection > button, .hosted-app .owner-pool-picker-footer .button { min-height: 44px; }
+}

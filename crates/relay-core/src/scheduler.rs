@@ -3,7 +3,7 @@ mod policy;
 pub mod refresh;
 pub mod rotation;
 pub use policy::{
-    resolve_pool_routing, PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+    PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, resolve_pool_routing,
 };
 mod affinity;
 mod candidate;
@@ -13,15 +13,16 @@ mod selection;
 
 pub use affinity::AffinityCache;
 pub use candidate::{
-    account_candidate_health, CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope,
-    RuntimeCandidate,
+    CandidateHealth, CandidateKind, CandidateQuotaReference, CandidateQuotaState, CandidateScope,
+    RuntimeCandidate, account_candidate_health,
 };
 pub use capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 pub(crate) use cooldown::CooldownReason;
 pub(crate) use selection::CooldownRequest;
 pub(crate) use selection::ReservationId;
 pub use selection::{
-    account_member_key, source_member_key, ActiveModelRuntime, CandidateRuntimeSnapshot,
-    ModelRetryRuntime, PoolScheduler, RoutingDiagnostics, Selection, SelectionReason,
-    SelectionRequest, PROMPT_AFFINITY_TTL_MS, RESPONSE_AFFINITY_TTL_MS,
+    ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
+    ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS, PoolScheduler, RESPONSE_AFFINITY_TTL_MS,
+    RequestTiming, RoutingDiagnostics, Selection, SelectionReason, SelectionRequest,
+    account_member_key, source_member_key,
 };

@@ -21,12 +21,8 @@ pub struct WakeExecutionMetrics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WakeExecutionErrorCode {
-    InvalidConfiguration,
-    InvalidEndpoint,
-    InvalidAccessToken,
-    InvalidProviderAccountId,
     InvalidRequest,
-    RequestTooLarge,
+    ModelUnavailable,
     Transport,
     Timeout,
     Unauthorized,
@@ -41,12 +37,8 @@ pub enum WakeExecutionErrorCode {
 impl WakeExecutionErrorCode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::InvalidConfiguration => error_codes::WAKE_INVALID_CONFIGURATION,
-            Self::InvalidEndpoint => error_codes::WAKE_INVALID_ENDPOINT,
-            Self::InvalidAccessToken => error_codes::WAKE_INVALID_ACCESS_TOKEN,
-            Self::InvalidProviderAccountId => error_codes::WAKE_INVALID_PROVIDER_ACCOUNT_ID,
             Self::InvalidRequest => error_codes::WAKE_INVALID_REQUEST,
-            Self::RequestTooLarge => error_codes::WAKE_REQUEST_TOO_LARGE,
+            Self::ModelUnavailable => error_codes::WAKE_MODEL_UNAVAILABLE,
             Self::Transport => error_codes::WAKE_TRANSPORT,
             Self::Timeout => error_codes::WAKE_TIMEOUT,
             Self::Unauthorized => error_codes::WAKE_UNAUTHORIZED,
@@ -71,14 +63,6 @@ pub struct WakeExecutionFailure {
 }
 
 impl WakeExecutionFailure {
-    pub(super) fn configuration() -> Self {
-        Self::runtime(WakeExecutionErrorCode::InvalidConfiguration, false, None, 0)
-    }
-
-    pub(super) fn invalid(code: WakeExecutionErrorCode) -> Self {
-        Self::runtime(code, false, None, 0)
-    }
-
     pub(super) fn runtime(
         code: WakeExecutionErrorCode,
         retryable: bool,

@@ -38,10 +38,12 @@ fn portable_bundle_is_neutral_and_never_imports_proxies() {
         parsed.preview.warnings[0],
         ImportWarning::count(ImportWarningCode::ProxiesIgnored, 2)
     );
-    assert!(parsed.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::ConcurrencyIgnored));
+    assert!(
+        parsed.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::ConcurrencyIgnored)
+    );
     let preview = serde_json::to_string(&parsed.preview).unwrap();
     assert!(!preview.to_ascii_lowercase().contains("sb2api"));
     assert!(!preview.contains("proxy-secret"));
@@ -192,10 +194,12 @@ fn parses_current_public_account_export_shapes() {
     assert_eq!(nine_router.preview.rows[0].plan.as_deref(), Some("plus"));
     let sub2api = parse_import(&fixtures[1], None, &[]).unwrap();
     assert_eq!(sub2api.preview.rows[0].auth_mode, ImportAuthMode::OAuth);
-    assert!(!sub2api.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::UnknownAuthMode));
+    assert!(
+        !sub2api.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::UnknownAuthMode)
+    );
     let wrapped_nine_router =
         parse_import(&format!(r#"{{"accounts":[{}]}}"#, fixtures[3]), None, &[]).unwrap();
     assert_eq!(wrapped_nine_router.preview.format, ImportFormat::JsonArray);
@@ -203,20 +207,24 @@ fn parses_current_public_account_export_shapes() {
 
     let axon_hub = parse_import(&fixtures[5], None, &[]).unwrap();
     assert_eq!(axon_hub.items[0].secrets().refresh_token(), None);
-    assert!(axon_hub.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
+    assert!(
+        axon_hub.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly)
+    );
 
     let manager = parse_import(&fixtures[6], None, &[]).unwrap();
     assert_eq!(manager.preview.rows[0].label, "Manager account");
     assert_eq!(manager.items[0].account_id.as_deref(), Some("acct_manager"));
     for access_only in [parse_import(&fixtures[1], None, &[]).unwrap(), manager] {
         assert_eq!(access_only.items[0].secrets().refresh_token(), None);
-        assert!(access_only.preview.rows[0]
-            .warnings
-            .iter()
-            .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
+        assert!(
+            access_only.preview.rows[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly)
+        );
     }
 }
 
@@ -250,12 +258,14 @@ fn parses_mixed_cockpit_array_and_sub2api_failure_rows() {
     assert_eq!(parsed.preview.format, ImportFormat::PortableAccountBundleV1);
     assert_eq!(parsed.preview.rows.len(), 3);
     assert_eq!(parsed.items.len(), 2);
-    assert!(parsed
-        .preview
-        .rows
-        .iter()
-        .take(2)
-        .all(|row| row.auth_mode == ImportAuthMode::OAuth));
+    assert!(
+        parsed
+            .preview
+            .rows
+            .iter()
+            .take(2)
+            .all(|row| row.auth_mode == ImportAuthMode::OAuth)
+    );
     assert_eq!(parsed.preview.rows[2].status, ImportPreviewStatus::Invalid);
     assert_eq!(
         parsed.preview.rows[2]

@@ -1,0 +1,29 @@
+.landing-home .landing-language-switcher > .language-trigger { opacity: 1; visibility: visible; transition: opacity 120ms ease, visibility 0s; }
+.landing-home .landing-language-switcher[data-open] > .language-trigger { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 100ms ease, visibility 0s linear 100ms; }
+.landing-home .landing-language-choices { position: absolute; inset-block: 0; right: 0; display: flex; align-items: stretch; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain; touch-action: pan-x; scrollbar-width: none; border: 0; background: var(--bg); box-shadow: none; opacity: 0; visibility: hidden; pointer-events: none; clip-path: inset(0 0 0 calc(100% - var(--language-control-size)) round 8px); transition: opacity 120ms ease, clip-path 220ms cubic-bezier(.16, 1, .3, 1), visibility 0s linear 220ms; }
+.landing-home .landing-language-switcher[data-open] .landing-language-choices { opacity: 1; visibility: visible; pointer-events: auto; clip-path: inset(0 round 8px); transition-delay: 0s; }
+.landing-home .landing-language-choices::-webkit-scrollbar { display: none; }
+.landing-home .landing-language-choices:where([data-scroll-start]) { mask-image: linear-gradient(to right, transparent, #000 10px); }
+.landing-home .landing-language-choices:where([data-scroll-end]) { mask-image: linear-gradient(to left, transparent, #000 10px); }
+.landing-home .landing-language-choices:where([data-scroll-start][data-scroll-end]) { mask-image: linear-gradient(to right, transparent, #000 10px, #000 calc(100% - 10px), transparent); }
+.landing-home .landing-language-choice { flex: 0 0 var(--language-control-size); display: inline-flex; align-items: center; justify-content: center; min-width: var(--language-control-size); height: var(--language-control-size); padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--secondary); cursor: pointer; transition: background-color 120ms ease; }
+.landing-home .landing-language-choice[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.landing-home .landing-language-choices:focus-visible { outline: none; }
+.landing-home .landing-language-choices:focus-visible .landing-language-choice[data-active="true"] { background: var(--accent-soft); color: var(--accent); }
+@media (hover: hover) and (pointer: fine) {
+  .landing-home .landing-language-choice:hover { background: var(--accent-soft); color: var(--accent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-home .landing-language-switcher > .language-trigger,
+  .landing-home .landing-language-switcher[data-open] > .language-trigger,
+  .landing-home .landing-language-choices,
+  .landing-home .landing-language-switcher[data-open] .landing-language-choices,
+  .landing-home .landing-language-choice { transition: none; }
+}
+@media (forced-colors: active) {
+  .landing-home .landing-language-choice { color: ButtonText; }
+  .landing-home .landing-language-choices { mask-image: none; }
+  .landing-home .landing-language-choice .language-flag { forced-color-adjust: none; }
+  .landing-home .landing-language-choice[aria-selected="true"] { border-color: Highlight; }
+  .landing-home .landing-language-choices:focus-visible .landing-language-choice[data-active="true"] { outline: 1px solid Highlight; outline-offset: -3px; }
+}

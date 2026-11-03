@@ -1,5 +1,5 @@
 import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { remarkGfmReadOnly } from "./remarkGfmReadOnly";
 
 const allowedElements = [
   "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img",
@@ -11,5 +11,5 @@ const components: Components = {
 };
 
 export default function MarkdownDescription({ content }: { content: string }) {
-  return <div className="markdown-description"><ReactMarkdown skipHtml allowedElements={allowedElements} components={components} remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown></div>;
+  return <div className="markdown-description"><ReactMarkdown skipHtml allowedElements={allowedElements} components={components} remarkPlugins={[remarkGfmReadOnly]}>{content}</ReactMarkdown></div>;
 }

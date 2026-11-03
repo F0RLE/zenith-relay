@@ -5,8 +5,10 @@ pub(in crate::local_pool::accounts) async fn request_subscription_metadata(
     request_timeout: Duration,
     now_ms: u64,
     http_scope: &ManagementHttpScope,
-) -> Option<CodexSubscriptionMetadata> {
-    let authorization = prepared.subscription_authorization.clone()?;
+) -> std::result::Result<Option<CodexSubscriptionRead>, QuotaRefreshFailure> {
+    let Some(authorization) = prepared.subscription_authorization.clone() else {
+        return Ok(None);
+    };
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(request_timeout);
@@ -15,13 +17,94 @@ pub(in crate::local_pool::accounts) async fn request_subscription_metadata(
         None => builder,
     }
     .build()
-    .ok()?;
-    CodexSubscriptionClient::new(client)
-        .ok()?
+    .map_err(|_| QuotaRefreshFailure::new(error_codes::SUBSCRIPTION_CONFIGURATION, false))?;
+    CodexSubscriptionClient::new(client)?
         .with_http_scope(http_scope.clone())
-        .fetch_authorized(authorization, &prepared.provider_account_id, now_ms)
+        .read_authorized(authorization, &prepared.provider_account_id, now_ms)
         .await
-        .ok()
+        .map(Some)
+}
+
+pub(super) fn record_subscription_failure(
+    account_id: &str,
+    prepared: &PreparedAccountAuthorization,
+    failure: &QuotaRefreshFailure,
+    elapsed: Duration,
+) {
+    // Optional metadata failure is diagnostic, not an account/quota rejection.
+    crate::diagnostics::record_error(
+        "account-subscription-probe",
+        Some(&failure.code),
+        "account subscription check failed",
+        &[
+            ("account", crate::diagnostics::hash_identifier(account_id)),
+            (
+                "request_route",
+                if prepared.proxy.is_some() {
+                    "configured_proxy"
+                } else {
+                    "client_default"
+                }
+                .into(),
+            ),
+            (
+                "http_status",
+                failure
+                    .http_status()
+                    .map_or_else(|| "none".into(), |status| status.to_string()),
+            ),
+            ("retryable", failure.retryable.to_string()),
+            (
+                "retry_after_ms",
+                failure
+                    .retry_after_ms()
+                    .map_or_else(|| "unreported".into(), |delay| delay.to_string()),
+            ),
+            ("elapsed_ms", elapsed.as_millis().to_string()),
+            (
+                "oauth_client_kind",
+                format!("{:?}", prepared.oauth_client_kind),
+            ),
+            ("cf_ray", failure.cf_ray().unwrap_or("unreported").into()),
+            (
+                "endpoint_stage",
+                failure.endpoint_stage().unwrap_or("unknown").into(),
+            ),
+            (
+                "response_format",
+                failure.response_format().unwrap_or("unknown").into(),
+            ),
+            (
+                "response_mitigation",
+                failure.response_mitigation().unwrap_or("unreported").into(),
+            ),
+        ],
+    );
+}
+
+pub(super) fn apply_subscription_read(
+    quota: &mut QuotaRefreshOutcome,
+    subscription: &mut Subscription,
+    metadata: CodexSubscriptionMetadata,
+    observed_at_ms: u64,
+) {
+    apply_subscription_metadata(subscription, metadata, observed_at_ms);
+    match quota {
+        QuotaRefreshOutcome::Updated(result) => {
+            result.quota.subscription = Some(zenith_relay_core::quota::SubscriptionInput {
+                plan_type: subscription.plan_type.clone(),
+                active_until_ms: subscription.active_until_ms,
+                forbidden: false,
+                observed_at_ms,
+            });
+        }
+        QuotaRefreshOutcome::Failed {
+            subscription: previous,
+            ..
+        } => {
+            *previous = subscription.clone();
+        }
+    }
 }
 
 pub(in crate::local_pool::accounts) fn apply_subscription_metadata(
@@ -45,12 +128,47 @@ pub(in crate::local_pool::accounts) fn apply_subscription_metadata(
     });
 }
 
+pub(super) fn apply_partial_subscription_read(
+    quota: &mut QuotaRefreshOutcome,
+    subscription: &mut Subscription,
+    metadata: CodexSubscriptionMetadata,
+    observed_at_ms: u64,
+) {
+    let plan_changed = zenith_relay_core::quota::subscription_plan_changed(
+        subscription.plan_type.as_deref(),
+        metadata.plan_type.as_deref(),
+    );
+    let previous_updated_at_ms = subscription.updated_at_ms;
+    let mut plan_type = subscription.plan_type.clone();
+    let mut active_until_ms = subscription.active_until_ms;
+    // A failed expiry lookup cannot refresh or clear a retained same-plan date.
+    merge_subscription_metadata_at(&mut plan_type, &mut active_until_ms, metadata, None);
+    let mut partial = Subscription::normalize(zenith_relay_core::quota::SubscriptionInput {
+        plan_type,
+        active_until_ms,
+        forbidden: subscription.status == zenith_relay_core::quota::SubscriptionStatus::Forbidden,
+        observed_at_ms,
+    });
+    partial.updated_at_ms = if plan_changed {
+        None
+    } else {
+        previous_updated_at_ms
+    };
+    *subscription = partial;
+    if let QuotaRefreshOutcome::Failed {
+        subscription: previous,
+        ..
+    } = quota
+    {
+        *previous = subscription.clone();
+    }
+}
+
 pub(super) async fn request_account_quota_metadata(
     prepared: &PreparedAccountAuthorization,
     request_timeout: Duration,
     now_ms: u64,
     subscription: &Subscription,
-    refresh_subscription: bool,
     http_scope: &ManagementHttpScope,
 ) -> LocalResult<std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>> {
     let quota =
@@ -66,11 +184,11 @@ pub(super) async fn request_account_quota_metadata(
         request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
         quota.refresh_quota_with_subscription_authorization(
             prepared.authorization.clone(),
-            prepared.subscription_authorization.clone(),
+            None,
             &prepared.provider_account_id,
             now_ms,
             subscription,
-            refresh_subscription,
+            false,
         ),
     )
     .await)
@@ -79,13 +197,16 @@ pub(super) async fn request_account_quota_metadata(
 pub(super) fn respect_quota_retry_after(
     state: &DesktopState,
     scope: &AccountRefreshScope,
-    result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
+    refresh_result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
 ) {
-    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = result {
-        if let Some(delay) = failure.retry_after_ms() {
-            state
-                .refresh
-                .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
-        }
+    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = refresh_result
+        && let Some(delay) = failure.retry_after_ms()
+    {
+        state
+            .refresh
+            .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
     }
 }
+
+#[cfg(test)]
+mod tests;

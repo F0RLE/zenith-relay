@@ -34,13 +34,14 @@ const HISTORY_REPAIR_BACKUP_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 mod types;
 use types::{
-    BackupEntry, BackupTimestamp, DatabaseCatalogThreadSnapshot, DatabaseSnapshot,
-    DatabaseThreadSnapshot, RepairManifest, RepairSnapshot, RolloutCollection, RolloutSnapshot,
-    SessionMeta, SessionMetadata,
+    BackupEntry, DatabaseCatalogThreadSnapshot, DatabaseSnapshot, DatabaseThreadSnapshot,
+    RepairManifest, RepairSnapshot, RolloutCollection, RolloutSnapshot, SessionMeta,
+    SessionMetadata,
 };
 pub use types::{RepairPreview, RepairResult, RollbackResult, TargetProvider};
 
-pub fn preview(
+#[cfg(test)]
+fn preview(
     state_root: &Path,
     profile_roots: &[PathBuf],
     target_provider: TargetProvider,
@@ -55,18 +56,35 @@ pub fn preview(
     )
 }
 
+#[cfg(test)]
 fn preview_with_rewrite_budget(
     state_root: &Path,
     profile_roots: &[PathBuf],
     target_provider: TargetProvider,
     codex_running: bool,
+    remaining_rewrite_bytes: u64,
+) -> Result<RepairPreview, String> {
+    preview_for_provider(
+        state_root,
+        profile_roots,
+        target_provider.as_str(),
+        codex_running,
+        remaining_rewrite_bytes,
+    )
+}
+
+fn preview_for_provider(
+    state_root: &Path,
+    profile_roots: &[PathBuf],
+    target: &str,
+    codex_running: bool,
     mut remaining_rewrite_bytes: u64,
 ) -> Result<RepairPreview, String> {
+    validate_target_provider(target)?;
     if profile_roots.is_empty() || profile_roots.len() > MAX_PROFILES {
         return Err("repair must select between 1 and 8 profiles".to_string());
     }
     let roots = scan::canonical_profile_roots(profile_roots)?;
-    let target = target_provider.as_str();
     let mut rollout_files = Vec::new();
     let mut history_rollouts = Vec::new();
     let mut databases = Vec::new();
@@ -88,7 +106,7 @@ fn preview_with_rewrite_budget(
         let profile_history_rollouts = collected_rollouts.history;
         let eligible_rollout_paths = profile_history_rollouts
             .iter()
-            .map(|item| item.path.clone())
+            .map(|rollout_file| rollout_file.path.clone())
             .collect::<HashSet<_>>();
         let mut eligible_thread_ids =
             scan::session_ids_from_rollouts(profile_history_rollouts.iter());
@@ -160,14 +178,15 @@ pub fn apply(
         .chain(snapshot.history_rollouts.iter())
         .collect::<Vec<_>>();
     for expected in &history_rollouts {
-        let current = scan::scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
-        if current.hash != expected.hash || current.records != expected.records {
+        let scanned_rollout =
+            scan::scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
+        if scanned_rollout.hash != expected.hash || scanned_rollout.records != expected.records {
             return Err("ChatGPT rollout files changed after repair preview".to_string());
         }
     }
     let eligible_rollout_paths = history_rollouts
         .iter()
-        .map(|item| item.path.clone())
+        .map(|rollout_file| rollout_file.path.clone())
         .collect::<HashSet<_>>();
     let mut eligible_thread_ids = scan::session_ids_from_rollouts(history_rollouts.iter().copied());
     for database in &snapshot.databases {
@@ -176,24 +195,23 @@ pub fn apply(
     for expected in &snapshot.databases {
         let profile_root =
             scan::profile_root_for_path(&snapshot.profile_roots, Path::new(&expected.path))?;
-        let current = scan::scan_database(
+        let scanned_database = scan::scan_database(
             &profile_root,
             Path::new(&expected.path),
             &snapshot.target_provider,
             &eligible_rollout_paths,
             &eligible_thread_ids,
         )?;
-        if current.hash != expected.hash || current.rows != expected.rows {
+        if scanned_database.hash != expected.hash || scanned_database.rows != expected.rows {
             return Err("ChatGPT history database changed after repair preview".to_string());
         }
     }
 
     let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
     let directory = backup_root.join(&backup_id);
-    fs::create_dir_all(&directory).map_err(io_error)?;
     let manifest = snapshot::create_backup(&directory, &backup_id, &snapshot)?;
-    let result = snapshot::apply_snapshot(&snapshot);
-    if let Err(error) = result {
+    let apply_result = snapshot::apply_snapshot(&snapshot);
+    if let Err(error) = apply_result {
         let rollback = snapshot::restore_manifest(&manifest, &directory);
         return Err(match rollback {
             Ok(_) => error,
@@ -206,8 +224,16 @@ pub fn apply(
     Ok(RepairResult {
         backup_id,
         backup_path: path_string(&directory),
-        rollout_records_changed: snapshot.rollout_files.iter().map(|item| item.records).sum(),
-        sqlite_rows_changed: snapshot.databases.iter().map(|item| item.rows).sum(),
+        rollout_records_changed: snapshot
+            .rollout_files
+            .iter()
+            .map(|rollout_file| rollout_file.records)
+            .sum(),
+        sqlite_rows_changed: snapshot
+            .databases
+            .iter()
+            .map(|database_snapshot| database_snapshot.rows)
+            .sum(),
     })
 }
 
@@ -217,14 +243,31 @@ pub fn synchronize(
     profile_root: &Path,
     target_provider: TargetProvider,
 ) -> Result<Option<RepairResult>, String> {
+    synchronize_provider(
+        state_root,
+        backup_root,
+        profile_root,
+        target_provider.as_str(),
+    )
+}
+
+/// Explicit connection recovery can target a user-defined provider captured in
+/// its snapshot. The manual command keeps its existing typed target choices.
+pub(super) fn synchronize_provider(
+    state_root: &Path,
+    backup_root: &Path,
+    profile_root: &Path,
+    target_provider: &str,
+) -> Result<Option<RepairResult>, String> {
     if !profile_root.is_dir() {
         return Ok(None);
     }
-    let preview = preview(
+    let preview = preview_for_provider(
         state_root,
         &[profile_root.to_path_buf()],
         target_provider,
         false,
+        MAX_TOTAL_REWRITE_BYTES,
     )?;
     if preview.rollout_record_count == 0 && preview.sqlite_row_count == 0 {
         let _ = fs::remove_file(snapshot::snapshot_path(state_root, &preview.session_id)?);
@@ -238,9 +281,16 @@ pub fn rollback(backup_root: &Path, backup_id: &str) -> Result<RollbackResult, S
     validate_id(backup_id, "history_repair_")?;
     let directory = backup_root.join(backup_id);
     let manifest_path = directory.join("manifest.json");
-    let manifest: RepairManifest =
-        serde_json::from_slice(&fs::read(&manifest_path).map_err(io_error)?)
-            .map_err(|_| "repair backup manifest is invalid".to_string())?;
+    let bytes = crate::files::read_regular_file_bounded(&manifest_path, MAX_REPAIR_MANIFEST_BYTES)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                "repair backup manifest is unsafe or too large".to_string()
+            } else {
+                io_error(error)
+            }
+        })?;
+    let manifest: RepairManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "repair backup manifest is invalid".to_string())?;
     if manifest.version != SNAPSHOT_VERSION || manifest.backup_id != backup_id {
         return Err("repair backup manifest is invalid".to_string());
     }

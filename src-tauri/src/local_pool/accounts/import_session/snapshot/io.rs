@@ -1,4 +1,4 @@
-use super::{ImportSessionError, ImportSessionErrorCode, SessionSnapshot, MAX_SNAPSHOT_BYTES};
+use super::{ImportSessionError, ImportSessionErrorCode, MAX_SNAPSHOT_BYTES, SessionSnapshot};
 use std::{
     fs,
     io::Write,
@@ -37,17 +37,19 @@ pub(in crate::local_pool::accounts::import_session) fn write_snapshot_new(
         ));
     }
     let temp = snapshot_temp_path(path);
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|_| {
-                ImportSessionError::new(
-                    ImportSessionErrorCode::SnapshotIo,
-                    "failed to create temporary import session snapshot",
-                )
-            })?;
+    // A failed exclusive open does not give this attempt ownership of an
+    // existing staging file. Only clean up after creating our own file.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|_| {
+            ImportSessionError::new(
+                ImportSessionErrorCode::SnapshotIo,
+                "failed to create temporary import session snapshot",
+            )
+        })?;
+    let write_result = (|| {
         file.write_all(&bytes).map_err(|_| {
             ImportSessionError::new(
                 ImportSessionErrorCode::SnapshotIo,
@@ -68,10 +70,10 @@ pub(in crate::local_pool::accounts::import_session) fn write_snapshot_new(
             )
         })
     })();
-    if result.is_err() {
+    if write_result.is_err() {
         let _ = remove_snapshot_file(&temp);
     }
-    result
+    write_result
 }
 
 pub(in crate::local_pool::accounts::import_session) fn ensure_import_dir(
@@ -108,18 +110,20 @@ pub(in crate::local_pool::accounts::import_session) fn snapshot_path(
     root: &Path,
     session_id: &str,
 ) -> Result<PathBuf, ImportSessionError> {
-    let session_id = validate_session_id(session_id)?;
-    Ok(root.join("imports").join(format!("{session_id}.json")))
+    let validated_session_id = validate_session_id(session_id)?;
+    Ok(root
+        .join("imports")
+        .join(format!("{validated_session_id}.json")))
 }
 
 pub(in crate::local_pool::accounts::import_session) fn prepared_snapshot_path(
     root: &Path,
     session_id: &str,
 ) -> Result<PathBuf, ImportSessionError> {
-    let session_id = validate_session_id(session_id)?;
+    let validated_session_id = validate_session_id(session_id)?;
     Ok(root
         .join("imports")
-        .join(format!("{session_id}.prepared.json")))
+        .join(format!("{validated_session_id}.prepared.json")))
 }
 
 pub(in crate::local_pool::accounts::import_session) fn snapshot_temp_path(path: &Path) -> PathBuf {
@@ -139,17 +143,17 @@ pub(in crate::local_pool::accounts::import_session) fn prepared_secret_ref(
 pub(in crate::local_pool::accounts::import_session) fn validate_session_id(
     session_id: &str,
 ) -> Result<String, ImportSessionError> {
-    let session_id = session_id.trim();
-    let uuid = Uuid::parse_str(session_id).map_err(|_| {
+    let trimmed_session_id = session_id.trim();
+    let uuid = Uuid::parse_str(trimmed_session_id).map_err(|_| {
         ImportSessionError::new(
             ImportSessionErrorCode::InvalidSessionId,
             "import session id is invalid",
         )
     })?;
     let canonical = uuid.hyphenated().to_string();
-    if !session_id.eq_ignore_ascii_case(&canonical)
-        || !session_id.is_ascii()
-        || session_id.len() != canonical.len()
+    if !trimmed_session_id.eq_ignore_ascii_case(&canonical)
+        || !trimmed_session_id.is_ascii()
+        || trimmed_session_id.len() != canonical.len()
     {
         return Err(ImportSessionError::new(
             ImportSessionErrorCode::InvalidSessionId,

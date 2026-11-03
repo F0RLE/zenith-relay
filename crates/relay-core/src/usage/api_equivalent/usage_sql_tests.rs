@@ -1,16 +1,8 @@
 #[test]
-fn usage_total_columns_keep_the_shared_activity_prefix_and_local_speed_guard() {
-    let server =
-        crate::usage_total_columns_sql!("MAX(COALESCE(output_tokens, 0), 0) <= latency_ms");
-    let desktop = crate::usage_total_columns_sql!("COALESCE(output_tokens, 0) <= latency_ms");
+fn usage_total_columns_keep_the_local_speed_guard() {
+    let desktop = crate::usage_total_columns_sql!();
     let marker = "COALESCE(SUM(total_tokens), 0)";
-    let server_at = server.find(marker).unwrap() + marker.len();
     let desktop_at = desktop.find(marker).unwrap() + marker.len();
-    assert_eq!(&server[..server_at], &desktop[..desktop_at]);
-    assert_eq!(
-        &server[server_at..],
-        ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND MAX(COALESCE(output_tokens, 0), 0) <= latency_ms THEN latency_ms ELSE 0 END), 0)"
-    );
     assert_eq!(
         &desktop[desktop_at..],
         ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN latency_ms ELSE 0 END), 0)"

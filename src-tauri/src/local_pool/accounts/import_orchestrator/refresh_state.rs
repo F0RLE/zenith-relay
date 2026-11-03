@@ -24,7 +24,8 @@ pub(in crate::local_pool::accounts) fn apply_quota_outcome_with_transitions(
     now_ms: u64,
 ) -> (AccountQuotaOutcome, Vec<QuotaTransition>) {
     match outcome {
-        QuotaRefreshOutcome::Updated(data) => match apply_quota_success(account, *data) {
+        QuotaRefreshOutcome::Updated(quota_data) => match apply_quota_success(account, *quota_data)
+        {
             Ok(applied) => (
                 AccountQuotaOutcome::Updated {
                     transitions: applied.transitions,
@@ -63,18 +64,18 @@ pub(in crate::local_pool::accounts) fn apply_quota_outcome_with_transitions(
 
 pub(in crate::local_pool::accounts) fn apply_model_discovery(
     account: &mut LocalAccountRecord,
-    result: std::result::Result<Vec<String>, ModelDiscoveryFailure>,
+    discovery_result: std::result::Result<Vec<String>, ModelDiscoveryFailure>,
 ) -> bool {
     let previous_models = account.effective_models().to_vec();
-    match result {
+    match discovery_result {
         Ok(models) => {
-            let state = &mut account.account;
+            let account_state = &mut account.account;
             if accept_discovered_models(
                 &mut account.models,
                 &mut account.discovered_models,
-                &mut state.auth_state,
-                &mut state.health,
-                &mut state.last_error_code,
+                &mut account_state.auth_state,
+                &mut account_state.health,
+                &mut account_state.last_error_code,
                 crate::local_pool::models::normalized_values(models),
             ) {
                 account.normalize();
@@ -95,11 +96,11 @@ pub(in crate::local_pool::accounts) fn apply_model_discovery_failure(
     code: &str,
     retryable: bool,
 ) {
-    let state = &mut account.account;
+    let account_state = &mut account.account;
     apply_account_model_discovery_failure(
-        &mut state.auth_state,
-        &mut state.health,
-        &mut state.last_error_code,
+        &mut account_state.auth_state,
+        &mut account_state.health,
+        &mut account_state.last_error_code,
         code,
         retryable,
     );

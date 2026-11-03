@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 
 mod cache_lifecycle;
 mod scheduling;

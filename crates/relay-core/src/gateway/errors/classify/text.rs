@@ -32,6 +32,13 @@ impl Rule {
 
 const RULES: &[Rule] = &[
     Rule::Phrases(
+        &[
+            "turn_rate_limit_exceeded",
+            error_codes::UPSTREAM_TURN_RATE_LIMITED,
+        ],
+        error_codes::UPSTREAM_TURN_RATE_LIMITED,
+    ),
+    Rule::Phrases(
         &[error_codes::UPSTREAM_ROUTE_DEGRADED],
         error_codes::UPSTREAM_ROUTE_DEGRADED,
     ),
@@ -58,6 +65,7 @@ const RULES: &[Rule] = &[
             "previous response not found",
             "no response found for previous_response_id",
             "unknown or expired previous_response_id",
+            super::super::UNSTORED_PREVIOUS_RESPONSE_MESSAGE,
         ],
         error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND,
     ),
@@ -81,6 +89,7 @@ const RULES: &[Rule] = &[
             "thinking_signature_invalid",
             "invalid signature in thinking block",
             "encrypted content could not be verified",
+            "encrypted content could not be decrypted or parsed",
         ],
         error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
     ),
@@ -124,7 +133,11 @@ const RULES: &[Rule] = &[
         error_codes::UPSTREAM_CONTENT_POLICY,
     ),
     Rule::Phrases(
-        &["model access has changed"],
+        &[
+            "model access has changed",
+            "basispoints_model_access_changed",
+            "model_not_allowed",
+        ],
         error_codes::UPSTREAM_MODEL_UNAVAILABLE,
     ),
     Rule::Custom(quota_exhausted),
@@ -174,6 +187,7 @@ const RULES: &[Rule] = &[
     Rule::Phrases(
         &[
             "model_at_capacity",
+            "model_capacity_exhausted",
             "selected model is at capacity",
             "model is at capacity",
         ],
@@ -196,6 +210,7 @@ const RULES: &[Rule] = &[
     ),
     Rule::Phrases(
         &[
+            error_codes::UPSTREAM_RATE_LIMITED,
             "rate_limit_exceeded",
             "rate_limit_error",
             "rate_limit_reached",
@@ -324,7 +339,12 @@ fn unauthorized(status: StatusCode, text: &str) -> Option<&'static str> {
         .then_some(error_codes::UPSTREAM_UNAUTHORIZED)
 }
 
-fn invalid_request(_status: StatusCode, text: &str) -> Option<&'static str> {
+fn invalid_request(status: StatusCode, text: &str) -> Option<&'static str> {
+    // Some providers label body validation failures as server_error. The
+    // explicit 422 rejection must not penalize accounts or trigger failover.
+    if status == StatusCode::UNPROCESSABLE_ENTITY && text.contains("invalid request body") {
+        return Some(error_codes::UPSTREAM_INVALID_REQUEST);
+    }
     (text_has_any(
         text,
         &[
@@ -346,6 +366,9 @@ fn invalid_request(_status: StatusCode, text: &str) -> Option<&'static str> {
                 "expected an id that begins with 'ctc_'",
                 "expected an id that starts with 'ctc'",
                 "expected an id that begins with 'msg'",
+                "expected an id that begins with 'tsc'",
+                "expected an id that begins with 'tsc_'",
+                "expected an id that starts with 'tsc'",
             ],
         )))
     .then_some(error_codes::UPSTREAM_INVALID_REQUEST)
@@ -411,7 +434,7 @@ fn server_error_text(_status: StatusCode, text: &str) -> Option<&'static str> {
 
 fn edge_challenge(status: StatusCode, text: &str) -> Option<&'static str> {
     (status == StatusCode::FORBIDDEN
-        && text_has_any(
+        && (text_has_any(
             text,
             &[
                 "cf-mitigated",
@@ -421,7 +444,7 @@ fn edge_challenge(status: StatusCode, text: &str) -> Option<&'static str> {
                 "attention required",
                 "just a moment",
             ],
-        ))
+        ) || (text.trim_start().starts_with('<') && text.contains("error code: 1010"))))
     .then_some(error_codes::UPSTREAM_EDGE_CHALLENGE)
 }
 

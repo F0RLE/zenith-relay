@@ -1,11 +1,11 @@
 use super::*;
 use crate::quota::{QuotaSnapshot, SubscriptionStatus};
-use crate::DefaultServiceTier;
+use crate::{CandidateQuota, DefaultServiceTier, QUOTA_STALE_AFTER_MS};
 use axum::{
+    Json, Router,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
-    Json, Router,
 };
 use serde_json::json;
 
@@ -37,10 +37,12 @@ fn chatgpt_adapter_implements_the_shared_quota_contract() {
     .unwrap();
     let adapter: &dyn QuotaAdapter = &client;
     assert!(adapter.capabilities().supports_quota);
-    assert!(adapter
-        .capabilities()
-        .supported_windows
-        .contains(&QuotaWindowKind::Primary));
+    assert!(
+        adapter
+            .capabilities()
+            .supported_windows
+            .contains(&QuotaWindowKind::Primary)
+    );
 }
 
 #[test]
@@ -111,7 +113,7 @@ fn usage_payload_has_one_normalized_shape() {
 }
 
 #[test]
-fn provider_credits_follow_the_explicit_cockpit_ledger_shapes() {
+fn provider_credits_follow_the_explicit_ledger_shapes() {
     for (body, micro_units, available, unlimited) in [
         (r#"{}"#, None, false, false),
         (r#"{"credits":{"balance":"0"}}"#, Some(0), false, false),
@@ -191,6 +193,115 @@ fn reset_credit_count_accepts_provider_variants() {
                 .quota
                 .reset_credits_available,
             expected
+        );
+    }
+}
+
+#[test]
+fn empty_limit_markers_do_not_override_available_quota() {
+    for marker in [
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!(""),
+        serde_json::json!(" \t "),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let body = serde_json::json!({
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {"used_percent": 0, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 0, "limit_window_seconds": 604800}
+            },
+            "rate_limit_reached_type": marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, Some(true));
+        assert_eq!(data.reported_limit_reached, Some(false), "marker={marker}");
+        assert!(!data.quota.limit_reached, "marker={marker}");
+
+        let previously_exhausted = QuotaSnapshot {
+            limit_reached: true,
+            ..Default::default()
+        };
+        let (snapshot, _) = data.quota.normalize(&previously_exhausted).unwrap();
+        for window in [&snapshot.primary, &snapshot.secondary] {
+            assert_eq!(
+                window.as_ref().unwrap().available_basis_points,
+                Some(10_000)
+            );
+        }
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Available(10_000),
+            "marker={marker}"
+        );
+    }
+}
+
+#[test]
+fn populated_limit_markers_still_override_available_counters() {
+    for marker in [
+        serde_json::json!(true),
+        serde_json::json!("rate_limit_reached"),
+        serde_json::json!({"type":"rate_limit_reached"}),
+        serde_json::json!({"future_provider_limit":"synthetic"}),
+    ] {
+        let body = serde_json::json!({
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {"used_percent": 0}
+            },
+            "rate_limit_reached_type": marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 1_000).unwrap();
+        assert_eq!(data.reported_limit_reached, Some(true), "marker={marker}");
+        assert!(data.quota.limit_reached, "marker={marker}");
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Exhausted,
+            "marker={marker}"
+        );
+    }
+}
+
+#[test]
+fn empty_limit_markers_neither_clear_rejections_nor_invent_allowance() {
+    for marker in [
+        serde_json::json!(false),
+        serde_json::json!(""),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let blocked = serde_json::json!({
+            "rate_limit": {"allowed":false,"limit_reached":true},
+            "rate_limit_reached_type":marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&blocked).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, Some(false));
+        assert_eq!(data.reported_limit_reached, Some(true));
+        assert!(data.quota.limit_reached);
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Exhausted,
+            "marker={marker}"
+        );
+
+        let unknown = serde_json::json!({"rate_limit_reached_type":marker});
+        let data = parse_codex_usage(&serde_json::to_vec(&unknown).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, None);
+        assert_eq!(data.reported_limit_reached, None);
+        assert!(data.quota.primary.is_none());
+        assert!(data.quota.secondary.is_none());
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Unknown,
+            "marker={marker}"
         );
     }
 }
@@ -344,7 +455,53 @@ async fn quota_refresh_drops_an_expiry_from_a_different_subscription_plan() {
 }
 
 #[tokio::test]
-async fn failed_subscription_probe_keeps_metadata_and_advances_refresh_time() {
+async fn cleared_subscription_date_stays_absent_during_later_quota_polls() {
+    let router = Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            get(successful_usage_without_plan),
+        )
+        .route(
+            "/backend-api/accounts/check/v4-2023-04-27",
+            get(subscription_account_check),
+        )
+        .route(
+            "/backend-api/subscriptions",
+            get(subscription_status_without_expiry),
+        );
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let mut subscription = Subscription {
+        plan_type: Some("business".into()),
+        active_until_ms: Some(1_600_000_000_000),
+        status: SubscriptionStatus::Expired,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    for (offset, refresh_subscription) in [(0, true), (1_000, false), (2_000, false)] {
+        let data = client
+            .refresh_data_with_subscription(
+                "access-secret",
+                "account-123",
+                now_ms + offset,
+                &subscription,
+                refresh_subscription,
+            )
+            .await
+            .unwrap();
+        let (_, observed) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        if let Some(observed) = observed {
+            subscription = observed;
+        }
+        assert_eq!(subscription.active_until_ms, None);
+        assert_eq!(subscription.status, SubscriptionStatus::Active);
+        assert_eq!(subscription.updated_at_ms, Some(now_ms));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_subscription_probe_preserves_metadata_and_refresh_time() {
     let router = Router::new()
         .route(
             "/backend-api/wham/usage",
@@ -375,7 +532,148 @@ async fn failed_subscription_probe_keeps_metadata_and_advances_refresh_time() {
     let subscription = subscription.unwrap();
     assert_eq!(subscription.plan_type, previous.plan_type);
     assert_eq!(subscription.active_until_ms, previous.active_until_ms);
+    assert_eq!(subscription.updated_at_ms, previous.updated_at_ms);
+    server.abort();
+}
+
+#[tokio::test]
+async fn quota_only_or_unsupported_subscription_read_keeps_expiry_freshness() {
+    let router = Router::new().route("/backend-api/wham/usage", get(successful_usage));
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("pro".into()),
+        active_until_ms: Some(1_800_000_000_000),
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(1_700_000_000_000),
+    };
+    for refresh_subscription in [false, true] {
+        let now_ms = previous.updated_at_ms.unwrap() + 30 * 60 * 1_000;
+        let data = client
+            .refresh_data_with_subscription_authorization(
+                bearer_authorization("access-secret").unwrap(),
+                None,
+                "account-123",
+                now_ms,
+                &previous,
+                refresh_subscription,
+            )
+            .await
+            .unwrap();
+        let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        let subscription = subscription.unwrap();
+        assert_eq!(subscription, previous);
+        assert!(crate::providers::chatgpt::subscription_refresh_due(
+            subscription.active_until_ms,
+            subscription.updated_at_ms,
+            now_ms,
+        ));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn quota_plan_change_without_subscription_access_drops_unrelated_expiry() {
+    let router = Router::new().route("/backend-api/wham/usage", get(successful_usage));
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("plus".into()),
+        active_until_ms: Some(1_800_000_000_000),
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    let data = client
+        .refresh_data_with_subscription_authorization(
+            bearer_authorization("access-secret").unwrap(),
+            None,
+            "account-123",
+            now_ms,
+            &previous,
+            true,
+        )
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    let subscription = subscription.unwrap();
+    assert_eq!(subscription.plan_type.as_deref(), Some("pro"));
+    assert_eq!(subscription.active_until_ms, None);
     assert_eq!(subscription.updated_at_ms, Some(now_ms));
+    server.abort();
+}
+
+#[tokio::test]
+async fn missing_subscription_expiry_recovers_after_a_rate_limited_fallback() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let fallback_attempts = attempts.clone();
+    let router = Router::new()
+        .route(
+            "/backend-api/wham/usage",
+            get(successful_usage_without_plan),
+        )
+        .route(
+            "/backend-api/accounts/check/v4-2023-04-27",
+            get(subscription_account_check),
+        )
+        .route(
+            "/backend-api/subscriptions",
+            get(move || {
+                let attempts = fallback_attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "60")],
+                            "private-body",
+                        )
+                            .into_response()
+                    } else {
+                        Json(json!({
+                            "subscription_plan": "business",
+                            "active_until": 1_800_000_000_000_u64,
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+    let (usage_endpoint, server) = spawn(router).await;
+    let client = client_with_subscription(usage_endpoint);
+    let previous = Subscription {
+        plan_type: Some("business".into()),
+        active_until_ms: None,
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(99),
+    };
+    let now_ms = 1_700_000_000_000;
+    let data = client
+        .refresh_data_with_subscription("access-secret", "account-123", now_ms, &previous, true)
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    assert_eq!(subscription.as_ref(), Some(&previous));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+    let data = client
+        .refresh_data_with_subscription(
+            "access-secret",
+            "account-123",
+            now_ms + 60_000,
+            &previous,
+            true,
+        )
+        .await
+        .unwrap();
+    let (_, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+    let subscription = subscription.unwrap();
+    assert_eq!(subscription.active_until_ms, Some(1_800_000_000_000));
+    assert_eq!(subscription.updated_at_ms, Some(now_ms + 60_000));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     server.abort();
 }
 

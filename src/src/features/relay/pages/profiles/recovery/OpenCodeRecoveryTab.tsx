@@ -15,7 +15,7 @@ export function OpenCodeRecoveryHeaderAction() {
       variant="secondary"
       icon={<FolderOpen aria-hidden />}
       busy={busy === "opencode-open-folder"}
-      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened", { backgroundRefresh: true })}
+      onClick={() => perform("opencode-open-folder", () => relayCommands.openFolder("opencode_backups"), "feedback.opened", { skipRefresh: true })}
     >
       {t("profiles.openFolder")}
     </Button>
@@ -34,10 +34,10 @@ export function OpenCodeRecoveryTab() {
   useEffect(refreshStatus, [refreshStatus]);
 
   const hasSnapshot = Boolean(status?.hasBackup);
-  const snapshotDate = (value: number | null | undefined) => value ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "-";
+  const snapshotDate = (createdAtMs: number | null | undefined) => createdAtMs ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(createdAtMs)) : "-";
   const createSnapshot = async () => {
-    const name = snapshotName.trim();
-    if (name && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(name), "feedback.openCodeSnapshotCreated", { backgroundRefresh: true })) {
+    const normalizedSnapshotName = snapshotName.trim();
+    if (normalizedSnapshotName && !hasSnapshot && await perform("opencode-snapshot-create", () => relayCommands.createOpenCodeSnapshot(normalizedSnapshotName), "feedback.openCodeSnapshotCreated", { backgroundRefresh: true })) {
       setSnapshotName("");
       refreshStatus();
     }

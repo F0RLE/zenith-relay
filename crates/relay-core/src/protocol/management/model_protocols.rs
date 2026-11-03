@@ -1,7 +1,6 @@
 use super::{AccountSummary, ModelSummary, SourceSummary};
 use crate::{
-    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter,
-    SourceProtocolResolution, WireApi,
+    CapabilityStatus, MessagesReasoningMode, ModelRules, ProtocolFeature, SourceAdapter, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,14 +26,14 @@ impl ModelProtocolRoute {
         if self.reasoning_efforts.is_empty() {
             self.reasoning_efforts = fallback.to_vec();
         }
+        self.reasoning_efforts =
+            crate::canonicalize_reasoning_levels(std::mem::take(&mut self.reasoning_efforts));
         let adapter = SourceAdapter::between(self.client_wire_api, self.upstream_wire_api);
         self.reasoning_efforts.retain(|effort| {
             adapter.is_some_and(|adapter| {
                 adapter.supports_reasoning_effort(MessagesReasoningMode::Adaptive, effort)
             })
         });
-        self.reasoning_efforts =
-            crate::canonicalize_reasoning_levels(std::mem::take(&mut self.reasoning_efforts));
     }
 }
 
@@ -44,6 +43,7 @@ impl ModelProtocolRoute {
 pub(super) struct ModelProtocolIndex {
     routes: BTreeMap<String, Vec<ModelProtocolRoute>>,
     cache_write_models: BTreeSet<String>,
+    service_tiers: BTreeMap<String, Vec<crate::DefaultServiceTier>>,
 }
 
 impl ModelProtocolIndex {
@@ -56,9 +56,10 @@ impl ModelProtocolIndex {
                 allowed: source.allowed_models.iter().cloned().collect(),
                 excluded: source.excluded_models.iter().cloned().collect(),
             };
-            for binding in
-                SourceProtocolResolution::resolved_protocol_bindings(source).unwrap_or_default()
-            {
+            let route_capabilities = source
+                .protocol_config
+                .effective_capabilities(&source.base_url, &source.models);
+            for binding in source.routed_bindings() {
                 let upstream = binding
                     .adapter
                     .upstream_protocol(binding.wire_api)
@@ -71,6 +72,14 @@ impl ModelProtocolIndex {
                         index.cache_write_models.insert(key.clone());
                     }
                     if enabled && rules.allows(&model) {
+                        let declared = route_capabilities
+                            .iter()
+                            .find(|route| {
+                                route.upstream_wire_api == upstream
+                                    && crate::model_id_key(&route.model_id) == key
+                            })
+                            .and_then(|route| route.service_tiers.as_deref());
+                        index.insert_service_tiers(&key, upstream, false, declared);
                         index.insert(key, binding.wire_api, upstream);
                     }
                 }
@@ -88,7 +97,14 @@ impl ModelProtocolIndex {
                 excluded: account.excluded_models.iter().cloned().collect(),
             };
             for model in account.models.iter().filter(|model| rules.allows(model)) {
-                for client in WireApi::ALL {
+                index.insert_service_tiers(
+                    &crate::model_id_key(model),
+                    WireApi::Responses,
+                    account.oauth_client_kind
+                        == crate::providers::chatgpt::OAuthClientKind::ExcelBps,
+                    None,
+                );
+                for client in WireApi::ALL_NATIVE {
                     index.insert(crate::model_id_key(model), client, WireApi::Responses);
                 }
             }
@@ -124,6 +140,43 @@ impl ModelProtocolIndex {
         self.cache_write_models
             .contains(&crate::model_id_key(model))
     }
+
+    fn insert_service_tiers(
+        &mut self,
+        model: &str,
+        upstream: WireApi,
+        basis_points: bool,
+        declared: Option<&[crate::DefaultServiceTier]>,
+    ) {
+        let available = self.service_tiers.entry(model.to_string()).or_default();
+        for tier in [
+            crate::DefaultServiceTier::Standard,
+            crate::DefaultServiceTier::Fast,
+            crate::DefaultServiceTier::Ultrafast,
+        ] {
+            if crate::catalog::transport_supports_service_tier(
+                tier,
+                upstream,
+                basis_points,
+                declared,
+            ) && !available.contains(&tier)
+            {
+                available.push(tier);
+            }
+        }
+    }
+
+    pub(super) fn supports_service_tier(
+        &self,
+        model: &str,
+        tier: crate::DefaultServiceTier,
+    ) -> bool {
+        tier == crate::DefaultServiceTier::Standard
+            || self
+                .service_tiers
+                .get(&crate::model_id_key(model))
+                .is_some_and(|tiers| tiers.contains(&tier))
+    }
 }
 
 pub fn apply_model_protocol_routes(
@@ -135,18 +188,6 @@ pub fn apply_model_protocol_routes(
     for model in models {
         model.protocol_routes = index.routes_for(&model.id);
     }
-}
-
-pub fn codex_catalog_supports_websockets(models: &[ModelSummary]) -> bool {
-    !models
-        .iter()
-        .filter(|model| model.enabled && model.codex_visible)
-        .any(|model| {
-            model.protocol_routes.iter().any(|route| {
-                route.client_wire_api == WireApi::Responses
-                    && route.upstream_wire_api != WireApi::Responses
-            })
-        })
 }
 
 #[cfg(test)]
@@ -192,6 +233,7 @@ mod tests {
                 cache_write_5m_micro_usd_per_million: Some(1_250_000),
                 cache_write_1h_micro_usd_per_million: Some(2_000_000),
                 output_micro_usd_per_million: 5_000_000,
+                ..Default::default()
             },
         )]);
         super::super::apply_pool_model_configuration(
@@ -211,15 +253,17 @@ mod tests {
                 continue;
             }
             assert_eq!(model.protocol_routes.len(), 4);
-            assert!(model
-                .protocol_routes
-                .iter()
-                .all(|route| route.upstream_wire_api
-                    == if i % 2 == 0 {
-                        WireApi::Messages
-                    } else {
-                        WireApi::Responses
-                    }));
+            assert!(
+                model
+                    .protocol_routes
+                    .iter()
+                    .all(|route| route.upstream_wire_api
+                        == if i % 2 == 0 {
+                            WireApi::Messages
+                        } else {
+                            WireApi::Responses
+                        })
+            );
         }
         let offline = models.last().unwrap();
         assert!(offline.protocol_routes.is_empty());
@@ -249,7 +293,7 @@ mod tests {
             }]}
         }))
         .unwrap();
-        let expected = source
+        let rejected = source
             .protocol_config
             .resolve(
                 &source.base_url,
@@ -261,6 +305,21 @@ mod tests {
         let mut other = source.clone();
         other.id = "second-source".into();
         other.protocol_config.capabilities.clear();
+        assert!(rejected.is_empty());
+        assert!(
+            ModelProtocolIndex::new(std::slice::from_ref(&source), &[])
+                .routes_for("future-model")
+                .is_empty()
+        );
+        let expected = other
+            .protocol_config
+            .resolve(
+                &other.base_url,
+                &other.models,
+                &other.protocol_bindings,
+                other.wire_api,
+            )
+            .unwrap();
         let index = ModelProtocolIndex::new(&[source, other], &[]);
         let routes = index.routes_for("future-model");
         assert_eq!(routes, index.routes_for("FUTURE-MODEL"));
@@ -281,13 +340,13 @@ mod tests {
 
     #[test]
     fn reasoning_projection_uses_the_selected_route_and_honors_explicit_unsupported() {
-        let fallback = ["minimal", "low", "high", "max", "ultra"].map(str::to_owned);
+        let fallback = ["minimal", "low", "high", "Very high", "max", "ultra"].map(str::to_owned);
         for (upstream, expected) in [
             (
                 WireApi::Responses,
-                vec!["minimal", "low", "high", "max", "ultra"],
+                vec!["minimal", "low", "high", "xhigh", "max", "ultra"],
             ),
-            (WireApi::Messages, vec!["low", "high", "max"]),
+            (WireApi::Messages, vec!["low", "high", "xhigh", "max"]),
             (WireApi::Gemini, vec!["minimal", "low", "high"]),
         ] {
             let mut route = ModelProtocolRoute {
@@ -304,31 +363,5 @@ mod tests {
             route.project_reasoning(&fallback);
             assert!(route.reasoning_efforts.is_empty());
         }
-    }
-
-    #[test]
-    fn codex_disables_websockets_when_a_visible_model_has_a_converted_fallback() {
-        let mut model: ModelSummary = serde_json::from_value(
-            json!({"id":"test","enabled":true,"memberCount":1,"codexVisible":true}),
-        )
-        .unwrap();
-        let route = ModelProtocolRoute {
-            client_wire_api: WireApi::Responses,
-            upstream_wire_api: WireApi::Responses,
-            features: BTreeMap::new(),
-            reasoning_efforts: Vec::new(),
-        };
-        model.protocol_routes.push(route.clone());
-        assert!(codex_catalog_supports_websockets(&[model.clone()]));
-        model.protocol_routes.push(ModelProtocolRoute {
-            upstream_wire_api: WireApi::Messages,
-            ..route
-        });
-        assert!(!codex_catalog_supports_websockets(&[model.clone()]));
-        model.enabled = false;
-        assert!(codex_catalog_supports_websockets(&[model.clone()]));
-        model.enabled = true;
-        model.codex_visible = false;
-        assert!(codex_catalog_supports_websockets(&[model]));
     }
 }

@@ -119,3 +119,54 @@ fn account_requests_drop_unusable_reasoning_ids_when_history_is_not_stored() {
     assert_eq!(request.pointer("/input/2/id").unwrap(), "rs_valid");
     assert_eq!(request.pointer("/input/3/id").unwrap(), "msg_1");
 }
+#[test]
+fn generated_account_cache_keys_are_stable_scoped_and_do_not_replace_client_values() {
+    let generate = |local_key: &str, model: &str, context: Option<&str>| {
+        let mut fields = serde_json::Map::new();
+        super::apply_account_prompt_cache_key(&mut fields, local_key, model, context);
+        fields.remove("prompt_cache_key")
+    };
+    let expected = generate("local-key", "synthetic-model", Some("synthetic-session"));
+    assert_eq!(
+        expected,
+        generate("local-key", "synthetic-model", Some("synthetic-session"))
+    );
+    assert_ne!(
+        expected,
+        generate("other-key", "synthetic-model", Some("synthetic-session"))
+    );
+    assert_ne!(
+        expected,
+        generate("local-key", "other-model", Some("synthetic-session"))
+    );
+    assert_ne!(
+        expected,
+        generate("local-key", "synthetic-model", Some("other-session"))
+    );
+    assert!(generate("local-key", "synthetic-model", None).is_none());
+    assert!(generate("local-key", "synthetic-model", Some("")).is_none());
+    let value = expected.unwrap();
+    let value = value.as_str().unwrap();
+    assert!(value.starts_with("relay_"));
+    assert!(!value.contains("synthetic-session"));
+    assert_eq!(value.len(), "relay_".len() + 64);
+    for client_value in [
+        serde_json::json!("explicit-key"),
+        serde_json::Value::Null,
+        serde_json::json!(7),
+    ] {
+        let mut fields =
+            serde_json::json!({"input":"Synthetic input","prompt_cache_key":client_value})
+                .as_object()
+                .unwrap()
+                .clone();
+        let original = fields.clone();
+        super::apply_account_prompt_cache_key(
+            &mut fields,
+            "local-key",
+            "synthetic-model",
+            Some("synthetic-session"),
+        );
+        assert_eq!(fields, original);
+    }
+}

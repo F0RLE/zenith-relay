@@ -161,7 +161,7 @@ async fn no_url_credentials_or_unbounded_origin_are_retained() {
 
 #[tokio::test]
 async fn send_holds_the_permit_until_the_response_body_is_read() {
-    use axum::{body::Body, routing::get, Router};
+    use axum::{Router, body::Body, routing::get};
     use futures_util::stream;
     use std::convert::Infallible;
     use tokio::sync::Notify;
@@ -232,7 +232,7 @@ async fn send_holds_the_permit_until_the_response_body_is_read() {
 
 #[tokio::test]
 async fn post_401_retry_needs_a_new_permit() {
-    use axum::{http::StatusCode, routing::get, Router};
+    use axum::{Router, http::StatusCode, routing::get};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -274,7 +274,7 @@ async fn post_401_retry_needs_a_new_permit() {
 
 #[tokio::test]
 async fn revision_changed_while_waiting_never_reaches_the_http_handler() {
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let hits = Arc::new(AtomicUsize::new(0));

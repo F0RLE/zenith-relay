@@ -1,0 +1,96 @@
+/* One shared table header; editing and confirmation stay in the page. */
+.hosted-app .api-keys-page { min-width: 0; }
+.hosted-app .api-keys-page > .page-heading { justify-content: flex-start; gap: 16px 24px; }
+.hosted-app .keys-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.hosted-app .keys-table .key-name-column { width: 12%; }
+.hosted-app .keys-table .key-token-column { width: 9%; }
+.hosted-app .keys-table .key-status-column { width: 10%; }
+.hosted-app .keys-table .key-models-column { width: 10%; }
+.hosted-app .keys-table .key-limit-column, .hosted-app .keys-table .key-expiry-column { width: 16%; }
+.hosted-app .keys-table .key-actions-column { width: 27%; }
+.hosted-app .keys-table th { height: 48px; padding: 0 8px; background: var(--subtle); border-bottom: 1px solid var(--border); color: var(--secondary); font-size: 12px; font-weight: 550; text-align: center; white-space: nowrap; }
+.hosted-app .keys-table th[aria-sort] { padding-inline: 0; }
+.hosted-app .key-sort { position: relative; display: block; width: 100%; min-height: 48px; padding: 8px calc(var(--control-chevron-inset) + 14px); border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.hosted-app .key-sort .relay-icon { position: absolute; inset-inline-end: var(--control-chevron-inset); top: calc(50% - 7px); width: 14px; height: 14px; color: var(--muted); }
+.hosted-app .keys-table th[aria-sort="ascending"] .key-sort, .hosted-app .keys-table th[aria-sort="descending"] .key-sort, .hosted-app .keys-table th[aria-sort="ascending"] .relay-icon, .hosted-app .keys-table th[aria-sort="descending"] .relay-icon { color: var(--accent); }
+.hosted-app .key-row > td { height: 64px; padding: 10px 8px; box-sizing: border-box; border-bottom: 1px solid var(--border); text-align: center; vertical-align: middle; min-width: 0; }
+.hosted-app .keys-table > tbody:last-child > tr:last-child > td { border-bottom: 0; }
+.hosted-app .key-identity h2, .hosted-app .key-editor h2, .hosted-app .key-reveal h2 { margin: 0; color: var(--text); font-size: 15px; line-height: 22px; font-weight: 550; overflow-wrap: anywhere; }
+.hosted-app .key-identity h2 { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hosted-app .key-status .status-badge { font-size: 11px; white-space: nowrap; }
+.hosted-app .key-token code { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.hosted-app .key-cell-label { display: none; }
+.hosted-app .key-cell-value { display: block; color: var(--secondary); font-size: 12px; line-height: 18px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hosted-app .key-model-cell .key-cell-value { overflow: hidden; text-overflow: ellipsis; }
+.hosted-app .key-actions { display: flex; justify-content: center; align-items: center; gap: 4px; }
+.hosted-app .key-actions .key-action { padding: 8px 4px; background: transparent; border-color: transparent; box-shadow: none; }
+.hosted-app .key-actions .button { flex-shrink: 0; white-space: nowrap; font-size: 12px; }
+.hosted-app .key-actions .key-action[aria-expanded="true"] { color: var(--accent); background: var(--accent-soft); }
+.hosted-app .key-actions-pending { flex-wrap: wrap; }
+.hosted-app .key-actions .key-confirm-action { background: var(--accent-soft); border-color: transparent; color: var(--accent); padding: 8px 12px; }
+.hosted-app .key-actions .key-confirm-revoke { background: var(--error-soft); color: var(--error); }
+.hosted-app .key-row[data-revoked="true"] .key-identity h2 { color: var(--secondary); }
+.hosted-app .keys-mobile-sort { display: none; }
+.hosted-app .key-editor-row > td { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.hosted-app .key-editor, .hosted-app .key-reveal { min-width: 0; padding: 24px; border-radius: 12px; background: var(--subtle); margin: 0 0 24px; }
+.hosted-app .key-editor { display: grid; gap: 16px; }
+.hosted-app .key-editor-row .key-editor { grid-template-columns: minmax(0, 1fr) auto; align-items: end; margin: 0; padding: 0; border-radius: 0; background: transparent; }
+.hosted-app .key-editor-fields { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 1fr)); gap: 12px; }
+.hosted-app .key-editor-fields > label { display: grid; align-content: start; gap: 6px; min-width: 0; color: var(--secondary); font-size: 12px; }
+.hosted-app .key-editor-fields input { min-width: 0; width: 100%; min-height: 40px; box-sizing: border-box; padding: 9px 12px; }
+.hosted-app .key-editor-fields .date-control input { padding-right: 44px; }
+.hosted-app .key-editor-fields input[type="number"] { appearance: textfield; }
+.hosted-app .key-editor-fields input::-webkit-inner-spin-button, .hosted-app .key-editor-fields input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.hosted-app .key-reveal p { margin: 0; color: var(--secondary); font-size: 12px; line-height: 20px; }
+.hosted-app .key-editor-actions, .hosted-app .key-reveal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.hosted-app .key-reveal { display: grid; gap: 12px; background: var(--accent-soft); }
+.hosted-app .key-reveal > code { display: block; min-width: 0; padding-block: 4px; color: var(--text); font-size: 13px; line-height: 22px; overflow-wrap: anywhere; user-select: all; }
+@container relay-page (max-width: 1000px) {
+  .hosted-app .keys-table, .hosted-app .keys-table tbody { display: block; }
+  .hosted-app .keys-table colgroup, .hosted-app .keys-table thead { display: none; }
+  .hosted-app .keys-mobile-sort { display: flex; justify-content: flex-end; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+  .hosted-app .keys-mobile-sort .option-menu { min-width: 0; max-width: 100%; }
+  .hosted-app .keys-mobile-sort .option-trigger { min-height: 36px; max-width: 100%; background: transparent; border-color: transparent; color: var(--secondary); font-size: 12px; }
+  .hosted-app .keys-mobile-sort .option-trigger:is(:hover, [aria-expanded="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+  .hosted-app .key-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr) repeat(2, minmax(0, 1fr)) auto; grid-template-areas: "name models limit expiry status" "token models limit expiry status" "actions actions actions actions actions"; gap: 4px 20px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .hosted-app .keys-table > tbody:last-child > .key-row:last-child { border-bottom: 0; }
+  .hosted-app .key-row > td { height: auto; padding: 0; border: 0; text-align: left; }
+  .hosted-app .key-identity { grid-area: name; }
+  .hosted-app .key-identity h2 { white-space: normal; overflow-wrap: anywhere; }
+  .hosted-app .key-token { grid-area: token; }
+  .hosted-app .key-status { grid-area: status; justify-self: end; align-self: start; }
+  .hosted-app .key-model-cell { grid-area: models; }
+  .hosted-app .key-limit-cell { grid-area: limit; }
+  .hosted-app .key-expiry-cell { grid-area: expiry; }
+  .hosted-app .key-cell-label { display: block; margin-bottom: 4px; color: var(--secondary); font-size: 11px; line-height: 16px; }
+  .hosted-app .key-cell-value { white-space: normal; overflow-wrap: anywhere; }
+  .hosted-app .key-row > .key-actions-cell { grid-area: actions; padding-block-start: 8px; }
+  .hosted-app .key-actions { justify-content: flex-start; }
+  .hosted-app .key-editor-row, .hosted-app .key-editor-row > td { display: block; }
+  .hosted-app .key-editor-row .key-editor { grid-template-columns: minmax(0, 1fr); }
+}
+@container relay-page (max-width: 800px) {
+  .hosted-app .key-row { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: "name name status" "token token status" "models limit expiry" "actions actions actions"; }
+  .hosted-app .key-row > .key-policy-cell { padding-block-start: 8px; }
+}
+@container relay-page (max-width: 600px) {
+  .hosted-app .key-row { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "name status" "token status" "models models" "limit expiry" "actions actions"; padding: 16px; gap: 4px 16px; }
+  .hosted-app .key-model-cell { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+  .hosted-app .key-model-cell .key-cell-label { margin: 0; }
+  .hosted-app .key-editor, .hosted-app .key-reveal { padding: 20px 16px; }
+  .hosted-app .key-editor-fields { grid-template-columns: minmax(0, 1fr); }
+  .hosted-app .key-editor-row > td { padding: 16px 12px; }
+  .hosted-app .key-editor-actions, .hosted-app .key-reveal-actions { justify-content: flex-start; }
+}
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .keys-mobile-sort .option-trigger { min-height: 44px; }
+  .hosted-app .key-actions .button { min-height: 44px; }
+  .hosted-app .key-editor-fields input { min-height: 44px; }
+  .hosted-app .key-editor-fields .date-control input { padding-right: 48px; }
+}
+@media (hover: hover) and (pointer: fine) {
+  .hosted-app .key-sort:hover { color: var(--accent); background: var(--accent-soft); }
+  .hosted-app .key-actions .button:hover:not(:disabled) { border-color: transparent; }
+  .hosted-app .key-actions .key-action:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+  .hosted-app .key-actions .danger-button:hover:not(:disabled) { color: var(--error); background: var(--error-soft); }
+}

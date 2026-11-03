@@ -19,31 +19,17 @@ impl GatewayRuntime {
             (response_affinity_key, self.response_affinity_store.as_ref())
         {
             let cached = self.lock_scheduler().has_response_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_response_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
+            if !cached && let Ok(Some(binding)) = store.find(key, now_ms) {
+                self.lock_scheduler().restore_response_affinity(
+                    binding.key,
+                    &binding.candidate_id,
+                    binding.expires_at_ms,
+                    now_ms,
+                );
             }
         }
-        if let (Some(key), Some(store)) =
-            (prompt_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_prompt_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_prompt_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
-            }
+        if let Some(key) = prompt_affinity_key {
+            self.restore_prompt_affinity_from_store(key, now_ms);
         }
         let attempted_members = budget.attempted_members();
         let mut exclusions = self.lock_scheduler().routes_for_members(&attempted_members);
@@ -94,39 +80,25 @@ impl GatewayRuntime {
         // Live principal scope stays locked through selection and reservation.
         let scope = key.scope_read();
         let mut scheduler = self.lock_scheduler();
-        let hidden = crate::poison::read(&self.hidden_models);
+        let hidden = crate::poison::read(&self.model_state.hidden_models);
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }
+        let selection_request = || SelectionRequest {
+            model,
+            allowed_protocols,
+            scope: &scope,
+            tried,
+            response_affinity_key,
+            prompt_affinity_key,
+            now_ms,
+        };
         let selection = match (lane, operation) {
-            (CandidateLeaseLane::Text, RotationOperation::Compaction) => scheduler
-                .select_compaction(SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                }),
-            (CandidateLeaseLane::Text, _) => scheduler.select(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-            (CandidateLeaseLane::Image, _) => scheduler.select_image(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
+            (CandidateLeaseLane::Text, RotationOperation::Compaction) => {
+                scheduler.select_compaction(selection_request())
+            }
+            (CandidateLeaseLane::Text, _) => scheduler.select(selection_request()),
+            (CandidateLeaseLane::Image, _) => scheduler.select_image(selection_request()),
         };
         let reserved = selection.and_then(|selection| {
             let reservation = scheduler.reserve_request_with_operation(
@@ -149,7 +121,7 @@ impl GatewayRuntime {
                     });
                 let lease = CandidateLease {
                     scheduler: self.scheduler.clone(),
-                    hidden_models: self.hidden_models.clone(),
+                    hidden_models: self.model_state.hidden_models.clone(),
                     availability: self.candidate_availability.clone(),
                     candidate_id: selection.candidate_id.clone(),
                     candidate_permission_revision: scheduler
@@ -186,19 +158,8 @@ impl GatewayRuntime {
                 (selection, lease)
             })
         });
-        let capacity_blocked = reserved.is_none()
-            && scheduler.capacity_blocked_for(
-                SelectionRequest {
-                    model,
-                    allowed_protocols,
-                    scope: &scope,
-                    tried,
-                    response_affinity_key,
-                    prompt_affinity_key,
-                    now_ms,
-                },
-                operation,
-            );
+        let capacity_blocked =
+            reserved.is_none() && scheduler.capacity_blocked_for(selection_request(), operation);
         (reserved, capacity_blocked)
     }
 
@@ -225,10 +186,10 @@ impl GatewayRuntime {
             }
         };
         self.emit_activity_changed(activity);
-        if let Some(key) = &request.response_affinity {
-            if selection.response_affinity_hit {
-                self.persist_response_affinity(key, &selection.candidate_id, now_ms);
-            }
+        if let Some(key) = &request.response_affinity
+            && selection.response_affinity_hit
+        {
+            self.persist_response_affinity(key, &selection.candidate_id, now_ms);
         }
     }
 

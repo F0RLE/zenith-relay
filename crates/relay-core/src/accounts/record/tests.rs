@@ -135,6 +135,7 @@ fn model_discovery_state_transitions_keep_user_reauthentication_intact() {
     // A previously confirmed account block must not be cleared by a
     // separate model-discovery permission failure.
     health = AccountHealthState::Blocked;
+    last_error_code = Some("workspace_disabled".to_string());
     apply_model_discovery_failure(
         &mut auth_state,
         &mut health,
@@ -218,13 +219,15 @@ fn model_discovery_preserves_independent_account_failures() {
                 &mut health,
                 &mut last_error_code,
             ));
-            assert!(!account_candidate_health(
-                auth_state,
-                health,
-                SubscriptionStatus::Active,
-                last_error_code.as_deref(),
-            )
-            .is_eligible());
+            assert!(
+                !account_candidate_health(
+                    auth_state,
+                    health,
+                    SubscriptionStatus::Active,
+                    last_error_code.as_deref(),
+                )
+                .is_eligible()
+            );
         }
     }
 }
@@ -264,17 +267,67 @@ fn model_discovery_transient_failure_preserves_terminal_catalog_failure() {
 }
 
 #[test]
-fn model_discovery_success_does_not_clear_persisted_block() {
+fn model_discovery_success_recovers_legacy_catalog_block() {
     let mut auth_state = AccountAuthState::Active;
     let mut health = AccountHealthState::Blocked;
     let mut last_error_code = Some("models_forbidden".to_string());
-    assert!(!recover_model_discovery_state(
+    assert!(recover_model_discovery_state(
         &mut auth_state,
         &mut health,
         &mut last_error_code,
     ));
-    assert_eq!(health, AccountHealthState::Blocked);
-    assert_eq!(last_error_code.as_deref(), Some("models_forbidden"));
+    assert_eq!(auth_state, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Healthy);
+    assert!(last_error_code.is_none());
+}
+
+#[test]
+fn model_discovery_block_repair_is_scoped_and_keeps_permission_error() {
+    let mut health = AccountHealthState::Blocked;
+    assert!(repair_model_discovery_block(
+        AccountAuthState::Active,
+        &mut health,
+        Some("models_forbidden"),
+    ));
+    assert_eq!(health, AccountHealthState::Degraded);
+    assert!(!repair_model_discovery_block(
+        AccountAuthState::Active,
+        &mut health,
+        Some("models_forbidden"),
+    ));
+    for (auth, code) in [
+        (AccountAuthState::Active, "workspace_disabled"),
+        (AccountAuthState::Active, "quota_forbidden"),
+        (AccountAuthState::Active, "checkpoint"),
+        (AccountAuthState::Error, "models_forbidden"),
+        (
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            "models_forbidden",
+        ),
+    ] {
+        let mut health = AccountHealthState::Blocked;
+        assert!(!repair_model_discovery_block(auth, &mut health, Some(code)));
+        let mut auth = auth;
+        let mut last_error = Some(code.to_string());
+        assert!(!recover_model_discovery_state(
+            &mut auth,
+            &mut health,
+            &mut last_error
+        ));
+        assert_eq!(health, AccountHealthState::Blocked);
+        assert_eq!(last_error.as_deref(), Some(code));
+    }
+}
+
+#[test]
+fn model_discovery_failure_rechecks_legacy_block_without_granting_access() {
+    let mut auth = AccountAuthState::Active;
+    let mut health = AccountHealthState::Blocked;
+    let mut code = Some("models_forbidden".to_string());
+    apply_model_discovery_failure(&mut auth, &mut health, &mut code, "models_forbidden", false);
+    assert_eq!(auth, AccountAuthState::Active);
+    assert_eq!(health, AccountHealthState::Degraded);
+    assert_eq!(code.as_deref(), Some("models_forbidden"));
 }
 
 #[test]
@@ -321,6 +374,60 @@ fn account_usage_reducer_ignores_request_errors_and_restores_success() {
         }
     );
     assert!(success.reset_runtime_failures);
+}
+
+#[test]
+fn delayed_success_does_not_move_last_used_backwards() {
+    let observation = AccountUsageObservation {
+        success: true,
+        http_status: 200,
+        error_category: None,
+        affects_account: false,
+    };
+    let mut state = usage_state();
+    for observed_at_ms in [3_000, 2_000, 3_000, 4_000] {
+        let previous = state.last_used_at_ms;
+        let updated = reduce_account_usage(state, observation, observed_at_ms, None, None);
+        assert_eq!(
+            updated.state.last_used_at_ms,
+            Some(previous.unwrap_or_default().max(observed_at_ms))
+        );
+        state = updated.state;
+    }
+    assert_eq!(state.last_used_at_ms, Some(4_000));
+}
+
+#[test]
+fn successful_inference_does_not_validate_a_rejected_refresh_grant() {
+    for reason in [
+        ReauthReason::InvalidGrant,
+        ReauthReason::ExpiredRefreshToken,
+        ReauthReason::InvalidatedRefreshToken,
+        ReauthReason::AccessTokenExpired,
+        ReauthReason::TokenRotationRecoveryRequired,
+    ] {
+        let mut state = usage_state();
+        state.auth_state = AccountAuthState::RequiresReauth(reason);
+        state.health = AccountHealthState::Unhealthy;
+        state.last_error_code = Some("auth_terminal_failure".into());
+        let mut expected = state.clone();
+        expected.last_used_at_ms = Some(20);
+        let update = reduce_account_usage(
+            state,
+            AccountUsageObservation {
+                success: true,
+                http_status: 200,
+                error_category: None,
+                affects_account: true,
+            },
+            20,
+            None,
+            Some(AccountAuthState::Active),
+        );
+        assert_eq!(update.state, expected, "terminal reason {reason:?}");
+        assert!(!update.reset_runtime_failures);
+        assert!(!update.refresh_quota);
+    }
 }
 
 #[test]

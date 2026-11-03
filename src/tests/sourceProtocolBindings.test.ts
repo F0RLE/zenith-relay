@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
   effectiveSourceProtocolBindings,
-  runtimeSourceProtocolBindings,
-  sourceModelsForWireApi,
   sourceModelsWithCacheWritePricing,
+  sourceSupportsNativeProtocol,
   sourceSupportsNativeResponses,
-  sourceSupportsWireApi,
 } from "../src/features/relay/sourceProtocolBindings";
 import type { SourceSummary } from "../src/features/relay/api/types";
 
 describe("source protocol bindings", () => {
+  test("Interactions is native-only and never supplies a Responses or Messages bridge", () => {
+    const source = { wireApi:"gemini_interactions", models:["synthetic"], protocolBindings:[{wireApi:"gemini_interactions",adapter:"native",modelIds:["synthetic"]}] } satisfies Pick<SourceSummary,"wireApi"|"models"|"protocolBindings">;
+    expect(effectiveSourceProtocolBindings(source)).toHaveLength(1);
+    expect(sourceSupportsNativeProtocol(source,"gemini_interactions")).toBe(true);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+    expect(sourceModelsWithCacheWritePricing(source)).toEqual([]);
+  });
   test("cache-write pricing follows Messages upstream routes", () => {
     const source = {
       wireApi: "responses",
@@ -63,11 +68,6 @@ describe("source protocol bindings", () => {
         modelIds: ["claude-bridge"],
       },
     ]);
-    expect(sourceModelsForWireApi(source, "responses")).toEqual([
-      "gpt-native",
-      "claude-bridge",
-    ]);
-    expect(sourceSupportsWireApi(source, "responses")).toBe(true);
     expect(sourceSupportsNativeResponses(source)).toBe(true);
   });
 
@@ -83,7 +83,6 @@ describe("source protocol bindings", () => {
       }],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceSupportsWireApi(source, "responses")).toBe(true);
     expect(sourceSupportsNativeResponses(source)).toBe(false);
   });
 
@@ -115,7 +114,6 @@ describe("source protocol bindings", () => {
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
     expect(effectiveSourceProtocolBindings(source)[0].adapter).toBe("responses_to_gemini");
-    expect(sourceModelsForWireApi(source, "responses")).toEqual(["gemini-3-pro"]);
     expect(sourceSupportsNativeResponses(source)).toBe(false);
   });
 
@@ -131,8 +129,7 @@ describe("source protocol bindings", () => {
       }],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual([]);
-    expect(sourceSupportsWireApi(source, "responses")).toBe(false);
+    expect(effectiveSourceProtocolBindings(source)[0]?.modelIds).toEqual([]);
   });
 
   test("keeps native Messages separate from the Responses route", () => {
@@ -156,15 +153,15 @@ describe("source protocol bindings", () => {
       ],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual(["gpt-native"]);
-    expect(sourceModelsForWireApi(source, "messages")).toEqual(["claude-messages"]);
-    expect(runtimeSourceProtocolBindings(source)).toEqual(effectiveSourceProtocolBindings(source));
+    expect(sourceSupportsNativeResponses(source)).toBe(true);
+    expect(sourceModelsWithCacheWritePricing(source)).toEqual(["claude-messages"]);
+    expect(effectiveSourceProtocolBindings(source)[1]?.cacheWriteTtl).toBe("1h");
   });
 
   test("uses the source catalog for a sole legacy-compatible empty binding", () => {
     const source = {
       wireApi: "responses",
-      models: ["gpt-legacy"],
+      models: [" GPT-Legacy ", "gpt-legacy"],
       protocolBindings: [{
         wireApi: "responses",
         adapter: "native",
@@ -173,8 +170,7 @@ describe("source protocol bindings", () => {
       }],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual(["gpt-legacy"]);
-    expect(sourceSupportsWireApi(source, "responses")).toBe(true);
+    expect(effectiveSourceProtocolBindings(source)[0]?.modelIds).toEqual(["GPT-Legacy"]);
     expect(sourceSupportsNativeResponses(source)).toBe(true);
   });
 
@@ -198,9 +194,85 @@ describe("source protocol bindings", () => {
       ],
     } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
 
-    expect(sourceModelsForWireApi(source, "responses")).toEqual([]);
     expect(sourceSupportsNativeResponses(source)).toBe(false);
-    expect(sourceModelsForWireApi(source, "messages")).toEqual(["claude-messages"]);
+    expect(sourceModelsWithCacheWritePricing(source)).toEqual(["claude-messages"]);
   });
 
+  for (const [wireApi, modelIds] of [
+    ["responses", ["retired-model"]],
+    ["messages", ["retired-model"]],
+    ["responses", ["current-model", "retired-model"]],
+  ] as const) {
+    test(`does not expose ${wireApi} when a binding references unavailable models: ${modelIds.join(",")}`, () => {
+      const source = {
+        wireApi,
+        models: ["current-model"],
+        protocolBindings: [{ wireApi, adapter: "native", modelIds: [...modelIds] }],
+      } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+      expect(sourceSupportsNativeProtocol(source)).toBe(false);
+      expect(sourceModelsWithCacheWritePricing(source)).toEqual([]);
+    });
+  }
+
+  for (const resolvedProtocolBindings of [[], [{ wireApi: "responses", adapter: "native", modelIds: [] }]] as const) {
+    test(`does not expand the backend's empty resolved routes (${resolvedProtocolBindings.length} bindings)`, () => {
+      const source = {
+        wireApi: "responses",
+        models: ["current-model"],
+        protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: [] }],
+        resolvedProtocolBindings: resolvedProtocolBindings.map(binding => ({ ...binding, modelIds: [...binding.modelIds] })),
+      } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings" | "resolvedProtocolBindings">;
+
+      expect(sourceSupportsNativeResponses(source)).toBe(false);
+      expect(sourceModelsWithCacheWritePricing(source)).toEqual([]);
+    });
+  }
+
+  test("does not turn an adapter for another client protocol into a native route", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["current-model"],
+      protocolBindings: [{ wireApi: "responses", adapter: "messages_to_responses", modelIds: ["current-model"] }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)).toEqual([]);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+  });
+
+  test("does not expose duplicate routes rejected by the backend", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["current-model"],
+      protocolBindings: [
+        { wireApi: "responses", adapter: "native", modelIds: ["current-model"] },
+        { wireApi: "responses", adapter: "native", modelIds: ["current-model"] },
+      ],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)).toEqual([]);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+  });
+
+  test("does not expose Messages cache TTL on a native Responses route", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["current-model"],
+      protocolBindings: [{ wireApi: "responses", adapter: "native", cacheWriteTtl: "1h", modelIds: ["current-model"] }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)).toEqual([]);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+  });
+
+  test("keeps explicit manual models when the source catalog is not yet known", () => {
+    const source = {
+      wireApi: "responses",
+      models: [],
+      protocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: [" Manual-Model ", "manual-model"] }],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(effectiveSourceProtocolBindings(source)[0]?.modelIds).toEqual(["Manual-Model"]);
+    expect(sourceSupportsNativeResponses(source)).toBe(true);
+  });
 });

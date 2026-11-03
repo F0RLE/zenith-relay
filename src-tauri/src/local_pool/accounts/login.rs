@@ -1,9 +1,10 @@
-use super::credentials::{totp_code, CredentialStore, StoredCodexCredentials};
+use super::NativeSecretBackend;
+use super::authority::{ProcessAccountLocks, ProcessLockConfig};
+use super::credentials::{CredentialStore, StoredCodexCredentials, totp_code};
 use super::exports::normalize_one_account_id;
 use super::import_orchestrator::credential_local_error;
-use super::NativeSecretBackend;
-use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError};
+use crate::local_pool::runtime::current_time_ms;
 use crate::local_pool::state::DesktopState;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -65,17 +66,33 @@ pub fn reveal_local_account_login(
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountLoginDetails> {
     let account_id = normalize_one_account_id(account_id)?;
-    let credentials = load_account_credentials(&account_id, &state)?;
+    let credentials = shared_login_credentials(&account_id, &state)?;
     Ok(login_details(&account_id, &credentials, current_time_ms()))
 }
 
 #[tauri::command]
-pub fn update_local_account_login(
+pub async fn update_local_account_login(
     input: AccountLoginUpdate,
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountLoginDetails> {
     let account_id = normalize_one_account_id(input.account_id)?;
-    let credentials = load_account_credentials(&account_id, &state)?;
+    let _setup = state.setup_guard().await;
+    let notes_id = login_note_account_id(&account_id, &state)?;
+    let locks =
+        ProcessAccountLocks::with_config(state.transient_root(), ProcessLockConfig::default())
+            .map_err(|_| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "account credential lock is unavailable",
+                )
+            })?;
+    let _lock = locks.acquire(&notes_id).await.map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account credentials are being refreshed",
+        )
+    })?;
+    let credentials = load_account_credentials(&notes_id, &state)?;
     let updated = credentials
         .replace_login_notes(input.email, input.phone, input.password, input.totp_secret)
         .map_err(|_| {
@@ -120,6 +137,36 @@ fn load_account_credentials(
     CredentialStore::from_backend(NativeSecretBackend)
         .require(account_id)
         .map_err(credential_local_error)
+}
+
+fn login_note_account_id(account_id: &str, state: &DesktopState) -> Result<String, LocalPoolError> {
+    let store = state.store()?;
+    if store.account(account_id).is_none() {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            "account was not found",
+        ));
+    }
+    Ok(store
+        .gateway()
+        .account_route_group(account_id)
+        .and_then(|group| {
+            group
+                .notes_account_id
+                .as_ref()
+                .or_else(|| group.account_ids.first())
+        })
+        .map(String::as_str)
+        .unwrap_or(account_id)
+        .to_string())
+}
+
+pub(in crate::local_pool) fn shared_login_credentials(
+    account_id: &str,
+    state: &DesktopState,
+) -> Result<StoredCodexCredentials, LocalPoolError> {
+    let notes_id = login_note_account_id(account_id, state)?;
+    load_account_credentials(&notes_id, state)
 }
 
 fn login_details(

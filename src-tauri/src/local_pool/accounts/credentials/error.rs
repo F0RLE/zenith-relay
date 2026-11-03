@@ -12,6 +12,8 @@ pub enum CredentialErrorCode {
     InvalidVersion,
     SecretMissing,
     SecretStoreUnavailable,
+    RotationOutcomeUnknown,
+    RotationCheckpointInvalid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -54,6 +56,8 @@ pub(in crate::local_pool) fn credential_local_error(error: CredentialError) -> L
     let code = match error.code {
         CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
         CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
+        CredentialErrorCode::RotationOutcomeUnknown
+        | CredentialErrorCode::RotationCheckpointInvalid => ErrorCode::RecoveryRequired,
         _ => ErrorCode::InvalidState,
     };
     LocalPoolError::new(code, error.message)

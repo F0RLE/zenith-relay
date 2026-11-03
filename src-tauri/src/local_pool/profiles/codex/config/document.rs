@@ -31,11 +31,11 @@ fn repair_windows_basic_strings(content: &str) -> String {
     let mut cursor = 0;
     while cursor < bytes.len() {
         if bytes[cursor] != b'"' {
-            let next = content[cursor..]
+            let segment_end = content[cursor..]
                 .find('"')
                 .map_or(bytes.len(), |offset| cursor + offset);
-            repaired.push_str(&content[cursor..next]);
-            cursor = next;
+            repaired.push_str(&content[cursor..segment_end]);
+            cursor = segment_end;
             continue;
         }
         let start = cursor;
@@ -59,25 +59,25 @@ fn repair_windows_basic_strings(content: &str) -> String {
             repaired.push_str(&content[start..]);
             break;
         }
-        let value = &content[cursor..end];
+        let quoted_value = &content[cursor..end];
         repaired.push('"');
-        if value.contains(":\\") {
+        if quoted_value.contains(":\\") {
             let mut index = 0;
-            while index < value.len() {
-                let byte = value.as_bytes()[index];
+            while index < quoted_value.len() {
+                let byte = quoted_value.as_bytes()[index];
                 if byte != b'\\' {
-                    let next = value[index..]
+                    let unescaped_segment_end = quoted_value[index..]
                         .find('\\')
-                        .map_or(value.len(), |offset| index + offset);
-                    repaired.push_str(&value[index..next]);
-                    index = next;
+                        .map_or(quoted_value.len(), |offset| index + offset);
+                    repaired.push_str(&quoted_value[index..unescaped_segment_end]);
+                    index = unescaped_segment_end;
                     continue;
                 }
                 let run_start = index;
-                while index < value.len() && value.as_bytes()[index] == b'\\' {
+                while index < quoted_value.len() && quoted_value.as_bytes()[index] == b'\\' {
                     index += 1;
                 }
-                let run = &value[run_start..index];
+                let run = &quoted_value[run_start..index];
                 if run.len() == 1 {
                     repaired.push_str("\\\\");
                 } else {
@@ -85,7 +85,7 @@ fn repair_windows_basic_strings(content: &str) -> String {
                 }
             }
         } else {
-            repaired.push_str(value);
+            repaired.push_str(quoted_value);
         }
         repaired.push('"');
         cursor = end + 1;
@@ -152,6 +152,22 @@ pub(in crate::local_pool::profiles::codex) fn root_model_provider(
         .map(ToOwned::to_owned)
 }
 
+pub(in crate::local_pool::profiles::codex) fn root_model(document: &DocumentMut) -> Option<String> {
+    document
+        .get("model")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
+pub(in crate::local_pool::profiles::codex) fn root_review_model(
+    document: &DocumentMut,
+) -> Option<String> {
+    document
+        .get("review_model")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 pub(in crate::local_pool::profiles::codex) fn root_model_catalog_json(
     document: &DocumentMut,
 ) -> Option<String> {
@@ -179,19 +195,49 @@ pub(in crate::local_pool::profiles::codex) fn root_openai_base_url(
         .map(ToOwned::to_owned)
 }
 
+pub(in crate::local_pool::profiles::codex) fn root_chatgpt_base_url(
+    document: &DocumentMut,
+) -> Option<String> {
+    document
+        .get("chatgpt_base_url")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 pub(in crate::local_pool::profiles::codex) fn document_has_provider(
     document: &DocumentMut,
 ) -> bool {
-    document
+    let root_uses_relay_provider = root_model_provider(document)
+        .as_deref()
+        .is_some_and(|provider| RELAY_PROVIDER_IDS.contains(&provider));
+    let profile_uses_relay_provider = document
+        .get("profiles")
+        .and_then(Item::as_table_like)
+        .is_some_and(|profiles| {
+            profiles.iter().any(|(_, profile)| {
+                profile
+                    .as_table_like()
+                    .and_then(|profile| profile.get("model_provider"))
+                    .and_then(Item::as_str)
+                    .is_some_and(|provider| RELAY_PROVIDER_IDS.contains(&provider))
+            })
+        });
+    let defines_relay_provider = document
         .get("model_providers")
-        .and_then(Item::as_table)
-        .is_some_and(|providers| providers.contains_key(PROVIDER_ID))
+        .and_then(Item::as_table_like)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|(provider, _)| RELAY_PROVIDER_IDS.contains(&provider))
+        });
+
+    root_uses_relay_provider || profile_uses_relay_provider || defines_relay_provider
 }
 
-pub(in crate::local_pool::profiles::codex) fn key_hash(value: &str) -> String {
-    hex::encode(Sha256::digest(value.as_bytes()))
+pub(in crate::local_pool::profiles::codex) fn key_hash(key_text: &str) -> String {
+    hex::encode(Sha256::digest(key_text.as_bytes()))
 }
 
-pub(in crate::local_pool::profiles::codex) fn bytes_hash(value: &[u8]) -> String {
-    hex::encode(Sha256::digest(value))
+pub(in crate::local_pool::profiles::codex) fn bytes_hash(content_bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(content_bytes))
 }

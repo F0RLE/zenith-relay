@@ -33,6 +33,26 @@ for (const guide of [
         await expect(toggle).toBeFocused();
       }
       await page.screenshot({ path: testInfo.outputPath("help-start.png") });
+      const chartHeading = document.getByRole("heading", {
+        name: guide.locale === "ru" ? "Как читать графики" : "Reading the charts", exact: true,
+      });
+      await chartHeading.scrollIntoViewIfNeeded();
+      const chartTable = document.locator("table").filter({
+        hasText: guide.locale === "ru" ? "Скорость E2E" : "E2E speed",
+      });
+      await expect(chartTable).toHaveCount(1);
+      await expect(chartTable.locator("tbody tr")).toHaveCount(5);
+      await expect(document).toContainText(guide.locale === "ru"
+        ? "Codex — обычное переключение аккаунтов в установленном Codex"
+        : "Codex — switch the account used by the installed Codex client");
+      await expect(document).toContainText(guide.locale === "ru"
+        ? "Excel / Basis Points (BPS) — работа аккаунта через пул Relay"
+        : "Excel / Basis Points (BPS) — use the account in Relay's pool");
+      await expect(document).toContainText(guide.locale === "ru"
+        ? "более прямой путь сам по себе не делает её стабильнее"
+        : "a shorter protocol path does not imply greater stability");
+      await chartTable.evaluate((table) => table.scrollIntoView({ block: "start" }));
+      await page.screenshot({ path: testInfo.outputPath("help-charts.png") });
       await openContents();
       await navigation.getByRole("link", { name: guide.pool, exact: true }).click();
       const poolHeading = document.getByRole("heading", { name: `3. ${guide.pool}`, exact: true });

@@ -2,39 +2,84 @@ use super::super::{
     AuthorizedRequestError, ChatGptAccountExecutor, ExecutorPrepareError, GatewayRuntime,
     PreparedAuthorization,
 };
+use crate::CandidateHealth;
 use crate::accounts::TokenAuthorityError;
 use crate::providers::chatgpt::{
-    is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
+    AgentIdentityCredential, AgentIdentityError, is_agent_identity_task_invalid_response,
 };
-use crate::CandidateHealth;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
 use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
+    pub(crate) async fn prepare_route_authorization(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        if route.account_id.is_none() {
+            return self.prepare_source_authorization(&route.candidate_id, route.binding_key());
+        }
+        self.prepare_authorization(&route.candidate_id, now_ms)
+            .await
+    }
+
+    pub(in crate::runtime) fn prepare_source_authorization(
+        &self,
+        candidate_id: &str,
+        binding_key: crate::SourceProtocolBindingKey,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        let binding = self
+            .source_candidate_bindings
+            .get(candidate_id)
+            .filter(|binding| {
+                binding
+                    .routes
+                    .iter()
+                    .any(|route| route.binding_key == binding_key)
+            })
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let provider_source = self
+            .sources
+            .get(&binding.source_id)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let source_binding = provider_source
+            .binding_for(binding_key)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let (header_name, authorization) =
+            provider_source.authorization_for_binding(source_binding);
+        Ok(PreparedAuthorization {
+            header_name,
+            authorization,
+            identity: None,
+            token_generation: None,
+            token_revision: None,
+            agent_task_id: None,
+            agent_credential_fingerprint: None,
+            agent_identity_revision: None,
+        })
+    }
+
     pub(crate) async fn prepare_authorization(
         &self,
         candidate_id: &str,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            let source = self
-                .sources
-                .get(&binding.source_id)
+            // A route can be omitted only when all client projections use
+            // one upstream contract and therefore identical authorization.
+            let first = binding
+                .routes
+                .first()
                 .ok_or(ExecutorPrepareError::Authentication)?;
-            let source_binding = source
-                .binding_for(binding.binding_key)
-                .ok_or(ExecutorPrepareError::Authentication)?;
-            let (header_name, authorization) = source.authorization_for_binding(source_binding);
-            return Ok(PreparedAuthorization {
-                header_name,
-                authorization,
-                identity: None,
-                token_generation: None,
-                token_revision: None,
-                agent_task_id: None,
-                agent_credential_fingerprint: None,
-                agent_identity_revision: None,
-            });
+            let upstream = first.adapter.upstream_protocol(first.wire_api);
+            if binding
+                .routes
+                .iter()
+                .any(|route| route.adapter.upstream_protocol(route.wire_api) != upstream)
+            {
+                return Err(ExecutorPrepareError::Authentication);
+            }
+            return self.prepare_source_authorization(candidate_id, first.binding_key);
         }
         let account = self
             .chatgpt_accounts
@@ -123,12 +168,18 @@ impl GatewayRuntime {
         Ok(PreparedAuthorization {
             header_name: AUTHORIZATION,
             authorization,
-            identity: Some(
-                account
-                    .identity
-                    .with_configured_client_version()
-                    .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
-            ),
+            identity: if account.oauth_client_kind
+                == crate::providers::chatgpt::OAuthClientKind::Siwc
+            {
+                None
+            } else {
+                Some(
+                    account
+                        .identity
+                        .with_configured_client_version()
+                        .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
+                )
+            },
             token_generation: Some(prepared.tokens.generation()),
             token_revision: Some(prepared.dispatch_revision),
             agent_task_id: None,
@@ -140,7 +191,7 @@ impl GatewayRuntime {
     pub(crate) async fn refresh_authorization_after_unauthorized(
         &self,
         candidate_id: &str,
-        failed_generation: Option<u64>,
+        rejected: &PreparedAuthorization,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let account = self
@@ -150,11 +201,15 @@ impl GatewayRuntime {
         if !account.active.load(Ordering::Acquire) {
             return Err(ExecutorPrepareError::Authentication);
         }
+        let revision = rejected
+            .token_revision
+            .as_ref()
+            .ok_or(ExecutorPrepareError::InvalidCredential)?;
         account
             .token_authority
-            .invalidate_access_generation_and_persist(
+            .invalidate_access_revision_and_persist(
                 &account.id,
-                failed_generation,
+                revision,
                 now_ms,
                 account.persistence_adapter.as_ref(),
             )
@@ -198,26 +253,26 @@ impl ChatGptAccountExecutor {
         if !self.active.load(Ordering::Acquire) {
             return Err(ExecutorPrepareError::Authentication);
         }
-        let (current, ready) = self.current_agent_identity(expected_task_id)?;
+        let (agent_identity, ready) = self.current_agent_identity(expected_task_id)?;
         if ready {
-            return Ok(current);
+            return Ok(agent_identity);
         }
 
         let _guard = self.agent_task_lock.lock().await;
-        let (current, ready) = self.current_agent_identity(expected_task_id)?;
+        let (agent_identity, ready) = self.current_agent_identity(expected_task_id)?;
         if ready {
-            return Ok(current);
+            return Ok(agent_identity);
         }
-        let task_id = current
+        let task_id = agent_identity
             .register_task(&self.clients.http)
             .await
             .map_err(classify_agent_identity_error)?;
         let task_id = self
             .persistence_adapter
-            .persist_agent_task_id_for_identity(&self.id, &current, &task_id)
+            .persist_agent_task_id_for_identity(&self.id, &agent_identity, &task_id)
             .await
             .map_err(|_| ExecutorPrepareError::Persistence)?;
-        let updated = current
+        let updated = agent_identity
             .with_task_id(task_id)
             .map_err(|_| ExecutorPrepareError::InvalidCredential)?;
         if !self.active.load(Ordering::Acquire) {
@@ -236,15 +291,15 @@ impl ChatGptAccountExecutor {
         &self,
         expected_task_id: Option<&str>,
     ) -> std::result::Result<(AgentIdentityCredential, bool), ExecutorPrepareError> {
-        let current = self
+        let agent_identity = self
             .agent_identity
             .read()
             .map_err(|_| ExecutorPrepareError::Transient)?
             .clone()
             .ok_or(ExecutorPrepareError::Authentication)?;
-        let ready = current.task_id().is_some()
-            && expected_task_id.is_none_or(|expected| current.task_id() != Some(expected));
-        Ok((current, ready))
+        let ready = agent_identity.task_id().is_some()
+            && expected_task_id.is_none_or(|expected| agent_identity.task_id() != Some(expected));
+        Ok((agent_identity, ready))
     }
 }
 
@@ -262,15 +317,15 @@ pub(super) async fn inspect_agent_identity_unauthorized(
     let status = response.status();
     let version = response.version();
     let headers = response.headers().clone();
-    let body = response
+    let response_body = response
         .bytes()
         .await
         .map_err(AuthorizedRequestError::Transport)?;
-    let invalid = is_agent_identity_task_invalid_response(status.as_u16(), &body);
+    let invalid = is_agent_identity_task_invalid_response(status.as_u16(), &response_body);
     let mut restored = axum::http::Response::builder()
         .status(status)
         .version(version)
-        .body(reqwest::Body::from(body))
+        .body(reqwest::Body::from(response_body))
         .map_err(|_| AuthorizedRequestError::NotReplayable)?;
     *restored.headers_mut() = headers;
     Ok((reqwest::Response::from(restored), invalid))
@@ -295,6 +350,14 @@ pub(super) fn agent_credential_fingerprint(agent: &AgentIdentityCredential) -> [
 
 fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepareError {
     match error {
+        TokenAuthorityError::RequiresReauth(
+            crate::accounts::ReauthReason::TokenRotationRecoveryRequired,
+        ) => ExecutorPrepareError::RotationRecoveryRequired,
+        TokenAuthorityError::RefreshFailed(ref code)
+            if code == "siwc_rotation_store_unavailable" =>
+        {
+            ExecutorPrepareError::CredentialStoreUnavailable
+        }
         TokenAuthorityError::AccessTokenExpired
         | TokenAuthorityError::RequiresReauth(_)
         | TokenAuthorityError::AccountNotFound

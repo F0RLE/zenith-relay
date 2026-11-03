@@ -1,10 +1,9 @@
 use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
 use super::{
-    event_terminal, fallback_event_message, fallback_response_origin, incomplete_requires_cooldown,
-    initial_payloads_are_empty_incomplete, semantic_output_payload, terminal_failure_status,
-    ClientRequest, EventTerminalOutcome, GatewayFailure, MAX_SSE_EVENT_BYTES,
-    MAX_WEBSOCKET_ERROR_BYTES, RELAY_ERROR_ORIGIN_HEADER, RELAY_UPSTREAM_ORIGIN_HEADER,
-    WEBSOCKET_PROTOCOLS,
+    ClientRequest, EventTerminalOutcome, GatewayFailure, RELAY_ERROR_ORIGIN_HEADER,
+    RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS, event_terminal, fallback_event_message,
+    fallback_response_origin, incomplete_requires_cooldown, initial_payloads_are_empty_incomplete,
+    semantic_output_payload, terminal_failure_status,
 };
 use crate::{
     ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
@@ -15,10 +14,15 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 
+mod agent_messages;
 mod client_requests;
 mod frame_contract;
 
 fn runtime() -> GatewayRuntime {
+    runtime_with_events(Arc::new(|_| {}))
+}
+
+fn runtime_with_events(events: Arc<dyn Fn(crate::UsageEvent) + Send + Sync>) -> GatewayRuntime {
     GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(ProviderSource {
             id: "source".into(),
@@ -27,6 +31,7 @@ fn runtime() -> GatewayRuntime {
             api_key: "upstream-secret".into(),
             wire_api: WireApi::Responses,
             models: vec!["upstream-model".into()],
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey {
             key: LocalGatewayKey {
@@ -39,8 +44,11 @@ fn runtime() -> GatewayRuntime {
             excluded_models: Vec::new(),
             model_prefix: Some("relay".into()),
         }],
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
+        events,
     )
     .unwrap()
 }

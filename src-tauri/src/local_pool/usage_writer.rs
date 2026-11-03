@@ -1,36 +1,41 @@
 use super::{
     accounts::{
+        NativeSecretBackend,
         authority::{ProcessAccountLocks, ProcessLockConfig},
         credentials::CredentialStore,
-        NativeSecretBackend,
     },
     state::DesktopOAuthEvents,
-    store::{telemetry_db::TelemetryDb, LocalPoolStore},
+    store::{LocalPoolStore, telemetry_db::TelemetryDb},
 };
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::Notify;
 use zenith_relay_core::{
+    UsageEvent,
     accounts::{AccountAccessState, AccountAuthState},
     automations::WakeCoordinator,
     providers::chatgpt::subscription_refresh_due,
     scheduler::{
         account_member_key,
         refresh::{
-            passive_quota_age_ms, quota_reset_delay, service::RefreshService, RefreshIdentity,
-            RefreshKind,
+            RefreshIdentity, RefreshKind, passive_quota_age_ms, quota_verification_delay,
+            service::RefreshService,
         },
     },
-    UsageCallback, UsageEvent,
 };
 
 mod account_state;
+mod worker;
+
+pub(super) use worker::offload;
 
 pub(super) use account_state::apply_account_usage_state;
 use account_state::{expire_account_access, persisted_auth_state};
+
+type TimedUsageCallback = Arc<dyn Fn(UsageEvent, chrono::DateTime<chrono::Utc>) + Send + Sync>;
 
 pub(crate) struct DesktopUsageWriter {
     telemetry: Arc<TelemetryDb>,
@@ -59,7 +64,7 @@ struct AccountRefreshHint {
     identity: RefreshIdentity,
     refresh_now: bool,
     passive_observation: Option<(u64, u64)>,
-    reset_delay_ms: Option<u64>,
+    verification_delay_ms: Option<u64>,
     retry_delay_ms: Option<u64>,
 }
 
@@ -85,7 +90,7 @@ impl DesktopUsageWriter {
         }
     }
 
-    pub(crate) fn callback(&self) -> UsageCallback {
+    pub(crate) fn callback(&self) -> TimedUsageCallback {
         let telemetry = self.telemetry.clone();
         let store = self.store.clone();
         let credentials = self.credentials.clone();
@@ -95,9 +100,22 @@ impl DesktopUsageWriter {
         let failed = self.failed.clone();
         let wake_notify = self.wake_notify.clone();
         let state_events = self.state_events.clone();
-        Arc::new(move |event| {
+        Arc::new(move |event, observed_at| {
+            if event.is_request_completion()
+                || event
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.attempt_outcome)
+                    == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+            {
+                if telemetry.record(&event).is_err() {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                } else if event.is_request_completion() {
+                    state_events.emit_usage_recorded();
+                }
+                return;
+            }
             // Keep the local write synchronous so the usage callback's state contract remains durable.
-            let observed_at = chrono::Utc::now();
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
             let account_id = event.account_id.clone();
@@ -170,7 +188,7 @@ impl DesktopUsageWriter {
                 if let Some((age_ms, observed_at_ms)) = hint.passive_observation {
                     account_refresh.observe_passive_quota(&hint.identity, age_ms, observed_at_ms);
                 }
-                if let Some(delay_ms) = hint.reset_delay_ms {
+                if let Some(delay_ms) = hint.verification_delay_ms {
                     account_refresh.schedule_after(&hint.identity, RefreshKind::Quota, delay_ms);
                 }
                 if let Some(delay_ms) = hint.retry_delay_ms {
@@ -220,21 +238,19 @@ fn persist_usage_observation(
     store.lock().map_err(|_| ()).and_then(|mut store| {
         let Some(account_id) = account_id else {
             store
-                .touch_usage(
-                    &event.local_key_id,
-                    &event.source_id,
-                    None,
-                    observed_at.to_string(),
-                )
+                .touch_usage(&event.local_key_id, &event.source_id, observed_at)
                 .map_err(|_| ())?;
             return Ok((0, None, false));
         };
 
-        let mut accounts = store.accounts().to_vec();
-        let account = accounts
-            .iter_mut()
-            .find(|account| account.account.id == account_id)
-            .ok_or(())?;
+        let mut account = store.account(account_id).cloned().ok_or(())?;
+        // Every dispatched result is bound to its credential generation, not
+        // just 401s. Keep late success, quota and failure data in telemetry but
+        // never apply it to a replacement login or complete its wake cycles.
+        let ignore_account_observation = ignore_account_observation
+            || event
+                .account_token_generation
+                .is_some_and(|generation| generation != account.account.token_generation);
         let visible_state = (
             account.account.quota.clone(),
             account.account.auth_state,
@@ -242,14 +258,14 @@ fn persist_usage_observation(
             account.account.last_error_code.clone(),
         );
         let refresh_now = apply_account_usage_state(
-            account,
+            &mut account,
             event,
             observed_at_ms,
             access_expiry,
             successful_auth_state,
             ignore_account_observation,
         ) && account.account.is_automatic_quota_monitoring_eligible()
-            && account.remote_location.is_none();
+            && account.recovery.is_none();
         let new_passive = event.success
             && !ignore_account_observation
             && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
@@ -272,8 +288,8 @@ fn persist_usage_observation(
                 .flatten()
             })
             .flatten();
-        let reset_delay_ms = new_passive
-            .then(|| quota_reset_delay(account_id, &account.account.quota, observed_at_ms))
+        let verification_delay_ms = new_passive
+            .then(|| quota_verification_delay(account_id, &account.account.quota, observed_at_ms))
             .flatten();
         let visible_state_changed = visible_state
             != (
@@ -282,23 +298,19 @@ fn persist_usage_observation(
                 account.account.health,
                 account.account.last_error_code.clone(),
             );
-        let mut keys = store.keys().to_vec();
-        if let Some(key) = keys.iter_mut().find(|key| key.id == event.local_key_id) {
-            key.last_used_at = Some(observed_at.to_string());
-        }
         let mut coordinator = wake.lock().map_err(|_| ())?;
-        let mut next = coordinator.clone();
+        let mut updated_coordinator = coordinator.clone();
         let mut automations = store.automations().clone();
-        let natural_use = if event.success {
-            next.mark_natural_use_for_account(account_id, observed_at_ms)
+        let natural_use = if event.is_natural_account_use() && !ignore_account_observation {
+            updated_coordinator.mark_natural_use_for_account(account_id, observed_at_ms)
         } else {
             0
         };
-        automations.state = next.state().clone();
+        automations.state = updated_coordinator.state().clone();
         store
-            .replace_account_state(accounts, keys, automations)
+            .persist_account_usage(account, &event.local_key_id, observed_at, automations)
             .map_err(|_| ())?;
-        *coordinator = next;
+        *coordinator = updated_coordinator;
         let (_, fence) = store.account_refresh_scope(account_id).map_err(|_| ())?;
         Ok((
             natural_use,
@@ -306,7 +318,7 @@ fn persist_usage_observation(
                 identity: fence.identity(),
                 refresh_now,
                 passive_observation,
-                reset_delay_ms,
+                verification_delay_ms,
                 retry_delay_ms: (refresh_now && event.http_status == 429)
                     .then_some(event.retry_at_ms)
                     .flatten()

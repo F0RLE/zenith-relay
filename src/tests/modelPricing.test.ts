@@ -7,7 +7,6 @@ import {
 import {
   formatEditableModelPrice,
   parseEditableModelPrice,
-  parseOptionalEditableModelPrice,
 } from "../src/features/relay/modelPricing";
 import type { ModelSummary } from "../src/features/relay/api/types";
 
@@ -31,7 +30,7 @@ describe("model metadata presentation", () => {
       metadata("unclassified", "openai", null),
     ];
     const groups = groupModels(models, { metadata: (model) => model });
-    expect(groups.map((group) => [group.id, group.label, group.items.map((item) => item.id)]))
+    expect(groups.map((group) => [group.id, group.label, group.models.map((item) => item.id)]))
       .toEqual([
         ["catalog-openai", "OpenAI", ["new", "sol", "terra", "newer-sol", "mini", "unclassified"]],
         ["catalog-anthropic", "Anthropic", ["claude"]],
@@ -50,7 +49,7 @@ describe("model metadata presentation", () => {
     ];
 
     expect(groupModels(models, { metadata: (model) => model })
-      .map((group) => [group.label, group.items.map((model) => model.id)]))
+      .map((group) => [group.label, group.models.map((model) => model.id)]))
       .toEqual([
         ["Google", ["anything-1", "anything-2"]],
         ["Other", ["private"]],
@@ -78,7 +77,7 @@ describe("model metadata presentation", () => {
     expect(groupModels(models, {
       metadata: (model) => model,
       isNativeChatGpt: (model) => model.nativeChatGpt,
-    }).map((group) => [group.provider, group.items.map((model) => model.id)]))
+    }).map((group) => [group.provider, group.models.map((model) => model.id)]))
       .toEqual([["openai", ["native-new", "api-model"]]]);
   });
 
@@ -95,16 +94,16 @@ describe("model metadata presentation", () => {
     expect(orderModelIdsBySnapshot([" New "], summaries)).toEqual([" New "]);
   });
 
-  test("sorts models outside the current snapshot by stable ID when requested", () => {
+  test("keeps source order for models outside the current snapshot and deduplicates snapshot rows", () => {
     const summaries = [
       metadata("new", "openai", "gpt"),
       metadata("old", "openai", "gpt"),
+      metadata("NEW", "openai", "gpt"),
     ] as ModelSummary[];
     expect(orderModelIdsBySnapshot(
       ["unknown-z", "old", "unknown-a", "new"],
       summaries,
-      { unknownOrder: "stable-id" },
-    )).toEqual(["new", "old", "unknown-a", "unknown-z"]);
+    )).toEqual(["new", "old", "unknown-z", "unknown-a"]);
   });
 });
 
@@ -114,6 +113,6 @@ describe("model pricing", () => {
     expect(parseEditableModelPrice("1,4")).toBe(1_400_000);
     expect(formatEditableModelPrice(4_200_000)).toBe("4.2");
     expect(parseEditableModelPrice("1.0000001")).toBeNull();
-    expect(parseOptionalEditableModelPrice("")).toBeNull();
+    expect(parseEditableModelPrice("")).toBeNull();
   });
 });

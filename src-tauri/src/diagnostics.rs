@@ -11,11 +11,12 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64},
         Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64},
     },
 };
 
+pub(crate) mod memory;
 mod persist;
 mod redact;
 use redact::{safe_code, safe_detail, safe_text, truncate_text};
@@ -32,7 +33,6 @@ const MAX_LOG_FILE_BYTES: u64 = 1_048_576;
 const MAX_RETAINED_ERROR_FILES: usize = 14;
 const MAX_RETAINED_OPERATION_FILES: usize = 14;
 const MAX_RETAINED_CRASH_FILES: usize = 20;
-const MAX_RETAINED_STAGE_FILES: usize = 2;
 const MAX_TEXT_BYTES: usize = 2_000;
 const MAX_STACK_BYTES: usize = 24_000;
 const REDACTED: &str = "[redacted]";
@@ -41,7 +41,6 @@ const SESSION_MARKER_FILE: &str = "session.active";
 static STATE: OnceLock<DiagnosticState> = OnceLock::new();
 static PANIC_HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
 static CRASH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 // Detailed operation breadcrumbs are opt-in. Errors and crash reports remain
 // enabled regardless of this flag so a normal installation stays quiet while
@@ -50,7 +49,7 @@ static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct DiagnosticState {
     root: Mutex<PathBuf>,
-    write_lock: Mutex<()>,
+    write_lock: Mutex<persist::Writers>,
     breadcrumb: Mutex<Option<Breadcrumb>>,
 }
 
@@ -97,15 +96,6 @@ pub struct FrontendDiagnosticInput {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DiagnosticPaths {
-    pub logs_path: String,
-    pub error_logs_path: String,
-    pub crash_logs_path: String,
-    pub operation_logs_path: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DiagnosticSettings {
     pub debug_enabled: bool,
 }
@@ -118,16 +108,13 @@ pub(crate) use lifecycle::{initialize, install_panic_hook, shutdown};
 pub(crate) use record::{
     breadcrumb, hash_identifier, record_error, record_frontend_error, record_operation,
 };
-pub(crate) use settings::{paths, set_debug_enabled, settings};
+pub(crate) use settings::{is_debug_enabled, set_debug_enabled, settings};
 
 #[tauri::command]
-pub fn record_frontend_diagnostic(input: FrontendDiagnosticInput) {
-    record_frontend_error(input);
-}
-
-#[tauri::command]
-pub fn get_diagnostic_paths() -> DiagnosticPaths {
-    paths()
+pub async fn record_frontend_diagnostic(input: FrontendDiagnosticInput) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || record_frontend_error(input))
+        .await
+        .map_err(|_| "Frontend diagnostic write was interrupted".to_string())
 }
 
 #[tauri::command]
@@ -136,9 +123,21 @@ pub fn get_diagnostic_settings() -> DiagnosticSettings {
 }
 
 #[tauri::command]
-pub fn set_diagnostic_debug_mode(enabled: bool) -> Result<DiagnosticSettings, String> {
-    set_debug_enabled(enabled)?;
-    Ok(settings())
+pub async fn set_diagnostic_debug_mode(
+    enabled: bool,
+    state: tauri::State<'_, crate::local_pool::DesktopState>,
+) -> Result<DiagnosticSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let was_enabled = is_debug_enabled();
+        set_debug_enabled(enabled)?;
+        if enabled && !was_enabled {
+            memory::record_snapshot(&state, "debug_enabled");
+        }
+        Ok(settings())
+    })
+    .await
+    .map_err(|_| "Diagnostic setting update was interrupted".to_string())?
 }
 
 #[cfg(test)]

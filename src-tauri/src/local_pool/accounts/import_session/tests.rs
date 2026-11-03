@@ -35,14 +35,14 @@ impl MemorySecrets {
 }
 
 impl SecretBackend for MemorySecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         let mut state = self.state();
         if state.fail_save {
             return Err(SecretBackendError);
         }
         state
             .values
-            .insert(secret_ref.to_string(), value.to_string());
+            .insert(secret_ref.to_string(), secret_value.to_string());
         Ok(())
     }
 
@@ -68,9 +68,9 @@ impl SecretBackend for MemorySecrets {
 struct VaultSecrets(Arc<crate::local_pool::store::vault::Vault>);
 
 impl SecretBackend for VaultSecrets {
-    fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError> {
         self.0
-            .save(secret_ref, value)
+            .save(secret_ref, secret_value)
             .map_err(|_| SecretBackendError)
     }
 
@@ -269,9 +269,11 @@ fn cancel_and_complete_clear_secret_before_snapshot() {
     let completed_ref = secret_ref(&completed.session_id);
     store.complete(&completed.session_id).unwrap();
     assert!(!secrets.contains(&completed_ref));
-    assert!(!snapshot_path(&root, &completed.session_id)
-        .unwrap()
-        .exists());
+    assert!(
+        !snapshot_path(&root, &completed.session_id)
+            .unwrap()
+            .exists()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -307,6 +309,10 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
     let root = temp_root("unsafe");
     let secrets = MemorySecrets::default();
     let store = ImportSessionStore::new(root.clone(), secrets);
+    assert_eq!(
+        store.resume(FIXED_ID, &[]).unwrap_err().code,
+        ImportSessionErrorCode::SessionNotFound
+    );
     let started = store.start(&fixture(), None, &[]).unwrap();
     let path = snapshot_path(&root, &started.session_id).unwrap();
     fs::write(&path, b"{not-json").unwrap();
@@ -322,6 +328,20 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
 
     let started = store.start(&fixture(), None, &[]).unwrap();
     let path = snapshot_path(&root, &started.session_id).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(8 * 1024 * 1024 + 1)
+        .unwrap();
+    assert_eq!(
+        store.resume(&started.session_id, &[]).unwrap_err().code,
+        ImportSessionErrorCode::SnapshotUnsafe
+    );
+    store.cancel(&started.session_id).unwrap();
+
+    let started = store.start(&fixture(), None, &[]).unwrap();
+    let path = snapshot_path(&root, &started.session_id).unwrap();
     let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     snapshot["preview"]["access_token"] = Value::String(ACCESS_TOKEN.to_string());
     fs::write(&path, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
@@ -331,6 +351,30 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
     );
     store.cancel(&started.session_id).unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn snapshot_collision_preserves_unowned_staging_file() {
+    let root = temp_root("unowned-staging");
+    let secrets = MemorySecrets::default();
+    let store = ImportSessionStore::new(root.clone(), secrets.clone());
+    let path = snapshot_path(&root, FIXED_ID).unwrap();
+    let staging = snapshot_temp_path(&path);
+    fs::create_dir_all(staging.parent().unwrap()).unwrap();
+    fs::write(&staging, "unrelated staging content").unwrap();
+
+    let error = store
+        .start_with_id(FIXED_ID, &fixture(), None, &[])
+        .unwrap_err();
+    let preserved = fs::read_to_string(&staging).ok();
+    let rolled_back = !secrets.contains(&secret_ref(FIXED_ID));
+    let published = path.exists();
+    fs::remove_dir_all(root).unwrap();
+
+    assert_eq!(error.code, ImportSessionErrorCode::SnapshotIo);
+    assert_eq!(preserved.as_deref(), Some("unrelated staging content"));
+    assert!(rolled_back);
+    assert!(!published);
 }
 
 #[test]
@@ -405,10 +449,5 @@ fn fixture() -> String {
 }
 
 fn temp_root(label: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-session-{label}-{}",
-        Uuid::new_v4()
-    ));
-    fs::create_dir_all(&root).unwrap();
-    root
+    crate::files::test_temp_root(&format!("import-session-{label}"))
 }

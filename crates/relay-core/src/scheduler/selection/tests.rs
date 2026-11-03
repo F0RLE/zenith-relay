@@ -2,14 +2,17 @@ use super::*;
 mod admission;
 mod affinity;
 mod automatic;
+mod cache_owner;
 mod capacity;
 mod live_order;
 mod policy;
 mod preview;
+mod rate_limits;
 mod recovery;
 mod rotation;
-use crate::scheduler::{CandidateKind, CandidateQuota};
+mod warm_fallback;
 use crate::ModelRules;
+use crate::scheduler::{CandidateKind, CandidateQuota};
 use std::collections::{BTreeSet, HashSet};
 
 fn candidate(id: &str) -> RuntimeCandidate {
@@ -19,6 +22,7 @@ fn candidate(id: &str) -> RuntimeCandidate {
         source_id: id.to_string(),
         account_id: None,
         protocol: WireApi::Responses,
+        model_protocols: BTreeMap::new(),
         enabled: true,
         draining: false,
         priority: 0,
@@ -29,6 +33,7 @@ fn candidate(id: &str) -> RuntimeCandidate {
         quota: CandidateQuota::Unknown,
         provider_credits_micro_units: None,
         provider_credits_unlimited: false,
+        provider_credits_observed_at_ms: None,
         quota_updated_at_ms: None,
         quota_reset_at_ms: None,
         cooldowns: BTreeMap::new(),

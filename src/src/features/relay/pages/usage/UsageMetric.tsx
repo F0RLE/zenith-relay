@@ -16,6 +16,9 @@ export function UsageMetric({ icon, label, value, detail, title, className }: {
       ref={hasTooltip ? tooltip.anchorRef : undefined}
       className={`usage-metric${className ? ` ${className}` : ""}`}
       aria-describedby={hasTooltip ? tooltip.describedBy : undefined}
+      tabIndex={hasTooltip ? 0 : undefined}
+      onFocus={hasTooltip ? tooltip.showAfterFocus : undefined}
+      onBlur={hasTooltip ? tooltip.hide : undefined}
       onMouseEnter={hasTooltip ? tooltip.show : undefined}
       onMouseLeave={hasTooltip ? tooltip.hideAfterHover : undefined}
       onPointerDown={hasTooltip ? tooltip.pointerStart : undefined}

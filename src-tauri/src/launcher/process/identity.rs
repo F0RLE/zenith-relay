@@ -8,97 +8,131 @@ use crate::launcher::opencode_desktop::is_macos_app_executable;
 #[cfg(target_os = "windows")]
 use sysinfo::Pid;
 
-pub(in crate::launcher) fn codex_process_system() -> System {
-    let mut system = System::new();
+pub(in crate::launcher) fn codex_process_system() -> Result<System, String> {
+    let mut system =
+        System::new().map_err(|error| format!("Could not inspect processes: {error}"))?;
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system
+    Ok(system)
 }
 
-pub(in crate::launcher) fn codex_process_pids() -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(in crate::launcher) fn codex_process_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .values()
         .filter(|process| is_codex_process(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
-pub(super) fn opencode_process_pids() -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(super) fn opencode_process_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .values()
         .filter(|process| is_opencode_process(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
+}
+
+pub(in crate::launcher) fn claude_desktop_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
+        .processes()
+        .values()
+        .filter(|process| is_claude_desktop_process(process))
+        .map(|process| process.pid().as_u32())
+        .collect())
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn codex_process_pids_for(targets: &[u32]) -> Vec<u32> {
+pub(super) fn claude_desktop_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
+    matching_process_pids(targets, is_claude_desktop_process)
+}
+
+pub(in crate::launcher) fn is_claude_desktop_process(process: &sysinfo::Process) -> bool {
+    is_claude_desktop_process_identity(process.exe(), process.cmd())
+}
+
+pub(in crate::launcher) fn is_claude_desktop_process_identity(
+    executable: Option<&Path>,
+    command: &[impl AsRef<std::ffi::OsStr>],
+) -> bool {
+    !command
+        .iter()
+        .any(|argument| argument.as_ref().to_string_lossy().starts_with("--type="))
+        && executable.is_some_and(super::super::claude_desktop::is_desktop_executable)
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn codex_process_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
     matching_process_pids(targets, is_codex_process)
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn opencode_process_pids_for(targets: &[u32]) -> Vec<u32> {
+pub(super) fn opencode_process_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
     matching_process_pids(targets, is_opencode_process)
 }
 
 #[cfg(target_os = "windows")]
-fn matching_process_pids(targets: &[u32], matcher: fn(&sysinfo::Process) -> bool) -> Vec<u32> {
+fn matching_process_pids(
+    targets: &[u32],
+    matcher: fn(&sysinfo::Process) -> bool,
+) -> Result<Vec<u32>, String> {
     if targets.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let pids = targets
         .iter()
         .copied()
         .map(Pid::from_u32)
         .collect::<Vec<_>>();
-    let mut system = System::new();
+    let mut system =
+        System::new().map_err(|error| format!("Could not inspect processes: {error}"))?;
     system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
-    system
+    Ok(system
         .processes()
         .values()
         .filter(|process| matcher(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
-pub(in crate::launcher) fn running_target_pids(targets: &[u32]) -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(in crate::launcher) fn running_target_pids(targets: &[u32]) -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .keys()
         .map(|pid| pid.as_u32())
         .filter(|pid| targets.contains(pid))
-        .collect()
+        .collect())
 }
 
 pub(crate) fn is_codex_process(process: &sysinfo::Process) -> bool {
-    let name = process.name().to_string_lossy();
+    let process_name = process.name().to_string_lossy();
     let executable = process.exe();
     let command = process
         .cmd()
         .iter()
-        .map(|value| value.to_string_lossy())
+        .map(|command_argument| command_argument.to_string_lossy())
         .collect::<Vec<_>>();
-    is_codex_process_identity(&name, executable, &command)
+    is_codex_process_identity(&process_name, executable, &command)
 }
 
 pub(super) fn is_opencode_process(process: &sysinfo::Process) -> bool {
-    let name = process.name().to_string_lossy();
+    let process_name = process.name().to_string_lossy();
     let executable = process.exe();
     let command = process
         .cmd()
         .iter()
-        .map(|value| value.to_string_lossy())
+        .map(|command_argument| command_argument.to_string_lossy())
         .collect::<Vec<_>>();
-    is_opencode_process_identity(&name, executable, &command)
+    is_opencode_process_identity(&process_name, executable, &command)
 }
 
 pub(in crate::launcher) fn is_opencode_process_identity(
-    name: &str,
+    process_name: &str,
     executable: Option<&Path>,
     command: &[impl AsRef<str>],
 ) -> bool {
@@ -108,7 +142,7 @@ pub(in crate::launcher) fn is_opencode_process_identity(
         // the same executable; those helpers are not the app itself.
         if command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="))
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="))
         {
             return false;
         }
@@ -119,7 +153,7 @@ pub(in crate::launcher) fn is_opencode_process_identity(
             "OpenCode Beta.exe",
         ]
         .iter()
-        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
             && executable
                 .is_some_and(super::super::opencode_desktop::is_windows_opencode_desktop_path)
     }
@@ -128,23 +162,23 @@ pub(in crate::launcher) fn is_opencode_process_identity(
     {
         !command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="))
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="))
             && executable.is_some_and(|path| {
                 if cfg!(target_os = "macos") {
-                    name.eq_ignore_ascii_case("OpenCode")
+                    process_name.eq_ignore_ascii_case("OpenCode")
                         && super::super::opencode_desktop::is_macos_opencode_desktop_path(path)
                 } else {
                     super::super::opencode_desktop::is_linux_opencode_desktop_path(path)
                         && ["opencode", "opencode-desktop", "ai.opencode.desktop"]
                             .iter()
-                            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+                            .any(|candidate| process_name.eq_ignore_ascii_case(candidate))
                 }
             })
     }
 }
 
 pub(in crate::launcher) fn is_codex_process_identity(
-    name: &str,
+    process_name: &str,
     executable: Option<&Path>,
     command: &[impl AsRef<str>],
 ) -> bool {
@@ -152,12 +186,17 @@ pub(in crate::launcher) fn is_codex_process_identity(
     {
         let helper = command
             .iter()
-            .any(|value| value.as_ref().starts_with("--type="));
+            .any(|command_argument| command_argument.as_ref().starts_with("--type="));
         if helper {
             return false;
         }
         let path = executable
-            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .map(|executable_path| {
+                executable_path
+                    .to_string_lossy()
+                    .replace('/', "\\")
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
         // Keep this exclusion explicit. Relay may launch or own a process
         // tree that contains a compatible executable name in the future, but
@@ -165,7 +204,7 @@ pub(in crate::launcher) fn is_codex_process_identity(
         if path.ends_with("\\zenith relay.exe") {
             return false;
         }
-        if name.eq_ignore_ascii_case("ChatGPT.exe") {
+        if process_name.eq_ignore_ascii_case("ChatGPT.exe") {
             return path.contains("openai.codex_")
                 || path.contains("openai.chatgpt_")
                 || path.contains("\\chatgpt\\")
@@ -176,8 +215,9 @@ pub(in crate::launcher) fn is_codex_process_identity(
         let packaged_desktop = path.contains("\\windowsapps\\openai.")
             || path.contains("\\program files\\chatgpt\\")
             || path.contains("\\program files\\codex\\");
-        (name.eq_ignore_ascii_case("OpenAI.Codex.exe")
-            || (name.eq_ignore_ascii_case("Codex.exe") && packaged_desktop))
+        (process_name.eq_ignore_ascii_case("OpenAI.Codex.exe")
+            || process_name.eq_ignore_ascii_case("Codex.exe"))
+            && packaged_desktop
             && !path.contains("\\resources\\codex.exe")
     }
 
@@ -186,39 +226,42 @@ pub(in crate::launcher) fn is_codex_process_identity(
         cfg!(target_os = "macos")
             && !command
                 .iter()
-                .any(|value| value.as_ref().starts_with("--type="))
+                .any(|command_argument| command_argument.as_ref().starts_with("--type="))
             && executable.is_some_and(|path| {
-                (name.eq_ignore_ascii_case("ChatGPT")
+                (process_name.eq_ignore_ascii_case("ChatGPT")
                     && is_macos_app_executable(path, "chatgpt", "chatgpt"))
-                    || (name.eq_ignore_ascii_case("Codex")
+                    || (process_name.eq_ignore_ascii_case("Codex")
                         && is_macos_app_executable(path, "codex", "codex"))
             })
     }
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn wait_for_codex_state(running: bool, timeout: Duration) -> bool {
+pub(super) fn wait_for_codex_state(running: bool, timeout: Duration) -> Result<bool, String> {
     let started = Instant::now();
     loop {
-        if super::is_codex_running() == running {
-            return true;
+        if super::is_codex_running()? == running {
+            return Ok(true);
         }
         if started.elapsed() >= timeout {
-            return false;
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(in crate::launcher) fn wait_for_pids_exit(pids: &[u32], timeout: Duration) -> bool {
+pub(in crate::launcher) fn wait_for_pids_exit(
+    pids: &[u32],
+    timeout: Duration,
+) -> Result<bool, String> {
     let started = Instant::now();
     loop {
-        if running_target_pids(pids).is_empty() {
-            return true;
+        if running_target_pids(pids)?.is_empty() {
+            return Ok(true);
         }
         if started.elapsed() >= timeout {
-            return false;
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }

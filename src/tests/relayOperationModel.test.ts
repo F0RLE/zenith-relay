@@ -8,6 +8,31 @@ const resolvedError = (cause: unknown) => ({
 });
 
 describe("relay operation policy", () => {
+  for (const fails of [false, true]) {
+    test(`standalone launch ${fails ? "failure" : "success"} never depends on a runtime refresh`, async () => {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => {
+          events.push("launch");
+          if (fails) throw new Error("application not found");
+        },
+        refresh: async () => {
+          events.push("refresh");
+          throw new Error("profile changed outside Relay");
+        },
+        isCurrent: () => true,
+        successKey: "feedback.launched",
+        options: { skipRefresh: true, backgroundRefresh: true },
+        resolveError: resolvedError,
+        setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+        settle: () => events.push("settled"),
+      });
+      await Promise.resolve();
+      expect(result).toBe(!fails);
+      expect(events).toEqual(["launch", fails ? "error:errors.general" : "success:feedback.launched", "settled"]);
+    });
+  }
+
   test("runs work, refreshes current state, and publishes success in order", async () => {
     const events: string[] = [];
     const result = await runRelayOperation({
@@ -167,6 +192,23 @@ describe("relay operation policy", () => {
     await refreshGate;
     await Promise.resolve();
     expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start", "refresh-end"]);
+  });
+
+  test("does not start a queued background refresh after ownership changes", async () => {
+    let current = true;
+    let refreshes = 0;
+    const result = await runRelayOperation({
+      work: async () => undefined,
+      refresh: async () => { refreshes += 1; },
+      isCurrent: () => current,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: () => { queueMicrotask(() => { current = false; }); },
+      settle: () => undefined,
+    });
+    expect(result).toBeTrue();
+    expect(refreshes).toBe(0);
   });
 
   test("reports a background refresh failure without treating the command as unsent", async () => {

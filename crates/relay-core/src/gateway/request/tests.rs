@@ -12,11 +12,9 @@ mod tool_repair;
 
 fn automatic_tool_policy_test_runtime() -> GatewayRuntime {
     let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
-    runtime
-        .set_tool_policy(crate::ToolPolicy {
-            mode: crate::ToolPolicyMode::Automatic,
-        })
-        .unwrap();
+    runtime.set_tool_policy(crate::ToolPolicy {
+        mode: crate::ToolPolicyMode::Automatic,
+    });
     runtime
 }
 
@@ -29,7 +27,10 @@ fn two_function_tools() -> Value {
     })
 }
 
-fn capability_test_runtime(models: &[&str], options: GatewayRuntimeOptions) -> GatewayRuntime {
+pub(super) fn capability_test_runtime(
+    models: &[&str],
+    options: GatewayRuntimeOptions,
+) -> GatewayRuntime {
     GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(ProviderSource {
             id: "source".into(),
@@ -38,6 +39,7 @@ fn capability_test_runtime(models: &[&str], options: GatewayRuntimeOptions) -> G
             api_key: "upstream-secret".into(),
             wire_api: WireApi::Responses,
             models: models.iter().map(|id| (*id).to_string()).collect(),
+            proxy_url: None,
         })],
         vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
             id: "key".into(),

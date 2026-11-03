@@ -17,18 +17,29 @@ pub fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
     }
 }
 
-pub fn token_refresh_provider_error_code(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let code = [
-        value.pointer("/error/code").and_then(Value::as_str),
-        value.get("code").and_then(Value::as_str),
-        value.get("error").and_then(Value::as_str),
-        value.pointer("/error/type").and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(normalize_error_code);
-    code
+pub fn token_refresh_provider_error_code(response_body: &[u8]) -> Option<String> {
+    if response_body.len() > 32 * 1_024 {
+        return None;
+    }
+    let error_payload = crate::strict_json::parse(std::str::from_utf8(response_body).ok()?).ok()?;
+    let fields = error_payload.as_object()?;
+    let error = fields.get("error");
+    // Presence establishes precedence. A malformed code keeps the result unknown
+    // instead of borrowing a terminal grant error from a lower-priority field.
+    if let Some(code) = error
+        .and_then(Value::as_object)
+        .and_then(|fields| fields.get("code"))
+    {
+        return code.as_str().and_then(normalize_error_code);
+    }
+    if let Some(code) = fields.get("code") {
+        return code.as_str().and_then(normalize_error_code);
+    }
+    match error? {
+        Value::String(code) => normalize_error_code(code),
+        Value::Object(fields) => fields.get("type")?.as_str().and_then(normalize_error_code),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -85,5 +96,63 @@ mod tests {
             normalize_error_code(" refresh_token_reused ").as_deref(),
             Some("refresh_token_reused")
         );
+    }
+
+    #[test]
+    fn explicit_refresh_codes_fence_lower_priority_fields() {
+        for code in serde_json::json!([null, 42, [], {}, "", "<script>"])
+            .as_array()
+            .unwrap()
+        {
+            for body in [
+                serde_json::json!({"error":{"code":code,"type":"invalid_grant"}}),
+                serde_json::json!({"code":code,"error":"invalid_grant"}),
+                serde_json::json!({"code":"invalid_grant","error":{"code":code,"type":"invalid_grant"}}),
+            ] {
+                assert_eq!(
+                    token_refresh_provider_error_code(&serde_json::to_vec(&body).unwrap()),
+                    None,
+                    "{body}"
+                );
+            }
+        }
+        assert_eq!(
+            token_refresh_provider_error_code(
+                br#"{"error":{"code":"provider_unknown","type":"invalid_grant"}}"#
+            )
+            .as_deref(),
+            Some("provider_unknown")
+        );
+        assert_eq!(
+            token_refresh_provider_error_code(br#"{"error":{"type":"invalid_grant"}}"#).as_deref(),
+            Some("invalid_grant")
+        );
+    }
+
+    #[test]
+    fn ambiguous_refresh_envelopes_stay_unknown() {
+        for body in [
+            r#"{"error":"provider_unknown","error":"invalid_grant"}"#,
+            r#"{"error":{"code":"provider_unknown","code":"invalid_grant"}}"#,
+            r#"{"error":{"code":"provider_unknown","co\u0064e":"invalid_grant"}}"#,
+            r#"{"error":{"type":"provider_unknown","type":"invalid_grant"}}"#,
+            r#"{"error":"invalid_grant","metadata":{"flag":false,"flag":true}}"#,
+            r#"{"error":"invalid_grant"} {}"#,
+            r#"{"error":"invalid_grant","value":NaN}"#,
+        ] {
+            assert_eq!(
+                token_refresh_provider_error_code(body.as_bytes()),
+                None,
+                "{body}"
+            );
+        }
+        let mut body = br#"{"error":"invalid_grant"}"#.to_vec();
+        body.resize(32 * 1_024, b' ');
+        assert_eq!(
+            token_refresh_provider_error_code(&body).as_deref(),
+            Some("invalid_grant")
+        );
+        body.push(b' ');
+        assert_eq!(token_refresh_provider_error_code(&body), None);
     }
 }

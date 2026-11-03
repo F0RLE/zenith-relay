@@ -1,18 +1,8 @@
 use super::helper::{replace_executable, rollback_executable, write_acknowledgement};
 use super::*;
-use std::{
-    env,
-    time::{SystemTime, UNIX_EPOCH},
-};
 
 fn temp_dir(label: &str) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = env::temp_dir().join(format!("zenith-relay-portable-{label}-{stamp}"));
-    fs::create_dir_all(&path).unwrap();
-    path
+    crate::files::test_temp_root(&format!("portable-{label}"))
 }
 
 #[test]

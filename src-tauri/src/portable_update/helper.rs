@@ -38,7 +38,7 @@ pub(super) fn update_paths() -> io::Result<UpdatePaths> {
         .ok_or_else(|| io::Error::other("executable has no parent directory"))?;
     let stem = target
         .file_stem()
-        .and_then(|value| value.to_str())
+        .and_then(|executable_stem| executable_stem.to_str())
         .ok_or_else(|| io::Error::other("executable has no valid file name"))?;
     let helper = parent.join(format!("{stem}.update.exe"));
     let temp = parent.join(format!("{stem}.update.exe.tmp"));
@@ -83,9 +83,9 @@ pub(super) fn write_helper(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    value.into()
+    let mut suffixed_path = path.as_os_str().to_os_string();
+    suffixed_path.push(suffix);
+    suffixed_path.into()
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -105,7 +105,7 @@ where
     let deadline = Instant::now() + FILE_WAIT;
     loop {
         match operation() {
-            Ok(value) => return Ok(value),
+            Ok(operation_result) => return Ok(operation_result),
             Err(_error) if Instant::now() < deadline => thread::sleep(Duration::from_millis(150)),
             Err(error) => return Err(error),
         }
@@ -149,24 +149,24 @@ fn relaunch(path: &Path) {
 }
 
 #[cfg(target_os = "windows")]
-fn process_is_running(pid: u32) -> bool {
+fn process_is_running(pid: u32) -> io::Result<bool> {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let pid = Pid::from_u32(pid);
-    let mut system = System::new();
+    let mut system = System::new().map_err(io::Error::other)?;
     system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).is_some()
+    Ok(system.process(pid).is_some())
 }
 
 #[cfg(target_os = "windows")]
-fn wait_for_process_exit(pid: u32) -> bool {
+fn wait_for_process_exit(pid: u32) -> io::Result<bool> {
     let deadline = Instant::now() + HELPER_WAIT;
-    while process_is_running(pid) {
+    while process_is_running(pid)? {
         if Instant::now() >= deadline {
-            return false;
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(200));
     }
-    true
+    Ok(true)
 }
 
 #[cfg(target_os = "windows")]
@@ -212,7 +212,7 @@ fn wait_for_ack(child: &mut std::process::Child, ack: &Path) -> bool {
 #[cfg(target_os = "windows")]
 pub(super) fn run_helper(old_pid: u32, target: PathBuf, ack: PathBuf) -> io::Result<()> {
     let helper = env::current_exe()?;
-    if !wait_for_process_exit(old_pid) {
+    if !wait_for_process_exit(old_pid)? {
         relaunch(&target);
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,

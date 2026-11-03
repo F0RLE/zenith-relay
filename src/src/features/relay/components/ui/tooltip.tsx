@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { isTooltipFocusSuppressed } from "./focus";
+import { positionTooltip } from "./tooltipPosition";
+import type { TooltipPosition } from "./tooltipPosition";
 
 export function mergeDescribedBy(...values: Array<string | undefined>) {
-  const ids = new Set(values.flatMap((value) => value?.split(/\s+/).filter(Boolean) ?? []));
-  return ids.size ? [...ids].join(" ") : undefined;
+  const describedByIds = new Set(values.flatMap((describedByValue) => describedByValue?.split(/\s+/).filter(Boolean) ?? []));
+  return describedByIds.size ? [...describedByIds].join(" ") : undefined;
 }
 
 // Both component-owned and delegated hints share one visible tooltip.
@@ -17,7 +20,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
   const [visible, setVisible] = useState(false);
   const [instant, setInstant] = useState(false);
   const [activation, setActivation] = useState(0);
-  const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
+  const [position, setPosition] = useState<TooltipPosition | null>(null);
 
   const hide = useCallback(() => {
     setVisible(false);
@@ -28,7 +31,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     dismissActiveTooltip = hide;
     setInstant(immediate);
     setPosition(null);
-    setActivation((value) => value + 1);
+    setActivation((activation) => activation + 1);
     setVisible(true);
   }, [hide]);
   const showNow = useCallback(() => activate(true), [activate]);
@@ -42,28 +45,8 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     const anchor = anchorRef.current?.getBoundingClientRect();
     const tooltip = tooltipRef.current;
     if (!anchor || !tooltip) return;
-    const margin = 9;
-    // The 7px pointer and a small breathing space keep the arrow connected to
-    // its trigger without making the tooltip feel attached to the control.
-    const gap = 10;
-    let placement: "top" | "bottom" = "bottom";
-    let top = anchor.bottom + gap;
-    if (top + tooltip.offsetHeight > window.innerHeight - margin && anchor.top - tooltip.offsetHeight - gap >= margin) {
-      placement = "top";
-      top = anchor.top - tooltip.offsetHeight - gap;
-    }
-    const anchorCenter = anchor.left + anchor.width / 2;
-    const centered = anchorCenter - tooltip.offsetWidth / 2;
-    const left = Math.max(margin, Math.min(centered, window.innerWidth - tooltip.offsetWidth - margin));
-    // Keep the arrow on the trigger even when the tooltip itself must be
-    // clamped inside the viewport.
-    const arrowInset = 8;
-    const arrowLeft = Math.max(
-      arrowInset,
-      Math.min(anchorCenter - left, tooltip.offsetWidth - arrowInset),
-    );
-    top = Math.max(margin, Math.min(top, window.innerHeight - tooltip.offsetHeight - margin));
-    setPosition({ left, top, placement, arrowLeft });
+    setPosition(positionTooltip(anchor, { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+      { width: window.innerWidth, height: window.innerHeight }, anchorRef.current?.closest(".relay-sidebar") ? "right" : "bottom"));
   }, [label, visible, activation]);
 
   useEffect(() => () => {
@@ -74,6 +57,18 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     if (!visible) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
+      // A hint must not swallow an editor's Escape-to-cancel shortcut.
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, [contenteditable='true']")) {
+        hide();
+        return;
+      }
+      // A passive hint must not make closing a dialog require a second Escape.
+      // Dialogs and inner editors/menus retain their own dismissal ordering.
+      if (anchorRef.current?.closest("[data-relay-dialog]")
+        || event.target instanceof Element && event.target.closest("[data-relay-dialog]")) {
+        hide();
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       hide();
@@ -110,6 +105,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
         left: position.left,
         top: position.top,
         "--relay-tooltip-arrow-left": `${position.arrowLeft}px`,
+        "--relay-tooltip-arrow-top": `${position.arrowTop}px`,
       } as CSSProperties : undefined}
     >
       {label}
@@ -124,7 +120,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     hideAfterHover: () => { if (!anchorRef.current?.matches(":focus-visible")) hide(); },
     show,
     showNow,
-    showAfterFocus: () => { if (anchorRef.current?.matches(":focus-visible")) showNow(); },
+    showAfterFocus: () => { if (!isTooltipFocusSuppressed() && anchorRef.current?.matches(":focus-visible")) showNow(); },
     pointerStart,
     tooltip,
   };

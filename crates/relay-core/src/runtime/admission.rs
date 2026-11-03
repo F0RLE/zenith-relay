@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::scheduler::rotation::{
-    AdmissionStopReason, RequestId, RotationOperation, SharedRequestBudget,
+    AdmissionStopReason, RequestId, RequestWaitKind, RotationOperation, SharedRequestBudget,
 };
 use crate::{Selection, SelectionRequest};
 use std::collections::VecDeque;
@@ -64,8 +64,10 @@ impl Default for AdmissionLimits {
         Self {
             requests: 1024,
             principal_requests: 256,
-            bytes: 256 * 1024 * 1024,
-            principal_bytes: 128 * 1024 * 1024,
+            // Waiter counts stay bounded. Body size is not a reason to refuse
+            // the request; the provider makes that decision.
+            bytes: usize::MAX,
+            principal_bytes: usize::MAX,
         }
     }
 }
@@ -85,14 +87,14 @@ pub(super) struct AdmissionQueue {
 }
 
 impl AdmissionQueue {
-    fn insert(&mut self, request: AdmissionRequest, selecting: bool) -> bool {
-        let id = request.budget.request_id();
+    fn insert(&mut self, request: AdmissionRequest, kind: RequestWaitKind) -> bool {
+        let request_id = request.budget.request_id();
         let bytes = request.retained_bytes();
         let principal = &request.key.id;
         let mut principal_count = 0usize;
         let mut principal_bytes = 0usize;
         for waiter in &self.waiters {
-            if waiter.request.budget.request_id() == id {
+            if waiter.request.budget.request_id() == request_id {
                 // Concurrent drivers must not count or admit the same request
                 // twice. Sequential WS/HTTP handoff uses the same budget.
                 return false;
@@ -106,7 +108,7 @@ impl AdmissionQueue {
             || principal_count >= self.limits.principal_requests
             || bytes > self.limits.bytes.saturating_sub(self.retained_bytes)
             || bytes > self.limits.principal_bytes.saturating_sub(principal_bytes)
-            || !request.budget.begin_queue_wait()
+            || !request.budget.begin_queue_wait(kind)
         {
             return false;
         }
@@ -117,7 +119,7 @@ impl AdmissionQueue {
         self.waiters.push_back(Waiter {
             request,
             bytes,
-            selecting,
+            selecting: kind == RequestWaitKind::Capacity,
         });
         true
     }
@@ -145,7 +147,11 @@ impl AdmissionQueue {
     }
 
     fn served(&mut self, principal: &str) {
-        if let Some(index) = self.principals.iter().position(|id| id == principal) {
+        if let Some(index) = self
+            .principals
+            .iter()
+            .position(|principal_id| principal_id == principal)
+        {
             let principal = self
                 .principals
                 .remove(index)
@@ -154,11 +160,11 @@ impl AdmissionQueue {
         }
     }
 
-    fn remove(&mut self, id: RequestId) {
+    fn remove(&mut self, request_id: RequestId) {
         let Some(index) = self
             .waiters
             .iter()
-            .position(|waiter| waiter.request.budget.request_id() == id)
+            .position(|waiter| waiter.request.budget.request_id() == request_id)
         else {
             return;
         };
@@ -170,7 +176,8 @@ impl AdmissionQueue {
             .iter()
             .any(|other| other.request.key.id == waiter.request.key.id)
         {
-            self.principals.retain(|id| *id != waiter.request.key.id);
+            self.principals
+                .retain(|principal_id| *principal_id != waiter.request.key.id);
         }
     }
 }
@@ -203,9 +210,9 @@ impl GatewayRuntime {
         &'a self,
         queue: &mut AdmissionQueue,
         request: &AdmissionRequest,
-        selecting: bool,
+        kind: RequestWaitKind,
     ) -> Option<AdmissionGuard<'a>> {
-        if !queue.insert(request.clone(), selecting) {
+        if !queue.insert(request.clone(), kind) {
             request
                 .budget
                 .stop_admission(AdmissionStopReason::QueueFull);

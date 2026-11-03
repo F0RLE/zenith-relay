@@ -19,26 +19,35 @@ pub(super) fn translate_completed_response(
     Ok((response_bytes, bridge_response))
 }
 
-/// The Excel transport wraps tools inside Responses. Unwrap it before the
-/// regular protocol adapter sees the response. For streamed client protocols,
-/// feed the completed Responses response through that adapter's SSE bridge.
-pub(super) struct CompletedBasisPointsResponse {
+/// A validated buffered response in the client's protocol, with its optional
+/// SSE representation and continuation state from the same adapter.
+pub(super) struct CompletedClientResponse {
     pub(super) bytes: Vec<u8>,
     pub(super) bridge_response: Option<AdapterResponse>,
     pub(super) stream: Option<Vec<u8>>,
 }
 
+/// Unwrap the Excel tool transport before regular protocol translation.
 pub(super) fn translate_basis_points_completed(
     adapter_request: PreparedAdapterRequest,
     upstream_bytes: &[u8],
-    responses_request: &Value,
+    responses_request: &super::super::basis_points::PreparedClientRequest,
     stream: bool,
-) -> Result<CompletedBasisPointsResponse, AdapterError> {
-    let responses_bytes =
-        super::super::basis_points::translate_response(upstream_bytes, responses_request)?;
+) -> Result<CompletedClientResponse, AdapterError> {
+    let responses_bytes = responses_request.translate_bytes(upstream_bytes)?;
+    translate_completed_responses(adapter_request, responses_bytes, stream)
+}
+
+/// Both BPS and SIWC can return JSON to a streaming caller. Reuse the existing
+/// Responses event encoder and protocol bridge without dispatching another turn.
+pub(super) fn translate_completed_responses(
+    adapter_request: PreparedAdapterRequest,
+    responses_bytes: Vec<u8>,
+    stream: bool,
+) -> Result<CompletedClientResponse, AdapterError> {
     if !stream {
         let (bytes, response) = translate_completed_response(adapter_request, responses_bytes)?;
-        return Ok(CompletedBasisPointsResponse {
+        return Ok(CompletedClientResponse {
             bytes,
             bridge_response: response,
             stream: None,
@@ -46,7 +55,7 @@ pub(super) fn translate_basis_points_completed(
     }
     let responses_stream = super::super::basis_points::synthetic_stream(&responses_bytes)?;
     let Some(mut bridge) = adapter_request.into_stream_bridge() else {
-        return Ok(CompletedBasisPointsResponse {
+        return Ok(CompletedClientResponse {
             bytes: responses_bytes,
             bridge_response: None,
             stream: Some(responses_stream),
@@ -64,7 +73,7 @@ pub(super) fn translate_basis_points_completed(
     }
     let bytes = serde_json::to_vec(&completed.response_body)
         .map_err(|_| AdapterError::upstream_response_invalid())?;
-    Ok(CompletedBasisPointsResponse {
+    Ok(CompletedClientResponse {
         bytes,
         bridge_response: Some(AdapterResponse::Translated(completed)),
         stream: Some(client_stream),

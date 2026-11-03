@@ -3,8 +3,7 @@ use super::presets::apply_source_preset_policy;
 use super::*;
 use crate::local_pool::models::ProviderSourceRecord;
 use std::collections::BTreeSet;
-use uuid::Uuid;
-use zenith_relay_core::protocol::{complete_model_display_order, SourcePresetRule};
+use zenith_relay_core::protocol::{SourcePresetRule, complete_model_display_order};
 use zenith_relay_core::{SourceProtocolBinding, WireApi};
 
 fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
@@ -17,6 +16,7 @@ fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
         base_url: "https://example.test/v1".into(),
         secret_ref: format!("source:{id}"),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api,
         protocol_config: Default::default(),
@@ -39,7 +39,7 @@ fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
 async fn check_routing_modes_with_inventory(stored_policy: bool) {
     use zenith_relay_core::PoolRoutingMode;
 
-    let root = std::env::temp_dir().join(format!("relay-routing-edit-{}", Uuid::new_v4()));
+    let root = crate::files::test_temp_root("routing-edit");
     let state = DesktopState::open(root.join("relay")).unwrap();
     let codex_home = root.join("codex");
     {
@@ -49,13 +49,13 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
         second.enabled = false;
         if stored_policy {
             let mut gateway = store.gateway().clone();
-            let mut old = gateway.pool_routing_for(
+            let mut persisted_policy = gateway.pool_routing_for(
                 &[source("removed", true, WireApi::Responses), first.clone()],
                 &[],
             );
-            old.members[0].weight = 7;
-            old.members[0].max_concurrency = 2;
-            gateway.pool_routing = Some(old);
+            persisted_policy.members[0].weight = 7;
+            persisted_policy.members[0].max_concurrency = 2;
+            gateway.pool_routing = Some(persisted_policy);
             store.replace_gateway(gateway).unwrap();
         }
         for record in [first, second, source("outside", false, WireApi::Responses)] {
@@ -82,11 +82,11 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
-        let mut next = displayed.clone();
-        next.mode = mode;
+        let mut updated_policy = displayed.clone();
+        updated_policy.mode = mode;
         let input = || {
             serde_json::from_value(serde_json::json!({
-                "poolRouting": next,
+                "poolRouting": updated_policy,
                 "expectedPoolRouting": displayed,
                 "maxRetryCandidates": 3,
                 "defaultServiceTier": "standard",
@@ -100,13 +100,16 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
         let result = update_local_routing_at(input(), &state, &codex_home)
             .await
             .unwrap();
-        assert_eq!(result.gateway.pool_routing, Some(next.clone()));
+        assert_eq!(result.gateway.pool_routing, Some(updated_policy.clone()));
         let saved_gateway = state.store().unwrap().gateway().clone();
         assert_eq!(saved_gateway.max_retry_candidates, 3);
         let refreshed = super::super::state::build_local_runtime_state(&state)
             .await
             .unwrap();
-        assert_eq!(refreshed.gateway.pool_routing.as_ref(), Some(&next));
+        assert_eq!(
+            refreshed.gateway.pool_routing.as_ref(),
+            Some(&updated_policy)
+        );
         // A real edit since the read must still conflict, without overwriting it.
         let error = update_local_routing_at(input(), &state, &codex_home)
             .await
@@ -156,6 +159,7 @@ fn source_preset_policy_preserves_source_identity() {
         name: "Imported name".into(),
         base_url: "https://imported.test/v1".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_bindings: Vec::new(),
@@ -203,7 +207,7 @@ fn model_display_order_accepts_models_before_automatic_route_confirmation() {
     source.protocol_config = zenith_relay_core::SourceProtocolConfig::automatic(&source.base_url);
 
     let order = complete_model_display_order(
-        configured_pool_model_ids(&[source], &[]),
+        configured_pool_model_ids(&[source], &[], false),
         &["gpt-pending".into()],
         &[],
     )
@@ -222,7 +226,7 @@ fn pool_model_inventory_includes_ids_only_present_on_source_bindings() {
     )];
 
     let sources = [binding_only];
-    let current = configured_pool_model_ids(&sources, &[])
+    let current = configured_pool_model_ids(&sources, &[], false)
         .map(String::as_str)
         .collect::<Vec<_>>();
     assert_eq!(current, ["binding-model"]);
@@ -272,7 +276,7 @@ fn model_edits_keep_unavailable_members_and_prefer_discovered_account_inventory(
     included.models = vec!["Shared".into()];
     included.excluded_models = vec!["Shared".into()];
     let sources = [included, source("outside", false, WireApi::Responses)];
-    let inventory = || configured_pool_model_ids(&sources, &accounts);
+    let inventory = || configured_pool_model_ids(&sources, &accounts, false);
 
     assert_eq!(canonical_pool_model_id(inventory(), "shared"), Ok("Shared"));
     assert_eq!(

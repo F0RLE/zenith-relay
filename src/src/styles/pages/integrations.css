@@ -1,0 +1,384 @@
+.integrations-category {
+  container-type: inline-size;
+  width: 100%;
+  max-width: 1120px;
+  min-width: 0;
+  display: grid;
+  gap: 18px;
+  margin-top: 8px;
+}
+
+.integrations-page > .relay-workspace-header {
+  border-bottom: 1px solid var(--relay-border);
+  margin-bottom: 24px;
+}
+
+.integrations-page .relay-page-navigation .relay-tabs {
+  gap: 6px;
+}
+
+.integrations-page .relay-page-navigation .relay-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+}
+
+.integrations-page .relay-page-navigation svg {
+  width: 16px;
+  height: 16px;
+}
+
+.integration-section-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.integration-section-heading h2 {
+  min-width: 0;
+  margin: 0;
+  color: var(--relay-text);
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 600;
+}
+
+.integration-section-heading > .relay-button,
+.integration-section-actions {
+  flex-shrink: 0;
+}
+
+.integration-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.integration-workspace {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.integration-workspace.has-picker {
+  grid-template-columns: 172px minmax(0, 1fr);
+}
+
+.integration-picker {
+  position: sticky;
+  top: calc(var(--integration-header-height, 0px) + 24px);
+  min-width: 0;
+}
+
+.integration-picker .relay-tabs {
+  min-width: 0;
+  height: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  border: 0;
+  overflow: visible;
+}
+
+.integration-picker .relay-tabs button {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: auto;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--relay-muted);
+  text-align: left;
+  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.integration-picker .relay-tabs button.active {
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.integration-picker .relay-tabs button:hover:not(.active) {
+  background: var(--relay-subtle);
+  color: var(--relay-text);
+}
+
+.integration-picker img {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.integrations-settings {
+  container-type: inline-size;
+  min-width: 0;
+}
+
+.integrations-page:has(.gateway-empty-tab-panel) {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.integrations-page:has(.gateway-empty-tab-panel) > .integrations-category,
+.integrations-page:has(.gateway-empty-tab-panel) .gateway-page {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-theme="dark"] .integration-workspace img[src="/icons/chatgpt.svg"] {
+  filter: brightness(0) invert(1);
+}
+
+@container (max-width: 760px) {
+  .integration-workspace.has-picker {
+    gap: 16px;
+  }
+}
+
+@container (max-width: 560px) {
+  .integration-section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .integration-workspace.has-picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .integration-picker {
+    position: static;
+  }
+}
+
+.integrations-settings .gateway-account-panel,
+.integrations-settings .gateway-settings-panel,
+.integrations-settings .integration-account-policy {
+  border: 0;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.integration-account-settings {
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
+.integration-account-settings .integration-account-policy {
+  padding: 18px 20px;
+  border: 0;
+  border-bottom: 1px solid var(--relay-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.integration-account-settings .integration-account-policy:last-child {
+  border-bottom: 0;
+}
+
+.integration-account-settings .relay-toggle-setting {
+  min-height: 44px;
+  gap: 20px;
+}
+
+.integration-account-settings .relay-toggle-setting > label {
+  flex: 1;
+}
+
+.integration-account-settings .relay-toggle-setting > label > span {
+  max-width: 620px;
+  line-height: 18px;
+}
+
+
+.integration-chatgpt-settings {
+  min-width: 0;
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
+.integration-chatgpt-settings .gateway-account-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.9fr);
+  gap: 16px;
+  padding: 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.integration-chatgpt-settings .gateway-settings-panel {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.integration-chatgpt-settings .oauth-binding-settings {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.integration-chatgpt-settings .oauth-binding-switch {
+  min-height: 36px;
+  border-radius: 7px;
+}
+
+.integration-chatgpt-settings .gateway-application-panel {
+  border-top: 1px solid var(--relay-border);
+}
+
+.integration-chatgpt-settings .gateway-setting-row.codex-feature-control {
+  min-height: 76px;
+  padding: 16px 20px;
+}
+
+.integration-chatgpt-settings .codex-feature-toggle {
+  width: auto;
+}
+
+.integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
+  min-height: 76px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 330px);
+  gap: 12px 24px;
+  padding: 16px 20px;
+}
+
+.codex-memory-model-options {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.codex-memory-model-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.codex-memory-model-menu .relay-option-trigger {
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--relay-text) 3%, var(--relay-surface));
+}
+
+.codex-memory-model-menu .relay-option-trigger:hover:not(:disabled) {
+  border-color: var(--relay-border-strong);
+}
+
+.codex-memory-model-menu .relay-option-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container (max-width: 620px) {
+  .integration-chatgpt-settings .gateway-account-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .codex-memory-model-options {
+    padding-left: 40px;
+  }
+}
+
+@container (max-width: 440px) {
+  .integration-chatgpt-settings .gateway-account-panel,
+  .integration-chatgpt-settings .gateway-setting-row.codex-feature-control,
+  .integration-chatgpt-settings .gateway-setting-row.codex-memory-model-control {
+    padding: 16px;
+  }
+}
+
+.application-workspace .gateway-tab-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.application-launch-path {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px 14px;
+  padding: 20px;
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
+.application-launch-path .relay-field,
+.application-launch-path input {
+  min-width: 0;
+  width: 100%;
+}
+
+.application-launch-path-actions,
+.application-launch-path-feedback {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.application-launch-path > small,
+.application-launch-path-feedback {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.application-launch-path-feedback {
+  color: var(--relay-danger);
+}
+
+@container (max-width: 620px) {
+  .application-launch-path {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+}
+
+@container (max-width: 280px) {
+  .application-launch-path-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .application-launch-path-actions .relay-button {
+    min-width: 0;
+    padding: 7px 8px;
+  }
+
+  .application-launch-path-actions .relay-button span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}

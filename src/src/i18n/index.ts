@@ -1,38 +1,32 @@
 import i18next from "i18next";
 import { initReactI18next } from "react-i18next";
 import { loadTranslations, normalizeLanguage } from "./resources";
+import { createLanguageController, readLanguagePreference } from "./controller";
 
-const LANGUAGE_KEY = "relay.language";
+const controller = createLanguageController(i18next, loadTranslations);
+let initialization: Promise<unknown> | undefined;
+let explicitSelection = false;
 
 export async function initI18n(systemLocale?: string | null) {
-  const language = normalizeLanguage(localStorage.getItem(LANGUAGE_KEY) ?? systemLocale);
-  if (i18next.isInitialized) {
-    await setI18nLanguage(language);
-    return i18next;
+  const language = normalizeLanguage(readLanguagePreference() ?? systemLocale);
+  if (!initialization) {
+    i18next.use(initReactI18next);
+    initialization = controller.initialize(language).catch(error => {
+      initialization = undefined;
+      throw error;
+    });
+    await initialization;
+  } else {
+    await initialization;
+    if (!explicitSelection) await controller.change(normalizeLanguage(readLanguagePreference() ?? systemLocale), false);
   }
-
-  const translations = await loadTranslations(language);
-  await i18next.use(initReactI18next).init({
-    resources: { [language]: { translation: translations } },
-    lng: language,
-    fallbackLng: false,
-    interpolation: {
-      escapeValue: false,
-    },
-    returnNull: false,
-  });
-  i18next.on("languageChanged", (value) => localStorage.setItem(LANGUAGE_KEY, normalizeLanguage(value)));
-
   return i18next;
 }
 
 export async function setI18nLanguage(locale?: string | null) {
-  const language = normalizeLanguage(locale);
-  if (!i18next.hasResourceBundle(language, "translation")) {
-    const translations = await loadTranslations(language);
-    i18next.addResourceBundle(language, "translation", translations, true, true);
-  }
-  await i18next.changeLanguage(language);
+  explicitSelection = true;
+  await initialization;
+  return controller.change(locale);
 }
 
 export { normalizeLanguage };

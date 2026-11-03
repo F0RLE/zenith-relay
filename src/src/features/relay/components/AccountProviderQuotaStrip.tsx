@@ -4,9 +4,9 @@ import { formatNumber } from "../numberFormatting";
 
 const CREDIT_MICRO_UNITS = 1_000_000;
 
-function availableCredits(value: number | null | undefined) {
-  if (value == null || !Number.isSafeInteger(value) || value < 0) return null;
-  return value / CREDIT_MICRO_UNITS;
+function availableCredits(creditMicroUnits: number | null | undefined) {
+  if (creditMicroUnits == null || !Number.isSafeInteger(creditMicroUnits) || creditMicroUnits < 0) return null;
+  return creditMicroUnits / CREDIT_MICRO_UNITS;
 }
 
 /**

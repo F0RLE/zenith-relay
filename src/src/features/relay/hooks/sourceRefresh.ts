@@ -8,7 +8,6 @@ export type SourceRefreshReport = {
 
 export type SourceRefreshExecutor = {
   testLocal: (sourceId: string) => Promise<unknown>;
-  testRemote: (sourceId: string) => Promise<unknown>;
 };
 
 export type SourceRefreshInput = {
@@ -22,7 +21,7 @@ export async function refreshSourceCatalog(
   sourceId: string,
   executor: SourceRefreshExecutor,
 ) {
-  if (mode === "remote") return executor.testRemote(sourceId);
+  if (mode !== "local") throw new Error("Catalog refresh requires the local pool");
   return executor.testLocal(sourceId);
 }
 

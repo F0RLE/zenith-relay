@@ -1,20 +1,18 @@
 mod gateway;
-mod ownership;
 mod participant;
 mod snapshot;
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
 
-pub use gateway::GatewaySettings;
-pub use ownership::{
-    OwnershipOperationKind, OwnershipOperationPhase, OwnershipOperationRecord, RemoteTargetRecord,
-};
+pub use gateway::{BindScope, GatewaySettings};
 #[cfg(test)]
 pub(crate) use participant::synthetic_responses_source;
 pub use participant::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
+    TrashedLocalAccount,
 };
-pub use snapshot::{LocalPoolSnapshot, RuntimeTarget};
+pub use snapshot::LocalPoolSnapshot;
+pub use zenith_relay_core::accounts::AccountRouteGroup;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
@@ -30,6 +28,24 @@ pub const MAX_LOCAL_ACCOUNTS: usize = 1_024;
 mod tests {
     use super::*;
     use zenith_relay_core::protocol::MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;
+
+    #[test]
+    fn gateway_settings_ignore_retired_transport_flag_without_losing_current_settings() {
+        let expected = GatewaySettings {
+            enabled: true,
+            port: 15432,
+            ..GatewaySettings::default()
+        };
+        let canonical = serde_json::to_value(&expected).unwrap();
+        assert!(canonical.get("basisPointsEnabled").is_none());
+        for enabled in [false, true] {
+            let mut legacy = canonical.clone();
+            legacy["basisPointsEnabled"] = serde_json::json!(enabled);
+            let restored: GatewaySettings = serde_json::from_value(legacy).unwrap();
+            assert_eq!(restored, expected);
+            assert_eq!(serde_json::to_value(restored).unwrap(), canonical);
+        }
+    }
 
     #[test]
     fn gateway_validation_rejects_privileged_port_and_remote_host() {

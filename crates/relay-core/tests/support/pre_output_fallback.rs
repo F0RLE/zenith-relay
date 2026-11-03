@@ -1,6 +1,55 @@
 use super::*;
 
 #[tokio::test]
+async fn http_admission_failure_with_generated_usage_is_not_retried() {
+    for (status, code) in [
+        (StatusCode::TOO_MANY_REQUESTS, "insufficient_quota"),
+        (StatusCode::SERVICE_UNAVAILABLE, "model_capacity_exhausted"),
+    ] {
+        let (first, first_state) = spawn_upstream(
+            "first-key",
+            vec![Reply::Json {
+                status,
+                body: json!({"error":{"code":code,"message":"Synthetic failure"},
+                "usage":{"input_tokens":5,"output_tokens":7}}),
+                cache_control: "no-store",
+                retry_after: None,
+            }],
+        )
+        .await;
+        let (second, second_state) = spawn_upstream(
+            "second-key",
+            vec![response_reply("must-not-repeat", "no-store")],
+        )
+        .await;
+        let (gateway, events) = spawn_gateway(
+            vec![
+                source("first", &first, "first-key", &[MODEL], 10),
+                source("second", &second, "second-key", &[MODEL], 0),
+            ],
+            vec![local_key("key", LOCAL_KEY, None)],
+            3,
+        )
+        .await;
+        let response = request(&gateway, false).await;
+        assert_eq!(response.status(), status);
+        let _: Value = response.json().await.unwrap();
+        assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+        assert!(second_state.requests.lock().unwrap().is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].output_tokens, Some(7));
+        assert_ne!(
+            events[0]
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.attempt_outcome),
+            Some(zenith_relay_core::AttemptOutcome::RetrySelection)
+        );
+    }
+}
+
+#[tokio::test]
 async fn generic_five_xx_stops_replay_but_does_not_block_an_independent_request() {
     for status in [StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE] {
         assert_server_error_fallback(status).await;
@@ -97,9 +146,11 @@ async fn assert_tool_output_owner_after_failure(complete_tool_turn: bool) {
                     "id": "resp-tool-owner",
                     "object": "response",
                     "model": MODEL,
+                    "status": "completed",
                     "output": [{
                         "type": "function_call",
                         "id": "fc_stateful_01",
+                        "status": "completed",
                         "call_id": call_id,
                         "name": "run_command",
                         "arguments": "{\"command\":\"pwd\"}"

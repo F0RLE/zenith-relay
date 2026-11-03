@@ -1,6 +1,7 @@
-use super::super::{gemini, messages};
+use super::super::messages;
 use super::{
-    AdapterError, AdapterResult, MessagesBridgeState, MessagesReasoningMode, PreparedAdapterRequest,
+    AdapterContinuationState, AdapterError, AdapterResult, MessagesReasoningMode,
+    PreparedAdapterRequest,
 };
 use crate::{CacheWriteTtl, WireApi};
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,7 @@ pub enum UpstreamProtocol {
     ChatCompletions,
     Messages,
     GeminiGenerateContent,
+    GeminiInteractions,
 }
 
 impl UpstreamProtocol {
@@ -49,6 +51,7 @@ impl UpstreamProtocol {
             Self::ChatCompletions => WireApi::ChatCompletions,
             Self::Messages => WireApi::Messages,
             Self::GeminiGenerateContent => WireApi::Gemini,
+            Self::GeminiInteractions => WireApi::GeminiInteractions,
         }
     }
 }
@@ -64,7 +67,7 @@ pub struct AdapterRequestContext<'a> {
     pub stream: bool,
     pub reasoning_mode: MessagesReasoningMode,
     pub cache_write_ttl: CacheWriteTtl,
-    pub previous: Option<MessagesBridgeState>,
+    pub previous: Option<AdapterContinuationState>,
     pub response_scope: &'a str,
     pub response_id_seed: &'a str,
 }
@@ -103,6 +106,7 @@ impl SourceAdapter {
                 WireApi::ChatCompletions => UpstreamProtocol::ChatCompletions,
                 WireApi::Messages => UpstreamProtocol::Messages,
                 WireApi::Gemini => UpstreamProtocol::GeminiGenerateContent,
+                WireApi::GeminiInteractions => UpstreamProtocol::GeminiInteractions,
             },
             Self::ResponsesToMessages
             | Self::ChatCompletionsToMessages
@@ -124,34 +128,56 @@ impl SourceAdapter {
     }
 
     pub fn supports_reasoning_effort(self, mode: MessagesReasoningMode, effort: &str) -> bool {
-        let effort = effort.trim().to_ascii_lowercase();
         if self.is_passthrough() {
             return true;
         }
-        if mode == MessagesReasoningMode::Disabled {
-            return false;
-        }
         match self.upstream_protocol(WireApi::Responses) {
-            UpstreamProtocol::Messages if mode == MessagesReasoningMode::Adaptive => {
-                matches!(effort.as_str(), "none" | "low" | "medium" | "high" | "max")
-            }
-            UpstreamProtocol::GeminiGenerateContent if mode == MessagesReasoningMode::Adaptive => {
-                matches!(effort.as_str(), "minimal" | "low" | "medium" | "high")
+            UpstreamProtocol::Messages => mode.supports_effort(effort),
+            UpstreamProtocol::GeminiGenerateContent => {
+                let effort = crate::catalog::canonical_reasoning_level(effort);
+                match mode {
+                    _ if effort == "none" => true,
+                    MessagesReasoningMode::Disabled => false,
+                    MessagesReasoningMode::Adaptive => {
+                        matches!(effort.as_str(), "minimal" | "low" | "medium" | "high")
+                    }
+                    MessagesReasoningMode::Budget => {
+                        super::reasoning_effort_budget(&effort).is_some()
+                    }
+                }
             }
             UpstreamProtocol::Responses | UpstreamProtocol::ChatCompletions => true,
-            _ => mode.supports_effort(&effort),
+            UpstreamProtocol::GeminiInteractions => false,
         }
     }
 
     pub const fn uses_local_continuation_state(self) -> bool {
-        matches!(
-            self,
-            Self::ResponsesToMessages | Self::ResponsesToGemini | Self::ResponsesToChatCompletions
-        )
+        !self.is_passthrough()
+    }
+
+    pub(crate) fn continuation_key(
+        self,
+        client: WireApi,
+        request: &Value,
+        model: &str,
+    ) -> AdapterResult<Option<String>> {
+        if self.is_passthrough() {
+            return Ok(None);
+        }
+        if client == WireApi::Responses
+            && let Some(key) = request
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+        {
+            return Ok(Some(key.to_owned()));
+        }
+        super::super::translation::continuation_key(client, request, model)
     }
 
     pub const fn route_suffix(self, client_wire_api: WireApi) -> &'static str {
         match (client_wire_api, self) {
+            (WireApi::GeminiInteractions, Self::Native) => "gemini_interactions",
             (WireApi::Responses, Self::ResponsesToMessages) => "responses_to_messages",
             (WireApi::Responses, Self::ResponsesToGemini) => "responses_to_gemini",
             (WireApi::Responses, Self::Native) => "responses",
@@ -207,12 +233,110 @@ impl SourceAdapter {
         self,
         context: AdapterRequestContext<'_>,
     ) -> AdapterResult<PreparedAdapterRequest> {
+        self.prepare_with_capabilities(context, None)
+    }
+
+    pub(crate) fn prepare_request_with_capabilities(
+        self,
+        context: AdapterRequestContext<'_>,
+        capabilities: &crate::model_metadata::ModelCapabilities,
+    ) -> AdapterResult<PreparedAdapterRequest> {
+        self.prepare_with_capabilities(context, Some(capabilities))
+    }
+
+    pub(crate) fn supports_reasoning_effort_for_model(
+        self,
+        mode: MessagesReasoningMode,
+        effort: &str,
+        capabilities: &crate::model_metadata::ModelCapabilities,
+    ) -> bool {
+        // Passthrough preserves native wire fields, not a capability claim.
+        // Exact route evidence must also constrain the client model picker.
+        if capabilities.reasoning_effort_conflict {
+            return false;
+        }
+        if capabilities.reasoning == Some(false) {
+            return crate::catalog::canonical_reasoning_level(effort) == "none";
+        }
+        self.is_passthrough()
+            || super::ReasoningPolicy::new(
+                self.upstream_protocol(WireApi::Responses).wire_api(),
+                mode,
+                Some(capabilities),
+            )
+            .apply_effort(&mut serde_json::Map::new(), effort, false)
+            .is_ok()
+    }
+
+    /// Validate controls without cloning/re-encoding a native request. The same
+    /// check runs during admission and preparation; it never clips user values.
+    pub(crate) fn validate_model_controls(
+        self,
+        client: WireApi,
+        request: &Value,
+        capabilities: &crate::model_metadata::ModelCapabilities,
+    ) -> AdapterResult<()> {
+        let (effort, outputs): (&str, &[(&str, &str)]) = match client {
+            WireApi::Responses => (
+                "/reasoning/effort",
+                &[("/max_output_tokens", "max_output_tokens")],
+            ),
+            WireApi::ChatCompletions => (
+                "/reasoning_effort",
+                &[
+                    ("/max_completion_tokens", "max_completion_tokens"),
+                    ("/max_tokens", "max_tokens"),
+                ],
+            ),
+            WireApi::Messages => ("/output_config/effort", &[("/max_tokens", "max_tokens")]),
+            WireApi::Gemini => (
+                "/generationConfig/thinkingConfig/thinkingLevel",
+                &[(
+                    "/generationConfig/maxOutputTokens",
+                    "generationConfig.maxOutputTokens",
+                )],
+            ),
+            // Interactions has its own contract; do not guess an output field
+            // from generateContent or a similarly named API.
+            WireApi::GeminiInteractions => ("/generation_config/thinking_level", &[]),
+        };
+        if capabilities.reasoning_effort_conflict
+            && request
+                .pointer(effort)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(AdapterError::reasoning_metadata_conflict());
+        }
+        if let Some(maximum) = capabilities.output_limit.filter(|maximum| *maximum > 0) {
+            for &(path, parameter) in outputs {
+                if request
+                    .pointer(path)
+                    .and_then(Value::as_u64)
+                    .is_some_and(|tokens| tokens > maximum)
+                {
+                    return Err(AdapterError::output_limit_exceeded(parameter));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_with_capabilities(
+        self,
+        context: AdapterRequestContext<'_>,
+        capabilities: Option<&crate::model_metadata::ModelCapabilities>,
+    ) -> AdapterResult<PreparedAdapterRequest> {
         self.validate(context.client_wire_api, context.reasoning_mode)?;
+        if let Some(capabilities) = capabilities {
+            self.validate_model_controls(context.client_wire_api, context.request, capabilities)?;
+        }
         let rewritten = if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
             match super::super::compaction::prepare_bridged_compaction(context.request)? {
-                super::super::compaction::BridgedCompaction::Rewritten { request, .. } => {
-                    Some(request)
-                }
+                super::super::compaction::BridgedCompaction::Rewritten {
+                    rewritten_request,
+                    ..
+                } => Some(rewritten_request),
                 super::super::compaction::BridgedCompaction::Unchanged => None,
             }
         } else {
@@ -223,75 +347,61 @@ impl SourceAdapter {
         } else {
             context
         };
-        if !matches!(
-            self,
-            Self::Native | Self::ResponsesToMessages | Self::ResponsesToGemini
-        ) {
+        let history_request =
+            if !self.is_passthrough() && context.client_wire_api == WireApi::Responses {
+                Some(super::history::prepare_request(
+                    context.request,
+                    context.previous.as_ref(),
+                    context.model,
+                )?)
+            } else {
+                None
+            };
+        let context = if let Some(request) = history_request.as_deref() {
+            AdapterRequestContext { request, ..context }
+        } else {
+            context
+        };
+        if !self.is_passthrough() {
             let upstream = self.upstream_protocol(context.client_wire_api).wire_api();
-            return super::super::translation::TranslationRequest::prepare(context, upstream).map(
-                |request| PreparedAdapterRequest::Translated {
-                    request: Box::new(request),
-                },
-            );
+            return super::super::translation::TranslationRequest::prepare(
+                context,
+                upstream,
+                capabilities,
+            )
+            .map(|request| PreparedAdapterRequest::Translated {
+                request: Box::new(request),
+            })
+            .and_then(|prepared| {
+                if let Some(capabilities) = capabilities {
+                    self.validate_model_controls(upstream, prepared.upstream_body(), capabilities)?;
+                }
+                Ok(prepared)
+            });
         }
-        let AdapterRequestContext {
-            client_wire_api,
-            request,
-            model,
-            stream,
-            reasoning_mode,
-            cache_write_ttl,
-            previous,
-            response_scope,
-            response_id_seed,
-        } = context;
-        self.validate(client_wire_api, reasoning_mode)?;
         match self {
             Self::Native => {
-                let mut upstream_body = request.clone();
-                let object = upstream_body
+                let mut upstream_body = context.request.clone();
+                let upstream_object = upstream_body
                     .as_object_mut()
                     .ok_or_else(AdapterError::invalid_request)?;
-                if client_wire_api == WireApi::Gemini {
+                if context.client_wire_api == WireApi::Gemini {
                     // Gemini places the model in the endpoint path. A model
                     // field is not part of the generateContent contract and
                     // some providers reject it as an unknown field.
-                    object.remove("model");
+                    upstream_object.shift_remove("model");
                 } else {
-                    object.insert("model".to_string(), Value::String(model.to_string()));
+                    upstream_object.insert(
+                        "model".to_string(),
+                        Value::String(context.model.to_string()),
+                    );
                 }
-                if client_wire_api == WireApi::Messages {
-                    messages::apply_cache_write_ttl(&mut upstream_body, cache_write_ttl)?;
+                if context.client_wire_api == WireApi::Messages {
+                    messages::apply_cache_write_ttl(&mut upstream_body, context.cache_write_ttl)?;
                 }
                 Ok(PreparedAdapterRequest::Native { upstream_body })
             }
-            Self::ResponsesToMessages => {
-                messages::prepare_responses_to_messages_scoped_with_cache_ttl(
-                    request,
-                    model,
-                    stream,
-                    reasoning_mode,
-                    cache_write_ttl,
-                    previous,
-                    response_scope,
-                )
-                .map(|request| PreparedAdapterRequest::ResponsesToMessages {
-                    request: Box::new(request),
-                })
-            }
-            Self::ResponsesToGemini => gemini::prepare_responses_to_gemini_with_reasoning(
-                request,
-                model,
-                stream,
-                reasoning_mode,
-                previous,
-                response_scope,
-                response_id_seed,
-            )
-            .map(|request| PreparedAdapterRequest::ResponsesToGemini {
-                request: Box::new(request),
-            }),
-            _ => unreachable!("registered translation handled before legacy adapters"),
+            _ => unreachable!("all conversions use the shared protocol codecs"),
         }
     }
 }

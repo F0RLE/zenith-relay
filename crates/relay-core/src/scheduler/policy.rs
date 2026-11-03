@@ -9,8 +9,12 @@ pub enum PoolRoutingMode {
     Smart,
     #[default]
     Automatic,
+    /// Legacy equal-cycling alias; priority failover must be explicit.
     InOrder,
     RoundRobin,
+    /// Opt into saved request shares without changing equal-cycling imports.
+    WeightedRoundRobin,
+    Failover,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -41,7 +45,7 @@ pub struct PoolRoutingPolicy {
 impl Default for PoolRoutingPolicy {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             mode: PoolRoutingMode::Automatic,
             members: Vec::new(),
         }
@@ -50,7 +54,7 @@ impl Default for PoolRoutingPolicy {
 
 impl PoolRoutingPolicy {
     pub fn is_current_rotation(&self) -> bool {
-        self.version == 2 && self.mode != PoolRoutingMode::Smart
+        self.version == 3 && self.mode != PoolRoutingMode::Smart
     }
 
     pub fn validate_activation(&self) -> Result<(), &'static str> {
@@ -79,14 +83,14 @@ impl PoolRoutingPolicy {
 
     pub fn validate_update(
         &self,
-        current: &Self,
+        existing_policy: &Self,
         expected: Option<&Self>,
     ) -> Result<(), &'static str> {
         self.validate()?;
-        if self.version != current.version {
+        if self.version != existing_policy.version {
             return Err("unsupported pool routing policy version for this runtime");
         }
-        if expected != Some(current) {
+        if expected != Some(existing_policy) {
             return Err("pool routing changed; reload the current policy before saving");
         }
         let identities = |policy: &Self| {
@@ -96,15 +100,20 @@ impl PoolRoutingPolicy {
                 .map(|m| (m.kind, m.id.clone()))
                 .collect::<BTreeSet<_>>()
         };
-        if identities(self) != identities(current) {
+        if identities(self) != identities(existing_policy) {
             return Err("pool membership changed; reload the current policy before saving");
         }
         Ok(())
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && self.mode == PoolRoutingMode::Automatic)
-            || (self.version == 2 && self.mode == PoolRoutingMode::Smart)
+            || (self.version >= 2 && self.mode == PoolRoutingMode::Smart)
+            || (self.version < 3
+                && matches!(
+                    self.mode,
+                    PoolRoutingMode::WeightedRoundRobin | PoolRoutingMode::Failover
+                ))
         {
             return Err("unsupported pool routing policy version");
         }
@@ -134,21 +143,21 @@ impl PoolRoutingPolicy {
     /// members keep their position, while new members append exactly once.
     pub fn reconcile(&self, members: Vec<PoolRoutingMember>) -> Self {
         let known: BTreeSet<_> = members.iter().map(|m| (m.kind, m.id.as_str())).collect();
-        let mut result = self.clone();
-        result
+        let mut reconciled_policy = self.clone();
+        reconciled_policy
             .members
             .retain(|m| known.contains(&(m.kind, m.id.as_str())));
-        let existing: BTreeSet<_> = result
+        let existing: BTreeSet<_> = reconciled_policy
             .members
             .iter()
             .map(|m| (m.kind, m.id.clone()))
             .collect();
-        result.members.extend(
+        reconciled_policy.members.extend(
             members
                 .into_iter()
                 .filter(|m| !existing.contains(&(m.kind, m.id.clone()))),
         );
-        result
+        reconciled_policy
     }
 }
 
@@ -184,13 +193,23 @@ pub fn resolve_pool_routing(
 }
 
 impl PoolRoutingPolicy {
-    /// Only the known version-one mode/version pair changes. Inventory order,
+    /// Only known legacy mode/version pairs change. Inventory order,
     /// weights, concurrency and all unrelated settings remain untouched.
     /// Validation remains mandatory: unknown versions and corrupt values are
     /// never silently clamped or treated as a supported legacy policy.
     pub(crate) fn upgrade_legacy_format(&mut self) {
-        if self.version == 1 && self.mode != PoolRoutingMode::Automatic {
-            self.version = 2;
+        let supported = matches!(
+            (self.version, self.mode),
+            (
+                1,
+                PoolRoutingMode::Smart | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
+            ) | (
+                2,
+                PoolRoutingMode::Automatic | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
+            )
+        );
+        if supported {
+            self.version = 3;
             if self.mode == PoolRoutingMode::Smart {
                 self.mode = PoolRoutingMode::Automatic;
             }

@@ -5,11 +5,15 @@ export type ProxyAssignmentResult = {
 
 export type ProxyPoolEntry = {
   id: string;
+  label?: string | null;
   endpoint: string;
   assignedAccountIds: string[];
+  /** Declared in the proxy username; observed geography belongs to lastCheck. */
   countryCode: string | null;
   region: string | null;
   createdAtMs: number;
+  timezone?: string | null;
+  lastCheck?: ProxyCheckResult | null;
 };
 
 export type ProxyPoolSummary = {
@@ -27,6 +31,16 @@ export type ProxyPoolImportResult = {
 };
 
 export type ProxyCheckResult = {
+  /** Probe offsets exclude queue; total includes optional location checks. */
+  timing?: { queueMs: number; totalMs: number; responseHeadersMs?: number | null; responseCompleteMs?: number | null } | null;
+  ipv4?: string | null;
+  ipv6?: string | null;
+  secondaryCheckError?: string | null;
+  timezone?: string | null;
+  region?: string | null;
+  city?: string | null;
+  locationSource?: "cloudflare" | "ipwhois" | null;
+  locationErrorCode?: string | null;
   proxyId: string;
   checkedAtMs: number;
   elapsedMs: number;
@@ -40,4 +54,12 @@ export type StoredProxyAssignmentResult = {
   unchanged: number;
   unavailable: number;
   pool: ProxyPoolSummary;
+};
+
+export type ProxySpeedTestResult = {
+  proxyId: string;
+  downloadedBytes: number;
+  elapsedMs: number;
+  downloadMbps: number | null;
+  errorCode: string | null;
 };

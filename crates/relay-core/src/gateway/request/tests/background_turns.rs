@@ -2,6 +2,53 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn memory_classifier_distinguishes_official_extraction_from_consolidation() {
+    let mut headers = HeaderMap::new();
+    headers.insert("originator", HeaderValue::from_static("chatgpt desktop"));
+    for (metadata, expected) in [
+        (
+            json!({"request_kind":"memory", "thread_source":"memory_consolidation", "turn_trigger":"memory_consolidation"}),
+            CODEX_MEMORY_EXTRACTION,
+        ),
+        (
+            json!({"request_kind":"turn", "thread_source":"memory_consolidation", "turn_trigger":"memory_consolidation"}),
+            CODEX_MEMORY_CONSOLIDATION,
+        ),
+    ] {
+        headers.insert(
+            "x-codex-turn-metadata",
+            HeaderValue::from_str(&metadata.to_string()).unwrap(),
+        );
+        assert_eq!(
+            codex_background_request_kind(&headers, &json!({"model":"synthetic-chat"})),
+            Some(expected)
+        );
+        headers.remove("x-codex-turn-metadata");
+        for body in [
+            json!({"client_metadata":{"x-codex-turn-metadata":metadata.to_string()}}),
+            json!({"client_metadata":metadata}),
+        ] {
+            assert_eq!(
+                codex_background_request_kind(&headers, &body),
+                Some(expected)
+            );
+        }
+    }
+    for kind in ["turn", "compaction", "prewarm"] {
+        assert_eq!(
+            codex_background_request_kind(
+                &headers,
+                &json!({
+                    "model":"synthetic-memory-model", "reasoning":{"effort":"low"},
+                    "instructions":"Extract memory from previous chats", "client_metadata":{"request_kind":kind, "thread_source":"user"}
+                })
+            ),
+            None
+        );
+    }
+}
+
+#[test]
 fn background_classifier_requires_explicit_codex_marker() {
     let mut headers = HeaderMap::new();
     headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));

@@ -8,33 +8,46 @@ const ACCOUNT_TIMESTAMP_OPTIONS = {
   hour: "2-digit",
   minute: "2-digit",
 } as const;
+let timestampFormatter: { locale: string; value: Intl.DateTimeFormat } | undefined;
 
 /**
  * Refreshes relative account/quota timestamps once a minute, or once a second
  * for the final hour before an event.
  */
 export function useRelativeTimeClock(timestamps: readonly (number | null | undefined)[]) {
-  const [nowMs, setNowMs] = useState(Date.now());
-  const timestampKey = timestamps.map((value) => value ?? "").join(":");
-  const delay = relativeTimeRefreshDelay(timestamps, nowMs);
+  const [nowMs, setNowMs] = useState(Date.now);
+  const timestampKey = timestamps.map((timestampValue) => timestampValue ?? "").join(":");
 
   useEffect(() => {
-    setNowMs(Date.now());
+    let timer: number | undefined;
+    const refresh = () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState !== "visible") return;
+      const currentTime = Date.now();
+      setNowMs(currentTime);
+      const delay = relativeTimeRefreshDelay(timestamps, currentTime);
+      if (delay != null) timer = window.setTimeout(refresh, delay);
+    };
+    refresh();
+    // Resume from wall time, even if every deadline expired while hidden.
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, [timestampKey]);
-
-  useEffect(() => {
-    if (delay == null) return;
-    const timer = window.setTimeout(() => setNowMs(Date.now()), delay);
-    return () => window.clearTimeout(timer);
-  }, [delay, nowMs]);
 
   return nowMs;
 }
 
 export function relativeTimeRefreshDelay(timestamps: readonly (number | null | undefined)[], nowMs: number) {
-  const upcoming = timestamps.filter((value): value is number => value != null && value > nowMs);
-  if (!upcoming.length) return null;
-  return upcoming.some((value) => value - nowMs < URGENT_WINDOW_MS) ? 1_000 : 60_000;
+  let delay: number | null = null;
+  for (const timestamp of timestamps) {
+    if (timestamp == null || !(timestamp > nowMs)) continue;
+    if (timestamp - nowMs < URGENT_WINDOW_MS) return 1_000;
+    delay = 60_000;
+  }
+  return delay;
 }
 
 export function secondsUntil(deadlineMs: number, nowMs: number) {
@@ -42,5 +55,8 @@ export function secondsUntil(deadlineMs: number, nowMs: number) {
 }
 
 export function subscriptionExpiryFormatter(locale: string) {
-  return new Intl.DateTimeFormat(locale, ACCOUNT_TIMESTAMP_OPTIONS);
+  if (timestampFormatter?.locale !== locale) {
+    timestampFormatter = { locale, value: new Intl.DateTimeFormat(locale, ACCOUNT_TIMESTAMP_OPTIONS) };
+  }
+  return timestampFormatter.value;
 }

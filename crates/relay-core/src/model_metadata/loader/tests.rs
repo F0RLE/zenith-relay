@@ -1,33 +1,21 @@
-use super::source::valid_payload;
+use super::source::valid_source_payload;
 use super::*;
 use crate::model_metadata::MetadataCacheEnvelope;
 use crate::pricing::CatalogRefreshKind;
 use axum::{
+    Router,
     extract::{Path as AxumPath, State},
     http::HeaderMap,
     response::IntoResponse,
     routing::get,
-    Router,
 };
-use serde_json::{value::RawValue, Value};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+use serde_json::{Value, value::RawValue};
+use std::sync::Mutex;
 
 struct CacheDir(PathBuf);
 impl CacheDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "relay-metadata-{}-{}-{}",
-            std::process::id(),
-            crate::unix_time_ms(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(crate::test_support::temp_root("metadata"))
     }
     fn path(&self) -> PathBuf {
         self.0.join("models-dev.json")
@@ -36,8 +24,8 @@ impl CacheDir {
 impl Drop for CacheDir {
     fn drop(&mut self) {
         if let Ok(entries) = std::fs::read_dir(&self.0) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+            for directory_entry in entries.flatten() {
+                let _ = std::fs::remove_file(directory_entry.path());
             }
         }
         let _ = std::fs::remove_dir(&self.0);
@@ -86,7 +74,7 @@ impl Server {
             serde_json::json!({"vendor/model": {"reasoning": true}}),
             serde_json::json!({"vendor": {"models": {"model": {"id":"model", "reasoning":true, "reasoning_options":[{"type":"effort", "values":["low", "high"]}]}}}}),
             serde_json::json!({"data": [{"id":"vendor/model", "reasoning":{"supported_efforts":["high","low"]}}]}),
-            serde_json::json!({"model": {"supports_low_reasoning_effort":true}}),
+            serde_json::json!({"model": {"litellm_provider":"vendor", "supports_low_reasoning_effort":true}}),
         ];
         let state = Arc::new(Mutex::new(MockState {
             replies: payloads.map(|p| Reply {
@@ -132,7 +120,7 @@ impl Server {
 }
 
 #[tokio::test]
-async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
+async fn caches_validated_sources_and_reuses_model_trees_after_304() {
     let cache = CacheDir::new();
     let server = Server::start().await;
     let loader = server.loader(&cache);
@@ -140,6 +128,7 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
         loader.refresh(false).await.unwrap(),
         CatalogRefreshOutcome::Updated { .. }
     ));
+    // The complete same-provider enum survives LiteLLM's partial low-only flag.
     assert_eq!(
         loader.snapshot().reasoning_levels_for("vendor/model"),
         ["low", "high"]
@@ -150,20 +139,29 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
         .unwrap()
         .unwrap();
     assert_eq!(bundle["schemaVersion"], 2);
+    assert_eq!(bundle["format"], CACHE_FORMAT);
+    assert_eq!(bundle["mergedRevision"].as_str(), revision.as_deref());
     assert_eq!(bundle["sources"].as_object().unwrap().len(), 4);
-    assert_eq!(
-        bundle["mergedPayload"]["vendor/model"]["reasoning_effort_levels"],
-        serde_json::json!(["low", "high"])
-    );
+    assert!(bundle.get("mergedPayload").is_none());
     for i in 0..4 {
         server.reply(i, StatusCode::NOT_MODIFIED, "");
     }
     let reopened = server.loader(&cache);
+    let before_refresh = reopened.snapshot();
     assert!(matches!(
         reopened.refresh(false).await.unwrap(),
         CatalogRefreshOutcome::NotModified { .. }
     ));
     assert_eq!(reopened.snapshot().revision, revision);
+    assert!(Arc::ptr_eq(
+        &before_refresh.entries,
+        &reopened.snapshot().entries
+    ));
+    assert!(Arc::ptr_eq(
+        &before_refresh.alias_matches,
+        &reopened.snapshot().alias_matches
+    ));
+    assert_eq!(*reopened.snapshot(), *server.loader(&cache).snapshot());
     for (index, headers) in server.state.lock().unwrap().requests.iter().skip(4) {
         assert_eq!(
             headers.get(header::IF_NONE_MATCH).unwrap(),
@@ -181,6 +179,42 @@ async fn caches_merged_payload_and_revalidates_all_sources_with_304() {
 }
 
 #[tokio::test]
+async fn identical_http_200_and_failed_refresh_share_catalog_trees() {
+    let cache = CacheDir::new();
+    let server = Server::start().await;
+    let loader = server.loader(&cache);
+    loader.refresh(false).await.unwrap();
+    let previous = loader.snapshot();
+    assert!(matches!(
+        loader.refresh(true).await.unwrap(),
+        CatalogRefreshOutcome::NotModified { .. }
+    ));
+    let unchanged = loader.snapshot();
+    assert!(Arc::ptr_eq(&previous.entries, &unchanged.entries));
+    assert!(Arc::ptr_eq(
+        &previous.alias_matches,
+        &unchanged.alias_matches
+    ));
+    assert_eq!(unchanged.sources.len(), 4);
+    for index in 0..4 {
+        server.reply(
+            index,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "synthetic unavailable",
+        );
+    }
+    assert!(loader.refresh(true).await.is_err());
+    let failed = loader.snapshot();
+    assert!(Arc::ptr_eq(&previous.entries, &failed.entries));
+    assert!(failed.stale);
+    assert!(failed.sources.values().all(|source| source.stale));
+    assert_eq!(
+        failed.reasoning_levels_for("vendor/model"),
+        previous.reasoning_levels_for("vendor/model")
+    );
+}
+
+#[tokio::test]
 async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     let cache = CacheDir::new();
     let server = Server::start().await;
@@ -188,13 +222,11 @@ async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     loader.refresh(false).await.unwrap();
     let before = loader.state.read().unwrap().clone();
     let snapshot = loader.snapshot();
-    let bundle = CacheBundle::new(&before).unwrap();
-    for (i, state) in before.iter().enumerate() {
-        assert!(Arc::ptr_eq(
-            &state.envelope.as_ref().unwrap().payload,
-            &bundle.sources[SOURCES[i]].payload
-        ));
-    }
+    let prepared = PreparedCatalog::new(&before, crate::unix_time_ms(), u64::MAX).unwrap();
+    assert_eq!(
+        snapshot.revision.as_deref(),
+        Some(prepared.revision.as_str())
+    );
 
     for i in 0..2 {
         server.reply(i, StatusCode::NOT_MODIFIED, "");
@@ -219,8 +251,20 @@ async fn refresh_shares_unchanged_payloads_and_preserves_previous_snapshots() {
     }
     assert!(!before[3].envelope.as_ref().unwrap().stale);
     assert!(after[3].envelope.as_ref().unwrap().stale);
-    assert_eq!(snapshot.reasoning_levels_for("model"), ["low", "high"]);
-    assert_eq!(loader.snapshot().reasoning_levels_for("model"), ["max"]);
+    assert_eq!(
+        snapshot.reasoning_levels_for("openrouter/vendor/model"),
+        ["low", "high"]
+    );
+    assert_eq!(
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
+        ["max"]
+    );
+    assert_eq!(
+        loader.snapshot().reasoning_levels_for("vendor/model"),
+        ["low", "high"]
+    );
     assert_eq!(*loader.snapshot(), *server.loader(&cache).snapshot());
 }
 
@@ -239,7 +283,7 @@ fn compact_source_preserves_json_contract_and_validates_canonical_content() {
     assert_eq!(encoded["payload"], payload);
     let decoded: SourceEnvelope = serde_json::from_value(encoded).unwrap();
     decoded.validate(0).unwrap();
-    assert_eq!(decoded.parse_payload().unwrap(), payload);
+    assert_eq!(decoded.parse_source_payload().unwrap(), payload);
 
     // Stored whitespace is not part of the content hash. Old and new cache
     // writers remain compatible without trusting unchecked raw JSON.
@@ -249,7 +293,7 @@ fn compact_source_preserves_json_contract_and_validates_canonical_content() {
     envelope.payload =
         Arc::from(RawValue::from_string(r#"{"vendor/model":false}"#.into()).unwrap());
     assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
-    envelope.revision = payload_hash(&envelope.parse_payload().unwrap()).unwrap();
+    envelope.revision = metadata_payload_hash(&envelope.parse_source_payload().unwrap()).unwrap();
     assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
 }
 
@@ -259,7 +303,9 @@ async fn malformed_compact_source_does_not_discard_other_cached_models() {
     let server = Server::start().await;
     let loader = server.loader(&cache);
     loader.refresh(false).await.unwrap();
-    let expected = loader.snapshot().reasoning_levels_for("vendor/model");
+    let expected = loader
+        .snapshot()
+        .reasoning_levels_for("openrouter/vendor/model");
     let mut bundle: Value = catalog_io::read_json(&cache.path(), MAX_CACHE_BYTES)
         .unwrap()
         .unwrap();
@@ -273,13 +319,17 @@ async fn malformed_compact_source_does_not_discard_other_cached_models() {
         CatalogStatus::Error
     );
     assert_eq!(
-        reopened.snapshot().reasoning_levels_for("vendor/model"),
+        reopened
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         expected
     );
-    assert!(reopened
-        .snapshot()
-        .resolve("untrusted/injected-only")
-        .is_none());
+    assert!(
+        reopened
+            .snapshot()
+            .resolve("untrusted/injected-only")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -340,6 +390,12 @@ async fn auxiliary_catalog_works_when_models_dev_never_loaded() {
             .reasoning_levels_for("vendor/model"),
         ["low", "high"]
     );
+    assert_eq!(
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
+        ["low", "high"]
+    );
     assert_eq!(loader.auxiliary_status("models_dev"), CatalogStatus::Error);
 }
 
@@ -373,7 +429,9 @@ async fn auxiliary_only_refresh_does_not_fetch_fresh_sources_or_change_primary_e
     );
     assert_eq!(loader.auxiliary_status("models_dev"), CatalogStatus::Stale);
     assert_eq!(
-        loader.snapshot().reasoning_levels_for("vendor/model"),
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         ["max"]
     );
 }
@@ -391,7 +449,9 @@ async fn malformed_source_preserves_cache_and_backoff_recovers_independently() {
         Some(ModelMetadataError::InvalidCatalog)
     );
     assert_eq!(
-        loader.snapshot().reasoning_levels_for("model"),
+        loader
+            .snapshot()
+            .reasoning_levels_for("openrouter/vendor/model"),
         ["low", "high"]
     );
     loader.state.write().unwrap()[2].retry_at_ms = Some(1);
@@ -474,7 +534,7 @@ async fn corrupted_source_hash_does_not_discard_other_sources() {
     assert!(loader.snapshot().resolve("vendor/model").is_some());
     assert_eq!(
         loader.snapshot().reasoning_levels_for("vendor/model"),
-        ["low"]
+        ["low", "high"]
     );
     assert!(loader.snapshot().resolve("malicious").is_none());
 }
@@ -486,11 +546,17 @@ fn retry_backoff_is_bounded_and_payload_shapes_are_validated() {
         state.fail(ModelMetadataError::Network, 1);
         assert_eq!(state.deadline(2, 100).at_ms, expected + 1);
     }
-    assert!(!valid_payload(
+    assert!(!valid_source_payload(
         1,
         &serde_json::json!({"vendor": {"models": {}}})
     ));
-    assert!(!valid_payload(2, &serde_json::json!({"data": []})));
-    assert!(!valid_payload(3, &serde_json::json!({"sample_spec": {}})));
-    assert!(!valid_payload(3, &serde_json::json!({"model": "invalid"})));
+    assert!(!valid_source_payload(2, &serde_json::json!({"data": []})));
+    assert!(!valid_source_payload(
+        3,
+        &serde_json::json!({"sample_spec": {}})
+    ));
+    assert!(!valid_source_payload(
+        3,
+        &serde_json::json!({"model": "invalid"})
+    ));
 }

@@ -1,6 +1,95 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
+async fn rate_limit_recovery_stays_bounded_without_persistent_wait() {
+    let budget = SharedRequestBudget::for_incoming_request(8);
+    budget.configure_retry_window(600_000, false);
+    // The limit begins at the refusal, not at request creation or generation.
+    tokio::time::advance(std::time::Duration::from_secs(600)).await;
+    assert!(budget.start_dispatch().is_some());
+    budget.limit_rate_limit_recovery(600_000);
+    let deadline = budget.rate_limit_deadline().unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(20)).await;
+    let handoff = budget.clone();
+    handoff.configure_retry_window(600_000, false);
+    handoff.begin_recovery_pass();
+    handoff.limit_rate_limit_recovery(600_000);
+    assert_eq!(handoff.rate_limit_deadline(), Some(deadline));
+    assert_eq!(handoff.retry_wait_deadline(600_000), deadline);
+    assert!(handoff.start_dispatch().is_some());
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    assert!(!budget.can_dispatch());
+    assert!(handoff.start_wire_attempt().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn rate_limit_recovery_respects_a_shorter_configured_window() {
+    let budget = SharedRequestBudget::for_incoming_request(8);
+    budget.configure_retry_window(1_000, false);
+    budget.limit_rate_limit_recovery(1_000);
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    budget.configure_retry_window(600_000, false);
+    assert!(!budget.can_dispatch());
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistent_rate_limit_wait_preserves_dispatch_and_wire_limits() {
+    let budget = SharedRequestBudget::for_incoming_request(2);
+    budget.configure_retry_window(1_000, true);
+    assert!(budget.start_dispatch().is_some());
+    assert_eq!(budget.start_wire_attempt(), Some(1));
+    budget.observe_rejection();
+    budget.limit_rate_limit_recovery(1_000);
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    let handoff = budget.clone();
+    handoff.begin_recovery_pass();
+    handoff.configure_retry_window(1_000, true);
+    assert_eq!(handoff.rate_limit_deadline(), None);
+    assert!(handoff.start_dispatch().is_some());
+    assert!(!budget.can_dispatch());
+    for attempt in 2..=4 {
+        assert_eq!(handoff.start_wire_attempt(), Some(attempt));
+    }
+    assert_eq!(budget.start_wire_attempt(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn disabling_persistent_wait_restores_the_original_rate_limit_deadline() {
+    let budget = SharedRequestBudget::for_incoming_request(8);
+    budget.configure_retry_window(1_000, false);
+    budget.limit_rate_limit_recovery(1_000);
+    let deadline = budget.rate_limit_deadline().unwrap();
+    budget.configure_retry_window(600_000, true);
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    assert!(budget.can_dispatch());
+    assert_eq!(budget.rate_limit_deadline(), None);
+    budget.configure_retry_window(600_000, false);
+    assert_eq!(budget.rate_limit_deadline(), Some(deadline));
+    assert!(!budget.can_dispatch());
+    assert!(budget.start_wire_attempt().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn http_headers_deadline_cannot_be_extended_by_retry_or_transport_handoff() {
+    let budget = SharedRequestBudget::for_incoming_request(4);
+    let first = budget.http_headers_deadline(std::time::Duration::from_secs(30));
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let fallback = budget.clone();
+    assert_eq!(
+        fallback.http_headers_deadline(std::time::Duration::from_secs(60)),
+        first
+    );
+    let tighter = fallback.http_headers_deadline(std::time::Duration::from_secs(5));
+    assert!(tighter < first);
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    assert!(
+        budget.http_headers_deadline(std::time::Duration::from_secs(30))
+            < tokio::time::Instant::now()
+    );
+    assert_eq!(budget.dispatches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn retry_window_starts_at_rejection_and_survives_transport_handoff() {
     let budget = SharedRequestBudget::for_incoming_request(8);
     budget.configure_retry_window(30_000, false);

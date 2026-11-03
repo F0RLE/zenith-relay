@@ -1,0 +1,9 @@
+.hosted-app .pagination .option-menu { width: 76px; flex-shrink: 0; }
+.hosted-app .pagination .option-trigger { gap: 6px; padding-inline: var(--control-chevron-inset); }
+@media (max-width: 639px) {
+  .hosted-app .pagination > div { display: grid; grid-template-columns: 76px 44px minmax(0, 1fr) 44px; width: 100%; gap: 8px; }
+  .hosted-app .pagination label { display: block; }
+  .hosted-app .pagination label > span { display: none; }
+  .hosted-app .pagination > div > span { text-align: center; white-space: nowrap; }
+  .hosted-app .pagination > div > button { width: 44px; min-width: 44px; }
+}

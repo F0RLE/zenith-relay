@@ -3,89 +3,158 @@ use super::*;
 impl TranslationStream {
     pub(in crate::protocol::adapter::translation::stream) fn messages(
         &mut self,
-        value: &Value,
+        upstream_event: &Value,
     ) -> AdapterResult<bool> {
         let invalid = AdapterError::upstream_stream_invalid;
-        match value
+        self.messages_completion
+            .observe(upstream_event)
+            .map_err(|()| invalid())?;
+        match upstream_event
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(invalid)?
         {
             "ping" => {}
             "message_start" => {
-                self.merge_usage(response::usage(
-                    WireApi::Messages,
-                    value.get("message").ok_or_else(invalid)?,
-                ));
+                if upstream_event
+                    .pointer("/message/role")
+                    .is_some_and(|role| role.as_str() != Some("assistant"))
+                {
+                    return Err(invalid().with_parameter("message.role"));
+                }
             }
             "content_block_start" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
                     .to_string();
-                let block = value.get("content_block").ok_or_else(invalid)?;
-                let block = match block.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        checked(block, &["type", "text"])?;
-                        Block::Text(
-                            block
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .into(),
-                        )
-                    }
-                    Some("thinking") => {
-                        // Signed thinking is provider-owned state. The generic
-                        // translator cannot carry it safely across protocols;
-                        // the dedicated MessagesStreamBridge handles it.
-                        checked(block, &["type", "thinking"])?;
-                        Block::Reasoning(
-                            block
-                                .get("thinking")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .into(),
-                        )
-                    }
-                    Some("tool_use") => {
-                        checked(block, &["type", "id", "name", "input"])?;
-                        Block::ToolCall {
-                            id: required_text(block, "id")?.into(),
-                            name: required_text(block, "name")?.into(),
-                            arguments: block
-                                .get("input")
-                                .filter(|input| {
-                                    input.as_object().is_some_and(|object| !object.is_empty())
-                                })
-                                .map(Value::to_string)
-                                .unwrap_or_default(),
+                let native = upstream_event.get("content_block").ok_or_else(invalid)?;
+                super::super::super::messages::validate_response_block(native)
+                    .map_err(|_| invalid())?;
+                if self.native_indices.contains_key(&key) {
+                    return Err(invalid());
+                }
+                let native_index = self.decoded_response.native_output.len();
+                let block = match native.get("type").and_then(Value::as_str) {
+                    Some("server_tool_use") => {
+                        if !self.translation_request.web_search_allowed {
+                            return Err(invalid());
                         }
+                        let search = web_search::start(native).map_err(|_| invalid())?;
+                        if self.decoded_response.blocks.iter().any(|block| {
+                            matches!(block, Block::WebSearch(previous) if previous.id == search.id)
+                        }) {
+                            return Err(invalid());
+                        }
+                        let input = native
+                            .get("input")
+                            .filter(|input| {
+                                input.as_object().is_some_and(|fields| !fields.is_empty())
+                            })
+                            .map(Value::to_string)
+                            .unwrap_or_default();
+                        self.search_inputs.insert(native_index, input);
+                        Block::WebSearch(search)
+                    }
+                    Some("web_search_tool_result") => {
+                        web_search::finish(&mut self.decoded_response.blocks, native)
+                            .map_err(|_| invalid())?;
+                        self.native_indices.insert(key, native_index);
+                        self.decoded_response.native_output.push(native.clone());
+                        return Ok(false);
+                    }
+                    Some("text") => Block::Text(
+                        native
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    ),
+                    Some("thinking") => Block::Reasoning(
+                        native
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .into(),
+                    ),
+                    Some("tool_use") => Block::ToolCall {
+                        id: required_text(native, "id")?.into(),
+                        name: required_text(native, "name")?.into(),
+                        arguments: native
+                            .get("input")
+                            .filter(|tool_input| {
+                                tool_input
+                                    .as_object()
+                                    .is_some_and(|tool_input_fields| !tool_input_fields.is_empty())
+                            })
+                            .map(Value::to_string)
+                            .unwrap_or_default(),
+                    },
+                    Some("redacted_thinking") => {
+                        required_text(native, "data").map_err(|_| invalid())?;
+                        let index = self.decoded_response.native_output.len();
+                        self.native_indices.insert(key, index);
+                        self.decoded_response.native_output.push(native.clone());
+                        return Ok(false);
                     }
                     _ => return Err(invalid()),
                 };
+                self.native_indices.insert(key.clone(), native_index);
+                self.decoded_response.native_output.push(native.clone());
                 self.insert(key, block)?;
             }
             "content_block_delta" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
                     .to_string();
                 let index = *self.indices.get(&key).ok_or_else(invalid)?;
-                if self.closed.contains(&index) {
+                let native_index = *self.native_indices.get(&key).ok_or_else(invalid)?;
+                if self.native_closed.contains(&native_index) {
                     return Err(invalid());
                 }
-                let delta = value.get("delta").ok_or_else(invalid)?;
+                let delta = upstream_event.get("delta").ok_or_else(invalid)?;
+                super::super::super::messages::validate_response_delta(delta)?;
                 match delta.get("type").and_then(Value::as_str) {
-                    Some("text_delta") => checked(delta, &["type", "text"])?,
-                    Some("thinking_delta") => checked(delta, &["type", "thinking"])?,
-                    Some("input_json_delta") => checked(delta, &["type", "partial_json"])?,
+                    Some("text_delta" | "thinking_delta" | "input_json_delta") => {}
+                    Some("citations_delta") => {
+                        if !self.translation_request.web_search_allowed
+                            || !matches!(self.decoded_response.blocks[index], Block::Text(_))
+                        {
+                            return Err(invalid());
+                        }
+                        let native = &mut self.decoded_response.native_output[native_index];
+                        if native.get("citations").is_none_or(Value::is_null) {
+                            native["citations"] = json!([]);
+                        }
+                        native["citations"]
+                            .as_array_mut()
+                            .ok_or_else(invalid)?
+                            .push(delta["citation"].clone());
+                        return Ok(false);
+                    }
+                    Some("signature_delta") => {
+                        let signature = delta
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .ok_or_else(invalid)?;
+                        if !matches!(self.decoded_response.blocks[index], Block::Reasoning(_)) {
+                            return Err(invalid());
+                        }
+                        let native = &mut self.decoded_response.native_output[native_index];
+                        match &mut native["signature"] {
+                            Value::String(previous) => previous.push_str(signature),
+                            Value::Null => native["signature"] = signature.into(),
+                            _ => return Err(invalid()),
+                        }
+                        return Ok(false);
+                    }
                     _ => return Err(invalid()),
                 }
                 match (
-                    &mut self.response.blocks[index],
+                    &mut self.decoded_response.blocks[index],
                     delta.get("type").and_then(Value::as_str),
                 ) {
                     (Block::Text(text), Some("text_delta")) => text.push_str(
@@ -107,33 +176,105 @@ impl TranslationStream {
                                 .and_then(Value::as_str)
                                 .ok_or_else(invalid)?,
                         ),
+                    (Block::WebSearch(_), Some("input_json_delta")) => {
+                        self.search_inputs
+                            .get_mut(&native_index)
+                            .ok_or_else(invalid)?
+                            .push_str(delta["partial_json"].as_str().ok_or_else(invalid)?);
+                    }
                     _ => return Err(invalid()),
                 }
             }
             "content_block_stop" => {
-                let key = value
+                let key = upstream_event
                     .get("index")
                     .and_then(Value::as_u64)
                     .ok_or_else(invalid)?
                     .to_string();
-                let index = *self.indices.get(&key).ok_or_else(invalid)?;
-                if !self.closed.insert(index) {
+                let native_index = *self.native_indices.get(&key).ok_or_else(invalid)?;
+                if !self.native_closed.insert(native_index) {
                     return Err(invalid());
                 }
-                if let Block::ToolCall { arguments, .. } = &mut self.response.blocks[index] {
-                    if arguments.is_empty() {
-                        *arguments = "{}".into();
+                let Some(&index) = self.indices.get(&key) else {
+                    return Ok(false);
+                };
+                self.closed.insert(index);
+                // Continuation snapshots are consumed only after every block closes.
+                match &self.decoded_response.blocks[index] {
+                    Block::Text(text) => {
+                        self.decoded_response.native_output[native_index]["text"] =
+                            text.clone().into();
+                        let citations = web_search::citations(
+                            &self.decoded_response.native_output[native_index],
+                            text,
+                        )
+                        .map_err(|_| invalid())?;
+                        if !citations.is_empty() {
+                            if !self.translation_request.web_search_allowed {
+                                return Err(invalid());
+                            }
+                            self.decoded_response.citations.insert(index, citations);
+                        }
                     }
+                    Block::Reasoning(text) => {
+                        self.decoded_response.native_output[native_index]["thinking"] =
+                            text.clone().into();
+                    }
+                    _ => {}
+                }
+                if matches!(self.decoded_response.blocks[index], Block::Reasoning(_)) {
+                    required_text(
+                        &self.decoded_response.native_output[native_index],
+                        "signature",
+                    )
+                    .map_err(|_| invalid())?;
+                }
+                if let Block::ToolCall { arguments, .. } = &mut self.decoded_response.blocks[index]
+                {
+                    // The later stop reason distinguishes truncated input from a broken call.
+                    if let Ok(input) = serde_json::from_str::<Value>(arguments) {
+                        if !input.is_object() {
+                            return Err(invalid());
+                        }
+                        self.decoded_response.native_output[native_index]["input"] = input;
+                    }
+                }
+                if let Block::WebSearch(search) = &mut self.decoded_response.blocks[index] {
+                    let fragments = self
+                        .search_inputs
+                        .remove(&native_index)
+                        .ok_or_else(invalid)?;
+                    let input: Value = serde_json::from_str(&fragments).map_err(|_| invalid())?;
+                    search.query = web_search::query(&input).map_err(|_| invalid())?;
+                    self.decoded_response.native_output[native_index]["input"] = input;
                 }
             }
             "message_delta" => {
-                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                if let Some(reason) = upstream_event
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                {
+                    if self.finish_reason.is_some() {
+                        return Err(invalid());
+                    }
                     self.finish_reason = Some(response::finish(WireApi::Messages, reason)?);
+                    self.refusal_explanation = upstream_event
+                        .pointer("/delta/stop_details/explanation")
+                        .or_else(|| upstream_event.pointer("/stop_details/explanation"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                 }
             }
             "message_stop" => {
-                if self.closed.len() != self.response.blocks.len() || self.finish_reason.is_none() {
+                if self.native_closed.len() != self.decoded_response.native_output.len()
+                    || self.finish_reason.is_none()
+                {
                     return Err(invalid());
+                }
+                if self.finish_reason == Some(Finish::Refusal) {
+                    self.decoded_response.blocks.push(Block::Refusal(
+                        self.refusal_explanation.take().unwrap_or_default(),
+                    ));
                 }
                 return Ok(true);
             }

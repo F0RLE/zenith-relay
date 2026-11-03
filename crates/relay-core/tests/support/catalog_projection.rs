@@ -49,14 +49,16 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         .json()
         .await
         .unwrap();
-    assert!(catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL)
+    );
     // Native ChatGPT rows retain account transport, with shared model semantics.
     assert!(catalog["models"][0].get("service_tiers").is_some());
-    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["use_responses_lite"], false);
     assert_eq!(catalog["models"][0]["supported_in_api"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
     assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
@@ -93,13 +95,15 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
         Some("priority"),
         Some("fast"),
     ];
+    // Native transport preserves the selected effort, but does not bypass
+    // the pool's explicit low-only policy configured above.
     for service_tier in client_tiers {
         let mut body = json!({
             "model": OFFICIAL_CODEX_MODEL,
             "input": "hello",
-            "parallel_tool_calls": true,
+            "parallel_tool_calls": false,
             "reasoning": {
-                "effort": "xhigh",
+                "effort": "low",
                 "summary": "detailed"
             }
         });
@@ -137,18 +141,19 @@ async fn account_catalog_uses_reference_metadata_and_preserves_native_transport(
             request.body.get("service_tier").and_then(Value::as_str),
             expected_tier
         );
-        assert_eq!(request.responses_lite.as_deref(), Some("true"));
+        // Advertising native Lite support must not opt this request into Lite.
+        assert_eq!(request.responses_lite, None);
         assert_eq!(request.body["parallel_tool_calls"], false);
-        assert_eq!(request.body["reasoning"]["effort"], "xhigh");
+        assert_eq!(request.body["reasoning"]["effort"], "low");
         assert_eq!(request.body["reasoning"]["summary"], "detailed");
-        assert_eq!(request.body["reasoning"]["context"], "all_turns");
+        assert!(request.body["reasoning"].get("context").is_none());
     }
     drop(requests);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), client_tiers.len());
     assert!(events.iter().all(|event| {
-        event.requested_reasoning_effort.as_deref() == Some("xhigh")
-            && event.effective_reasoning_effort.as_deref() == Some("xhigh")
+        event.requested_reasoning_effort.as_deref() == Some("low")
+            && event.effective_reasoning_effort.as_deref() == Some("low")
     }));
 }
 
@@ -282,7 +287,7 @@ async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_ac
         3
     );
     assert_eq!(first_model["use_responses_lite"], false);
-    assert_eq!(first_model["supports_parallel_tool_calls"], true);
+    assert_eq!(first_model["supports_parallel_tool_calls"], false);
 
     // If the first account is temporarily unreachable, the stale manifest is
     // retained only for that account and cannot overwrite the live second
@@ -312,7 +317,7 @@ async fn pool_catalog_keeps_transport_owned_and_model_semantics_stable_across_ac
             .len(),
         3
     );
-    assert_eq!(second_model["use_responses_lite"], true);
+    assert_eq!(second_model["use_responses_lite"], false);
     assert_eq!(second_model["supports_parallel_tool_calls"], true);
     assert_eq!(
         second_model["supported_reasoning_levels"],
@@ -345,6 +350,7 @@ async fn pool_catalog_fetches_account_manifests_concurrently_without_changing_ra
                     }
                     let mut catalog = default_upstream_model_catalog();
                     catalog["models"][0]["use_responses_lite"] = Value::Bool(index == 0);
+                    catalog["models"][0]["native_rank_marker"] = json!(index);
                     Json(catalog)
                 }
             }),
@@ -387,7 +393,8 @@ async fn pool_catalog_fetches_account_manifests_concurrently_without_changing_ra
         .await
         .unwrap();
     assert_eq!(first_arrived.load(Ordering::SeqCst), 2);
-    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["use_responses_lite"], false);
+    assert_eq!(catalog["models"][0]["native_rank_marker"], 0);
 }
 
 #[tokio::test]
@@ -520,11 +527,13 @@ async fn pool_catalog_ignores_participant_capabilities_on_a_mixed_source_model()
         ["low", "high", "xhigh"]
     );
     assert!(model.get("service_tiers").is_some());
-    assert_eq!(model["use_responses_lite"], true);
+    assert_eq!(model["use_responses_lite"], false);
     assert_eq!(model["supports_reasoning_summaries"], false);
     assert_eq!(model["input_modalities"], json!(["text", "image"]));
-    assert!(model.get("context_window").is_none());
-    assert!(model.get("max_context_window").is_none());
+    // Short preserves the native card's published default, capped by its
+    // hard maximum. The mixed API source cannot replace that evidence.
+    assert_eq!(model["context_window"], 120_000);
+    assert_eq!(model["max_context_window"], 120_000);
 
     let source_requests_before = source_state.requests.lock().unwrap().len();
     assert_eq!(source_requests_before, 0);
@@ -596,12 +605,12 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
     register_ready(&authority, "ready-account", "ready-access").await;
-    let mut stale = account("stale-account", "stale-provider", &upstream, 10);
-    stale.models.push("gpt-extra".to_string());
+    let mut stale_account = account("stale-account", "stale-provider", &upstream, 10);
+    stale_account.models.push("gpt-extra".to_string());
     let ready = account("ready-account", "ready-provider", &upstream, 10);
     let (gateway, _, _, _) = spawn_mixed_gateway(
         Vec::new(),
-        vec![stale, ready],
+        vec![stale_account, ready],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
@@ -622,11 +631,13 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
 
-    assert!(catalog["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|model| model["slug"] == MODEL));
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == MODEL)
+    );
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(

@@ -11,8 +11,12 @@ impl DesktopState {
         self.storage_paths().history_repair_backup_root()
     }
 
-    pub fn ready_api_backup_root(&self) -> PathBuf {
-        self.storage_paths().ready_api_backup_root()
+    pub fn claude_desktop_recovery_file(&self) -> PathBuf {
+        self.storage_paths().claude_desktop_recovery_file()
+    }
+
+    pub fn claude_desktop_backup_root(&self) -> PathBuf {
+        self.storage_paths().claude_desktop_backup_root()
     }
 
     pub fn opencode_backup_root(&self) -> PathBuf {
@@ -25,10 +29,6 @@ impl DesktopState {
 
     pub fn transient_root(&self) -> PathBuf {
         self.cache_root()
-    }
-
-    pub fn output_root(&self) -> PathBuf {
-        self.storage_paths().exports_root()
     }
 
     pub fn logs_root(&self) -> PathBuf {

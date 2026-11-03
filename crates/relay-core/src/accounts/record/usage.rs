@@ -1,4 +1,4 @@
-use super::auth::{explicit_account_disable, AccountAuthState, AccountHealthState};
+use super::auth::{AccountAuthState, AccountHealthState, explicit_account_disable};
 use crate::error_codes;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,16 +39,29 @@ pub fn reduce_account_usage(
     successful_auth_state: Option<AccountAuthState>,
 ) -> AccountUsageUpdate {
     if observation.success {
-        state.last_used_at_ms = Some(observed_at_ms);
+        state.last_used_at_ms = Some(
+            state
+                .last_used_at_ms
+                .unwrap_or_default()
+                .max(observed_at_ms),
+        );
+        // A completed request proves access-token use, not that a rejected
+        // refresh grant or an unresolved rotation checkpoint became valid.
+        if state.auth_state.requires_fresh_login() {
+            return AccountUsageUpdate {
+                state,
+                reset_runtime_failures: false,
+                refresh_quota: false,
+            };
+        }
         state.health = AccountHealthState::Healthy;
         state.last_error_code = None;
         if matches!(
             state.auth_state,
             AccountAuthState::Error | AccountAuthState::RequiresReauth(_)
-        ) {
-            if let Some(auth_state) = successful_auth_state {
-                state.auth_state = auth_state;
-            }
+        ) && let Some(auth_state) = successful_auth_state
+        {
+            state.auth_state = auth_state;
         }
         return AccountUsageUpdate {
             state,
@@ -70,9 +83,8 @@ pub fn reduce_account_usage(
     let failure_category = observation
         .error_category
         .filter(|category| *category != error_codes::UPSTREAM_STATUS);
-    // A quota rejection asks for a fresh window read. It is not an account
-    // outage: the windows themselves decide rotation, and a stale copy of this
-    // code must not keep a recoverable account looking broken.
+    // Quota windows own rotation. Refresh them after rejection and clear stale
+    // quota-health warnings for recoverable accounts.
     if failure_category == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED) {
         let owns_quota_error =
             state.last_error_code.as_deref() == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED);

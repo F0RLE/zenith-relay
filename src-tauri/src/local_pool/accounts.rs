@@ -5,6 +5,7 @@ pub(crate) mod exports;
 pub(crate) mod import_orchestrator;
 pub(crate) mod import_session;
 pub(crate) mod login;
+pub(crate) mod model_probe;
 pub(crate) mod mutations;
 pub(crate) mod oauth;
 pub(crate) mod oauth_flow;
@@ -27,7 +28,7 @@ pub(crate) async fn collect_limited(
     limit: usize,
 ) -> Result<Vec<u8>, LimitedBodyError> {
     match zenith_relay_core::collect_limited(response, limit).await {
-        Ok(body) => Ok(body),
+        Ok(response_bytes) => Ok(response_bytes),
         Err(zenith_relay_core::Error::UpstreamBodyTooLarge) => Err(LimitedBodyError::TooLarge),
         Err(_) => Err(LimitedBodyError::Transport),
     }
@@ -43,9 +44,9 @@ impl import_session::SecretBackend for NativeSecretBackend {
     fn save(
         &self,
         secret_ref: &str,
-        value: &str,
+        secret_value: &str,
     ) -> Result<(), import_session::SecretBackendError> {
-        crate::local_pool::store::secret_store::save(secret_ref, value)
+        crate::local_pool::store::secret_store::save(secret_ref, secret_value)
             .map_err(|_| import_session::SecretBackendError)
     }
 

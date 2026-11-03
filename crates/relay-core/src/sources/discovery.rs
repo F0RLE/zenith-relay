@@ -1,8 +1,8 @@
 use super::observations::{SourceRead, SourceReadHints};
 use super::{
-    capabilities::catalog_capabilities, normalize_source_protocol_bindings, service_protocol,
     ModelEndpointCapability, ProviderSource, SourceAdapter, SourceConnector, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProtocolConfig,
+    SourceProtocolBindingKey, SourceProtocolConfig, capabilities::catalog_capabilities,
+    normalize_source_protocol_bindings, service_protocol,
 };
 use crate::scheduler::refresh::http::ManagementHttpScope;
 use crate::{ApiModelPriceOverride, Result};
@@ -101,8 +101,11 @@ impl SourceCatalogRecord for SourceCatalogEvidence<'_> {
 }
 
 /// Whether discovery replaced any stored catalog field.
-pub fn source_catalog_changed<T: SourceCatalogRecord + ?Sized>(previous: &T, next: &T) -> bool {
-    previous.catalog_evidence() != next.catalog_evidence()
+pub fn source_catalog_changed<T: SourceCatalogRecord + ?Sized>(
+    previous_catalog: &T,
+    updated_source: &T,
+) -> bool {
+    previous_catalog.catalog_evidence() != updated_source.catalog_evidence()
 }
 
 /// Catalog refresh is read-only at the provider: it never sends a generation.
@@ -128,7 +131,7 @@ pub async fn discover_source_with_protocol_config_with_scope(
 ) -> Result<SourceDiscovery> {
     read_source_models_with_scope(source, bindings, config, scope)
         .await
-        .value
+        .read_value
 }
 
 pub async fn read_source_models(
@@ -155,9 +158,9 @@ pub async fn read_source_models_with_scope(
     // Stored bindings are discovery hints for providers that expose distinct
     // catalogs per physical protocol. Runtime routes are still recomputed from
     // the resulting catalog and capability evidence.
-    let value = read_bindings(&catalog_source, bindings, &hints, &scope).await;
+    let discovery_result = read_bindings(&catalog_source, bindings, &hints, &scope).await;
     SourceRead {
-        value,
+        read_value: discovery_result,
         retry_after_ms: hints.delay(),
     }
 }
@@ -205,11 +208,17 @@ async fn read_bindings(
     // remaining Responses models are explicitly assigned to a bridge.
     let automatic_catalog_routes =
         automatic_catalog_routes(protocol_bindings, &bindings, &source.models);
-    let client = reqwest::Client::builder()
+    let client_builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+        .redirect(reqwest::redirect::Policy::none());
+    let client_builder = match source.proxy_url.as_deref() {
+        Some(proxy_url) if !proxy_url.trim().is_empty() => crate::ProxyConfig::parse(proxy_url)
+            .map_err(|message| crate::Error::Validation(message.to_string()))?
+            .apply(client_builder),
+        _ => client_builder,
+    };
+    let client = client_builder.build()?;
     let mut discovery = fetch::discover_protocol_bindings_with_client(
         &client,
         &SourceConnector::new(source, &bindings)?,
@@ -220,10 +229,11 @@ async fn read_bindings(
         scope,
     )
     .await?;
-    if bindings.len() == 1 && automatic_catalog_routes.contains(&bindings[0].key()) {
-        if let Some(binding) = discovery.protocol_bindings.first_mut() {
-            binding.model_ids.clear();
-        }
+    if bindings.len() == 1
+        && automatic_catalog_routes.contains(&bindings[0].key())
+        && let Some(binding) = discovery.protocol_bindings.first_mut()
+    {
+        binding.model_ids.clear();
     }
     Ok(discovery)
 }

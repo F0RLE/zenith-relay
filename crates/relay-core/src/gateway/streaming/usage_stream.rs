@@ -1,6 +1,12 @@
 use super::*;
+use crate::protocol::completion::{
+    ChatStreamCompletion, GeminiStreamCompletion, MessagesStreamCompletion, ResponseCompletion,
+};
 
 mod ingest;
+
+#[cfg(test)]
+mod forwarding_tests;
 
 pub(super) struct UsageStream<S> {
     pub(super) inner: Pin<Box<S>>,
@@ -10,20 +16,35 @@ pub(super) struct UsageStream<S> {
     pub(super) completion: CompletionCallback,
     pub(super) event: Option<UsageEvent>,
     pub(super) response_id: Option<String>,
+    next_sequence: u64,
     pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
+    pub(super) tool_call_capture: Option<Arc<Mutex<crate::gateway::request::ToolCallCapture>>>,
     pub(super) native_gemini: bool,
-    native_gemini_incomplete: bool,
-    native_gemini_finished: bool,
+    native_gemini_completion: GeminiStreamCompletion,
+    chat_completion: ChatStreamCompletion,
+    messages_completion: MessagesStreamCompletion,
+    interactions_completion: crate::protocol::interactions::InteractionsStreamCompletion,
+    usage_snapshot: Option<Value>,
     native_replay_capture: NativeReplayCapture,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
     pub(super) sse_pending: Vec<u8>,
+    sse_forward_pending: Vec<u8>,
+    sse_forward_mode: SseForwardMode,
     pub(super) output_pending: VecDeque<Bytes>,
-    // Track yielded bytes, not parsed deltas: even an incomplete SSE frame is
-    // already owned by the client and cannot be replaced by a synthetic response.
-    client_visible_output: bool,
+    // Parser buffers are cleared on rejection. Remember separately whether
+    // the client owns an unfinished frame: a failure may be appended between
+    // frames, never inside JSON that has already reached the client.
+    client_frame_open: bool,
     pub(super) heartbeat: Pin<Box<Sleep>>,
     pub(super) terminated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SseForwardMode {
+    Detect,
+    Passthrough,
+    BufferedTerminal,
 }
 
 impl<S> UsageStream<S> {
@@ -45,16 +66,23 @@ impl<S> UsageStream<S> {
             completion,
             event: Some(event),
             response_id: None,
+            next_sequence: 0,
             native_response,
+            tool_call_capture: None,
             native_gemini,
-            native_gemini_incomplete: false,
-            native_gemini_finished: false,
+            native_gemini_completion: GeminiStreamCompletion::default(),
+            chat_completion: ChatStreamCompletion::default(),
+            messages_completion: MessagesStreamCompletion::default(),
+            interactions_completion: Default::default(),
+            usage_snapshot: None,
             native_replay_capture: NativeReplayCapture::default(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
+            sse_forward_pending: Vec::new(),
+            sse_forward_mode: SseForwardMode::Detect,
             output_pending: VecDeque::new(),
-            client_visible_output: false,
+            client_frame_open: false,
             heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
             terminated: false,
         }
@@ -95,6 +123,7 @@ impl<S> UsageStream<S> {
 impl<S, E> Stream for UsageStream<S>
 where
     S: Stream<Item = std::result::Result<Bytes, E>>,
+    E: std::error::Error + 'static,
 {
     type Item = std::result::Result<Bytes, E>;
 
@@ -111,39 +140,65 @@ where
                 Poll::Ready(Some(Ok(bytes))) => {
                     let now = TokioInstant::now();
                     this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
-                    let (valid, forward_len) = if this.native_gemini {
-                        (this.ingest_native_gemini(&bytes), bytes.len())
+                    let origin = this
+                        .event
+                        .as_ref()
+                        .map(UsageStream::<S>::stream_error_origin)
+                        .unwrap_or(crate::ErrorOrigin::Relay);
+                    let valid = if this.native_gemini {
+                        this.ingest_native_gemini(&bytes)
                     } else {
                         this.ingest_sse(&bytes)
                     };
+                    if valid {
+                        let forwarded = this.forward_sse_bytes(&bytes, origin);
+                        if !forwarded.is_empty() {
+                            this.client_frame_open = !this.sse_pending.is_empty();
+                            return Poll::Ready(Some(Ok(Bytes::from(forwarded))));
+                        }
+                    } else {
+                        this.sse_forward_pending.clear();
+                        this.sse_forward_mode = SseForwardMode::Detect;
+                    }
                     if let Some(failure) = this.output_pending.pop_front() {
                         return Poll::Ready(Some(Ok(failure)));
                     }
                     if !valid {
                         return Poll::Ready(None);
                     }
-                    let forwarded = bytes.slice(..forward_len);
-                    this.client_visible_output |= !forwarded.is_empty();
-                    if !forwarded.is_empty() {
-                        return Poll::Ready(Some(Ok(forwarded)));
-                    }
                 }
                 Poll::Ready(Some(Err(error))) => {
+                    this.record_transport_error(&error);
+                    this.sse_forward_pending.clear();
+                    this.sse_forward_mode = SseForwardMode::Detect;
                     if this.fail_stream(error_codes::UPSTREAM_STREAM) {
                         continue;
                     }
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
+                    if !this.sse_forward_pending.is_empty() {
+                        let pending = std::mem::take(&mut this.sse_forward_pending);
+                        this.sse_forward_mode = SseForwardMode::Detect;
+                        this.client_frame_open = !this.sse_pending.is_empty();
+                        return Poll::Ready(Some(Ok(Bytes::from(pending))));
+                    }
                     if this.native_gemini {
                         if !this.sse_pending.is_empty() {
                             this.fail_stream(error_codes::STREAM_INCOMPLETE);
-                        } else if this.native_gemini_incomplete {
-                            this.finish(Some(false), Some(error_codes::RESPONSE_INCOMPLETE));
-                        } else if this.native_gemini_finished {
-                            this.finish(Some(true), None);
                         } else {
-                            this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                            match this.native_gemini_completion.outcome() {
+                                ResponseCompletion::Completed => this.finish(Some(true), None),
+                                ResponseCompletion::Incomplete => {
+                                    this.finish(
+                                        Some(false),
+                                        Some(error_codes::RESPONSE_INCOMPLETE),
+                                    );
+                                }
+                                ResponseCompletion::Invalid => {
+                                    this.fail_stream(error_codes::STREAM_INCOMPLETE);
+                                }
+                            }
                         }
                         this.sse_pending.clear();
                         this.terminated = true;
@@ -166,6 +221,7 @@ where
                     // Chunks are forwarded immediately, so a heartbeat is safe
                     // only between complete SSE events, never inside a frame.
                     if this.sse_pending.is_empty()
+                        && this.sse_forward_pending.is_empty()
                         && this.heartbeat.as_mut().poll(context).is_ready()
                     {
                         this.heartbeat

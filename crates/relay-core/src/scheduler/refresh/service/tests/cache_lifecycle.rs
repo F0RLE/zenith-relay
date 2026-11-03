@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn replacement_releases_old_waiters_without_publishing_old_results() {
+async fn replacement_releases_stale_waiters_without_publishing_stale_results() {
     let service = RefreshService::new(RefreshLimits::default()).unwrap();
     let (started, mut requests) = mpsc::unbounded_channel();
     service
@@ -13,9 +13,9 @@ async fn replacement_releases_old_waiters_without_publishing_old_results() {
             })
         })
         .unwrap();
-    let old_service = service.clone();
-    let old = tokio::spawn(async move {
-        old_service
+    let stale_service = service.clone();
+    let stale_request = tokio::spawn(async move {
+        stale_service
             .request(&registration(1, false).identity, RefreshKind::Quota)
             .await
     });
@@ -24,13 +24,13 @@ async fn replacement_releases_old_waiters_without_publishing_old_results() {
         .register(registration(2, false), |_| {
             Box::pin(async {
                 RefreshResult {
-                    value: 2,
+                    refresh_value: 2,
                     outcome: RefreshOutcome::Success,
                 }
             })
         })
         .unwrap();
-    assert_eq!(old.await.unwrap(), Err(RefreshWaitError::Stale));
+    assert_eq!(stale_request.await.unwrap(), Err(RefreshWaitError::Stale));
     assert_eq!(
         *service
             .request(&registration(2, false).identity, RefreshKind::Quota)
@@ -81,7 +81,7 @@ async fn unchanged_read_is_fresh_and_disabled_monitoring_does_not_retry_in_backg
             observed.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 RefreshResult {
-                    value: 0,
+                    refresh_value: 0,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -121,7 +121,7 @@ async fn background_manual_and_dirty_events_have_one_owner_and_one_follow_up() {
                 started.send(job.manual).unwrap();
                 release.notified().await;
                 RefreshResult {
-                    value: 1,
+                    refresh_value: 1,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -170,7 +170,7 @@ async fn panicking_provider_releases_its_key_and_reports_a_safe_result() {
 }
 
 #[tokio::test]
-async fn a_late_old_registration_cannot_evict_a_newer_login_or_configuration() {
+async fn a_late_stale_registration_cannot_evict_a_newer_login_or_configuration() {
     let service = RefreshService::new(RefreshLimits::default()).unwrap();
     let mut current = registration(2, false);
     current.identity.config_revision = 3;
@@ -179,7 +179,7 @@ async fn a_late_old_registration_cannot_evict_a_newer_login_or_configuration() {
         .register(current, |_| {
             Box::pin(async {
                 RefreshResult {
-                    value: 2,
+                    refresh_value: 2,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -208,13 +208,13 @@ async fn cached_reads_are_scoped_to_resource_and_revision() {
     let service = RefreshService::new(RefreshLimits::default()).unwrap();
     let identity = registration(1, false).identity;
     for kind in [RefreshKind::Quota, RefreshKind::Balance] {
-        let mut entry = registration(1, false);
-        entry.kind = kind;
+        let mut refresh_registration = registration(1, false);
+        refresh_registration.kind = kind;
         service
-            .register(entry, move |_| {
+            .register(refresh_registration, move |_| {
                 Box::pin(async move {
                     RefreshResult {
-                        value: kind,
+                        refresh_value: kind,
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -233,7 +233,7 @@ async fn cached_reads_are_scoped_to_resource_and_revision() {
         .register(registration(2, false), |_| {
             Box::pin(async {
                 RefreshResult {
-                    value: RefreshKind::Quota,
+                    refresh_value: RefreshKind::Quota,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -248,13 +248,13 @@ async fn preparation_errors_reach_waiters_without_erasing_the_cached_observation
     let service =
         RefreshService::with_cache_policy(RefreshLimits::default(), Result::is_ok).unwrap();
     let identity = registration(1, false).identity;
-    for value in [Ok(42_u64), Err("synthetic preparation failure")] {
+    for refresh_value in [Ok(42_u64), Err("synthetic preparation failure")] {
         service
             .register(registration(1, false), move |_| {
                 Box::pin(async move {
                     RefreshResult {
-                        value,
-                        outcome: if value.is_ok() {
+                        refresh_value,
+                        outcome: if refresh_value.is_ok() {
                             RefreshOutcome::Success
                         } else {
                             RefreshOutcome::FailedRetryAt(60_000)
@@ -268,7 +268,7 @@ async fn preparation_errors_reach_waiters_without_erasing_the_cached_observation
                 .request(&identity, RefreshKind::Quota)
                 .await
                 .unwrap(),
-            value
+            refresh_value
         );
     }
     let (cached, freshness) = service
@@ -298,7 +298,7 @@ async fn quota_and_models_join_reserved_auth_without_caching_its_transient_resul
             minimum_interval_ms: 0,
             ..RefreshLimits::default()
         },
-        |value: &Observation| *value != Observation::Auth,
+        |observation: &Observation| *observation != Observation::Auth,
     )
     .unwrap();
     let identity = registration(1, false).identity;
@@ -316,7 +316,7 @@ async fn quota_and_models_join_reserved_auth_without_caching_its_transient_resul
                 started.send(()).unwrap();
                 release.notified().await;
                 RefreshResult {
-                    value: Observation::Auth,
+                    refresh_value: Observation::Auth,
                     outcome: RefreshOutcome::Success,
                 }
             })
@@ -326,11 +326,11 @@ async fn quota_and_models_join_reserved_auth_without_caching_its_transient_resul
         (RefreshKind::Quota, Observation::Quota),
         (RefreshKind::Models, Observation::Models),
     ] {
-        let mut entry = registration(1, false);
-        entry.kind = kind;
+        let mut refresh_registration = registration(1, false);
+        refresh_registration.kind = kind;
         let weak = Arc::downgrade(&service);
         service
-            .register(entry, move |_| {
+            .register(refresh_registration, move |_| {
                 let weak = weak.clone();
                 let identity = registration(1, false).identity;
                 Box::pin(async move {
@@ -344,7 +344,7 @@ async fn quota_and_models_join_reserved_auth_without_caching_its_transient_resul
                         Observation::Auth
                     );
                     RefreshResult {
-                        value: observation,
+                        refresh_value: observation,
                         outcome: RefreshOutcome::Success,
                     }
                 })
@@ -375,7 +375,7 @@ async fn quota_and_models_join_reserved_auth_without_caching_its_transient_resul
                     kind: RefreshKind::Auth,
                 };
                 let auth_waiters = state.entries[&auth_key]
-                    .result
+                    .completion_sender
                     .as_ref()
                     .unwrap()
                     .receiver_count();

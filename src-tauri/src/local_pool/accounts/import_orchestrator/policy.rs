@@ -7,12 +7,12 @@ use zenith_relay_core::accounts::{
     AccountAuthMode, AccountHealthState, ImportAuthMode, ParsedImportItem,
 };
 use zenith_relay_core::error_codes;
-use zenith_relay_core::{normalize_bounded_model_ids, ModelIdListError};
+use zenith_relay_core::{ModelIdListError, normalize_bounded_model_ids};
 
 pub(in crate::local_pool::accounts) fn ensure_account_import_item(
-    item: &ParsedImportItem,
+    import_item: &ParsedImportItem,
 ) -> ItemResult<()> {
-    if item.secrets().api_key().is_some() {
+    if import_item.secrets().api_key().is_some() {
         Err(ImportItemError::new(
             error_codes::USE_SOURCE_IMPORT,
             "API keys must be imported as compatible API sources",
@@ -51,6 +51,7 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
     account.account.tags = existing.account.tags.clone();
     account.account.enabled = existing.account.enabled;
     account.account.in_pool = existing.account.in_pool;
+    account.image_pool_enabled = existing.image_pool_enabled && existing.account.in_pool;
     account.account.draining = existing.account.draining;
     account.account.created_at_ms = existing.account.created_at_ms;
     account.account.last_used_at_ms = existing.account.last_used_at_ms;
@@ -58,7 +59,7 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
     account.account.quota = existing.account.quota.clone();
     account.account.subscription = existing.account.subscription.clone();
     account.account.last_error_code = existing.account.last_error_code.clone();
-    account.remote_location = existing.remote_location.clone();
+    account.recovery = existing.recovery.clone();
     account.allowed_models = existing.allowed_models.clone();
     account.excluded_models = existing.excluded_models.clone();
     account.priority = existing.priority;
@@ -68,23 +69,24 @@ pub(in crate::local_pool::accounts) fn merge_existing_account(
 pub(in crate::local_pool::accounts) fn preserve_newer_account_state(
     account: &mut LocalAccountRecord,
     before_refresh: &LocalAccountRecord,
-    current: &LocalAccountRecord,
+    latest_account: &LocalAccountRecord,
 ) {
-    if current.account.auth_state != before_refresh.account.auth_state {
-        account.account.auth_state = current.account.auth_state;
+    if latest_account.account.auth_state != before_refresh.account.auth_state {
+        account.account.auth_state = latest_account.account.auth_state;
     }
-    if current.account.health != before_refresh.account.health {
-        account.account.health = current.account.health;
+    if latest_account.account.health != before_refresh.account.health {
+        account.account.health = latest_account.account.health;
     }
-    if current.account.last_error_code != before_refresh.account.last_error_code {
-        account.account.last_error_code = current.account.last_error_code.clone();
+    if latest_account.account.last_error_code != before_refresh.account.last_error_code {
+        account.account.last_error_code = latest_account.account.last_error_code.clone();
     }
 }
 
 pub(in crate::local_pool::accounts) fn account_model_state_is_valid(
     account: &LocalAccountRecord,
 ) -> bool {
-    account.discovered_models.is_some()
+    account.image_pool_enabled
+        || account.discovered_models.is_some()
         || !account.models.is_empty()
         || (account.account.last_error_code.is_some()
             && account.account.health != AccountHealthState::Healthy)

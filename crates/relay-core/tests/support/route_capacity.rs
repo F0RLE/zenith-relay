@@ -272,7 +272,10 @@ async fn local_key_account_scope_uses_relay_ids_not_provider_header_ids() {
     )
     .await;
 
-    assert_eq!(models(&gateway).await, [MODEL]);
+    assert_eq!(
+        models(&gateway).await,
+        [zenith_relay_core::IMAGE_API_MODEL, MODEL]
+    );
     assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
     assert_eq!(allowed_state.requests.lock().unwrap().len(), 1);
     assert!(denied_state.requests.lock().unwrap().is_empty());
@@ -340,9 +343,11 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
         }
     }))
     .await;
-    assert!(responses
-        .iter()
-        .all(|response| response.status() == StatusCode::OK));
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.status() == StatusCode::OK)
+    );
     assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
     assert_eq!(persistence.token_writes.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -358,9 +363,11 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
     );
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 20);
-    assert!(requests
-        .iter()
-        .all(|request| request.authorization.as_deref() == Some("Bearer rotated-access")));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.authorization.as_deref() == Some("Bearer rotated-access"))
+    );
 }
 
 #[tokio::test]
@@ -386,22 +393,26 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 
     let responses = join_all((0..REQUESTS).map(|_| request(&gateway, false))).await;
 
-    assert!(responses
-        .iter()
-        .all(|response| response.status() == StatusCode::OK));
+    assert!(
+        responses
+            .iter()
+            .all(|response| response.status() == StatusCode::OK)
+    );
     assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
     assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
-    assert!(gateway
-        .runtime
-        .as_ref()
-        .unwrap()
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.in_flight == 0));
+    assert!(
+        gateway
+            .runtime
+            .as_ref()
+            .unwrap()
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.in_flight == 0)
+    );
 }
 
 #[tokio::test]
-async fn independent_chat_stays_on_the_account_with_known_quota() {
+async fn independent_chat_uses_a_free_source_while_the_quota_account_is_busy() {
     let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
     let (source_upstream, source_state) =
         spawn_upstream(vec![success_reply("source-response")]).await;
@@ -433,20 +444,27 @@ async fn independent_chat_stays_on_the_account_with_known_quota() {
 
     let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the independent chat did not stay on the account with known quota");
+        .expect("the independent chat did not use a free pool member");
     assert_eq!(independent.status(), StatusCode::OK);
     let _ = independent.bytes().await.unwrap();
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
-    assert_eq!(source_state.requests.lock().unwrap().len(), 0);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|event| {
-        event.account_id.as_deref() == Some("stream-account") && event.source_id != "z-reserve-api"
-    }));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.account_id.as_deref() == Some("stream-account"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.source_id == "z-reserve-api")
+    );
 }
 
 #[tokio::test]
@@ -474,19 +492,21 @@ async fn queued_request_rechecks_scope_after_pool_member_removal() {
     assert_eq!(removed_request.status(), StatusCode::OK);
     assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
 
-    assert!(runtime.update_key_scope(
-        "local-key",
-        CandidateScope {
-            source_ids: Some(BTreeSet::new()),
-            account_ids: Some(
-                ["removed-account", "blocker-account"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            ),
-            model_rules: Default::default(),
-        },
-    ));
+    assert!(
+        runtime.update_key_scope(
+            "local-key",
+            CandidateScope {
+                source_ids: Some(BTreeSet::new()),
+                account_ids: Some(
+                    ["removed-account", "blocker-account"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+                model_rules: Default::default(),
+            },
+        )
+    );
     let blocker_request = request(&gateway, true).await;
     assert_eq!(blocker_request.status(), StatusCode::OK);
     assert_eq!(blocker_state.requests.lock().unwrap().len(), 1);
@@ -598,22 +618,41 @@ async fn pre_output_failure_releases_only_replayable_tool_affinity() {
     for stream in [false, true] {
         for (include_call, previous_response) in [(true, false), (false, false), (true, true)] {
             for (failure, replay_safe) in [
-                (Reply::Json(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    json!({"error": {"code": "server_is_overloaded"}}),
-                ), true),
-                (Reply::Json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": {"type": "server_error", "code": "server_error"}}),
-                ), false),
-                (Reply::Stream(vec![
-                    StreamChunk::Data("data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed-setup\"}}\n\n"),
-                    StreamChunk::Data("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\"}}}\n\n"),
-                ]), false),
+                (
+                    Reply::Json(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        json!({"error": {"code": "server_is_overloaded"}}),
+                    ),
+                    true,
+                ),
+                (
+                    Reply::Json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({"error": {"type": "server_error", "code": "server_error"}}),
+                    ),
+                    false,
+                ),
+                (
+                    Reply::Stream(vec![
+                        StreamChunk::Data(
+                            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"failed-setup\"}}\n\n",
+                        ),
+                        StreamChunk::Data(
+                            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_error\",\"code\":\"server_error\"}}}\n\n",
+                        ),
+                    ]),
+                    false,
+                ),
                 (Reply::Stream(vec![StreamChunk::Error]), false),
             ] {
-                assert_tool_affinity_retry(stream, include_call, previous_response, failure, replay_safe)
-                    .await;
+                assert_tool_affinity_retry(
+                    stream,
+                    include_call,
+                    previous_response,
+                    failure,
+                    replay_safe,
+                )
+                .await;
             }
         }
     }
@@ -637,7 +676,7 @@ async fn assert_tool_affinity_retry(
         Reply::Json(
             StatusCode::OK,
             json!({
-                "id": "tool-owner-response", "object": "response", "model": MODEL,
+                "id": "tool-owner-response", "object": "response", "status": "completed", "model": MODEL,
                 "output": [call.clone()]
             }),
         ),
@@ -707,13 +746,17 @@ async fn assert_tool_affinity_retry(
         // this must stay inside the same three-send request budget.
         assert!((2..=4).contains(&owner_attempts));
     } else {
-        assert_eq!(owner_attempts, 2);
+        assert_eq!(
+            owner_attempts, 2,
+            "stream={stream}, include_call={include_call}, previous_response={previous_response}, replay_safe={replay_safe}"
+        );
     }
     assert_eq!(
         backup_state.requests.lock().unwrap().len(),
         usize::from(fallback)
     );
     let events = events.lock().unwrap();
+    let events = usage_observations::physical_attempts(&events);
     assert_eq!(events.len(), owner_attempts + usize::from(fallback));
     assert_eq!(
         events[1].routing.as_ref().unwrap().reason,
@@ -798,8 +841,10 @@ async fn agent_identity_account_signs_each_gateway_request() {
     assert_eq!(response.status(), StatusCode::OK);
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0]
-        .authorization
-        .as_deref()
-        .is_some_and(|value| value.starts_with("AgentAssertion ")));
+    assert!(
+        requests[0]
+            .authorization
+            .as_deref()
+            .is_some_and(|value| value.starts_with("AgentAssertion "))
+    );
 }

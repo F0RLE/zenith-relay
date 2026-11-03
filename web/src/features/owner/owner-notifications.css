@@ -1,0 +1,41 @@
+.hosted-app .owner-notifications-page { min-width: 0; }
+.hosted-app .owner-notifications-page .page-heading { gap: 16px; flex-wrap: wrap; }
+.hosted-app .owner-notices-surface { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.hosted-app .owner-notices-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.hosted-app .owner-notices-toolbar > span:first-child { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.hosted-app .owner-notices-toolbar svg { width: 16px; height: 16px; color: var(--secondary); }
+.hosted-app .owner-notices-state, .hosted-app .owner-notice-draft-label { font-size: 12px; color: var(--secondary); }
+.hosted-app .owner-notices-boundary { margin: 0; padding: 12px 20px; color: var(--secondary); font-size: 12px; line-height: 1.6; background: var(--subtle); }
+.hosted-app .owner-notices-empty { display: grid; justify-items: center; gap: 12px; padding: 64px 20px; color: var(--secondary); text-align: center; }
+.hosted-app .owner-notices-empty > svg { width: 24px; height: 24px; }
+.hosted-app .owner-notices-empty h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 500; }
+.hosted-app .owner-notice-editor { display: grid; padding: 24px 20px; }
+.hosted-app .owner-notice-editor > label { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+.hosted-app .owner-notice-editor > input { margin-bottom: 24px; }
+.hosted-app .owner-notice-editor > input, .hosted-app .owner-notice-editor > textarea { box-sizing: border-box; min-width: 0; width: 100%; padding: 12px; font: inherit; font-size: 14px; line-height: 1.6; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; caret-color: var(--accent); }
+.hosted-app .owner-notice-editor > textarea { min-height: 160px; resize: vertical; }
+.hosted-app .owner-notice-editor :is(input, textarea):focus-visible { outline: none; border-color: var(--accent); }
+.hosted-app .owner-notice-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 20px; }
+.hosted-app .owner-notice-editor-footer > p { margin: 0; max-width: 52ch; color: var(--secondary); font-size: 12px; line-height: 1.6; }
+.hosted-app .owner-notice-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hosted-app .owner-notice-list { list-style: none; padding: 0; margin: 0; }
+.hosted-app .owner-notice-list > li + li { border-top: 1px solid var(--border); }
+.hosted-app .owner-notice-row { display: flex; justify-content: space-between; gap: 24px; padding: 24px 20px; }
+.hosted-app .owner-notice-copy { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.hosted-app .owner-notice-copy h2 { margin: 0 0 8px; color: var(--text); font-size: 15px; line-height: 1.5; font-weight: 600; }
+.hosted-app .owner-notice-copy p { max-width: 72ch; margin: 0 0 12px; color: var(--secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+.hosted-app .owner-notice-row > .owner-notice-actions { align-content: flex-start; flex-shrink: 0; }
+.hosted-app .owner-notice-delete-question { font-size: 13px; color: var(--text); }
+.hosted-app .owner-notice-delete { color: var(--error); }
+@container relay-page (max-width: 760px) {
+  .hosted-app .owner-notice-row { flex-direction: column; gap: 16px; }
+}
+@media (max-width: 639px) {
+  .hosted-app .owner-notices-toolbar, .hosted-app .owner-notices-boundary { padding: 12px 16px; }
+  .hosted-app .owner-notice-editor, .hosted-app .owner-notice-row { padding: 20px 16px; }
+  .hosted-app .owner-notice-actions > .relay-button { min-height: 44px; }
+  .hosted-app .owner-notice-editor-footer > .owner-notice-actions { width: 100%; }
+}
+@media (forced-colors: active) {
+  .hosted-app .owner-notice-editor :is(input, textarea):focus-visible { outline: 1px solid Highlight; }
+}

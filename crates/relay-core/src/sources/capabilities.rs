@@ -42,6 +42,18 @@ pub enum ProtocolFeature {
     Reasoning,
 }
 
+impl ProtocolFeature {
+    pub const ALL: [Self; 7] = [
+        Self::Text,
+        Self::Streaming,
+        Self::Images,
+        Self::FunctionTools,
+        Self::ToolChoice,
+        Self::StructuredOutput,
+        Self::Reasoning,
+    ];
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelEndpointCapability {
@@ -54,6 +66,27 @@ pub struct ModelEndpointCapability {
     pub features: BTreeMap<ProtocolFeature, CapabilityStatus>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// Numeric restrictions for this exact source/model endpoint only.
+    #[serde(default, skip_serializing_if = "ModelTokenLimits::is_empty")]
+    pub token_limits: ModelTokenLimits,
+    /// An explicit route list may narrow reference modes. None leaves the
+    /// model reference in charge; a present empty list permits Standard only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tiers: Option<Vec<crate::DefaultServiceTier>>,
+}
+
+impl ModelEndpointCapability {
+    /// Exact source/model declarations and configured endpoints take priority
+    /// over manufacturer hints. Host profiles and probes do not establish this.
+    pub(crate) fn explicitly_declares_endpoint(&self) -> bool {
+        self.status.available()
+            && matches!(
+                self.origin,
+                CapabilityOrigin::Catalog
+                    | CapabilityOrigin::Manual
+                    | CapabilityOrigin::EndpointUrl
+            )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,12 +104,16 @@ pub struct SourceProtocolConfig {
 
 mod catalog;
 mod config;
+mod limits;
 pub(crate) use catalog::catalog_capabilities;
 pub use config::SourceProtocolResolution;
+pub use limits::ModelTokenLimits;
 pub fn endpoint_url_protocol(base_url: &str) -> Option<WireApi> {
     let url = url::Url::parse(base_url).ok()?;
     let path = url.path().trim_end_matches('/');
-    if path.ends_with("/responses") {
+    if path.ends_with("/interactions") {
+        Some(WireApi::GeminiInteractions)
+    } else if path.ends_with("/responses") {
         Some(WireApi::Responses)
     } else if path.ends_with("/chat/completions") {
         Some(WireApi::ChatCompletions)
@@ -93,19 +130,21 @@ pub fn endpoint_url_protocol(base_url: &str) -> Option<WireApi> {
 /// Match exact hosts to avoid interpreting lookalike domains as trusted profiles.
 pub fn service_protocol(base_url: &str) -> Option<WireApi> {
     let url = url::Url::parse(base_url).ok()?;
-    match url.host_str()? {
-        "api.openai.com" | "api.zenithmarket.dev" => Some(WireApi::Responses),
-        "openrouter.ai" | "api.deepseek.com" | "api.groq.com" | "api.mistral.ai" => {
-            Some(WireApi::ChatCompletions)
-        }
-        "api.anthropic.com" => Some(WireApi::Messages),
-        "generativelanguage.googleapis.com" => Some(WireApi::Gemini),
-        _ => None,
-    }
+    super::services::Service::from_host(url.host_str()?)?.protocol(&url)
 }
 
-pub(super) fn endpoint_type(value: &str) -> Option<WireApi> {
-    match value {
+pub(super) fn service_protocols(base_url: &str) -> Vec<WireApi> {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return Vec::new();
+    };
+    url.host_str()
+        .and_then(super::services::Service::from_host)
+        .map(|service| service.protocols(&url))
+        .unwrap_or_default()
+}
+
+pub(super) fn endpoint_type(endpoint_type_text: &str) -> Option<WireApi> {
+    match endpoint_type_text {
         "openai-response" | "responses" | "/v1/responses" => Some(WireApi::Responses),
         "openai" | "chat_completions" | "chat.completions" | "/v1/chat/completions" => {
             Some(WireApi::ChatCompletions)

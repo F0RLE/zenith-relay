@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "revision": "2",
+  "preferences": {
+    "openai": ["responses", "chat_completions", "messages", "gemini"],
+    "anthropic": ["messages", "responses", "chat_completions", "gemini"],
+    "google": ["gemini", "responses", "chat_completions", "messages"],
+    "xai": ["chat_completions", "responses", "messages", "gemini"],
+    "zai": ["chat_completions", "responses", "messages", "gemini"],
+    "default": ["responses", "chat_completions", "messages", "gemini"]
+  }
+}

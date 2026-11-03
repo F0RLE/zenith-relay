@@ -1,27 +1,8 @@
 use super::persist;
 use super::record::record_operation;
-use super::{
-    DiagnosticPaths, DiagnosticSettings, CRASHES_DIRECTORY, DEBUG_ENABLED, DEBUG_MARKER_FILE,
-    ERRORS_DIRECTORY, LOGS_DIRECTORY, OPERATIONS_DIRECTORY,
-};
+use super::{DEBUG_ENABLED, DEBUG_MARKER_FILE, DiagnosticSettings, LOGS_DIRECTORY};
 use std::fs::{self, OpenOptions};
 use std::sync::atomic::Ordering;
-
-/// Return the user-visible diagnostics locations without exposing any file
-/// contents to the renderer.
-pub(crate) fn paths() -> DiagnosticPaths {
-    let root = persist::root_path();
-    let logs = root.join(LOGS_DIRECTORY);
-    DiagnosticPaths {
-        logs_path: logs.to_string_lossy().into_owned(),
-        error_logs_path: logs.join(ERRORS_DIRECTORY).to_string_lossy().into_owned(),
-        crash_logs_path: logs.join(CRASHES_DIRECTORY).to_string_lossy().into_owned(),
-        operation_logs_path: logs
-            .join(OPERATIONS_DIRECTORY)
-            .to_string_lossy()
-            .into_owned(),
-    }
-}
 
 pub(crate) fn settings() -> DiagnosticSettings {
     DiagnosticSettings {

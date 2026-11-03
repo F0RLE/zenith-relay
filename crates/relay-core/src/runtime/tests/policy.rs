@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "synthetic-upstream-key",
+            &["model-a", "model-b"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local-key",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let scheduler = runtime.scheduler.clone();
+    let visibility = runtime.model_state.hidden_models.clone();
+    let adapters = runtime.adapter_continuation_store.clone();
+    let replay = runtime.native_responses_replay_store.clone();
+
+    runtime.set_model_display_order(vec!["model-b".into(), "model-a".into()]);
+    runtime.set_hidden_models(vec!["MODEL-B".into()]);
+    assert!(crate::poison::read(&visibility).contains("model-b"));
+    assert_eq!(
+        runtime.visible_models_for_secret(
+            "synthetic-local-key",
+            &[WireApi::Responses],
+            current_time_ms(),
+        ),
+        vec!["model-a"]
+    );
+    runtime.set_hidden_models(Vec::new());
+    assert_eq!(
+        runtime.visible_models_for_secret(
+            "synthetic-local-key",
+            &[WireApi::Responses],
+            current_time_ms(),
+        ),
+        vec!["model-b", "model-a"]
+    );
+    assert!(Arc::ptr_eq(&scheduler, &runtime.scheduler));
+    assert!(Arc::ptr_eq(&visibility, &runtime.model_state.hidden_models));
+    assert!(Arc::ptr_eq(&adapters, &runtime.adapter_continuation_store));
+    assert!(Arc::ptr_eq(&replay, &runtime.native_responses_replay_store));
+}
+
+#[test]
 fn runtime_updates_service_tier_and_removes_candidates_in_place() {
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
@@ -255,9 +302,11 @@ fn local_auth_returns_only_the_matching_redacted_key_policy() {
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
     assert_eq!(authenticated.id, "key-1");
-    assert!(runtime
-        .authenticate(Some(&HeaderValue::from_static("Bearer upstream-secret")))
-        .is_none());
+    assert!(
+        runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer upstream-secret")))
+            .is_none()
+    );
     assert!(!format!("{runtime:?}").contains("local-secret"));
     assert!(!format!("{runtime:?}").contains("upstream-secret"));
 }
@@ -309,7 +358,9 @@ fn transition_runtime_allows_an_explicitly_empty_scope() {
     )
     .unwrap();
 
-    assert!(runtime
-        .visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms())
-        .is_empty());
+    assert!(
+        runtime
+            .visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms())
+            .is_empty()
+    );
 }

@@ -9,6 +9,7 @@ struct MatrixUpstream {
 
 fn generation_path(protocol: WireApi, streaming: bool) -> &'static str {
     match (protocol, streaming) {
+        (WireApi::GeminiInteractions, _) => "/v1beta/interactions",
         (WireApi::Responses, _) => "/v1/responses",
         (WireApi::ChatCompletions, _) => "/v1/chat/completions",
         (WireApi::Messages, _) => "/v1/messages",
@@ -19,6 +20,7 @@ fn generation_path(protocol: WireApi, streaming: bool) -> &'static str {
 
 fn request_body(protocol: WireApi, streaming: bool) -> Value {
     let mut request = match protocol {
+        WireApi::GeminiInteractions => json!({"input":"Synthetic matrix request","store":false}),
         WireApi::Responses => json!({
             "input":"Synthetic matrix request",
             "store":false,
@@ -39,11 +41,21 @@ fn request_body(protocol: WireApi, streaming: bool) -> Value {
         request["model"] = "matrix-model".into();
         request["stream"] = streaming.into();
     }
+    if protocol == WireApi::Messages {
+        request["system"] = "Synthetic root instruction.".into();
+        request["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"system","content":"Synthetic initial attachment."}));
+    }
     request
 }
 
 fn response_body(protocol: WireApi) -> Value {
     match protocol {
+        WireApi::GeminiInteractions => {
+            json!({"id":"interaction_matrix","status":"completed","model":"matrix-model","outputs":[{"type":"text","text":"Matrix reply"}],"usage":{"total_input_tokens":13,"total_output_tokens":7,"total_tokens":20}})
+        }
         WireApi::Responses => json!({
             "id":"resp_matrix","object":"response","status":"completed","model":"matrix-model",
             "output":[{"type":"message","id":"msg_matrix","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Matrix reply","annotations":[]}]}],
@@ -68,6 +80,9 @@ fn response_body(protocol: WireApi) -> Value {
 
 fn stream_body(protocol: WireApi) -> String {
     let events = match protocol {
+        WireApi::GeminiInteractions => vec![
+            json!({"event_type":"interaction.completed","interaction":response_body(protocol)}),
+        ],
         WireApi::Responses => vec![
             json!({"type":"response.created","response":{"id":"resp_matrix","output":[]}}),
             json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_matrix","role":"assistant","content":[]}}),
@@ -159,6 +174,107 @@ async fn upstream(
 }
 
 #[tokio::test]
+async fn chat_pdf_reaches_native_and_converted_upstreams_without_extraction() {
+    for output in WireApi::ALL {
+        let observed = MatrixUpstream {
+            protocol: output,
+            requests: Arc::default(),
+        };
+        let provider = spawn(
+            Router::new()
+                .fallback(post(upstream))
+                .with_state(observed.clone()),
+        )
+        .await;
+        let mut source = RuntimeSource::unrestricted(ProviderSource {
+            id: "pdf-source".into(),
+            name: "Synthetic PDF source".into(),
+            base_url: format!(
+                "{}/{}",
+                provider.base_url,
+                if output == WireApi::Gemini {
+                    "v1beta"
+                } else {
+                    "v1"
+                }
+            ),
+            api_key: SOURCE_KEY.into(),
+            proxy_url: None,
+            wire_api: output,
+            models: vec!["matrix-model".into()],
+        });
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::ChatCompletions,
+            adapter: SourceAdapter::between(WireApi::ChatCompletions, output).unwrap(),
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            cache_write_ttl: Default::default(),
+            model_ids: vec!["matrix-model".into()],
+        }];
+        let runtime = GatewayRuntime::from_pool(
+            vec![source],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "pdf-key".into(),
+                secret: LOCAL_KEY.into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let relay = spawn(gateway::router(Arc::new(runtime))).await;
+        for streaming in [false, true] {
+            let response = reqwest::Client::new()
+                .post(format!("{}/v1/chat/completions", relay.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .json(&json!({"model":"matrix-model","stream":streaming,"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"synthetic.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjc="}}]}]}))
+                .send().await.unwrap();
+            let status = response.status();
+            let body = response.text().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "Chat -> {output:?}: {body}");
+            assert!(body.contains("Matrix reply"));
+        }
+        let requests = observed.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let (data_path, filename_path, expected_data) = match output {
+            WireApi::GeminiInteractions => {
+                unreachable!("native-only protocol has separate media acceptance")
+            }
+            WireApi::ChatCompletions => (
+                "/messages/0/content/0/file/file_data",
+                "/messages/0/content/0/file/filename",
+                "data:application/pdf;base64,JVBERi0xLjc=",
+            ),
+            WireApi::Responses => (
+                "/input/0/content/0/file_data",
+                "/input/0/content/0/filename",
+                "data:application/pdf;base64,JVBERi0xLjc=",
+            ),
+            WireApi::Messages => (
+                "/messages/0/content/0/source/data",
+                "/messages/0/content/0/title",
+                "JVBERi0xLjc=",
+            ),
+            WireApi::Gemini => (
+                "/contents/0/parts/0/inlineData/data",
+                "/contents/0/parts/0/inlineData/displayName",
+                "JVBERi0xLjc=",
+            ),
+        };
+        for (_, body) in requests.iter() {
+            assert_eq!(
+                body.pointer(data_path).and_then(Value::as_str),
+                Some(expected_data),
+                "{output:?}: {body}"
+            );
+            assert_eq!(
+                body.pointer(filename_path).and_then(Value::as_str),
+                Some("synthetic.pdf"),
+                "{output:?}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
     for output in WireApi::ALL {
         let observed = MatrixUpstream {
@@ -185,6 +301,7 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     }
                 ),
                 api_key: SOURCE_KEY.into(),
+                proxy_url: None,
                 wire_api: output,
                 models: vec!["matrix-model".into()],
             });
@@ -235,11 +352,29 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     !body.contains("adapter_upstream"),
                     "{input:?} -> {output:?}: {body}"
                 );
+                if input == WireApi::Messages && output == WireApi::Gemini {
+                    let requests = observed.requests.lock().unwrap();
+                    let (_, request) = requests.last().unwrap();
+                    assert_eq!(
+                        request["systemInstruction"]["parts"],
+                        json!([
+                            {"text":"Synthetic root instruction."},
+                            {"text":"Synthetic initial attachment."}
+                        ])
+                    );
+                    assert_eq!(
+                        request["contents"],
+                        json!([
+                            {"role":"user","parts":[{"text":"Synthetic matrix request"}]}
+                        ])
+                    );
+                }
                 if streaming {
                     if input == output {
                         assert_eq!(body, stream_body(output), "native {input:?}");
                     }
                     let terminal = match input {
+                        WireApi::GeminiInteractions => "completed",
                         WireApi::Responses => "response.completed",
                         WireApi::ChatCompletions => "[DONE]",
                         WireApi::Messages => "message_stop",

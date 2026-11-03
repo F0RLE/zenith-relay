@@ -27,35 +27,36 @@ pub(super) fn reconcile_pending_catalog_state(
 
 pub(super) fn valid_managed_model_catalog(
     backup: &ProfileBackup,
-    expected_path: &Path,
-    content: &Option<Vec<u8>>,
+    expected_catalog_path: &Path,
+    catalog_bytes: &Option<Vec<u8>>,
 ) -> bool {
-    if !valid_managed_model_catalog_metadata(backup, expected_path, content) {
+    if !valid_managed_model_catalog_metadata(backup, expected_catalog_path, catalog_bytes) {
         return false;
     }
     if backup.managed_model_catalog_path.is_none() {
         return true;
     }
-    if backup.restore_pending && content.is_none() {
+    if backup.restore_pending && catalog_bytes.is_none() {
         return true;
     }
-    let current_hash = content.as_deref().map(bytes_hash);
+    let current_hash = catalog_bytes.as_deref().map(bytes_hash);
     let stable_valid = match backup.managed_model_catalog_hash.as_deref() {
         Some(hash) => current_hash.as_deref() == Some(hash),
-        None => content.is_none(),
+        None => catalog_bytes.is_none(),
     };
     let pending_valid = backup
         .managed_model_catalog_pending_hash
         .as_deref()
         .is_some_and(|hash| current_hash.as_deref() == Some(hash));
-    let pending_remove_valid = backup.managed_model_catalog_pending_remove && content.is_none();
+    let pending_remove_valid =
+        backup.managed_model_catalog_pending_remove && catalog_bytes.is_none();
     stable_valid || pending_valid || pending_remove_valid
 }
 
 fn valid_managed_model_catalog_metadata(
     backup: &ProfileBackup,
-    expected_path: &Path,
-    content: &Option<Vec<u8>>,
+    expected_catalog_path: &Path,
+    catalog_bytes: &Option<Vec<u8>>,
 ) -> bool {
     if backup
         .managed_model_catalog_hash
@@ -70,13 +71,13 @@ fn valid_managed_model_catalog_metadata(
     {
         return false;
     }
-    let Some(path) = backup.managed_model_catalog_path.as_deref() else {
+    let Some(recorded_catalog_path) = backup.managed_model_catalog_path.as_deref() else {
         return backup.managed_model_catalog_hash.is_none()
             && backup.managed_model_catalog_pending_hash.is_none()
             && !backup.managed_model_catalog_pending_remove
-            && content.is_none();
+            && catalog_bytes.is_none();
     };
-    if portable_path_value(path) != portable_path_string(expected_path) {
+    if portable_path_value(recorded_catalog_path) != portable_path_string(expected_catalog_path) {
         return false;
     }
     true
@@ -87,108 +88,114 @@ fn valid_managed_model_catalog_metadata(
 /// alone, while attach/refresh must still refuse to replace it.
 pub(super) fn externally_changed_managed_model_catalog(
     backup: &ProfileBackup,
-    expected_path: &Path,
-    content: &Option<Vec<u8>>,
+    expected_catalog_path: &Path,
+    catalog_bytes: &Option<Vec<u8>>,
 ) -> bool {
-    if !valid_managed_model_catalog_metadata(backup, expected_path, content)
+    if !valid_managed_model_catalog_metadata(backup, expected_catalog_path, catalog_bytes)
         || backup.managed_model_catalog_path.is_none()
         || (backup.managed_model_catalog_hash.is_none()
             && backup.managed_model_catalog_pending_hash.is_none())
     {
         return false;
     }
-    let Some(content) = content.as_deref() else {
+    let Some(catalog_bytes) = catalog_bytes.as_deref() else {
         return false;
     };
-    let current_hash = bytes_hash(content);
+    let current_hash = bytes_hash(catalog_bytes);
     backup.managed_model_catalog_hash.as_deref() != Some(current_hash.as_str())
         && backup.managed_model_catalog_pending_hash.as_deref() != Some(current_hash.as_str())
 }
 
 pub(super) fn managed_model_catalog_path(backup_root: &Path) -> Result<PathBuf> {
-    let root = fs::canonicalize(backup_root).map_err(io_error)?;
-    Ok(root.join(MODEL_CATALOG_FILE))
+    let canonical_backup_root = fs::canonicalize(backup_root).map_err(io_error)?;
+    Ok(canonical_backup_root.join(MODEL_CATALOG_FILE))
 }
 
 pub(super) fn apply_model_catalog_change(
-    path: &Path,
-    previous: &Option<Vec<u8>>,
-    next: Option<&str>,
+    catalog_path: &Path,
+    previous_catalog_snapshot: &Option<Vec<u8>>,
+    updated_catalog_text: Option<&str>,
     previously_managed: bool,
 ) -> Result<()> {
-    match (next, previously_managed) {
-        (Some(content), _) => replace_if_unchanged(path, previous, content),
-        (None, true) => remove_if_unchanged(path, previous),
+    match (updated_catalog_text, previously_managed) {
+        (Some(catalog_text), _) => {
+            replace_if_unchanged(catalog_path, previous_catalog_snapshot, catalog_text)
+        }
+        (None, true) => remove_if_unchanged(catalog_path, previous_catalog_snapshot),
         (None, false) => Ok(()),
     }
 }
 
 pub(super) fn rollback_model_catalog_change(
-    path: &Path,
-    attempted: Option<&str>,
+    catalog_path: &Path,
+    attempted_catalog_text: Option<&str>,
     previously_managed: bool,
-    previous: &Option<Vec<u8>>,
+    previous_catalog_snapshot: &Option<Vec<u8>>,
 ) -> Result<()> {
-    match (attempted, previously_managed) {
-        (Some(content), _) => rollback_file(path, content, previous),
-        (None, true) => restore_snapshot_if_unchanged(path, &None, previous),
+    match (attempted_catalog_text, previously_managed) {
+        (Some(catalog_text), _) => {
+            rollback_file(catalog_path, catalog_text, previous_catalog_snapshot)
+        }
+        (None, true) => {
+            restore_snapshot_if_unchanged(catalog_path, &None, previous_catalog_snapshot)
+        }
         (None, false) => Ok(()),
     }
 }
 
 pub(super) fn remove_managed_model_catalog_if_unchanged(backup: &ProfileBackup) {
-    let Some(path) = backup.managed_model_catalog_path.as_deref() else {
+    let Some(catalog_path) = backup.managed_model_catalog_path.as_deref() else {
         return;
     };
-    let path = Path::new(path);
-    let Ok(Some(content)) = read_optional_bytes(path) else {
+    let catalog_path = Path::new(catalog_path);
+    let Ok(Some(catalog_bytes)) = read_optional_bytes(catalog_path) else {
         return;
     };
-    let current_hash = bytes_hash(&content);
+    let current_hash = bytes_hash(&catalog_bytes);
     if backup.managed_model_catalog_hash.as_deref() == Some(current_hash.as_str())
         || backup.managed_model_catalog_pending_hash.as_deref() == Some(current_hash.as_str())
     {
-        let _ = remove_if_unchanged(path, &Some(content));
+        let _ = remove_if_unchanged(catalog_path, &Some(catalog_bytes));
     }
 }
 
 pub(super) fn invalidate_models_cache(codex_home: &Path) -> Result<bool> {
-    let path = codex_home.join(MODELS_CACHE_FILE);
-    let snapshot = read_optional_bytes(&path)?;
-    if snapshot.is_none() {
+    let cache_path = codex_home.join(MODELS_CACHE_FILE);
+    let cache_snapshot = read_optional_bytes(&cache_path)?;
+    if cache_snapshot.is_none() {
         return Ok(false);
     }
-    remove_if_unchanged(&path, &snapshot)?;
+    remove_if_unchanged(&cache_path, &cache_snapshot)?;
     Ok(true)
 }
 
-pub(super) fn backup_path(root: &Path) -> PathBuf {
-    root.join("codex-default.json")
+pub(super) fn backup_path(backup_root: &Path) -> PathBuf {
+    backup_root.join("codex-default.json")
 }
 
-pub(super) fn local_backup(codex_home: &Path, root: &Path) -> Result<Option<ProfileBackup>> {
-    let path = backup_path(root);
-    let mut snapshot = read_optional_bytes(&path)?;
-    let Some(mut backup) = parse_backup_snapshot(&snapshot, &path)? else {
+pub(super) fn local_backup(codex_home: &Path, backup_root: &Path) -> Result<Option<ProfileBackup>> {
+    let backup_path = backup_path(backup_root);
+    let mut backup_snapshot = read_optional_bytes(&backup_path)?;
+    let Some(mut backup) = parse_backup_snapshot(&backup_snapshot, &backup_path)? else {
         return Ok(None);
     };
-    let catalog_path = managed_model_catalog_path(root)?;
-    let catalog = read_optional_bytes(&catalog_path)?;
+    let catalog_path = managed_model_catalog_path(backup_root)?;
+    let catalog_bytes = read_optional_bytes(&catalog_path)?;
     migrate_legacy_managed_catalog_metadata(
         codex_home,
-        &path,
-        &mut snapshot,
+        &backup_path,
+        &mut backup_snapshot,
         &mut backup,
         &catalog_path,
-        &catalog,
+        &catalog_bytes,
     )?;
     migrate_missing_managed_catalog_for_restore(
         codex_home,
-        &path,
-        &mut snapshot,
+        &backup_path,
+        &mut backup_snapshot,
         &mut backup,
         &catalog_path,
-        &catalog,
+        &catalog_bytes,
     )?;
     let oauth_metadata_valid = match (
         backup.bound_oauth_account_id.as_deref(),
@@ -209,11 +216,11 @@ pub(super) fn local_backup(codex_home: &Path, root: &Path) -> Result<Option<Prof
         Some("missing managed gateway address")
     } else if !oauth_metadata_valid {
         Some("invalid OAuth ownership metadata")
-    } else if !valid_managed_model_catalog(&backup, &catalog_path, &catalog)
-        && !externally_changed_managed_model_catalog(&backup, &catalog_path, &catalog)
+    } else if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes)
+        && !externally_changed_managed_model_catalog(&backup, &catalog_path, &catalog_bytes)
     {
         Some(
-            if valid_managed_model_catalog_metadata(&backup, &catalog_path, &catalog) {
+            if valid_managed_model_catalog_metadata(&backup, &catalog_path, &catalog_bytes) {
                 "managed model catalog is missing or cannot be verified"
             } else {
                 "invalid managed model catalog reference or fingerprint"
@@ -237,37 +244,39 @@ fn migrate_legacy_managed_catalog_metadata(
     backup_bytes: &mut Option<Vec<u8>>,
     backup: &mut ProfileBackup,
     catalog_path: &Path,
-    catalog: &Option<Vec<u8>>,
+    catalog_bytes: &Option<Vec<u8>>,
 ) -> Result<()> {
     let legacy_metadata = backup.managed_model_catalog_path.is_none()
         && backup.managed_model_catalog_hash.is_none()
         && backup.managed_model_catalog_pending_hash.is_none()
         && !backup.managed_model_catalog_pending_remove;
-    let Some(content) = catalog.as_deref() else {
+    let Some(catalog_bytes) = catalog_bytes.as_deref() else {
         return Ok(());
     };
-    if !legacy_metadata || !is_relay_managed_model_catalog(content) {
+    if !legacy_metadata || !is_relay_managed_model_catalog(catalog_bytes) {
         return Ok(());
     }
 
     backup.managed_model_catalog_path = Some(portable_path_string(catalog_path));
-    backup.managed_model_catalog_hash = Some(bytes_hash(content));
+    backup.managed_model_catalog_hash = Some(bytes_hash(catalog_bytes));
     if backup.previous_model_catalog_json.is_none() {
         let config_path = codex_home.join(CONFIG_FILE);
         let current_catalog = read_optional_bytes(&config_path)
             .ok()
             .flatten()
-            .and_then(|config| {
-                snapshot_text(&Some(config), &config_path)
+            .and_then(|config_bytes| {
+                snapshot_text(&Some(config_bytes), &config_path)
                     .ok()
                     .flatten()
                     .map(str::to_owned)
             })
-            .and_then(|content| parse_config(&content).ok())
+            .and_then(|config_text| parse_config(&config_text).ok())
             .and_then(|document| root_model_catalog_json(&document));
         if current_catalog
             .as_deref()
-            .is_some_and(|path| !configured_catalog_matches_path(codex_home, path, catalog_path))
+            .is_some_and(|configured_catalog_path| {
+                !configured_catalog_matches_path(codex_home, configured_catalog_path, catalog_path)
+            })
         {
             backup.previous_model_catalog_json = current_catalog;
         }
@@ -299,9 +308,9 @@ fn migrate_missing_managed_catalog_for_restore(
     backup_bytes: &mut Option<Vec<u8>>,
     backup: &mut ProfileBackup,
     catalog_path: &Path,
-    catalog: &Option<Vec<u8>>,
+    catalog_bytes: &Option<Vec<u8>>,
 ) -> Result<()> {
-    if catalog.is_some()
+    if catalog_bytes.is_some()
         || backup.restore_pending
         || backup.attach_pending
         || backup.managed_model_catalog_path.is_none()
@@ -311,14 +320,16 @@ fn migrate_missing_managed_catalog_for_restore(
     }
 
     let config_path = codex_home.join(CONFIG_FILE);
-    let config = read_optional_bytes(&config_path)?;
-    let configured_catalog = snapshot_text(&config, &config_path)?
+    let config_bytes = read_optional_bytes(&config_path)?;
+    let configured_catalog = snapshot_text(&config_bytes, &config_path)?
         .map(parse_config)
         .transpose()?
         .and_then(|document| root_model_catalog_json(&document));
     if !configured_catalog
         .as_deref()
-        .is_some_and(|path| configured_catalog_matches_path(codex_home, path, catalog_path))
+        .is_some_and(|configured_catalog_path| {
+            configured_catalog_matches_path(codex_home, configured_catalog_path, catalog_path)
+        })
     {
         return Ok(());
     }
@@ -330,8 +341,8 @@ fn migrate_missing_managed_catalog_for_restore(
     Ok(())
 }
 
-fn is_relay_managed_model_catalog(content: &[u8]) -> bool {
-    catalog::read_catalog_values(content, true).is_ok_and(|models| {
+fn is_relay_managed_model_catalog(catalog_bytes: &[u8]) -> bool {
+    catalog::read_catalog_values(catalog_bytes, true).is_ok_and(|models| {
         !models.is_empty()
             && models.iter().all(|model| {
                 model.get("comp_hash").and_then(Value::as_str) == Some(CODEX_RELAY_CATALOG_HASH)

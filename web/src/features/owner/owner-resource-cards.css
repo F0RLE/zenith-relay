@@ -1,0 +1,97 @@
+/* Desktop AccountCard anatomy, using Hosted palette and accessible controls. */
+.hosted-app .owner-resource-grid { display: grid; grid-template-columns: repeat(var(--owner-card-columns, 1), minmax(0, 340px)); justify-content: start; gap: 10px; margin-top: 16px; align-items: stretch; }
+.hosted-app .owner-resource-card { min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.hosted-app .owner-resource-card[data-selected] { border-color: transparent; background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface)); }
+.hosted-app .owner-resource-card-heading { display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; align-items: stretch; gap: 0; padding: 0; min-height: 54px; border-bottom: 1px solid var(--border); }
+.hosted-app .owner-resource-icon { display: grid; place-items: center; height: auto; color: var(--accent); background: var(--accent-soft); border-right: 1px solid var(--border); border-radius: 11px 0 0 0; }
+.hosted-app .owner-resource-icon svg { width: 18px; height: 18px; }
+.hosted-app .owner-resource-card[data-status="idle"] .owner-resource-icon { color: var(--secondary); background: var(--subtle); }
+.hosted-app .owner-resource-card[data-status="disabled"] .owner-resource-icon { color: var(--secondary); background: var(--subtle); }
+.hosted-app .owner-resource-card[data-status="error"] .owner-resource-icon { color: var(--error); background: var(--error-soft); }
+.hosted-app .owner-resource-identity { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; padding: 7px 8px; }
+.hosted-app .owner-resource-identity h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosted-app .owner-resource-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
+.hosted-app .owner-resource-meta > span { padding: 2px 4px; font-size: 10px; line-height: 15px; overflow-wrap: anywhere; }
+.hosted-app .owner-account-plan { color: var(--accent); background: var(--accent-soft); border-radius: 3px; }
+.hosted-app .owner-account-route { color: var(--secondary); background: var(--subtle); border-radius: 3px; }
+.hosted-app .owner-resource-header-actions { display: flex; align-items: center; padding-right: 3px; }
+.hosted-app .owner-resource-header-actions :is(.owner-resource-select, .owner-card-menu-trigger) { width: 40px; min-width: 40px; height: 40px; min-height: 40px; flex-basis: 40px; }
+.hosted-app .owner-card-menu-trigger { border-color: transparent; background: transparent; color: var(--secondary); padding: 0; }
+.hosted-app .owner-account-quota { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 10px 16px; padding: 10px; flex: 1; min-height: 82px; }
+.hosted-app .owner-quota-meter { min-width: 0; display: grid; justify-items: center; align-content: start; text-align: center; font-variant-numeric: tabular-nums; }
+.hosted-app .owner-quota-meter:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.hosted-app .owner-quota-meter > span { font-size: 11px; line-height: 16px; }
+.hosted-app .owner-quota-meter strong { font-size: 15px; line-height: 18px; font-weight: 650; }
+.hosted-app .owner-quota-meter small { font-size: 10px; line-height: 15px; color: var(--secondary); }
+.hosted-app .owner-quota-track { width: 100%; height: 4px; margin-top: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.hosted-app .owner-quota-track > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.hosted-app .owner-quota-meter[data-level="low"] strong { color: var(--warning); }
+.hosted-app .owner-quota-meter[data-level="low"] .owner-quota-track > span { background: var(--warning); }
+.hosted-app .owner-quota-meter[data-level="critical"] strong { color: var(--error); }
+.hosted-app .owner-quota-meter[data-level="critical"] .owner-quota-track > span { background: var(--error); }
+.hosted-app .owner-quota-meter[data-stale] .owner-quota-track > span { background: var(--secondary); }
+.hosted-app .owner-quota-empty { grid-column: 1 / -1; align-self: center; text-align: center; color: var(--secondary); font-size: 12px; line-height: 18px; }
+.hosted-app .owner-quota-empty[data-state="failed"], .hosted-app .owner-quota-empty[data-state="requires_reauth"] { color: var(--error); }
+.hosted-app :is(.owner-account-token, .owner-account-subscription, .owner-provider-credits) { min-height: 30px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px; margin: 0 10px; padding: 7px 0; font-size: 10px; line-height: 15px; font-variant-numeric: tabular-nums; color: var(--secondary); }
+.hosted-app :is(.owner-account-token, .owner-account-subscription) svg { width: 14px; height: 14px; }
+.hosted-app :is(.owner-account-subscription, .owner-provider-credits) { border-top: 1px solid var(--border); }
+.hosted-app .owner-account-subscription strong { font-size: inherit; font-weight: 550; color: var(--text); }
+.hosted-app .owner-account-subscription[data-expired] { color: var(--error); }
+.hosted-app .owner-account-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--subtle) 45%, transparent); }
+.hosted-app .owner-account-values > div { min-width: 0; display: grid; grid-template-rows: 1fr auto; gap: 2px; padding: 8px 4px; text-align: center; }
+.hosted-app .owner-account-values > div + div { border-left: 1px solid var(--border); }
+.hosted-app .owner-account-values dt { font-size: 10px; line-height: 14px; color: var(--secondary); }
+.hosted-app .owner-account-values dd { margin: 0; font-size: 12px; line-height: 18px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hosted-app .owner-account-values [data-paid] dd { color: var(--accent); }
+.hosted-app .owner-resource-footer { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0; padding: 0; margin-top: auto; border-top: 1px solid var(--border); }
+.hosted-app .owner-resource-footer > :is(button, span) { flex: 1 1 0; width: auto; min-width: 0; }
+.hosted-app .owner-resource-footer > :first-child { border-radius: 0 0 0 11px; }
+.hosted-app .owner-resource-footer > :last-child, .hosted-app .owner-resource-footer > :last-child > button { border-radius: 0 0 11px 0; }
+.hosted-app .owner-resource-footer .relay-icon-button { display: flex; justify-content: center; align-items: center; width: 100%; height: 44px; min-height: 44px; border: 0; background: transparent; color: var(--secondary); box-shadow: none; }
+.hosted-app .owner-resource-footer > :not(:first-child) { border-left: 1px solid var(--border); }
+.hosted-app .owner-resource-footer .owner-membership-action[aria-pressed="true"] { color: var(--accent); }
+.hosted-app .owner-resource-meta > .owner-source-endpoint { display: block; min-width: 0; max-width: 100%; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--secondary); }
+.hosted-app .owner-source-body { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.hosted-app .owner-source-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+.hosted-app .owner-source-values > div { display: grid; align-content: center; gap: 3px; min-width: 0; min-height: 58px; padding: 8px; text-align: center; }
+.hosted-app .owner-source-values > div + div { border-inline-start: 1px solid var(--border); }
+.hosted-app .owner-source-values dt, .hosted-app .owner-source-models > span { color: var(--secondary); font-size: 11px; line-height: 16px; }
+.hosted-app .owner-source-values dd { display: grid; gap: 2px; margin: 0; font-size: 14px; line-height: 19px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hosted-app .owner-source-values[data-stale] dd { color: var(--secondary); }
+.hosted-app .owner-source-models { display: grid; place-content: center; gap: 2px; flex: 1; width: 100%; min-height: 52px; padding: 8px 12px; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.hosted-app .owner-source-values + .owner-source-models { border-top: 1px solid var(--border); }
+.hosted-app .owner-source-models strong { font-size: 14px; line-height: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.hosted-app .owner-source-models:not(:disabled):hover, .hosted-app .owner-resource-footer button:not(:disabled):hover { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .owner-source-models:disabled { cursor: default; }
+.hosted-app .owner-resource-card[data-kind="api"] .owner-resource-footer > .relay-icon-button { border-radius: 0; }
+.hosted-app .owner-resource-card[data-kind="api"] .owner-resource-footer > .relay-icon-button:first-child { border-end-start-radius: 11px; }
+.hosted-app .owner-resource-card[data-kind="api"] .owner-resource-footer > .relay-icon-button:last-child { border-end-end-radius: 11px; }
+.hosted-app .owner-card-menu { position: fixed; z-index: 100; visibility: hidden; width: max-content; min-width: 180px; max-width: min(280px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border-radius: 12px; background: var(--pine); color: var(--pine-ink); box-shadow: var(--overlay-lift); }
+.hosted-app .owner-card-menu button { display: block; width: 100%; min-height: 40px; border: 0; border-radius: 8px; padding: 8px 12px; text-align: left; background: transparent; color: inherit; font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; overflow-wrap: anywhere; }
+.hosted-app .owner-card-menu button:focus-visible, .hosted-app .owner-card-menu button:not(:disabled):hover { outline: 0; background: var(--pine-ink); color: var(--pine); }
+.hosted-app .owner-card-menu button:disabled { opacity: .5; cursor: not-allowed; }
+.hosted-app .owner-card-menu button[data-danger]:not(:hover):not(:focus-visible) { color: #ffb4ae; }
+/* The same usable-width thresholds and 280–340px tracks as Desktop workspace.css. */
+@container relay-page (min-width: 570px) { .hosted-app .owner-resource-grid { --owner-card-columns: 2; } }
+@container relay-page (min-width: 860px) { .hosted-app .owner-resource-grid { --owner-card-columns: 3; } }
+@container relay-page (min-width: 1150px) { .hosted-app .owner-resource-grid { --owner-card-columns: 4; } }
+@container relay-page (min-width: 1440px) { .hosted-app .owner-resource-grid { --owner-card-columns: 5; } }
+@container relay-page (min-width: 1730px) { .hosted-app .owner-resource-grid { --owner-card-columns: 6; } }
+@container relay-page (min-width: 2020px) { .hosted-app .owner-resource-grid { --owner-card-columns: 7; } }
+@container relay-page (min-width: 2310px) { .hosted-app .owner-resource-grid { --owner-card-columns: 8; } }
+@container relay-page (min-width: 2600px) { .hosted-app .owner-resource-grid { --owner-card-columns: 9; } }
+@container relay-page (min-width: 2890px) { .hosted-app .owner-resource-grid { --owner-card-columns: 10; } }
+@container relay-page (min-width: 3180px) { .hosted-app .owner-resource-grid { --owner-card-columns: 11; } }
+@container relay-page (min-width: 3470px) { .hosted-app .owner-resource-grid { --owner-card-columns: 12; } }
+@media (max-width: 639px) { .hosted-app .owner-resource-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .owner-resource-header-actions :is(.owner-resource-select, .owner-card-menu-trigger) { width: 44px; min-width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
+  .hosted-app .owner-card-menu button { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .hosted-app .owner-resource-card[data-selected] { border-color: Highlight; }
+  .hosted-app .owner-quota-track { background: Canvas; border: 1px solid CanvasText; }
+  .hosted-app .owner-quota-track > span { background: Highlight; }
+  .hosted-app .owner-card-menu { border: 1px solid CanvasText; background: Canvas; color: CanvasText; }
+  .hosted-app .owner-card-menu button:focus-visible { outline: 2px solid Highlight; }
+}

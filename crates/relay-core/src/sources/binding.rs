@@ -212,7 +212,7 @@ pub fn runtime_source_models_for_any_wire_api(
     )?;
     let mut seen = BTreeSet::new();
     let mut models = Vec::new();
-    for wire_api in WireApi::ALL {
+    for wire_api in WireApi::ALL_NATIVE {
         for binding in bindings
             .iter()
             .filter(|binding| binding.wire_api == wire_api)

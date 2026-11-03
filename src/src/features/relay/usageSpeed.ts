@@ -1,4 +1,3 @@
-import type { LocalUsage } from "./api/types";
 import { formatNumber } from "./numberFormatting";
 
 export type TokenSpeedSample = {
@@ -42,28 +41,6 @@ export function tokenSpeed(sample: TokenSpeedSample) {
   return measured ? observedTokensPerSecond(measured.outputTokens, measured.durationMs) : null;
 }
 
-export function averageTokenSpeed(samples: TokenSpeedSample[]) {
-  const totals = samples.reduce((result, sample) => {
-    const measured = measureTokenSpeed(sample);
-    if (measured) {
-      result.outputTokens += measured.outputTokens;
-      result.durationMs += measured.durationMs;
-    }
-    return result;
-  }, { outputTokens: 0, durationMs: 0 });
-  return observedTokensPerSecond(totals.outputTokens, totals.durationMs);
-}
-
-export function latestLocalAccountSpeeds(events: LocalUsage[]) {
-  const speeds = new Map<string, number>();
-  for (const event of [...events].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))) {
-    if (!event.accountId || speeds.has(event.accountId)) continue;
-    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, reasoningTokens: event.reasoningTokens, durationMs: event.generationMs });
-    if (speed != null) speeds.set(event.accountId, speed);
-  }
-  return speeds;
-}
-
-export function formatTokenSpeed(value: number | null | undefined, locale: string, unit: string) {
-  return value == null ? "-" : `${formatNumber(value, locale, { maximumFractionDigits: 1 })} ${unit}`;
+export function formatTokenSpeed(tokensPerSecond: number | null | undefined, locale: string, unit: string) {
+  return tokensPerSecond == null ? "-" : `${formatNumber(tokensPerSecond, locale, { maximumFractionDigits: 1 })} ${unit}`;
 }

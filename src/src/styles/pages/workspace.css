@@ -101,8 +101,9 @@
 }
 
 .workspace-controls .relay-status-summary {
-  margin-bottom: 12px;
-  padding-bottom: 12px;
+  margin: -14px -16px 8px;
+  border-width: 0 0 1px;
+  border-radius: 9px 9px 0 0;
 }
 
 .workspace-controls .relay-status-summary strong {
@@ -113,16 +114,49 @@
   color: var(--relay-accent-hover);
 }
 
-.relay-workspace-page .connections-toolbar {
-  margin-block: 0 16px;
-  min-height: 0;
-  padding: 12px 16px;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-surface);
+/* Card counts follow the usable workspace, including sidebar resizing.
+   Tracks stay between 280px and 340px; spare space stays after the grid. */
+.relay-page :is(.account-list, .pool-member-list):not(.relay-dialog *) {
+  grid-template-columns: repeat(var(--relay-card-columns, 1), minmax(0, 340px));
+  align-content: start;
+  justify-content: start;
 }
 
-@media (min-width: 1400px) {
+@container relay-page (min-width: 570px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 2; }
+}
+@container relay-page (min-width: 860px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 3; }
+}
+@container relay-page (min-width: 1150px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 4; }
+}
+@container relay-page (min-width: 1440px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 5; }
+}
+@container relay-page (min-width: 1730px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 6; }
+}
+@container relay-page (min-width: 2020px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 7; }
+}
+@container relay-page (min-width: 2310px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 8; }
+}
+@container relay-page (min-width: 2600px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 9; }
+}
+@container relay-page (min-width: 2890px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 10; }
+}
+@container relay-page (min-width: 3180px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 11; }
+}
+@container relay-page (min-width: 3470px) {
+  :is(.account-list, .pool-member-list) { --relay-card-columns: 12; }
+}
+
+@container relay-page (min-width: 1000px) {
   .relay-page-header.relay-workspace-header {
     grid-template-columns: auto minmax(0, 1fr) auto;
     padding-block: 24px;
@@ -139,7 +173,7 @@
   }
 }
 
-@media (max-width: 620px) {
+@container relay-page (max-width: 560px) {
   .relay-page-header.relay-workspace-header {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
@@ -171,5 +205,9 @@
 
   .workspace-controls {
     padding: 12px;
+  }
+
+  .workspace-controls .relay-status-summary {
+    margin: -12px -12px 8px;
   }
 }

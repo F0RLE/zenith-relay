@@ -7,7 +7,7 @@
   place-items: center;
   padding: 20px;
   background: var(--relay-overlay);
-  backdrop-filter: blur(3px);
+  backdrop-filter: blur(6px);
 }
 
 /* Error details can be opened from a toast while another modal is active. */
@@ -16,13 +16,14 @@
 }
 
 .relay-dialog {
+  --relay-dialog-field-background: var(--relay-subtle);
   width: min(560px, 100%);
   max-height: calc(100dvh - 76px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 18px;
   background: var(--relay-surface);
   box-shadow: var(--relay-dialog-shadow);
 }
@@ -31,44 +32,68 @@
   width: min(920px, 100%);
 }
 
-.relay-dialog.request-details-dialog {
+.relay-dialog > header,
+.relay-dialog > footer {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 22px 24px 12px;
+}
+
+.relay-dialog-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.relay-dialog-header-actions .relay-icon-button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+}
+
+.relay-dialog.help-topic-dialog {
   width: min(720px, 100%);
 }
 
-.relay-dialog > header,
-.relay-dialog > footer {
-  min-height: 60px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--relay-border);
+.help-topic-dialog .help-document > :first-child {
+  margin-top: 0;
+}
+
+.help-topic-dialog .help-document > :last-child {
+  margin-bottom: 0;
 }
 
 .relay-dialog > header {
   position: relative;
   justify-content: flex-start;
-  padding-right: 60px;
-  background: var(--relay-surface);
+  padding-right: 68px;
+  background: transparent;
 }
 
 .relay-dialog > header h2 {
   max-width: 100%;
   margin: 0;
   color: var(--relay-text);
-  font-size: 17px;
-  font-weight: 650;
-  line-height: 22px;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 26px;
   text-align: left;
   overflow-wrap: anywhere;
 }
 
 .relay-dialog > header > .relay-icon-button {
   position: absolute;
-  right: 16px;
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
+  right: 20px;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  border-radius: 9px;
   border-color: transparent;
   background: transparent;
 }
@@ -76,35 +101,142 @@
 .relay-dialog > footer {
   justify-content: flex-end;
   flex-wrap: wrap;
-  padding-block: 12px;
-  background: var(--relay-surface);
-  border-top: 1px solid var(--relay-border);
-  border-bottom: 0;
+  padding: 4px 24px 24px;
+  background: transparent;
 }
 
 .relay-dialog-body {
   min-width: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 20px;
+  padding: 16px 24px 24px;
+  scrollbar-gutter: stable;
 }
 
 .relay-dialog .relay-field {
   min-width: 0;
 }
 
-.relay-dialog .relay-field > input:not([type="checkbox"]):not([type="radio"]),
+.relay-dialog .relay-field > input:where(:not([type="checkbox"]):not([type="radio"])),
+.relay-dialog .secret-field > input,
+.relay-dialog .search-field > input,
 .relay-dialog textarea {
   min-width: 0;
   width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--relay-dialog-field-background);
+  transition: background-color 120ms ease;
+}
+
+.relay-dialog .secret-field > input {
+  padding-inline-end: 82px;
+}
+
+.relay-dialog .source-proxy-field {
+  display: grid;
+  gap: 6px;
+}
+
+.relay-dialog .source-proxy-field .relay-option-trigger {
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: 9px;
+  background: var(--relay-dialog-field-background);
+  font-size: inherit;
+  transition: background-color 120ms ease;
+}
+
+.relay-dialog .source-proxy-field .relay-option-trigger:hover,
+.relay-dialog .source-proxy-field .relay-option-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--relay-border) 18%, var(--relay-dialog-field-background));
+}
+
+.relay-dialog .source-proxy-field .relay-option-trigger:focus-visible {
+  background: var(--relay-field-focus-background);
+}
+
+.relay-dialog .relay-field > input:hover,
+.relay-dialog .secret-field > input:hover,
+.relay-dialog .search-field > input:hover,
+.relay-dialog textarea:hover {
+  background: color-mix(in srgb, var(--relay-border) 18%, var(--relay-dialog-field-background));
+}
+
+.relay-dialog .relay-field > input:focus,
+.relay-dialog .secret-field > input:focus,
+.relay-dialog .search-field > input:focus,
+.relay-dialog textarea:focus {
+  background: var(--relay-field-focus-background);
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs {
+  width: fit-content;
+  max-width: 100%;
+  height: auto;
+  min-height: 40px;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 4px;
+  border: 0;
+  border-radius: 11px;
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button {
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button.active {
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.relay-dialog .relay-dialog-body .relay-tabs button:hover:not(.active) {
+  background: color-mix(in srgb, var(--relay-border) 22%, transparent);
+}
+
+.relay-dialog .relay-button {
+  border-color: transparent;
+  border-radius: 9px;
+}
+
+.relay-dialog .relay-button.secondary {
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .source-price-group {
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+}
+
+.relay-dialog .source-price-group[open] > summary {
+  border: 0;
+}
+
+.relay-dialog .source-price-input {
+  border: 0;
+  background: var(--relay-surface);
+}
+
+.relay-dialog .source-price-currency {
+  border: 0;
 }
 
 .relay-dialog > footer .relay-button {
-  min-height: 36px;
+  min-height: 40px;
   white-space: normal;
 }
 
-.relay-dialog.source-add-dialog,
 .relay-dialog.account-export-dialog {
   width: min(640px, 100%);
 }
@@ -141,7 +273,7 @@
   .relay-dialog {
     width: 100%;
     max-height: calc(100dvh - 60px);
-    border-radius: 10px;
+    border-radius: 14px;
   }
 
   .relay-dialog > header,
@@ -153,6 +285,10 @@
     padding-right: 56px;
   }
 
+  .relay-dialog > header > .relay-icon-button {
+    right: 12px;
+  }
+
   .relay-dialog-body {
     padding: 16px;
   }
@@ -160,6 +296,105 @@
   .relay-dialog > footer > .relay-button {
     flex: 1 1 auto;
   }
+}
+
+.relay-dialog.application-picker {
+  width: min(480px, 100%);
+}
+
+.application-picker .relay-dialog-body {
+  padding: 8px 16px 16px;
+  scrollbar-gutter: auto;
+}
+
+.application-picker-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.application-picker-options.with-claude-desktop {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.application-picker-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 132px;
+  padding: 20px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+  color: var(--relay-text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.application-picker-option:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--relay-accent) 8%, var(--relay-subtle));
+}
+
+.application-picker-option:focus-visible {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: -2px;
+}
+
+.application-picker-logo {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.application-picker-logo.chatgpt {
+  filter: brightness(0);
+}
+
+:root[data-theme="dark"] .application-picker-logo.chatgpt {
+  filter: brightness(0) invert(1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .application-picker-logo.chatgpt {
+    filter: brightness(0) invert(1);
+  }
+}
+
+.application-picker-label {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  min-height: 0;
+  gap: 4px;
+}
+
+.application-picker-label strong {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.application-picker-label small {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.application-picker-option:disabled {
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.application-picker-option:disabled .application-picker-logo,
+.application-picker-option:disabled strong {
+  opacity: 0.5;
 }
 
 .confirm-dialog-message {
@@ -192,7 +427,7 @@
   flex: 0 0 36px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 30%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 7px;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
@@ -374,22 +609,22 @@
 }
 
 .import-file-source {
-  min-height: 118px;
+  min-height: 136px;
   display: grid;
   place-items: center;
   align-content: center;
   gap: 5px;
   padding: 16px;
-  border: 1px dashed color-mix(in srgb, var(--relay-accent) 48%, var(--relay-border));
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--relay-accent) 5%, var(--relay-surface));
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
   color: var(--relay-text);
   cursor: pointer;
 }
 
 .import-file-source:hover:not(:disabled),
 .import-file-source:focus-visible {
-  border-color: var(--relay-accent);
+  border-color: transparent;
   background: var(--relay-accent-soft);
 }
 
@@ -464,8 +699,8 @@
 .import-package-description {
   display: grid;
   gap: 4px;
-  padding: 10px 12px;
-  border-left: 2px solid var(--relay-accent);
+  padding: 14px 16px;
+  border-radius: 10px;
   background: var(--relay-subtle);
 }
 
@@ -602,47 +837,22 @@
   text-underline-offset: 2px;
 }
 
-.post-import-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  padding-top: 12px;
-  border-top: 1px solid var(--relay-border);
-}
-
-.post-import-options > span {
-  grid-column: 1 / -1;
-  color: var(--relay-muted);
-  font-size: 11px;
-  font-weight: 650;
-  text-transform: uppercase;
-}
-
-.oauth-account-setup .post-import-options {
-  grid-template-columns: 1fr;
-  padding-top: 0;
-  border-top: 0;
-}
-
 .import-account-list {
   display: grid;
   margin: 0;
-  padding: 0;
+  padding: 4px;
   overflow: hidden;
   list-style: none;
-  border: 1px solid var(--relay-border);
-  border-radius: 10px;
-  background: var(--relay-surface);
+  gap: 4px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--relay-subtle);
 }
 
 .import-account-card {
   min-width: 0;
-  border-bottom: 1px solid var(--relay-border);
+  border-radius: 9px;
   background: transparent;
-}
-
-.import-account-card:last-child {
-  border-bottom: 0;
 }
 
 .import-account-card:hover,
@@ -769,27 +979,20 @@
   min-height: 64px;
   padding: 14px 16px;
   border: 0;
-  border-radius: 0;
-  border-bottom: 1px solid var(--relay-border);
-  background: transparent;
+  border-radius: 10px;
+  background: var(--relay-subtle);
 }
 
-.import-after .import-after-toggle:last-child {
-  border-bottom: 0;
+.import-after .settings-group-body {
+  display: grid;
+  gap: 6px;
 }
 
 .import-after .import-after-toggle:hover,
 .import-after .import-after-toggle:has(input:checked),
 .import-after .import-after-toggle:has(input:checked):hover {
   border-color: transparent;
-  border-bottom-color: var(--relay-border);
-  background: color-mix(in srgb, var(--relay-subtle) 72%, transparent);
-}
-
-.import-after .import-after-toggle:last-child:hover,
-.import-after .import-after-toggle:last-child:has(input:checked),
-.import-after .import-after-toggle:last-child:has(input:checked):hover {
-  border-bottom-color: transparent;
+  background: var(--relay-accent-soft);
 }
 
 .import-after .import-after-toggle:has(input:disabled) {
@@ -824,7 +1027,7 @@
   height: 54px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: color-mix(in srgb, var(--relay-accent) 10%, var(--relay-surface));
   color: var(--relay-accent-hover);
@@ -838,12 +1041,6 @@
 
 .import-file-loading strong {
   font-size: 14px;
-}
-
-.import-file-loading p {
-  margin: 4px 0 0;
-  color: var(--relay-muted);
-  font-size: 12px;
 }
 
 .import-progress {
@@ -868,7 +1065,7 @@
   height: 38px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 34%, var(--relay-border));
+  border: 1px solid transparent;
   border-radius: 50%;
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
@@ -927,7 +1124,7 @@
   place-content: center;
   justify-items: center;
   gap: 12px;
-  border: 2px dashed var(--relay-accent);
+  border: 2px dashed transparent;
   margin: 18px;
   background: var(--relay-overlay);
   color: var(--relay-accent-hover);
@@ -941,70 +1138,6 @@
 
 @keyframes import-drop-pulse {
   50% {
-    border-color: var(--relay-accent);
-    box-shadow: 0 0 0 8px color-mix(in srgb, var(--relay-accent) 10%, transparent);
     transform: translateY(-3px);
   }
-}
-
-.secret-field {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px;
-  border-radius: 6px;
-}
-
-.secret-field input {
-  min-width: 0;
-  border-radius: 6px 0 0 6px;
-}
-
-/* Edge/Chromium adds its own password reveal control. SecretField already
-   renders the accessible themed toggle, so showing both creates two reveal
-   buttons and makes the key field look like it accepts two actions. */
-.secret-field input::-ms-reveal,
-.secret-field input::-ms-clear {
-  display: none;
-}
-
-.secret-field button {
-  border-left: 0;
-  border-radius: 0 6px 6px 0;
-}
-
-.secret-field input:focus-visible,
-.secret-field button:focus-visible {
-  outline: 0;
-}
-
-.deployment-result {
-  display: grid;
-  gap: 18px;
-}
-
-.deployment-result > .relay-status {
-  justify-self: start;
-}
-
-.deployment-result > label,
-.deployment-result > .relay-field {
-  min-width: 0;
-  display: grid;
-  gap: 7px;
-  margin: 0;
-}
-
-.deployment-result > label > span,
-.deployment-result > .relay-field > span {
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
-.deployment-result > label > code,
-.deployment-result > .relay-field > code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.deployment-result > .form-note {
-  margin: 0;
 }

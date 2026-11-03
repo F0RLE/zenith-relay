@@ -11,8 +11,8 @@ export function memberPickerHealth(tone: MemberPickerTone): MemberPickerHealth {
   return tone === "warning" ? "cooldown" : tone;
 }
 
-export function accountPickerTone(account: AccountSummary, onServer: boolean): MemberPickerTone {
-  return accountSurfaceTone(account, onServer);
+export function accountPickerTone(account: AccountSummary, recoveryRequired: boolean): MemberPickerTone {
+  return accountSurfaceTone(account, recoveryRequired);
 }
 
 export function sourcePickerTone(source: Pick<SourceSummary, "lastErrorCode" | "operationalStatus">): MemberPickerTone {

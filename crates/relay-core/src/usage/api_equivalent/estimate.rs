@@ -1,29 +1,44 @@
-use super::{ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride};
+use super::{
+    ApiEquivalentBreakdown, ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride,
+};
 use crate::{
     is_valid_model_id, model_id_key,
     pricing::{
         PriceEvidence, PriceSource, PricingCatalog, PricingContext, PricingMetadata,
-        PricingSourceSummary, ResolvedPrice, TokenPrice, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+        PricingSourceSummary, ResolvedPrice, TokenPrice, TokenRateSet,
     },
 };
 use std::collections::BTreeMap;
 
 impl ApiModelPriceOverride {
     pub fn from_optional_fields(
-        input: Option<u64>,
-        cached_input: Option<u64>,
-        cache_write_5m: Option<u64>,
-        cache_write_1h: Option<u64>,
-        output: Option<u64>,
+        input_price: Option<u64>,
+        cache_read_price: Option<u64>,
+        short_cache_write_price: Option<u64>,
+        long_cache_write_price: Option<u64>,
+        output_price: Option<u64>,
     ) -> Result<Option<Self>, &'static str> {
-        match (input, cached_input, cache_write_5m, cache_write_1h, output) {
-            (Some(input), cached_input, cache_write_5m, cache_write_1h, Some(output)) => {
+        match (
+            input_price,
+            cache_read_price,
+            short_cache_write_price,
+            long_cache_write_price,
+            output_price,
+        ) {
+            (
+                Some(input_price),
+                cache_read_price,
+                short_cache_write_price,
+                long_cache_write_price,
+                Some(output_price),
+            ) => {
                 let price = Self {
-                    input_micro_usd_per_million: input,
-                    cached_input_micro_usd_per_million: cached_input,
-                    cache_write_5m_micro_usd_per_million: cache_write_5m,
-                    cache_write_1h_micro_usd_per_million: cache_write_1h,
-                    output_micro_usd_per_million: output,
+                    input_micro_usd_per_million: input_price,
+                    cached_input_micro_usd_per_million: cache_read_price,
+                    cache_write_5m_micro_usd_per_million: short_cache_write_price,
+                    cache_write_1h_micro_usd_per_million: long_cache_write_price,
+                    output_micro_usd_per_million: output_price,
+                    ..Default::default()
                 };
                 price
                     .is_valid()
@@ -36,17 +51,7 @@ impl ApiModelPriceOverride {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.input_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-            && self
-                .cached_input_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self
-                .cache_write_5m_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self
-                .cache_write_1h_micro_usd_per_million
-                .is_none_or(|value| value <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-            && self.output_micro_usd_per_million <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+        TokenPrice::from(*self).is_valid()
     }
 }
 
@@ -59,7 +64,16 @@ impl From<ApiModelPriceOverride> for TokenPrice {
             cache_read: price.cached_input_micro_usd_per_million,
             cache_write_5m: price.cache_write_5m_micro_usd_per_million,
             cache_write_1h: price.cache_write_1h_micro_usd_per_million,
+            cache_write: price.cache_write_micro_usd_per_million,
             output: price.output_micro_usd_per_million,
+            flex: price.flex,
+            priority: price.priority,
+            ultrafast: price.ultrafast,
+            above_100k: price.above_100k,
+            above_128k: price.above_128k,
+            above_200k: price.above_200k,
+            above_272k: price.above_272k,
+            above_512k: price.above_512k,
         }
     }
 }
@@ -71,7 +85,16 @@ impl From<TokenPrice> for ApiModelPriceOverride {
             cached_input_micro_usd_per_million: price.cache_read,
             cache_write_5m_micro_usd_per_million: price.cache_write_5m,
             cache_write_1h_micro_usd_per_million: price.cache_write_1h,
+            cache_write_micro_usd_per_million: price.cache_write,
             output_micro_usd_per_million: price.output,
+            flex: price.flex,
+            priority: price.priority,
+            ultrafast: price.ultrafast,
+            above_100k: price.above_100k,
+            above_128k: price.above_128k,
+            above_200k: price.above_200k,
+            above_272k: price.above_272k,
+            above_512k: price.above_512k,
         }
     }
 }
@@ -118,12 +141,12 @@ pub fn normalize_model_price_overrides(
     prices: BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<BTreeMap<String, ApiModelPriceOverride>, &'static str> {
     let mut normalized = BTreeMap::new();
-    for (model, price) in prices {
-        let model = model.trim();
-        if !is_valid_model_id(model) || !price.is_valid() {
+    for (model_id, price_override) in prices {
+        let model_id = model_id.trim();
+        if !is_valid_model_id(model_id) || !price_override.is_valid() {
             return Err("model price override is invalid");
         }
-        normalized.insert(model_id_key(model), price);
+        normalized.insert(model_id_key(model_id), price_override);
     }
     Ok(normalized)
 }
@@ -136,90 +159,112 @@ pub fn estimate_api_equivalent_with_token_price(
     usage: ApiEquivalentUsage,
     quote: Option<TokenPrice>,
 ) -> ApiEquivalentSummary {
-    let input = usage.input_tokens;
-    let output = usage.output_tokens;
-    let cached = usage
+    estimate_api_equivalent_breakdown_with_token_price(usage, quote).0
+}
+
+/// Uses the same component rounding and price selection for the total and detail.
+pub fn estimate_api_equivalent_breakdown_with_token_price(
+    usage: ApiEquivalentUsage,
+    quote: Option<TokenPrice>,
+) -> (ApiEquivalentSummary, ApiEquivalentBreakdown) {
+    let input_tokens = usage.input_tokens;
+    let output_tokens = usage.output_tokens;
+    let cache_read_tokens = usage
         .cached_input_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let write_5m = usage
-        .cache_write_5m_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let write_1h = usage
-        .cache_write_1h_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-    let unknown = usage
-        .unknown_cache_write_tokens
-        .map(|value| value.min(input.unwrap_or(value)));
-
-    let (uncached, cached, write_5m, write_1h, unknown) = if let Some(input) = input {
-        let mut remaining = input;
-        let cached = cached.map(|value| value.min(remaining)).unwrap_or_default();
-        remaining = remaining.saturating_sub(cached);
-        let write_5m = write_5m
-            .map(|value| value.min(remaining))
-            .unwrap_or_default();
-        remaining = remaining.saturating_sub(write_5m);
-        let write_1h = write_1h
-            .map(|value| value.min(remaining))
-            .unwrap_or_default();
-        remaining = remaining.saturating_sub(write_1h);
-        let unknown = unknown
-            .map(|value| value.min(remaining))
-            .unwrap_or_default();
-        remaining = remaining.saturating_sub(unknown);
-        (Some(remaining), cached, write_5m, write_1h, unknown)
-    } else {
-        (
-            None,
-            cached.unwrap_or_default(),
-            write_5m.unwrap_or_default(),
-            write_1h.unwrap_or_default(),
-            unknown.unwrap_or_default(),
-        )
-    };
-
-    let measured_input = if input.is_some() {
-        input.unwrap_or_default()
-    } else {
-        cached
-            .saturating_add(write_5m)
-            .saturating_add(write_1h)
-            .saturating_add(unknown)
-    };
-    let measured_tokens = measured_input.saturating_add(output.unwrap_or_default());
+        .map(|cached_tokens| cached_tokens.min(input_tokens.unwrap_or(cached_tokens)));
+    let cache_read_tokens = cache_read_tokens.unwrap_or_default();
+    let mut uncached_input_tokens =
+        input_tokens.map(|input| input.saturating_sub(cache_read_tokens));
+    let write_buckets = [
+        usage.cache_write_5m_tokens,
+        usage.cache_write_1h_tokens,
+        usage.unknown_cache_write_tokens,
+    ];
+    // All cache buckets share one remaining-input budget, in a stable order.
+    // Unknown/mixed windows stay in their own generic/unsplit bucket.
+    let cache_write_tokens = write_buckets.map(|tokens| {
+        let count = tokens.unwrap_or_default();
+        let count = count.min(uncached_input_tokens.unwrap_or(count));
+        if let Some(remaining) = uncached_input_tokens.as_mut() {
+            *remaining -= count;
+        }
+        count
+    });
+    let measured_input_tokens = input_tokens.unwrap_or_else(|| {
+        cache_write_tokens
+            .into_iter()
+            .fold(cache_read_tokens, u64::saturating_add)
+    });
+    let measured_tokens = measured_input_tokens.saturating_add(output_tokens.unwrap_or_default());
     let total_tokens = usage
         .total_tokens
         .unwrap_or(measured_tokens)
         .max(measured_tokens);
 
-    let Some(quote) = quote else {
-        return ApiEquivalentSummary {
-            unpriced_tokens: total_tokens,
-            ..Default::default()
-        };
-    };
-
-    let components = [
-        (uncached, Some(quote.input)),
-        (Some(cached), quote.cache_read),
-        (Some(write_5m), quote.cache_write_5m),
-        (Some(write_1h), quote.cache_write_1h),
-        (Some(unknown), None),
-        (output, Some(quote.output)),
+    let rates = quote
+        .and_then(|quote| rates_for(quote, usage.price_class, usage.context_band))
+        .unwrap_or_default();
+    let uncached_input = component_value(uncached_input_tokens, rates.input);
+    let cache_read = component_value(
+        usage.cached_input_tokens.map(|_| cache_read_tokens),
+        rates.cache_read,
+    );
+    // A generic provider rate is not an inferred TTL. If the quote also has
+    // window-specific alternatives, an unsplit write remains ambiguous.
+    let unsplit_write_rate = rates.cache_write.filter(|generic| {
+        [rates.cache_write_5m, rates.cache_write_1h]
+            .into_iter()
+            .flatten()
+            .all(|rate| rate == *generic)
+    });
+    let write_rates = [
+        rates.cache_write_5m.or(rates.cache_write),
+        rates.cache_write_1h.or(rates.cache_write),
+        unsplit_write_rate,
     ];
-    let mut priced_tokens = 0_u64;
-    let mut micro_usd = 0_u64;
-    for (tokens, price) in components {
-        if let (Some(tokens), Some(price)) = (tokens, price) {
-            priced_tokens = priced_tokens.saturating_add(tokens);
-            micro_usd = micro_usd.saturating_add(token_cost(tokens, price));
-        }
-    }
-    ApiEquivalentSummary {
-        micro_usd,
-        priced_tokens,
-        unpriced_tokens: total_tokens.saturating_sub(priced_tokens),
-    }
+    let cache_write = sum_component_values(std::array::from_fn::<_, 3, _>(|index| {
+        component_value(
+            write_buckets[index].map(|_| cache_write_tokens[index]),
+            write_rates[index],
+        )
+    }));
+    let input = sum_component_values([uncached_input, cache_read, cache_write]);
+    let output = component_value(output_tokens, rates.output);
+    let mut summary = sum_component_values([input, output]).unwrap_or_default();
+    summary.unpriced_tokens = total_tokens.saturating_sub(summary.priced_tokens);
+    (
+        summary,
+        ApiEquivalentBreakdown {
+            input,
+            uncached_input,
+            cache_read,
+            cache_write,
+            output,
+        },
+    )
+}
+
+fn component_value(tokens: Option<u64>, rate: Option<u64>) -> Option<ApiEquivalentSummary> {
+    tokens.map(|tokens| match rate {
+        Some(rate) => ApiEquivalentSummary {
+            micro_usd: token_cost(tokens, rate),
+            priced_tokens: tokens,
+            unpriced_tokens: 0,
+        },
+        None => ApiEquivalentSummary {
+            unpriced_tokens: tokens,
+            ..Default::default()
+        },
+    })
+}
+
+fn sum_component_values<const N: usize>(
+    values: [Option<ApiEquivalentSummary>; N],
+) -> Option<ApiEquivalentSummary> {
+    values.into_iter().flatten().reduce(|mut sum, value| {
+        sum.merge(value);
+        sum
+    })
 }
 
 /// Resolves a candidate's price against one immutable catalog snapshot.
@@ -246,7 +291,7 @@ pub fn resolve_candidate_price(query: CandidatePriceQuery<'_>) -> ResolvedPrice 
         provider_price,
         manual_price,
     } = query;
-    let Some(model) = model else {
+    let Some(model) = model.filter(|model| !crate::runtime::is_image_model_id(model)) else {
         return ResolvedPrice {
             quote: None,
             source: PriceSource::Unpriced,
@@ -342,19 +387,32 @@ impl<'a> CatalogPriceResolver<'a> {
             .source
     }
 
+    pub fn estimate_breakdown(
+        &self,
+        candidate_kind: &str,
+        candidate_id: &str,
+        model: Option<&str>,
+        usage: ApiEquivalentUsage,
+    ) -> (ApiEquivalentSummary, ApiEquivalentBreakdown) {
+        let resolved =
+            self.context
+                .candidate_price(self.catalog, candidate_kind, candidate_id, model);
+        estimate_api_equivalent_breakdown_with_token_price(usage, resolved.quote)
+    }
+
     pub fn revision_key(&self) -> &str {
         &self.revision
     }
 
     pub fn pricing_metadata(
         &self,
-        value: ApiEquivalentSummary,
+        equivalent_summary: ApiEquivalentSummary,
         sources: &[PriceSource],
     ) -> PricingMetadata {
         PricingMetadata::for_catalog(
             self.catalog,
             PricingSourceSummary::from_sources(sources.iter().copied()),
-            value.unpriced_tokens,
+            equivalent_summary.unpriced_tokens,
         )
     }
 }
@@ -364,4 +422,63 @@ fn token_cost(tokens: u64, micro_usd_per_million: u64) -> u64 {
         .saturating_mul(u128::from(micro_usd_per_million))
         .saturating_add(500_000);
     u64::try_from(numerator / 1_000_000).unwrap_or(u64::MAX)
+}
+
+/// Picks the published schedule for one tier and prompt band.
+///
+/// Missing tier prices stay unpriced. Long-context fields overlay that tier's
+/// base fields; the highest published threshold exceeded by the request wins.
+fn rates_for(
+    quote: TokenPrice,
+    class: super::UsagePriceClass,
+    band: super::UsageContextBand,
+) -> Option<TokenRateSet> {
+    use super::UsagePriceClass;
+    let mut rates = match class {
+        UsagePriceClass::Standard => TokenRateSet {
+            input: Some(quote.input),
+            cache_read: quote.cache_read,
+            cache_write_5m: quote.cache_write_5m,
+            cache_write_1h: quote.cache_write_1h,
+            cache_write: quote.cache_write,
+            output: Some(quote.output),
+        },
+        UsagePriceClass::Flex => quote.flex,
+        UsagePriceClass::Priority => quote.priority,
+        UsagePriceClass::Ultrafast => quote.ultrafast,
+        UsagePriceClass::Unknown => return None,
+    };
+    let above = context_rates(quote, band, class);
+    if let Some(above) = above {
+        rates = rates.overlay(above);
+    }
+    (!rates.is_empty()).then_some(rates)
+}
+
+fn context_rates(
+    quote: TokenPrice,
+    band: super::UsageContextBand,
+    class: super::UsagePriceClass,
+) -> Option<TokenRateSet> {
+    quote
+        .context_rates()
+        .into_iter()
+        .rev()
+        .filter(|(threshold, _)| *threshold <= band.threshold())
+        .find_map(|(_, rates)| band_rates(rates, class))
+}
+
+fn band_rates(
+    rates: crate::pricing::LongContextRates,
+    class: super::UsagePriceClass,
+) -> Option<TokenRateSet> {
+    use super::UsagePriceClass;
+    let rates = match class {
+        UsagePriceClass::Standard => rates.standard,
+        UsagePriceClass::Flex => rates.flex,
+        UsagePriceClass::Priority => rates.priority,
+        UsagePriceClass::Ultrafast => rates.ultrafast,
+        UsagePriceClass::Unknown => return None,
+    };
+    (!rates.is_empty()).then_some(rates)
 }
