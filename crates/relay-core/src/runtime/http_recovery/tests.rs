@@ -238,6 +238,13 @@ async fn broken_http2_handshake_retires_the_pool_without_retrying_the_request() 
 #[tokio::test]
 async fn replacement_and_http1_fallback_keep_the_configured_proxy() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!(
+        "http://{}/v1/responses",
+        destination.local_addr().unwrap()
+    ))
+    .unwrap();
+    let expected_request = format!("GET {url} HTTP/1.1\r\n");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy = ProxyConfig::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
     let server = tokio::spawn(async move {
@@ -247,7 +254,7 @@ async fn replacement_and_http1_fallback_keep_the_configured_proxy() {
             while !request.ends_with(b"\r\n\r\n") {
                 request.push(socket.read_u8().await.unwrap());
             }
-            assert!(request.starts_with(b"GET http://synthetic.invalid/v1/responses HTTP/1.1\r\n"));
+            assert!(request.starts_with(expected_request.as_bytes()));
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .await
@@ -255,7 +262,6 @@ async fn replacement_and_http1_fallback_keep_the_configured_proxy() {
         }
     });
     let recovery = HttpRecovery::default();
-    let url = Url::parse("http://synthetic.invalid/v1/responses").unwrap();
     let client = fresh_client(Some(&proxy), false).unwrap();
     for http1_expected in [false, true] {
         recovery
@@ -274,6 +280,12 @@ async fn replacement_and_http1_fallback_keep_the_configured_proxy() {
         assert_eq!(response.text().await.unwrap(), "ok");
     }
     server.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), destination.accept())
+            .await
+            .is_err(),
+        "requests must reach the configured proxy, not the destination listener"
+    );
 }
 
 #[tokio::test]

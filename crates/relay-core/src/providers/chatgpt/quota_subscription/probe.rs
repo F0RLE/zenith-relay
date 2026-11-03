@@ -115,17 +115,21 @@ pub(super) async fn compare_authorization(
 pub(super) async fn probe(
     http: &Client,
     scope: &ManagementHttpScope,
-    accounts: &Url,
-    subscriptions: &Url,
+    accounts_endpoint: &Url,
+    subscriptions_endpoint: &Url,
 ) -> Vec<SubscriptionEndpointProbe> {
     let mut observations = Vec::with_capacity(2);
     for (stage, endpoint, target) in [
         (
             "accounts_check",
-            accounts,
+            accounts_endpoint,
             "/backend-api/accounts/check/v4-2023-04-27",
         ),
-        ("subscriptions", subscriptions, "/backend-api/subscriptions"),
+        (
+            "subscriptions",
+            subscriptions_endpoint,
+            "/backend-api/subscriptions",
+        ),
     ] {
         let mut observation = empty_observation(stage);
         let Ok(headers) = subscription_public_headers(target) else {

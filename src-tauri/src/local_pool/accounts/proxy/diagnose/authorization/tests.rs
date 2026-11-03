@@ -84,7 +84,8 @@ fn authorization_diagnostic_uses_current_item_overlays_without_rewriting_state()
 
 #[test]
 fn authorization_diagnostic_rejects_a_missing_root_without_creating_it() {
-    let root = std::env::temp_dir().join(format!("relay-auth-diagnostic-{}", uuid::Uuid::new_v4()));
+    let fixture = crate::files::test_temp_root("auth-diagnostic-missing-root");
+    let root = fixture.join("missing");
     assert!(!root.exists());
     assert!(load_records(&root).is_err());
     assert!(!root.exists());
@@ -96,4 +97,5 @@ fn authorization_diagnostic_rejects_a_missing_root_without_creating_it() {
     );
     assert!(backend.delete("synthetic-reference").is_err());
     assert!(!root.exists());
+    std::fs::remove_dir_all(fixture).unwrap();
 }

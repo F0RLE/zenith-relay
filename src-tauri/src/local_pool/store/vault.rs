@@ -323,28 +323,26 @@ mod tests {
     #[test]
     fn diagnostic_vault_reads_do_not_create_recover_or_change_files() {
         let root = crate::files::test_temp_root("vault-diagnostic-read");
-        let vault = Vault::open(&root, [3; 32]).unwrap();
+        let mut key = [0; 32];
+        rand::rng().fill_bytes(&mut key);
+        let vault = Vault::open(&root, key).unwrap();
         vault.save("proxy:pool", "synthetic-proxy-data").unwrap();
         let path = root.join("secrets.enc");
         let bytes = fs::read(&path).unwrap();
         assert_eq!(
-            Vault::read_secret(&root, [3; 32], "proxy:pool")
+            Vault::read_secret(&root, key, "proxy:pool")
                 .unwrap()
                 .as_deref(),
             Some("synthetic-proxy-data")
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(
-            Vault::read_secret(&root, [3; 32], "missing")
-                .unwrap()
-                .is_none()
-        );
+        assert!(Vault::read_secret(&root, key, "missing").unwrap().is_none());
         fs::rename(&path, root.join("secrets.enc.bak")).unwrap();
-        assert!(Vault::read_secret(&root, [3; 32], "proxy:pool").is_err());
+        assert!(Vault::read_secret(&root, key, "proxy:pool").is_err());
         assert!(!path.exists());
         assert_eq!(fs::read(root.join("secrets.enc.bak")).unwrap(), bytes);
         let missing = root.join("missing");
-        assert!(Vault::read_secret(&missing, [3; 32], "proxy:pool").is_err());
+        assert!(Vault::read_secret(&missing, key, "proxy:pool").is_err());
         assert!(!missing.exists());
         fs::remove_dir_all(root).unwrap();
     }

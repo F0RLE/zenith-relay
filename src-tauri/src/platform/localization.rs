@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn preferences_round_trip_and_reject_invalid_replacements() {
-        let root = std::env::temp_dir().join(format!("zenith-language-{}", uuid::Uuid::new_v4()));
+        let root = crate::files::test_temp_root("language-roundtrip");
         persist(&root, "en", &messages()).unwrap();
         let path = crate::storage_paths::StoragePaths::from_root(&root).ui_language_file();
         let original = std::fs::read(&path).unwrap();
@@ -174,8 +174,7 @@ mod tests {
 
     #[test]
     fn unavailable_preferences_report_an_error_without_overwriting_the_blocker() {
-        let root = std::env::temp_dir().join(format!("zenith-language-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
+        let root = crate::files::test_temp_root("language-write-blocker");
         let blocker = root.join("data");
         std::fs::write(&blocker, "synthetic existing file").unwrap();
         assert!(persist(&root, "en", &messages()).is_err());
