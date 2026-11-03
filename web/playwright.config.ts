@@ -8,6 +8,9 @@ export default defineConfig({
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:1442",
+    // Existing interaction regressions intentionally exercise Russian. Dedicated
+    // localization specs override this state to verify English-first profiles.
+    storageState: { cookies: [], origins: [{ origin: "http://127.0.0.1:1442", localStorage: [{ name: "relay-hosted-locale", value: "ru" }] }] },
     browserName: "chromium",
     launchOptions: executablePath ? { executablePath } : {},
     screenshot: "only-on-failure",

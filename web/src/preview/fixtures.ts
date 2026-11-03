@@ -2,14 +2,14 @@ import type { ComponentId, RequestRecord, TokenCounters } from "../features/usag
 import { componentTokens } from "../features/usage/model";
 
 const keys = [
-  { id: "editor", name: "Редактор", mask: "demo_…7P2" },
-  { id: "project", name: "Мой проект", mask: "demo_…9K4" },
-  { id: "bot", name: "Бот", mask: "demo_…3B8" },
+  { id: "editor", name: "Editor", mask: "demo_…7P2" },
+  { id: "project", name: "My project", mask: "demo_…9K4" },
+  { id: "bot", name: "Bot", mask: "demo_…3B8" },
 ];
 const models = [
-  { id: "demo-gpt", name: "GPT · демо", reasoningEffort: "Высокое" },
-  { id: "demo-claude", name: "Claude · демо", reasoningEffort: "Среднее" },
-  { id: "demo-gemini", name: "Gemini · демо", reasoningEffort: "Не запрашивалось" },
+  { id: "demo-gpt", name: "GPT", reasoningEffort: "reasoning.high" },
+  { id: "demo-claude", name: "Claude", reasoningEffort: "reasoning.medium" },
+  { id: "demo-gemini", name: "Gemini", reasoningEffort: "reasoning.notRequested" },
 ];
 
 // Synthetic fixture arithmetic only; real charges are supplied by the Hosted API.
@@ -51,7 +51,7 @@ export const previewRequests: RequestRecord[] = Array.from({ length: 36 }, (_, i
     execution: running ? "running" : failed ? "failed" : "completed",
     accounting: running ? "held" : pending ? "pending" : "posted",
     protocol: ["Responses", "Messages", "Gemini"][family]!,
-    transport: family === 0 ? "WebSocket" : "HTTP", tier: "Обычная", tokens,
+    transport: family === 0 ? "WebSocket" : "HTTP", tier: "service.standard", tokens,
     timing: { firstTokenMs: running ? null : firstTokenMs, totalMs: running ? null : generationMs + firstTokenMs, generationMs: known ? generationMs : null },
     billing: { revision: `demo-${family}-v1`, rates, components,
       postedMicroUsd: known ? Object.values(components).reduce<bigint>((sum, amount) => sum + amount!, 0n) : null,
@@ -59,11 +59,11 @@ export const previewRequests: RequestRecord[] = Array.from({ length: 36 }, (_, i
     client: { label: ["Demo Editor", "Demo App", "Demo Bot"][family]!, userAgent: `DemoClient/${family + 1}.0` },
     response: {
       httpStatus: running ? null : 200,
-      result: running ? "Ответ ещё выполняется" : failed ? "Ответ прерван" : "Ответ завершён",
+      result: running ? "request.responseInProgress" : failed ? "request.responseInterrupted" : "request.responseComplete",
       errorCode: failed ? "response_interrupted" : null,
-      guidance: failed ? "Поток ответа закрылся до подтверждения завершения. Списаны подтверждённые токены. Перед повтором проверьте результат в клиенте: действия могли выполниться. Сохраните ID запроса для поддержки." : null,
+      guidance: failed ? "request.interruptedGuidance" : null,
     },
     context: { bodyBytes: 28340 + index * 50, instructionBytes: 1240, conversationBytes: 23100 + index * 50, toolSchemaBytes: 3200 },
-    tools: family === 0 ? { declared: 8, forwarded: 8, calls: known ? 2 : 0, choice: "Автоматически", result: running ? "Ожидается" : "Вызов инструмента" } : null,
+    tools: family === 0 ? { declared: 8, forwarded: 8, calls: known ? 2 : 0, choice: "Automatic", result: running ? "Pending" : "Tool call" } : null,
   };
 }).sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt));

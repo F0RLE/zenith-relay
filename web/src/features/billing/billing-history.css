@@ -1,0 +1,22 @@
+.hosted-app .billing-layout { align-items: stretch; }
+.hosted-app .billing-layout :is(.balance-panel, .payment-panel) { display: flex; flex-direction: column; align-self: stretch; }
+.hosted-app .billing-layout .payment-panel { min-width: 0; }
+.hosted-app .billing-layout .payment-panel > header { padding: 20px 24px 16px; }
+.hosted-app .payment-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 24px 20px; }
+.hosted-app .payment-filters .option-menu { min-width: 0; }
+.hosted-app .payment-filters .option-trigger { width: 100%; min-width: 0; }
+.hosted-app .payment-panel .pagination { margin: auto 0 0; padding: 12px 24px; border-top: 1px solid var(--border); }
+.hosted-app .payment-panel .payment-table :is(th, td) { padding: 12px 20px; }
+.hosted-app .payment-empty { padding: 40px 24px; color: var(--muted); text-align: center; }
+@media (max-width: 639px) {
+  .hosted-app .billing-layout .payment-panel > header { padding: 16px; }
+  .hosted-app .payment-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 16px 16px; }
+  .hosted-app .payment-filters > :first-child { grid-column: 1 / -1; }
+  .hosted-app .payment-panel .payment-table tr { gap: 4px 12px; padding: 12px 16px; }
+  .hosted-app .payment-panel .payment-table td { padding: 0; }
+  .hosted-app .payment-panel .payment-table td:first-child { font-size: 11px; }
+  .hosted-app .payment-panel .payment-table td:nth-child(2) { grid-column: 1; grid-row: 2; }
+  .hosted-app .payment-panel .payment-table td:nth-child(3) { grid-row: 3; font-size: 11px; }
+  .hosted-app .payment-panel .payment-table td:nth-child(2) button { min-height: 32px; }
+  .hosted-app .payment-panel .pagination { padding: 12px 16px; }
+}

@@ -1,0 +1,23 @@
+.hosted-app .request-dialog.owner-source-dialog { width: min(560px, calc(100% - 32px)); }
+.hosted-app .owner-source-form { display: grid; gap: 20px; min-width: 0; }
+.hosted-app .owner-source-tabs { justify-self: start; }
+.hosted-app .owner-source-fields:not([hidden]) { display: grid; gap: 16px; }
+.hosted-app .owner-source-fields label, .hosted-app .owner-source-protocol-field { display: grid; gap: 7px; min-width: 0; font-size: 12px; color: var(--secondary); }
+.hosted-app .owner-source-form input { width: 100%; min-width: 0; min-height: 40px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.hosted-app .owner-source-form input::placeholder { color: var(--secondary); }
+.hosted-app .owner-source-form input[aria-invalid] { border-color: var(--error); }
+.hosted-app .source-form-error { color: var(--error); margin: -8px 0 0; }
+.hosted-app .owner-source-protocol-field .option-trigger { width: 100%; }
+.hosted-app .owner-source-model-input { display: flex; align-items: center; gap: 8px; }
+.hosted-app .owner-source-model-input .icon-button { flex-shrink: 0; }
+.hosted-app .owner-source-model-list { list-style: none; margin: 16px 0 0; padding: 0; max-height: 280px; overflow-y: auto; scrollbar-gutter: stable; }
+.hosted-app .owner-source-model-list li { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.hosted-app .owner-source-model-list li:last-child { border-bottom: 0; }
+.hosted-app .owner-source-model-list li > div { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.hosted-app .owner-source-model-list code { font-size: 12px; overflow-wrap: anywhere; }
+.hosted-app .owner-source-model-list li > div > span { font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.hosted-app .owner-source-model-list .icon-button { flex-shrink: 0; }
+.hosted-app .owner-source-preview-note { margin: 0; font-size: 11px; line-height: 1.6; }
+.hosted-app .owner-source-form-actions { justify-content: flex-end; margin: 0; }
+@media (max-width: 639px), (pointer: coarse) { .hosted-app .owner-source-form input, .hosted-app .owner-source-form .option-trigger { min-height: 44px; } }
+@media (max-width: 639px) { .hosted-app .request-dialog.owner-source-dialog { width: calc(100% - 16px); } }

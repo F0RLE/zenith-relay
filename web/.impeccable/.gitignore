@@ -1,0 +1,6 @@
+# Ephemeral local design sessions; retain the durable design and surface briefs.
+questions/
+review/
+mocks/
+build/
+live/

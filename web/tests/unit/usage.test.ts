@@ -16,14 +16,14 @@ describe("request tokens and money presentation", () => {
     expect(componentTokens(tokens).input).toBeNull();
     expect(componentTotal({ input: 0n, output: null, cacheRead: 0n, cacheWrite: 0n })).toBeNull();
     expect(formatMoney(null)).toBe("—");
-    expect(formatMoney(0n)).toBe("0,000000");
+    expect(formatMoney(0n)).toBe("0.000000");
   });
 
   test("formatting preserves microUSD beyond Number.MAX_SAFE_INTEGER", () => {
-    expect(formatMoney(9007199254740993n).replace(/\s/g, "")).toBe("9007199254,740993");
-    expect(formatMoney(-1234567n)).toBe("−1,234567");
-    expect(formatMoney(999999n, 2)).toBe("1,00");
-    expect(formatMoney(60000n, 2)).toBe("0,06");
+    expect(formatMoney(9007199254740993n)).toBe("9,007,199,254.740993");
+    expect(formatMoney(-1234567n)).toBe("−1.234567");
+    expect(formatMoney(999999n, 2)).toBe("1.00");
+    expect(formatMoney(60000n, 2)).toBe("0.06");
   });
 
   test("synthetic components use integer rounding, not floating point money", () => {
@@ -63,6 +63,17 @@ describe("request tokens and money presentation", () => {
     expect(byKey.reduce((sum, group) => sum + group.charge!, 0n)).toBe(total.charge!);
     expect(byKey.reduce((sum, group) => sum + group.tokens, 0)).toBe(total.tokens);
     expect(usageTotals([]).charge).toBe(0n);
+  });
+
+  test("only posted API charges enter spending, never held or pending amounts", () => {
+    const original = previewRequests.find(row => row.accounting === "posted")!;
+    const rows = [
+      { ...original, billing: { ...original.billing, postedMicroUsd: 123n, reservedMicroUsd: 9000000n } },
+      { ...original, accounting: "held" as const, billing: { ...original.billing, postedMicroUsd: 4000000n, reservedMicroUsd: 5000000n } },
+      { ...original, accounting: "pending" as const, billing: { ...original.billing, postedMicroUsd: 6000000n } },
+    ];
+    expect(usageTotals(rows).charge).toBe(123n);
+    expect(usageTotals(rows).pending).toBe(2);
   });
 
   test("support copy uses an allowlist, not an object dump", () => {

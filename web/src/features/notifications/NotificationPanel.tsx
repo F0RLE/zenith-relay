@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import type { RefObject } from "react";
-import { ArrowUpRight, CheckCheck, Clock3, X } from "lucide-react";
+import { ArrowRight, CheckCheck, Clock3, X } from "../../components/Icons";
+import { useLocale } from "../../i18n/LocaleProvider";
+import "./notifications.css";
 
 export function NotificationPanel({ anchor, read, modelName, onRead, onOpenRequest, onClose }: {
   anchor: RefObject<HTMLButtonElement | null>;
@@ -10,7 +12,9 @@ export function NotificationPanel({ anchor, read, modelName, onRead, onOpenReque
   onOpenRequest: () => void;
   onClose: () => void;
 }) {
+  const { t, locale } = useLocale();
   const panel = useRef<HTMLElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   function close(restoreFocus = false) {
     if (restoreFocus) anchor.current?.focus({ preventScroll: true });
     onClose();
@@ -20,7 +24,7 @@ export function NotificationPanel({ anchor, read, modelName, onRead, onOpenReque
       const trigger = anchor.current?.getBoundingClientRect();
       const root = panel.current;
       if (!trigger || !root) return;
-      const width = Math.min(400, innerWidth - 24);
+      const width = Math.min(384, innerWidth - 24);
       root.style.width = `${width}px`;
       root.style.maxHeight = `${innerHeight - 24}px`;
       const below = Math.max(0, innerHeight - trigger.bottom - 22);
@@ -39,9 +43,9 @@ export function NotificationPanel({ anchor, read, modelName, onRead, onOpenReque
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [anchor]);
+  }, [anchor, read, locale]);
   useEffect(() => {
-    panel.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    closeButton.current?.focus({ preventScroll: true });
   }, []);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
@@ -67,18 +71,20 @@ export function NotificationPanel({ anchor, read, modelName, onRead, onOpenReque
       const next = event.relatedTarget;
       if (next instanceof Node && !event.currentTarget.contains(next) && !anchor.current?.contains(next)) onClose();
     }}>
-    <header className="notification-panel-header"><div><h2 id="notifications-title">Уведомления</h2><span>{read ? "Нет новых" : "1 новое"}</span></div>
-      <button type="button" className="notification-close" aria-label="Закрыть уведомления" onClick={() => close(true)}><X aria-hidden="true" /></button>
+    <header className="notification-panel-header"><div><h2 id="notifications-title">{t("shell.notifications")}</h2>{!read && <span className="notification-count" aria-label={t("notifications.oneNew")}>1</span>}</div>
+      <div className="notification-panel-actions">
+        {!read && <button type="button" className="notification-mark-read" aria-label={t("notifications.markAsRead")} data-relay-tooltip={t("notifications.readAll")} onClick={() => { closeButton.current?.focus({ preventScroll: true }); onRead(); }}><CheckCheck aria-hidden="true" /></button>}
+        <button ref={closeButton} type="button" className="notification-close" aria-label={t("notifications.closeNotifications")} onClick={() => close(true)}><X aria-hidden="true" /></button>
+      </div>
     </header>
     <article className="notification-entry" data-unread={!read}>
       <span className="notification-event-icon"><Clock3 aria-hidden="true" /></span>
-      <div className="notification-entry-content"><div className="notification-entry-heading"><h3>Расчёт ещё уточняется</h3>{!read && <span className="notification-unread-dot" aria-hidden="true" />}</div>
-        <p>Ответ готов. Итоговые токены и сумма ещё уточняются. Дождитесь завершения расчёта.</p>
+      <div className="notification-entry-content"><div className="notification-entry-heading"><h3>{t("notifications.accountingIsStillBeingFinalized")}</h3>{!read && <span className="notification-unread-dot" aria-hidden="true" />}</div>
+        <p>{t("notifications.pendingNotice")}</p>
         <div className="notification-entry-meta"><span>{modelName}</span>
-          <button type="button" className="notification-open" onClick={() => { anchor.current?.focus({ preventScroll: true }); onOpenRequest(); }}>Открыть запрос<ArrowUpRight aria-hidden="true" /></button>
+          <button type="button" className="notification-open" onClick={() => { anchor.current?.focus({ preventScroll: true }); onOpenRequest(); }}>{t("notifications.openRequest")}<ArrowRight aria-hidden="true" /></button>
         </div>
       </div>
     </article>
-    <footer className="notification-panel-footer"><span>Демо</span><button type="button" className="notification-mark-read" aria-label="Отметить прочитанным" disabled={read} onClick={onRead}><CheckCheck aria-hidden="true" />{read ? "Всё прочитано" : "Прочитать всё"}</button></footer>
   </section>;
 }

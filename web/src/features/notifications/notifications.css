@@ -1,0 +1,23 @@
+/* Hosted notifications: one compact message surface, no nested status tiles. */
+.hosted-app .notification-panel .notification-panel-header { min-height: 56px; gap: 12px; padding: 8px 12px 8px 20px; }
+.hosted-app .notification-panel .notification-panel-header > div { min-width: 0; gap: 8px; }
+.hosted-app .notification-panel .notification-panel-header h2 { margin: 0; font-size: 15px; line-height: 24px; font-weight: 550; letter-spacing: -.015em; }
+.hosted-app .notification-panel .notification-count { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.hosted-app .notification-panel .notification-panel-actions { flex-shrink: 0; gap: 4px; }
+.hosted-app .notification-panel :is(.notification-close, .notification-mark-read) { display: grid; place-items: center; width: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); box-shadow: none; }
+.hosted-app .notification-panel :is(.notification-close, .notification-mark-read):is(:hover, :focus-visible) { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .notification-panel .notification-entry { padding: 20px; gap: 12px; background: transparent; }
+.hosted-app .notification-panel .notification-event-icon { width: 20px; height: 20px; border-radius: 0; background: transparent; }
+.hosted-app .notification-panel .notification-entry-heading { min-height: 20px; }
+.hosted-app .notification-panel .notification-entry h3 { margin: 0; font-size: 13px; line-height: 20px; font-weight: 550; }
+.hosted-app .notification-panel .notification-entry p { margin: 6px 0 0; color: var(--secondary); font-size: 12px; line-height: 18px; }
+.hosted-app .notification-panel .notification-entry-meta { gap: 4px 12px; margin-top: 12px; }
+.hosted-app .notification-panel .notification-entry-meta > span { min-width: 0; color: var(--muted); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.hosted-app .notification-panel .notification-open { min-height: 32px; padding: 4px 0; gap: 6px; font-size: 12px; font-weight: 500; }
+.hosted-app .notification-panel .notification-open:is(:hover, :focus-visible) { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 639px) {
+  .hosted-app .notification-panel .notification-panel-header { padding: 6px 8px 6px 16px; }
+  .hosted-app .notification-panel .notification-entry { padding: 16px; gap: 8px; }
+  .hosted-app .notification-panel :is(.notification-close, .notification-mark-read) { width: 44px; min-height: 44px; }
+  .hosted-app .notification-panel .notification-open { min-height: 44px; }
+}

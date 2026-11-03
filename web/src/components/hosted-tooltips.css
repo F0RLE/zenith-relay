@@ -1,0 +1,5 @@
+.hosted-app .hosted-tooltip { inset: auto; margin: 0; width: max-content; overflow: visible; }
+.hosted-app .hosted-tooltip::backdrop { background: transparent; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .hosted-app .hosted-tooltip[data-positioned="true"] { animation: none; }
+}

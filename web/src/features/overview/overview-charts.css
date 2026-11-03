@@ -1,0 +1,76 @@
+/* Hosted charts own their rendering, independent of Desktop chart chrome. */
+.hosted-app .hosted-overview .hosted-chart { --plot-height: 164px; --series-color: var(--accent); min-width: 0; padding: 24px; overflow: visible; }
+.hosted-app .hosted-overview .hosted-chart.tokens { --plot-height: 204px; }
+.hosted-app .hosted-chart .is-input { --series-color: light-dark(#15644d, #80b49a); }
+.hosted-app .hosted-chart .is-output { --series-color: light-dark(#307f91, #71bec9); }
+.hosted-app .hosted-chart .is-cache-write { --series-color: light-dark(#9c6b19, #d8ac60); }
+.hosted-app .hosted-chart .is-cache-read { --series-color: light-dark(#6d779e, #a4b1db); }
+.hosted-app .hosted-chart .is-cache-rate { --series-color: light-dark(#8a5680, #c893bb); }
+.hosted-app .hosted-chart .is-requests { --series-color: light-dark(#347d8f, #75b9c6); }
+.hosted-app .hosted-chart .is-speed { --series-color: light-dark(#8e6b34, #d5b87e); }
+.hosted-app .hosted-chart .is-e2e-speed { --series-color: light-dark(#75628f, #b5a0cf); }
+.hosted-app .hosted-overview .hosted-chart-header { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(65%); align-items: start; min-height: 36px; gap: 16px; margin: 0 0 28px; }
+.hosted-app .hosted-overview .hosted-chart-title { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 14px; line-height: 20px; font-weight: 500; color: var(--secondary); }
+.hosted-app .hosted-chart-title svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
+.hosted-app .hosted-chart-total { display: grid; justify-items: end; gap: 4px; text-align: right; min-width: 0; }
+.hosted-app .hosted-overview .hosted-chart .overview-chart-summary { min-width: 0; white-space: normal; color: var(--text); font-size: 23px; line-height: 28px; font-weight: 550; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hosted-app .hosted-overview .hosted-chart-total small { color: var(--muted); font-size: 11px; line-height: 16px; font-weight: 400; white-space: normal; }
+.hosted-app .hosted-chart-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: -12px 0 24px; }
+.hosted-app .hosted-chart-legend button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; min-height: 32px; border: 0; border-radius: 4px; background: transparent; color: var(--secondary); font-size: 12px; line-height: 16px; white-space: nowrap; cursor: pointer; }
+.hosted-app .hosted-chart-legend i, .hosted-app .hosted-chart-tooltip dt i { width: 14px; height: 0; border-top: 2px solid var(--series-color); flex-shrink: 0; }
+.hosted-app .hosted-chart-legend .is-cache-rate i, .hosted-app .hosted-chart-tooltip .is-cache-rate i { border-top-style: dashed; }
+.hosted-app .hosted-chart-legend button[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px; }
+.hosted-app .hosted-chart-legend button[aria-pressed="false"] i { border-top-color: var(--muted); border-top-style: dotted; }
+.hosted-app .hosted-chart-legend button:is(:hover, :focus-visible) { background: var(--accent-soft); color: var(--text); }
+.hosted-app .hosted-chart-body { position: relative; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; }
+.hosted-app .hosted-chart-body[data-rate-axis="true"] { grid-template-columns: max-content minmax(0, 1fr) max-content; }
+.hosted-app .hosted-chart-body[data-primary-axis="false"] { grid-template-columns: minmax(0, 1fr); }
+.hosted-app .hosted-chart-body[data-primary-axis="false"][data-rate-axis="true"] { grid-template-columns: minmax(0, 1fr) max-content; }
+.hosted-app .hosted-chart-axis { height: var(--plot-height); display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; color: var(--muted); font-size: 11px; line-height: 14px; font-variant-numeric: tabular-nums; }
+.hosted-app .hosted-chart-axis span:first-child { transform: translateY(-50%); }
+.hosted-app .hosted-chart-axis span:last-child { transform: translateY(50%); }
+.hosted-app .hosted-chart-rate-axis { align-items: flex-start; }
+.hosted-app .hosted-chart-plot { min-width: 0; }
+.hosted-app .hosted-chart-canvas { position: relative; height: var(--plot-height); min-width: 0; cursor: crosshair; touch-action: pan-y; }
+.hosted-app .hosted-overview .hosted-chart-canvas:focus-visible { outline: none; background: color-mix(in srgb, var(--accent) 3%, transparent); }
+.hosted-app .hosted-chart-canvas > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.hosted-app .hosted-chart-grid { fill: none; stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 5; vector-effect: non-scaling-stroke; }
+.hosted-app .hosted-chart-line { fill: none; stroke: var(--series-color); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.hosted-app .hosted-chart-line.is-cache-rate { stroke-dasharray: 4 4; stroke-width: 1.5; }
+.hosted-app .hosted-chart-points { position: absolute; inset: 0; display: grid; width: 100%; height: 100%; margin: 0; padding: 0; list-style: none; pointer-events: none; }
+.hosted-app .hosted-chart-points li { position: relative; min-width: 0; height: 100%; }
+.hosted-app .hosted-chart-points li[data-active="true"]::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; border-left: 1px solid var(--muted); opacity: .6; }
+.hosted-app .hosted-chart-mark { position: absolute; left: 50%; color: var(--series-color); }
+.hosted-app .hosted-chart-dot { width: 6px; height: 6px; border: 1.5px solid currentColor; border-radius: 50%; background: var(--surface); transform: translate(-50%, -50%); opacity: 0; }
+.hosted-app .hosted-chart-dot:is([data-last="true"], [data-isolated="true"]), .hosted-app [data-active="true"] > .hosted-chart-dot { opacity: 1; }
+.hosted-app .hosted-chart-bar { bottom: 0; width: min(60%, 24px); border-radius: 3px 3px 0 0; background: var(--series-color); opacity: .85; transform: translateX(-50%); }
+.hosted-app .hosted-chart-points [data-active="true"] > .hosted-chart-bar { opacity: 1; }
+.hosted-app .hosted-chart-tooltip { position: absolute; z-index: 5; top: 8px; width: max-content; max-width: calc(100% - 16px); padding: 12px; border: 0; border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--overlay-lift); pointer-events: none; font-size: 11px; line-height: 16px; cursor: default; }
+.hosted-app .hosted-chart-tooltip[data-side="start"] { left: 8px; }
+.hosted-app .hosted-chart-tooltip[data-side="end"] { right: 8px; }
+.hosted-app .hosted-chart-tooltip-time { display: block; max-width: 32ch; color: var(--secondary); }
+.hosted-app .hosted-chart-tooltip dl { display: grid; gap: 8px; margin: 12px 0 0; }
+.hosted-app .hosted-chart-tooltip dl > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.hosted-app .hosted-chart-tooltip dt { display: flex; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; color: var(--secondary); }
+.hosted-app .hosted-chart-tooltip dd { margin: 0; text-align: right; font-weight: 550; font-variant-numeric: tabular-nums; }
+.hosted-app .hosted-chart-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; pointer-events: none; }
+@media (max-width: 639px) {
+  .hosted-app .hosted-overview .hosted-chart { --plot-height: 152px; padding: 20px 16px; }
+  .hosted-app .hosted-overview .hosted-chart.tokens { --plot-height: 192px; }
+  .hosted-app .hosted-overview .hosted-chart-header { gap: 12px; margin-bottom: 24px; }
+  .hosted-app .hosted-overview .hosted-chart-title { font-size: 13px; line-height: 18px; }
+  .hosted-app .hosted-chart-title svg { display: none; }
+  .hosted-app .hosted-overview .hosted-chart .overview-chart-summary { font-size: 20px; line-height: 24px; }
+  .hosted-app .hosted-chart-legend { gap: 0 4px; margin-bottom: 20px; }
+  .hosted-app .hosted-chart-legend button { min-height: 44px; }
+  .hosted-app .hosted-chart-body { gap: 8px; }
+  .hosted-app .hosted-chart-axis { font-size: 10px; }
+  .hosted-app .hosted-chart-tooltip { padding: 10px; }
+  .hosted-app .hosted-chart-tooltip dl { gap: 6px; }
+}
+@media (forced-colors: active) {
+  .hosted-app .hosted-chart-line { stroke: CanvasText; }
+  .hosted-app .hosted-chart-bar { background: CanvasText; }
+  .hosted-app .hosted-chart-tooltip { border: 1px solid CanvasText; }
+  .hosted-app .hosted-overview .hosted-chart-canvas:focus-visible, .hosted-app .hosted-chart-legend button:focus-visible { outline: 1px solid Highlight; }
+}

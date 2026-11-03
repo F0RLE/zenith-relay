@@ -1,0 +1,147 @@
+/* Use the desktop's source styles rather than a second look-alike theme.
+   Native titlebar, platform reset and runtime are intentionally not imported. */
+@import "../../../../src/src/styles/shell.css";
+@import "../../../../src/src/styles/controls.css";
+@import "../../../../src/src/styles/tables.css";
+@import "../../../../src/src/styles/pages/overview.css";
+@import "../../../../src/src/styles/pages/settings.css";
+@import "../../../../src/src/styles/pages/usage.css";
+@import "../../../../src/src/styles/pages/connections.css";
+@import "../../../../src/src/styles/pages/workspace.css";
+
+.hosted-app {
+  --hosted-tools-space: 176px;
+  --relay-bg: var(--bg); --relay-surface: var(--surface); --relay-sidebar: var(--subtle);
+  --relay-subtle: var(--subtle); --relay-border: var(--border); --relay-text: var(--text);
+  --relay-secondary: var(--secondary); --relay-muted: var(--muted); --relay-accent: var(--accent);
+  --relay-accent-hover: light-dark(#104c3b, #a0ccb3); --relay-accent-soft: var(--accent-soft);
+  --relay-on-accent: light-dark(#fffefa, #102018); --relay-info: var(--info);
+  --relay-warning: var(--warning); --relay-error: var(--error); --relay-error-soft: var(--error-soft);
+  --relay-border-strong: light-dark(#bacbbd, #555550);
+  --relay-shadow-soft: 0 1px 2px light-dark(rgb(32 43 41 / 5%), rgb(0 0 0 / 28%));
+  --relay-shadow: 0 8px 24px light-dark(rgb(32 43 41 / 7%), rgb(0 0 0 / 26%));
+  --relay-mono: "Cascadia Code", Consolas, monospace;
+  --relay-tooltip-bg: light-dark(#202b29, #292a27); --relay-tooltip-text: light-dark(#fffefa, #f2f0eb);
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: auto;
+}
+.hosted-app .relay-shell { height: 100dvh; }
+.hosted-app .sidebar-bottom { padding: 0; }
+.hosted-app .sidebar-footer { margin-top: 0; }
+.hosted-mode { min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 8px; background: var(--surface); color: var(--text); text-decoration: none; }
+.sidebar-collapsed .hosted-mode { justify-content: center; padding: 0; }
+.hosted-app .relay-content { scrollbar-gutter: stable; }
+.hosted-app .page-heading { min-height: 68px; padding: 10px 0 9px; flex-wrap: nowrap; }
+.hosted-app .page-heading h1 { font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: normal; }
+.hosted-app .page-heading > .button { min-height: 32px; padding-block: 5px; flex-shrink: 0; }
+.hosted-tools { position: absolute; right: 24px; top: 18px; z-index: 9; display: flex; align-items: center; gap: 8px; }
+.hosted-tools .icon-button { width: 32px; min-height: 32px; border-color: transparent; background: transparent; }
+.hosted-balance { display: flex; min-height: 32px; align-items: center; gap: 6px; border: 0; background: none; color: var(--secondary); font-size: 12px; padding: 4px 6px; white-space: nowrap; }
+.hosted-app .page-heading > span { display: none; }
+.hosted-app .page-heading:has(.button-row), .hosted-app .page-heading:has(> button) { padding-right: var(--hosted-tools-space); }
+.hosted-app .relay-page h2 { font-size: 15px; font-weight: 600; }
+.hosted-app .relay-page [hidden] { display: none !important; }
+.hosted-app .relay-content { scrollbar-color: var(--relay-border-strong) transparent; scrollbar-width: thin; }
+.hosted-app .overview-analytics { display: block; }
+.hosted-app .overview-analytics-header { flex-wrap: nowrap; padding: 10px 16px; gap: 20px; }
+.hosted-app .overview-analytics-controls .option-menu { width: 224px; }
+.hosted-app .overview-analytics-controls .option-trigger { border-color: transparent; background: transparent; }
+.hosted-app .metric-band { gap: 0; margin: 12px 0 0; }
+.hosted-app .metric-band > div { min-height: 58px; padding: 10px 14px; gap: 10px; }
+.hosted-app .metric-band strong { font-size: 20px; }
+.hosted-app .overview-chart-title strong { font-size: 14px; }
+.hosted-app .overview-chart-canvas > svg, .hosted-app .overview-token-trend-canvas > svg { height: 100%; width: 100%; }
+.hosted-app :is(.overview-chart-points, .overview-token-trend-points) [role="tooltip"] { display: none; max-width: min(220px, 55vw); min-width: 0; width: max-content; white-space: normal; }
+.hosted-app :is(.overview-chart-dot, .overview-chart-bar, .overview-token-trend-dot):is(:hover, :focus-visible) > [role="tooltip"] { display: flex; }
+.hosted-app [data-tooltip-side="start"] :is(.overview-chart-dot, .overview-chart-bar, .overview-token-trend-dot) > [role="tooltip"] { left: 0; right: auto; transform: none; }
+.hosted-app [data-tooltip-side="end"] :is(.overview-chart-dot, .overview-chart-bar, .overview-token-trend-dot) > [role="tooltip"] { left: auto; right: 0; transform: none; }
+.hosted-app .relay-workspace-header { padding-right: var(--hosted-tools-space); }
+.hosted-app .relay-workspace-header h1 { font-weight: 600; }
+.hosted-app .settings-control-row .option-menu { width: min(220px, 46%); }
+.hosted-app .settings-control-row .option-trigger { border-color: transparent; background: transparent; }
+.hosted-app .usage-filters { margin: 0 0 14px; gap: 8px; grid-template-columns: 140px 124px repeat(2, minmax(0, 1fr)); }
+.hosted-app .usage-filters > label, .hosted-app .usage-key-controls > label { font-size: 0; gap: 0; }
+.hosted-app .usage-key-controls { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hosted-app .usage-key-controls > label { flex: 1; }
+.hosted-app .usage-filter-trigger { flex: 0 0 34px; width: 34px; height: 34px; min-height: 34px; border-color: transparent; background: var(--surface); }
+.hosted-app .usage-filter-trigger:is([aria-expanded="true"], [data-active="true"]) { color: var(--accent); background: var(--accent-soft); }
+.hosted-app .usage-filter-footer { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.hosted-app .usage-filters .option-trigger { min-height: 34px; height: 34px; font-size: 12px; border-color: transparent; }
+.hosted-app .usage-overview .usage-metric { border: 0; border-radius: 0; background: transparent; padding: 12px 16px; }
+.hosted-app .usage-metrics > .usage-metric + .usage-metric { border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.hosted-app .usage-metric-copy { width: 100%; }
+.hosted-app .usage-metric-copy strong { margin: 0; }
+.hosted-app .usage-secondary-metrics .usage-metric { min-height: 0; padding: 0; }
+.hosted-app .usage-secondary-metrics .usage-metric-copy > strong { font-size: 13px; line-height: 18px; }
+.hosted-app .usage-secondary-metrics .usage-metric-copy > span { font-size: 11px; }
+.hosted-app .table-shell { border-radius: 12px; }
+.hosted-app .request-table :is(th, td) { padding-block: 12px; }
+.hosted-app .relay-toggle { width: 36px; height: 20px; flex: 0 0 36px; border: 0; border-radius: 10px; padding: 3px; background: var(--relay-border-strong); }
+.hosted-app .relay-toggle span { display: block; width: 14px; height: 14px; border-radius: 50%; background: #fffefa; transition: transform 120ms ease; }
+.hosted-app .relay-toggle.active { background: var(--accent); }
+.hosted-app .relay-toggle.active span { transform: translateX(16px); }
+.hosted-app .connection-list.account-list { margin: 16px 0 24px; gap: 10px; }
+.hosted-app .connection-row.account-card { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 0; }
+.hosted-app .account-identity h2 { font-size: 13px; line-height: 18px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosted-resource-body { display: flex; justify-content: space-around; gap: 10px; padding: 14px 10px; }
+.hosted-resource-body > div { min-width: 0; display: grid; justify-items: center; gap: 4px; text-align: center; font-size: 12px; }
+.hosted-resource-body span { color: var(--muted); font-size: 11px; }
+.hosted-resource-body strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.hosted-resource-body .pool-controls { display: flex; }
+.hosted-app .account-card-footer .relay-button { flex: 1; border: 0; background: transparent; border-radius: 0 0 7px 7px; font-size: 12px; }
+.hosted-resource-controls { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--border); }
+.resource-summary span { padding: 10px; font-size: 12px; text-align: center; }
+.resource-summary span + span { border-left: 1px solid var(--border); }
+.hosted-resource-controls .hosted-toolbar { margin: 0; padding: 8px 16px; }
+.hosted-app .account-list .empty-state { grid-column: 1 / -1; }
+.hosted-app .settings-group > header h2 { font-size: 13px; font-weight: 650; }
+.hosted-app .segmented { display: inline-flex; gap: 2px; padding: 4px; border-radius: 7px; background: var(--subtle); }
+.hosted-app .segmented button { height: 28px; border: 0; border-radius: 4px; padding: 0 12px; background: transparent; color: var(--secondary); font-size: 13px; }
+.hosted-app .segmented button.active { background: var(--surface); color: var(--text); }
+.hosted-app .hosted-tools .notification-button[data-unread="true"] { color: light-dark(#986900, #f2c34f); }
+/* Tabs and refresh share the second row when the desktop header cannot fit.
+   Reserve shell tools space only beside the title, not across both rows. */
+@container relay-page (max-width: 999px) {
+  .hosted-app .usage-page .relay-workspace-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    padding-right: 0;
+  }
+  .hosted-app .usage-page .relay-workspace-header h1 { grid-column: 1 / -1; grid-row: 1; padding-right: var(--hosted-tools-space); }
+  .hosted-app .usage-page .relay-page-navigation { grid-column: 1; grid-row: 2; }
+  .hosted-app .usage-page .relay-page-actions { grid-column: 2; grid-row: 2; align-self: start; width: auto; justify-content: flex-end; }
+}
+@container relay-page (max-width: 760px) {
+  .hosted-app .usage-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 639px) {
+  .hosted-app .relay-shell { grid-template-columns: minmax(0, 1fr); }
+  .hosted-app .relay-sidebar { display: none; }
+  .hosted-app .relay-sidebar[data-open="true"] { display: flex; position: fixed; inset: 0 auto 0 0; width: min(280px, calc(100vw - 40px)); z-index: 90; }
+  .hosted-app .mode-picker { padding-right: 64px; }
+  .hosted-app .relay-page { padding-inline: 16px; }
+  .hosted-tools { right: 16px; gap: 8px; }
+  .hosted-app .relay-workspace-header { padding-right: 0; padding-top: 68px; }
+  .hosted-app .usage-page .relay-workspace-header h1 { padding-right: 0; }
+  .hosted-app .settings-control-row { padding: 12px; gap: 12px; }
+  .hosted-app .usage-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hosted-app .usage-overview-details { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-inline: 12px; }
+  .hosted-app .overview-analytics-header { flex-wrap: wrap; gap: 12px; }
+  .hosted-app .overview-analytics-controls { width: 100%; justify-content: space-between; }
+  .hosted-app .overview-analytics-controls .option-menu { width: 100%; }
+  .hosted-app .metric-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hosted-app .metric-band > div { padding: 10px 8px; gap: 7px; }
+  .hosted-app .metric-band > div:nth-child(2) { border-right: 0; }
+  .hosted-app .metric-band > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+  .hosted-app .overview-chart, .hosted-app .overview-token-trend { padding: 12px; }
+  .hosted-app .overview-token-trend-legend { margin-left: 0; gap: 7px 12px; }
+  .hosted-app .overview-chart-body, .hosted-app .overview-token-trend-body { grid-template-columns: minmax(32px, max-content) minmax(0, 1fr) minmax(32px, max-content); gap: 5px; }
+  .hosted-app .overview-chart-summary { font-size: 18px; }
+  .hosted-app .overview-token-trend-header { gap: 8px; }
+  .hosted-app .overview-token-trend-summary { flex-shrink: 0; }
+  .hosted-app .overview-chart-x-axis { font-size: 10px; }
+  .hosted-app .overview-chart-x-axis > span { visibility: hidden; }
+  .hosted-app .overview-chart-x-axis > span[data-mobile-visible="true"] { visibility: visible; }
+  .hosted-app .page-heading:has(.button-row), .hosted-app .page-heading:has(> button) { flex-wrap: wrap; padding-right: 0; padding-top: 68px; }
+}

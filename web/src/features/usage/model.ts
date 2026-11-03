@@ -1,3 +1,6 @@
+import { defaultLocale, translate } from "../../i18n/catalog";
+import type { Locale } from "../../i18n/catalog";
+
 export type Execution = "completed" | "running" | "failed";
 export type Accounting = "posted" | "pending" | "held";
 export type ComponentId = "input" | "cacheRead" | "cacheWrite" | "output";
@@ -36,12 +39,8 @@ export interface RequestRecord {
   tools: { declared: number; forwarded: number; calls: number; choice: string; result: string } | null;
 }
 
-export const executionLabels: Record<Execution, string> = {
-  completed: "Завершён", running: "В работе", failed: "Ошибка",
-};
-export const accountingLabels: Record<Accounting, string> = {
-  posted: "Проведено", pending: "Ожидает данных", held: "Удержание",
-};
+export const executionLabels = { completed: "status.completed", running: "status.running", failed: "status.error" } as const;
+export const accountingLabels = { posted: "status.posted", pending: "status.pending", held: "status.held" } as const;
 
 export function tokenTotal(tokens: TokenCounters): number | null {
   return tokens.input === null || tokens.output === null ? null : tokens.input + tokens.output;
@@ -62,26 +61,27 @@ export function componentTotal(components: Record<ComponentId, bigint | null>): 
   return values.some(value => value === null) ? null : values.reduce<bigint>((sum, value) => sum + value!, 0n);
 }
 
-export function formatInteger(value: number | null): string {
-  return value === null ? "—" : value.toLocaleString("ru-RU");
+export function formatInteger(value: number | null, locale: Locale = defaultLocale): string {
+  return value === null ? "—" : value.toLocaleString(locale);
 }
 
-export function formatMoney(value: bigint | null, digits = 6): string {
+export function formatMoney(value: bigint | null, digits = 6, locale: Locale = defaultLocale): string {
   if (value === null) return "—";
   const negative = value < 0n;
   const magnitude = negative ? -value : value;
   const divisor = 10n ** BigInt(6 - digits);
   const rounded = (magnitude + divisor / 2n) / divisor;
   const base = 10n ** BigInt(digits);
-  return `${negative ? "−" : ""}${(rounded / base).toLocaleString("ru-RU")}${digits ? "," + (rounded % base).toString().padStart(digits, "0") : ""}`;
+  const decimal = new Intl.NumberFormat(locale).formatToParts(1.1).find(part => part.type === "decimal")!.value;
+  return `${negative ? "−" : ""}${(rounded / base).toLocaleString(locale)}${digits ? decimal + (rounded % base).toString().padStart(digits, "0") : ""}`;
 }
 
-export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString("ru-RU", { timeZone: "UTC", dateStyle: "short", timeStyle: "medium" });
+export function formatTime(iso: string, locale: Locale = defaultLocale): string {
+  return new Date(iso).toLocaleString(locale, { timeZone: "UTC", dateStyle: "short", timeStyle: "medium" });
 }
 
-export function formatDuration(ms: number | null): string {
-  return ms === null ? "—" : `${(ms / 1000).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} с`;
+export function formatDuration(ms: number | null, locale: Locale = defaultLocale): string {
+  return ms === null ? "—" : new Intl.NumberFormat(locale, { style: "unit", unit: "second", unitDisplay: "short", maximumFractionDigits: 2 }).format(ms / 1000);
 }
 
 export function generationSpeed(record: RequestRecord): number | null {
@@ -107,18 +107,19 @@ export function usageTotals(rows: readonly RequestRecord[]) {
   };
 }
 
-export function formatSpeed(value: number | null): string {
-  return value === null ? "—" : `${value.toLocaleString("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ток/с`;
+export function formatSpeed(value: number | null, locale: Locale = defaultLocale): string {
+  return value === null ? "—" : translate(locale, "usage.tokensPerSecond", { value: value.toLocaleString(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
 }
 
-export function supportSummary(record: RequestRecord): string {
+export function supportSummary(record: RequestRecord, locale: Locale = defaultLocale): string {
+  const t = (key: Parameters<typeof translate>[1]) => translate(locale, key);
   return [
-    `ID: ${record.id}`, `Начало: ${formatTime(record.startedAt)} UTC`,
-    `Модель: ${record.model.id}`, `API-ключ: ${record.key.name} · ${record.key.mask}`,
-    `Выполнение: ${executionLabels[record.execution]}`, `Расчёт: ${accountingLabels[record.accounting]}`,
-    `Протокол / транспорт: ${record.protocol} / ${record.transport}`,
-    `Токены: ${formatInteger(tokenTotal(record.tokens))}`,
-    `Списано: ${formatMoney(record.billing.postedMicroUsd)} USD`,
-    ...(record.response.errorCode ? [`Код ошибки: ${record.response.errorCode}`] : []),
+    `ID: ${record.id}`, `${t("usage.started")}: ${formatTime(record.startedAt, locale)} UTC`,
+    `${t("common.model")}: ${record.model.id}`, `${t("common.apiKey")}: ${record.key.name} · ${record.key.mask}`,
+    `${t("usage.execution")}: ${t(executionLabels[record.execution])}`, `${t("usage.accounting")}: ${t(accountingLabels[record.accounting])}`,
+    `${t("usage.protocolTransport")}: ${record.protocol} / ${record.transport}`,
+    `${t("common.tokens")}: ${formatInteger(tokenTotal(record.tokens), locale)}`,
+    `${t("common.charged")}: ${formatMoney(record.billing.postedMicroUsd, 6, locale)} USD`,
+    ...(record.response.errorCode ? [`${t("common.errorCode")}: ${record.response.errorCode}`] : []),
   ].join("\n");
 }

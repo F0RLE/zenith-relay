@@ -1,26 +1,70 @@
-import { useState } from "react";
-import { Search } from "lucide-react";
-import { Dialog } from "../../components/Dialog";
+import { useId, useState } from "react";
 import { CopyButton } from "../../components/CopyButton";
-import { OptionMenu } from "../../components/OptionMenu";
-import { formatMoney } from "../usage/model";
-import type { ComponentId } from "../usage/model";
+import { useLocale } from "../../i18n/LocaleProvider";
+import { CatalogChoice } from "./CatalogChoice";
+import { ModelCacheWritePrice, ModelPrice } from "./ModelPrice";
+import { modelContextRanges, selectedModelVariant } from "./model";
+import type { CustomerModel, ModelPricingVariant } from "./model";
+import { catalogGroups } from "./catalogOrder";
+import "./models.css";
 
-export interface CustomerModel {
-  id: string; name: string; protocols: string[]; description: string;
-  rates: Record<ComponentId, bigint>; revision: string;
+export type { CustomerModel } from "./model";
+
+const components = [
+  ["input", "modelCatalog.input"], ["output", "modelCatalog.output"],
+  ["cacheRead", "modelCatalog.cacheRead"], ["cacheWrite", "modelCatalog.cacheWrite"],
+] as const;
+
+function ModelRow({ model }: { model: CustomerModel }) {
+  const { t, locale } = useLocale();
+  const [selectedId, setSelectedId] = useState<string>();
+  const selected = selectedModelVariant(model, selectedId);
+  const variants = model.pricingVariants ?? [];
+  const ranges = selected ? modelContextRanges(model, selected.tier) : [];
+  const contexts = ranges.map(range => variants.find(variant => variant.tier === selected?.tier && variant.contextBand === range.band)!);
+  const compact = (value: number | null | undefined) => typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
+  const contextText = (variant: ModelPricingVariant, short = false) => {
+    const range = ranges.find(range => range.band === variant.contextBand)!;
+    if (range.min == null && range.max == null) return null;
+    if (range.min != null && range.max != null) return `> ${compact(range.min)} · ≤ ${compact(range.max)}`;
+    if (short) return range.min == null ? `≤ ${compact(range.max)}` : `> ${compact(range.min)}`;
+    return t(range.min == null ? "modelCatalog.shortContext" : "modelCatalog.longContext", { tokens: compact(range.min ?? range.max) });
+  };
+  return <tr className="catalog-row" data-model-id={model.id} data-variant-id={selected?.id}>
+    <th scope="row"><div className="catalog-model-heading"><strong className="catalog-model-name">{model.name}</strong></div><code className="catalog-model-id">{model.id}</code>
+    </th>
+    <td className="catalog-protocol-cell"><span className="catalog-cell-label">{t("modelCatalog.protocol")}</span><span className="catalog-protocols">{model.protocols.length ? model.protocols.join(" · ") : "—"}</span></td>
+    {components.map(([component, label]) => <td className="catalog-rate-cell" key={component}><span className="catalog-cell-label">{t(label)}</span>{component === "cacheWrite" ? <ModelCacheWritePrice model={selected ?? model} /> : <ModelPrice model={selected ?? model} component={component} />}</td>)}
+    <td className="catalog-context"><span className="catalog-cell-label">{t("modelCatalog.context")}</span><div className="catalog-context-value">
+      {selected && contextText(selected)
+        ? <CatalogChoice label={t("modelCatalog.contextFor", { name: model.name })} description={t("modelCatalog.maxContext", { tokens: compact(model.contextTokens) })} value={selected.id} options={contexts.map(variant => ({ value: variant.id, label: contextText(variant)!, shortLabel: contextText(variant, true)! }))} onChange={setSelectedId} />
+        : <span>{compact(model.contextTokens)}</span>}
+    </div></td>
+    <td className="catalog-actions"><CopyButton text={model.id} label={t("modelCatalog.copyId", { name: model.name })} compact /></td>
+  </tr>;
 }
 
-export function ModelsPage({ models, onHelp }: { models: CustomerModel[]; onHelp: () => void }) {
-  const [query, setQuery] = useState("");
-  const [protocol, setProtocol] = useState("all");
-  const [selected, setSelected] = useState<CustomerModel | null>(null);
-  const visible = models.filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.toLowerCase()) && (protocol === "all" || model.protocols.includes(protocol)));
-  return <>
-    <header className="page-heading"><h1>Модели</h1><span>Демонстрационный каталог · цены за 1 млн токенов</span></header>
-    <div className="catalog-filters"><label className="search-field"><Search aria-hidden="true" /><input type="search" aria-label="Поиск модели" placeholder="Найти модель" value={query} onChange={event => setQuery(event.target.value)} /></label><label>Протокол модели<OptionMenu label="Протокол модели" value={protocol} onChange={setProtocol} options={[{ value: "all", label: "Все протоколы" }, ...[...new Set(models.flatMap(model => model.protocols))].map(value => ({ value, label: value }))]} /></label></div>
-    <div className="table-shell"><div className="table-scroll" role="region" aria-label="Каталог моделей"><table className="catalog-table"><thead><tr><th>Модель</th><th>Протокол</th><th>Вход, USD</th><th>Чтение кэша</th><th>Выход, USD</th><th>Подробнее</th></tr></thead><tbody>{visible.map(model => <tr key={model.id}><td><strong>{model.name}</strong><small>{model.id}</small></td><td>{model.protocols.join(", ")}</td><td>{formatMoney(model.rates.input, 2)}</td><td>{formatMoney(model.rates.cacheRead, 2)}</td><td>{formatMoney(model.rates.output, 2)}</td><td><button type="button" className="text-button" aria-label={`Подробнее о ${model.name}`} onClick={() => setSelected(model)}>Открыть</button></td></tr>)}</tbody></table>{!visible.length && <p className="empty-state">Модели не найдены</p>}</div></div>
-    <p className="form-note">Демонстрационный каталог с вымышленными моделями и ценами. Подключениями и доступом к моделям управляет владелец сервера.</p>
-    {selected && <Dialog title="Модель и тариф" onClose={() => setSelected(null)}><div className="model-detail"><span className="status-badge">Демо-модель</span><h3>{selected.name}</h3><p>{selected.description}</p></div><dl className="detail-list"><div><dt>ID модели</dt><dd><code>{selected.id}</code></dd></div><div><dt>Протоколы</dt><dd>{selected.protocols.join(", ")}</dd></div>{([['input', 'Вход без кэша'], ['cacheRead', 'Чтение кэша'], ['cacheWrite', 'Запись кэша'], ['output', 'Выход']] as [ComponentId, string][]).map(([id, label]) => <div key={id}><dt>{label}</dt><dd>{formatMoney(selected.rates[id], 2)} USD / 1 млн</dd></div>)}<div><dt>Версия тарифа</dt><dd><code>{selected.revision}</code></dd></div></dl><CopyButton text={selected.id} label="Скопировать ID модели" /><button className="button" type="button" onClick={() => { setSelected(null); onHelp(); }}>Как подключить клиент</button><p className="form-note">Цены прошлых запросов сохранены в использовании.</p></Dialog>}
-  </>;
+export function ModelsPage({ models = [] }: {
+  models?: readonly CustomerModel[];
+}) {
+  const { t } = useLocale();
+  const heading = useId();
+  const groups = catalogGroups(models);
+
+  return <section className="models-page">
+    <header className="page-heading"><h1 id={heading}>{t("modelCatalog.title")}</h1></header>
+    <section className="table-shell catalog-frame" aria-labelledby={heading}>
+      <table className="catalog-table">
+        <caption className="sr-only">{t("modelCatalog.table")}</caption>
+        <colgroup><col className="catalog-name-col" /><col className="catalog-protocol-col" />{components.map(([component]) => <col key={component} />)}<col className="catalog-context-col" /><col className="catalog-action-col" /></colgroup>
+        <thead><tr><th scope="col">{t("common.model")}</th><th scope="col">{t("modelCatalog.protocol")}</th>{components.map(([component, label]) => <th key={component} scope="col">{t(label)}</th>)}<th scope="col">{t("modelCatalog.context")}</th><th scope="col"><span className="sr-only">{t("modelCatalog.actions")}</span></th></tr></thead>
+        {groups.map(group => <tbody key={group.id} data-group-id={group.id}>
+          <tr className="catalog-company"><th scope="rowgroup" colSpan={8}>{group.provider === "other" ? t("modelCatalog.otherCompany") : group.label}</th></tr>
+          {group.models.map(model => <ModelRow key={model.id} model={model} />)}
+        </tbody>)}
+        {!models.length && <tbody><tr className="catalog-empty"><td colSpan={8}><p role="status">{t("modelCatalog.noModels")}</p></td></tr></tbody>}
+      </table>
+    </section>
+  </section>;
 }

@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
-import { X } from "lucide-react";
+import { X } from "./Icons";
+import { useLocale } from "../i18n/LocaleProvider";
 
 export function Dialog({ title, onClose, children, className = "" }: { title: string; onClose: () => void; children: ReactNode; className?: string }) {
+  const { t } = useLocale();
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const dialog = ref.current!;
@@ -21,7 +23,7 @@ export function Dialog({ title, onClose, children, className = "" }: { title: st
   return <dialog ref={ref} className={`request-dialog ${className}`.trim()} aria-labelledby="request-dialog-title"
     onCancel={event => { event.preventDefault(); onClose(); }}>
     <header className="dialog-header"><h2 id="request-dialog-title">{title}</h2>
-      <button type="button" className="icon-button" aria-label="Закрыть" onClick={onClose}><X aria-hidden="true" /></button>
+      <button type="button" className="icon-button" aria-label={t("common.close")} onClick={onClose}><X aria-hidden="true" /></button>
     </header>
     <div className="dialog-body">{children}</div>
   </dialog>;

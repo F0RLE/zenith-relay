@@ -1,0 +1,16 @@
+@import "./fonts.css";
+
+/* Web-only brand: shared by the public landing and Hosted workspaces. */
+.landing, .hosted-app {
+  --font-body: "Golos Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-display: var(--font-body);
+  --font-code: "Cascadia Code", Consolas, monospace;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+  --space-9: 96px; --space-10: 128px;
+  --radius-control: 8px;
+  --control-border: light-dark(#819087, #767e78);
+  --accent-ink: light-dark(#fffefa, #102018);
+  --accent-hover: light-dark(#104c3b, #a0ccb3);
+  --mask-clear: transparent; --mask-solid: #000;
+}

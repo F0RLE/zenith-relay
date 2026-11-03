@@ -1,0 +1,83 @@
+.hosted-app .status-page { min-width: 0; }
+.hosted-app .status-heading { justify-content: flex-start; flex-wrap: wrap; gap: 16px 32px; padding-inline-end: var(--hosted-tools-space); }
+.hosted-app .status-heading h1 { flex-shrink: 0; }
+.hosted-app .model-status-period { flex-shrink: 0; border: 0; padding: 0; }
+.hosted-app .model-status-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; margin-bottom: 32px; }
+.hosted-app .model-status-summary > div { display: grid; grid-template-rows: 1fr auto; min-width: 0; padding: 18px 20px; text-align: center; }
+.hosted-app .model-status-summary > div + div { border-inline-start: 1px solid var(--border); }
+.hosted-app .model-status-summary dt { font-size: 12px; line-height: 18px; color: var(--secondary); }
+.hosted-app .model-status-summary dd { margin-top: 8px; font-size: 28px; line-height: 32px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.hosted-app .model-status-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr) 240px; align-items: center; gap: 12px 24px; margin-bottom: 16px; }
+.hosted-app .model-status-toolbar h2 { display: flex; align-items: baseline; gap: 10px; margin: 0; font-size: 16px; font-weight: 550; }
+.hosted-app .model-status-toolbar h2 > span { color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.hosted-app .model-status-search { position: relative; width: 240px; max-width: 100%; }
+.hosted-app .model-status-search > svg { position: absolute; inset-inline-start: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.hosted-app .model-status-search input { width: 100%; min-height: 40px; padding: 9px 12px; padding-inline-start: 36px; border: 1px solid var(--border); }
+.hosted-app .model-status-table { table-layout: fixed; }
+.hosted-app .model-status-name-col { width: 21%; }
+.hosted-app .model-status-history-col { width: 37%; }
+.hosted-app .model-status-table th, .hosted-app .model-status-table td { padding: 16px 12px; text-align: center; vertical-align: middle; font-size: 12px; }
+.hosted-app .model-status-table thead th { padding-block: 12px; font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.hosted-app .model-status-table thead th:first-child, .hosted-app .model-status-table tbody th { text-align: center; padding-inline: 20px; }
+.hosted-app .model-status-table tbody th { background: transparent; color: var(--text); }
+.hosted-app .model-status-table tbody tr:last-child th { border-bottom: 0; }
+.hosted-app .model-status-table :is(th, td):last-child { padding-inline: 20px; }
+.hosted-app .model-status-name { display: block; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.hosted-app .model-status-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--accent); }
+.hosted-app .model-status-dot[data-state="degraded"] { background: var(--warning); }
+.hosted-app .model-status-dot[data-state="unavailable"] { background: var(--error); }
+.hosted-app .model-status-dot[data-state="unknown"] { border: 1px solid var(--muted); background: transparent; }
+.hosted-app .model-status-axis { display: flex; justify-content: space-between; gap: 12px; color: var(--secondary); font-size: 11px; font-weight: 400; }
+.hosted-app .model-status-history { display: grid; align-items: center; gap: 3px; min-width: 0; min-height: 40px; cursor: crosshair; touch-action: pan-y; border-radius: 3px; }
+.hosted-app .model-status-history > span { display: block; height: 24px; min-width: 0; border-radius: 2px; background: color-mix(in srgb, var(--muted) 25%, var(--surface)); }
+.hosted-app .model-status-history > span[data-active="true"] { background: var(--muted); }
+.hosted-app .model-status-value { color: var(--secondary); font-variant-numeric: tabular-nums; }
+.hosted-app .model-status-mobile-axis, .hosted-app .model-status-cell-label { display: none; }
+.hosted-app .model-status-empty td { padding: 48px 20px; text-align: center; color: var(--secondary); }
+.hosted-app .model-status-legend { display: flex; justify-content: center; flex-wrap: wrap; min-width: 0; gap: 8px 16px; margin: 0; padding: 0; list-style: none; color: var(--secondary); font-size: 11px; }
+.hosted-app .model-status-legend li { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.hosted-app .model-status-tooltip { position: fixed; z-index: 90; width: 256px; max-width: calc(100vw - 16px); padding: 14px 16px; border: 0; border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: var(--overlay-lift); font-size: 12px; line-height: 18px; visibility: hidden; }
+.hosted-app .model-status-tooltip > strong { display: block; font-size: 12px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.hosted-app .model-status-tooltip dl { display: grid; gap: 7px; margin-top: 12px; }
+.hosted-app .model-status-tooltip dl > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.hosted-app .model-status-tooltip dt { color: var(--secondary); overflow-wrap: anywhere; }
+.hosted-app .model-status-tooltip dd { text-align: end; font-variant-numeric: tabular-nums; font-weight: 550; }
+@container relay-page (max-width: 900px) {
+  .hosted-app .model-status-table, .hosted-app .model-status-table tbody { display: block; }
+  .hosted-app .model-status-table colgroup { display: none; }
+  .hosted-app .model-status-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .hosted-app .model-status-table tr.model-status-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 16px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+  .hosted-app .model-status-table tr.model-status-row:last-child { border-bottom: 0; }
+  .hosted-app .model-status-table tbody th, .hosted-app .model-status-table tbody td { display: block; min-width: 0; padding: 0; border: 0; text-align: center; }
+  .hosted-app .model-status-table tbody th { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: center; }
+  .hosted-app .model-status-history-cell { grid-column: 1 / -1; }
+  .hosted-app .model-status-mobile-axis { display: flex; }
+  .hosted-app .model-status-cell-label { display: block; margin-bottom: 6px; color: var(--secondary); font-size: 11px; }
+  .hosted-app .model-status-table tr.model-status-empty { display: block; }
+  .hosted-app .model-status-table tr.model-status-empty td { padding: 40px 20px; text-align: center; }
+}
+@container relay-page (max-width: 820px) {
+  .hosted-app .model-status-toolbar { grid-template-columns: minmax(0, 1fr) 240px; }
+  .hosted-app .model-status-search { grid-column: 2; grid-row: 1; }
+  .hosted-app .model-status-legend { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
+}
+@container relay-page (max-width: 560px) {
+  .hosted-app .model-status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 24px; }
+  .hosted-app .model-status-summary > div { padding: 16px; }
+  .hosted-app .model-status-summary > div:nth-child(3) { border-inline-start: 0; }
+  .hosted-app .model-status-summary > div:nth-child(n+3) { border-top: 1px solid var(--border); }
+  .hosted-app .model-status-toolbar { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .hosted-app .model-status-search { grid-column: 1; grid-row: auto; width: 100%; }
+  .hosted-app .model-status-table tr.model-status-row { padding: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hosted-app .model-status-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-column: 1; grid-row: auto; }
+}
+@media (max-width: 639px) {
+  .hosted-app .status-heading { padding-inline-end: 0; gap: 16px; }
+}
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .model-status-search input, .hosted-app .model-status-history { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .hosted-app .model-status-history > span { background: GrayText; }
+  .hosted-app .model-status-history > span[data-active="true"] { background: Highlight; }
+}

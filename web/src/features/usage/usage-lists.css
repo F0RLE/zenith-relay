@@ -1,0 +1,31 @@
+.hosted-app .usage-page .request-link-label { display: none; }
+@media (max-width: 639px) {
+  .hosted-app .usage-page .request-table tbody tr { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 12px 14px; }
+  .hosted-app .usage-page .request-table td { padding: 0; min-height: 0; }
+  .hosted-app .usage-page .request-table td::before { display: none; }
+  .hosted-app .usage-page .request-table [data-column="model"] { grid-column: 1; grid-row: 1; order: 0; }
+  .hosted-app .usage-page .request-table [data-column="model"] small { display: none; }
+  .hosted-app .usage-page .request-table [data-column="status"] { grid-column: 2; grid-row: 1; order: 0; justify-self: end; }
+  .hosted-app .usage-page .request-table [data-column="time"] { grid-column: 1 / -1; grid-row: 2; color: var(--muted); font-size: 11px; }
+  .hosted-app .usage-page .request-table [data-column="cost"] { grid-column: 1; grid-row: 3; align-self: center; order: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .hosted-app .usage-page .request-table [data-column="cost"]:not(:has(.pending-text))::after { content: " USD"; color: var(--muted); font-size: 11px; }
+  .hosted-app .usage-page .request-table [data-column="request"] { grid-column: 2; grid-row: 3; order: 0; }
+  .hosted-app .usage-page .request-table .request-link { display: inline-flex; align-items: center; min-height: 44px; font-size: 11px; }
+  .hosted-app .usage-page .request-link-id { display: none; }
+  .hosted-app .usage-page .request-link-label { display: inline; }
+  .hosted-app .usage-page .request-table :is([data-column="key"], [data-column="timing"], [data-column="tokens"], [data-column="protocol"], [data-column="tier"], [data-column="speed"]) { display: none; }
+  .hosted-app .usage-page .aggregate-table { min-width: 0; width: 100%; }
+  .hosted-app .usage-page .aggregate-table thead { display: none; }
+  .hosted-app .usage-page .aggregate-table tbody { display: block; }
+  .hosted-app .usage-page .aggregate-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .hosted-app .usage-page .aggregate-table tr:last-child { border-bottom: 0; }
+  .hosted-app .usage-page .aggregate-table td { display: block; min-width: 0; padding: 0; border: 0; font-size: 12px; overflow-wrap: anywhere; }
+  .hosted-app .usage-page .aggregate-table td:first-child { grid-column: 1; grid-row: 1; text-align: left; }
+  .hosted-app .usage-page .aggregate-table td:first-child button { min-height: 44px; text-align: left; }
+  .hosted-app .usage-page .aggregate-table td:nth-child(2) { grid-column: 1; grid-row: 2; text-align: left; }
+  .hosted-app .usage-page .aggregate-table td:nth-child(3) { grid-column: 2; grid-row: 2; text-align: right; }
+  .hosted-app .usage-page .aggregate-table td:last-child { grid-column: 2; grid-row: 1; padding-top: 4px; text-align: right; }
+  .hosted-app .usage-page .aggregate-table td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 10px; color: var(--muted); }
+  .hosted-app .usage-page .aggregate-table .group-charge::after { content: " USD"; font-size: 10px; color: var(--muted); }
+  .hosted-app .usage-page .aggregate-table td small { margin-top: 4px; font-size: 10px; }
+}
