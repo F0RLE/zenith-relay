@@ -23,7 +23,7 @@ struct NetworkAddress {
 }
 
 fn network_addresses<'a>(
-    interfaces: impl IntoIterator<Item = (&'a str, InterfaceOperationalState, &'a [IpNetwork])>,
+    interfaces: impl IntoIterator<Item = (impl AsRef<str>, InterfaceOperationalState, &'a [IpNetwork])>,
     port: u16,
 ) -> Vec<NetworkAddress> {
     let mut addresses = Vec::new();
@@ -39,7 +39,7 @@ fn network_addresses<'a>(
                 && ip.is_private()
             {
                 addresses.push(NetworkAddress {
-                    interface: name.to_owned(),
+                    interface: name.as_ref().to_owned(),
                     base_url: format!("http://{ip}:{port}/v1"),
                 });
             }
@@ -53,13 +53,13 @@ fn network_addresses<'a>(
 
 fn read_snapshot(state: &DesktopState) -> Result<NetworkAccess> {
     let settings = state.store()?.gateway().clone();
-    let networks = Networks::new_with_refreshed_list();
+    let networks = Networks::new_with_refreshed_list().map_err(LocalPoolError::io)?;
     Ok(NetworkAccess {
         enabled: settings.bind_scope == BindScope::Lan,
         addresses: network_addresses(
             networks.iter().map(|(name, network)| {
                 (
-                    name.as_str(),
+                    name.to_string_lossy(),
                     network.operational_state(),
                     network.ip_networks(),
                 )

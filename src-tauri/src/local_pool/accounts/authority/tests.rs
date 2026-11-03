@@ -155,7 +155,7 @@ async fn twenty_concurrent_refreshes_make_one_network_rotation() {
             store.clone(),
             client.clone(),
             0,
-            fast_lock_config(),
+            ProcessLockConfig::default(),
         )
         .unwrap(),
     );

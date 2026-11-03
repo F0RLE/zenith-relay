@@ -5,11 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) fn is_claude_desktop_running() -> bool {
-    super::process::codex_process_system()
+pub(crate) fn is_claude_desktop_running() -> Result<bool, String> {
+    Ok(super::process::codex_process_system()?
         .processes()
         .values()
-        .any(super::process::is_claude_desktop_process)
+        .any(super::process::is_claude_desktop_process))
 }
 
 pub(super) fn is_desktop_executable(path: &Path) -> bool {

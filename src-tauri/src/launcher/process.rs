@@ -44,13 +44,13 @@ pub(super) use identity::{codex_process_pids, codex_process_system};
 use identity::{codex_process_pids_for, opencode_process_pids_for};
 use identity::{is_opencode_process, opencode_process_pids};
 
-pub(super) fn is_codex_running() -> bool {
-    let system = codex_process_system();
-    system.processes().values().any(is_codex_process)
+pub(super) fn is_codex_running() -> Result<bool, String> {
+    let system = codex_process_system()?;
+    Ok(system.processes().values().any(is_codex_process))
 }
 
 pub(super) fn stop_codex_and_wait() -> Result<bool, String> {
-    let pids = codex_process_pids();
+    let pids = codex_process_pids()?;
     if pids.is_empty() {
         return Ok(false);
     }
@@ -63,8 +63,8 @@ pub(super) fn stop_codex_and_wait() -> Result<bool, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        stop_codex_processes(&pids);
-        if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT) {
+        stop_codex_processes(&pids)?;
+        if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT)? {
             Ok(true)
         } else {
             Err("ChatGPT did not exit before the profile switch timeout".to_string())
@@ -75,7 +75,7 @@ pub(super) fn stop_codex_and_wait() -> Result<bool, String> {
 const CLAUDE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
-    let pids = claude_desktop_pids();
+    let pids = claude_desktop_pids()?;
     if pids.is_empty() {
         return Ok(false);
     }
@@ -93,7 +93,7 @@ pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let system = codex_process_system();
+        let system = codex_process_system()?;
         for process in system
             .processes()
             .values()
@@ -101,7 +101,7 @@ pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
         {
             let _ = process.kill();
         }
-        if wait_for_pids_exit(&pids, CLAUDE_STOP_TIMEOUT) {
+        if wait_for_pids_exit(&pids, CLAUDE_STOP_TIMEOUT)? {
             Ok(true)
         } else {
             Err("Claude Desktop did not exit before the restart timeout".to_string())
@@ -109,13 +109,13 @@ pub(crate) fn stop_claude_desktop_and_wait() -> Result<bool, String> {
     }
 }
 
-pub(super) fn is_opencode_running() -> bool {
-    let system = codex_process_system();
-    system.processes().values().any(is_opencode_process)
+pub(super) fn is_opencode_running() -> Result<bool, String> {
+    let system = codex_process_system()?;
+    Ok(system.processes().values().any(is_opencode_process))
 }
 
 pub(super) fn stop_opencode_and_wait() -> Result<bool, String> {
-    let pids = opencode_process_pids();
+    let pids = opencode_process_pids()?;
     if pids.is_empty() {
         return Ok(false);
     }
@@ -128,7 +128,7 @@ pub(super) fn stop_opencode_and_wait() -> Result<bool, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let system = codex_process_system();
+        let system = codex_process_system()?;
         for process in system
             .processes()
             .values()
@@ -136,7 +136,7 @@ pub(super) fn stop_opencode_and_wait() -> Result<bool, String> {
         {
             let _ = process.kill();
         }
-        if wait_for_pids_exit(&pids, OPENCODE_STOP_TIMEOUT) {
+        if wait_for_pids_exit(&pids, OPENCODE_STOP_TIMEOUT)? {
             Ok(true)
         } else {
             Err("OpenCode did not exit before the restart timeout".to_string())
@@ -145,8 +145,8 @@ pub(super) fn stop_opencode_and_wait() -> Result<bool, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(super) fn stop_codex_processes(pids: &[u32]) {
-    let system = codex_process_system();
+pub(super) fn stop_codex_processes(pids: &[u32]) -> Result<(), String> {
+    let system = codex_process_system()?;
     for process in system
         .processes()
         .values()
@@ -154,6 +154,7 @@ pub(super) fn stop_codex_processes(pids: &[u32]) {
     {
         let _ = process.kill();
     }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -170,7 +171,7 @@ fn stop_opencode_windows(initial_pids: &[u32], timeout: Duration) -> Result<(), 
 fn stop_windows_processes(
     initial_pids: &[u32],
     timeout: Duration,
-    current_pids: fn(&[u32]) -> Vec<u32>,
+    current_pids: fn(&[u32]) -> Result<Vec<u32>, String>,
     product: &str,
 ) -> Result<(), String> {
     let started = Instant::now();
@@ -193,7 +194,7 @@ fn stop_windows_processes(
         // process can own unrelated children (for example the Codex
         // app-server used by another host), and killing that whole tree can
         // terminate Relay or another user's process.
-        let running = current_pids(initial_pids);
+        let running = current_pids(initial_pids)?;
         let now = Instant::now();
         let elapsed = now.duration_since(started);
         if elapsed >= timeout {
@@ -273,7 +274,7 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
     // Opening an already running desktop app is a no-op. Besides avoiding a
     // duplicate process, this prevents Chromium from reinitializing its
     // profile and touching the large on-disk cache on every click.
-    if is_codex_running() {
+    if is_codex_running()? {
         return Ok(());
     }
 
@@ -312,7 +313,7 @@ fn launch_configured_chatgpt(executable: &Path) -> Result<(), String> {
         windows_hidden_command(executable)
             .spawn()
             .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?;
-        if wait_for_codex_state(true, CODEX_START_TIMEOUT) {
+        if wait_for_codex_state(true, CODEX_START_TIMEOUT)? {
             Ok(())
         } else {
             Err("The selected ChatGPT desktop application did not start".to_string())
@@ -341,11 +342,12 @@ fn launch_configured_chatgpt(executable: &Path) -> Result<(), String> {
 }
 
 pub(super) fn detected_chatgpt_launch_path() -> Option<String> {
-    if let Some(path) = codex_process_system()
-        .processes()
-        .values()
-        .filter(|process| is_codex_process(process))
-        .find_map(|process| process.exe())
+    if let Ok(system) = codex_process_system()
+        && let Some(path) = system
+            .processes()
+            .values()
+            .filter(|process| is_codex_process(process))
+            .find_map(|process| process.exe())
     {
         return Some(path.to_string_lossy().into_owned());
     }
@@ -392,13 +394,13 @@ pub(super) fn find_commands_on_path(paths: &std::ffi::OsStr, command_name: &str)
 }
 
 pub(super) fn wait_for_application_start(
-    mut running: impl FnMut() -> bool,
+    mut running: impl FnMut() -> Result<bool, String>,
     timeout: Duration,
     product: &str,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if running() {
+        if running()? {
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -415,7 +417,7 @@ fn launch_codex_desktop() -> Result<(), String> {
     let mut last_error = None;
     for target in windows_chatgpt_launch_targets() {
         match windows_hidden_command("explorer.exe").arg(&target).spawn() {
-            Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
+            Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT)? => return Ok(()),
             Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
             Err(error) => last_error = Some(error.to_string()),
         }

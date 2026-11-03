@@ -81,7 +81,7 @@ const AUTH_SNAPSHOT_SCRIPT: &str = r#"
 "#;
 
 pub(super) fn remote_debugging_port() -> Option<u16> {
-    let mut system = System::new();
+    let mut system = System::new().ok()?;
     system.refresh_processes(ProcessesToUpdate::All, true);
     unique_remote_debugging_port(system.processes().values().filter_map(|process| {
         // Reuse the launcher identity guard so the observer does not

@@ -157,7 +157,7 @@ pub(in crate::local_pool) fn active_catalog_refresh_target(
 pub(in crate::local_pool) async fn refresh_active_codex_catalog(
     state: &DesktopState,
 ) -> LocalResult<CodexCatalogRefreshStatus> {
-    let client_running = is_codex_running();
+    let client_running = is_codex_running().map_err(LocalPoolError::io)?;
     let profile_dir = default_codex_home();
     let backup_root = state.profile_backup_root();
     let Some(binding) = codex::profile_bindings(&profile_dir, &backup_root)?

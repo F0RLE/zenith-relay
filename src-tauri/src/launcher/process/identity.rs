@@ -8,44 +8,45 @@ use crate::launcher::opencode_desktop::is_macos_app_executable;
 #[cfg(target_os = "windows")]
 use sysinfo::Pid;
 
-pub(in crate::launcher) fn codex_process_system() -> System {
-    let mut system = System::new();
+pub(in crate::launcher) fn codex_process_system() -> Result<System, String> {
+    let mut system =
+        System::new().map_err(|error| format!("Could not inspect processes: {error}"))?;
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system
+    Ok(system)
 }
 
-pub(in crate::launcher) fn codex_process_pids() -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(in crate::launcher) fn codex_process_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .values()
         .filter(|process| is_codex_process(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
-pub(super) fn opencode_process_pids() -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(super) fn opencode_process_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .values()
         .filter(|process| is_opencode_process(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
-pub(in crate::launcher) fn claude_desktop_pids() -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(in crate::launcher) fn claude_desktop_pids() -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .values()
         .filter(|process| is_claude_desktop_process(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn claude_desktop_pids_for(targets: &[u32]) -> Vec<u32> {
+pub(super) fn claude_desktop_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
     matching_process_pids(targets, is_claude_desktop_process)
 }
 
@@ -64,44 +65,48 @@ pub(in crate::launcher) fn is_claude_desktop_process_identity(
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn codex_process_pids_for(targets: &[u32]) -> Vec<u32> {
+pub(super) fn codex_process_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
     matching_process_pids(targets, is_codex_process)
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn opencode_process_pids_for(targets: &[u32]) -> Vec<u32> {
+pub(super) fn opencode_process_pids_for(targets: &[u32]) -> Result<Vec<u32>, String> {
     matching_process_pids(targets, is_opencode_process)
 }
 
 #[cfg(target_os = "windows")]
-fn matching_process_pids(targets: &[u32], matcher: fn(&sysinfo::Process) -> bool) -> Vec<u32> {
+fn matching_process_pids(
+    targets: &[u32],
+    matcher: fn(&sysinfo::Process) -> bool,
+) -> Result<Vec<u32>, String> {
     if targets.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let pids = targets
         .iter()
         .copied()
         .map(Pid::from_u32)
         .collect::<Vec<_>>();
-    let mut system = System::new();
+    let mut system =
+        System::new().map_err(|error| format!("Could not inspect processes: {error}"))?;
     system.refresh_processes(ProcessesToUpdate::Some(&pids), true);
-    system
+    Ok(system
         .processes()
         .values()
         .filter(|process| matcher(process))
         .map(|process| process.pid().as_u32())
-        .collect()
+        .collect())
 }
 
 #[cfg(any(not(target_os = "windows"), test))]
-pub(in crate::launcher) fn running_target_pids(targets: &[u32]) -> Vec<u32> {
-    let system = codex_process_system();
-    system
+pub(in crate::launcher) fn running_target_pids(targets: &[u32]) -> Result<Vec<u32>, String> {
+    let system = codex_process_system()?;
+    Ok(system
         .processes()
         .keys()
         .map(|pid| pid.as_u32())
         .filter(|pid| targets.contains(pid))
-        .collect()
+        .collect())
 }
 
 pub(crate) fn is_codex_process(process: &sysinfo::Process) -> bool {
@@ -232,28 +237,31 @@ pub(in crate::launcher) fn is_codex_process_identity(
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn wait_for_codex_state(running: bool, timeout: Duration) -> bool {
+pub(super) fn wait_for_codex_state(running: bool, timeout: Duration) -> Result<bool, String> {
     let started = Instant::now();
     loop {
-        if super::is_codex_running() == running {
-            return true;
+        if super::is_codex_running()? == running {
+            return Ok(true);
         }
         if started.elapsed() >= timeout {
-            return false;
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(in crate::launcher) fn wait_for_pids_exit(pids: &[u32], timeout: Duration) -> bool {
+pub(in crate::launcher) fn wait_for_pids_exit(
+    pids: &[u32],
+    timeout: Duration,
+) -> Result<bool, String> {
     let started = Instant::now();
     loop {
-        if running_target_pids(pids).is_empty() {
-            return true;
+        if running_target_pids(pids)?.is_empty() {
+            return Ok(true);
         }
         if started.elapsed() >= timeout {
-            return false;
+            return Ok(false);
         }
         thread::sleep(Duration::from_millis(100));
     }

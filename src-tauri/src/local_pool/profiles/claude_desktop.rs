@@ -43,7 +43,7 @@ pub async fn get_claude_desktop_status(
         has_recovery: status.has_recovery,
         snapshot_name: status.snapshot_name,
         snapshot_created_at_ms: status.created_at_ms,
-        running: crate::launcher::is_claude_desktop_running(),
+        running: crate::launcher::is_claude_desktop_running().map_err(LocalPoolError::io)?,
         path: path.display().to_string(),
     })
 }

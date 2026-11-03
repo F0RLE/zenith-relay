@@ -323,7 +323,7 @@ pub(super) fn launch_opencode(restart: bool) -> Result<(), String> {
 
     // Resolve the executable before stopping the current instance. A broken
     // installation must not leave a working OpenCode session closed.
-    if restart && is_opencode_running() {
+    if restart && is_opencode_running()? {
         stop_opencode_and_wait()?;
     }
 

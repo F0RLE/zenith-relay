@@ -44,7 +44,7 @@ impl Drop for PrivateProfile {
         // cleanup bounded and off the UI thread, without unsafe native FFI.
         tauri::async_runtime::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
-            while webview_uses_profile(&path) {
+            while webview_uses_profile(&path).unwrap_or(true) {
                 if Instant::now() >= deadline {
                     return;
                 }
@@ -64,8 +64,8 @@ impl Drop for PrivateProfile {
     }
 }
 
-fn webview_uses_profile(path: &Path) -> bool {
-    let mut system = System::new();
+fn webview_uses_profile(path: &Path) -> Result<bool, sysinfo::Error> {
+    let mut system = System::new()?;
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let webviews = system
         .processes()
@@ -79,7 +79,7 @@ fn webview_uses_profile(path: &Path) -> bool {
         })
         .collect::<Vec<_>>();
     if webviews.is_empty() {
-        return false;
+        return Ok(false);
     }
     // Read only WebView2 command lines, only during this owned profile's cleanup.
     // No arguments or process metadata leave this function or enter diagnostics.
@@ -88,7 +88,7 @@ fn webview_uses_profile(path: &Path) -> bool {
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
-    webviews
+    Ok(webviews
         .into_iter()
         .filter_map(|pid| system.process(pid))
         .any(|process| {
@@ -96,7 +96,7 @@ fn webview_uses_profile(path: &Path) -> bool {
                 .cmd()
                 .iter()
                 .any(|argument| uses_profile(&argument.to_string_lossy(), path))
-        })
+        }))
 }
 
 fn uses_profile(argument: &str, profile: &Path) -> bool {

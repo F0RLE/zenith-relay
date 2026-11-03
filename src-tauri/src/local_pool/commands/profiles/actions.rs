@@ -20,7 +20,8 @@ pub async fn launch_managed_codex_profile(
     // Catalog overrides are loaded by Codex on startup. Finish deferred
     // updates before launching; do not rescan or rewrite conversation history.
     process::launch_after_catalog_refresh(
-        !is_codex_running() && state.catalog_refresh_warning().is_some(),
+        !is_codex_running().map_err(LocalPoolError::io)?
+            && state.catalog_refresh_warning().is_some(),
         catalog::refresh_active_codex_catalog(&state),
         |catalog_refresh_result| {
             super::super::record_catalog_refresh_result(&state, catalog_refresh_result)

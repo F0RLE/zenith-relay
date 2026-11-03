@@ -31,7 +31,7 @@ pub fn restart_opencode() -> Result<(), String> {
     opencode_desktop::launch_opencode(true)
 }
 
-pub fn is_codex_running() -> bool {
+pub fn is_codex_running() -> Result<bool, String> {
     process::is_codex_running()
 }
 
