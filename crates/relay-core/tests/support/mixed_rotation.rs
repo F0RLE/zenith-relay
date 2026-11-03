@@ -231,10 +231,13 @@ async fn run_mixed_waves(waves: usize) {
             }
         ));
         let progress = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
-        let responses = (0..24).map(|index| {
+        let mut clients = tokio::task::JoinSet::new();
+        for index in 0..24 {
             let client = client.clone();
             let progress = progress.clone();
-            async move {
+            let base_url = base_url.clone();
+            let runtime = runtime.clone();
+            clients.spawn(async move {
                 progress.lock().unwrap().insert(index, "started");
                 if index % 4 == 2 {
                     let response = client.get(format!("{base_url}/v1/responses"))
@@ -273,9 +276,16 @@ async fn run_mixed_waves(waves: usize) {
                     }
                 }
                 progress.lock().unwrap().insert(index, "completed");
+            });
+        }
+        tokio::time::timeout(wave_timeout, async {
+            let mut completed = 0;
+            while let Some(result) = clients.join_next().await {
+                result.expect("mixed transport client task failed");
+                completed += 1;
             }
-        });
-        tokio::time::timeout(wave_timeout, join_all(responses))
+            assert_eq!(completed, 24);
+        })
             .await
             .unwrap_or_else(|error| panic!(
                 "mixed transport wave {wave} stalled: {error}; progress={:?}; candidates={:?}; upstream HTTP={}/{} WS={}/{}; events={}",
