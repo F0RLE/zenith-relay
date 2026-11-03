@@ -53,6 +53,7 @@ pub(super) fn repair_collected_rejection(
         legacy_call_id: legacy_call_id_repair_attempted,
         function_item_id: function_item_id_repair_attempted,
         custom_tool_item_id: custom_tool_item_id_repair_attempted,
+        tool_search_item_id: tool_search_item_id_repair_attempted,
         message_item_id: message_item_id_repair_attempted,
         native_replay: native_replay_attempted,
         stale_tool_history: stale_tool_history_recovered,
@@ -73,7 +74,7 @@ pub(super) fn repair_collected_rejection(
     ));
     event.error_category = Some(failure.category.to_string());
     if (route.account_transport == crate::runtime::AccountTransport::Siwc
-        && route_forbids_fallback(route, failure.status, failure.category))
+        && route_forbids_fallback(route, failure.status, &failure))
         || failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED
     {
         let state = settle_route_failure(runtime, lease, route, &failure, response_headers);
@@ -124,6 +125,7 @@ pub(super) fn repair_collected_rejection(
             &mut ResponsesItemPrefixRepairs {
                 function_ids: function_item_id_repair_attempted,
                 custom_tool_ids: custom_tool_item_id_repair_attempted,
+                tool_search_ids: tool_search_item_id_repair_attempted,
                 message_ids: message_item_id_repair_attempted,
             },
             tried,

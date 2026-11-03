@@ -81,7 +81,11 @@ impl GatewayRuntime {
                 } else if !busy {
                     return None;
                 } else if waiter.is_none() {
-                    waiter = Some(self.register_waiter(&mut queue, &request, true)?);
+                    waiter = Some(self.register_waiter(
+                        &mut queue,
+                        &request,
+                        RequestWaitKind::Capacity,
+                    )?);
                 }
                 reserved
             };
@@ -177,7 +181,13 @@ impl GatewayRuntime {
         };
         let _waiter = {
             let mut queue = crate::poison::mutex(&self.admission);
-            let Some(waiter) = self.register_waiter(&mut queue, &request, false) else {
+            let kind = match retry_at {
+                Some(at) => RequestWaitKind::Recovery {
+                    delay_ms: at.saturating_sub(now_ms),
+                },
+                None => RequestWaitKind::PoolEvent,
+            };
+            let Some(waiter) = self.register_waiter(&mut queue, &request, kind) else {
                 return false;
             };
             waiter

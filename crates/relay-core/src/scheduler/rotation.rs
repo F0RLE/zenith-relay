@@ -22,9 +22,12 @@ pub(crate) const HEALTH_LATENCY_SWITCH_MARGIN_MILLI: u32 = 250;
 mod budget;
 mod cache_affinity;
 mod engine;
+mod latency;
 mod types;
 
 pub use budget::*;
 pub use cache_affinity::*;
 pub use engine::RotationEngine;
+use latency::LatencyWindow;
+pub use latency::{RouteLatencyDiagnostics, RouteLatencyState};
 pub use types::*;

@@ -15,9 +15,8 @@ pub fn claude_desktop_model_alias(model: &str) -> String {
 }
 
 /// A client-only route that opts into Desktop's built-in effort picker.
-/// The alias does not establish support for every value in that picker;
-/// unsupported requests are rejected.
-/// Never infer upstream capabilities, context, prices or effort from this name.
+/// Validate each selected effort against the route; reject unsupported values.
+/// Capabilities, context, prices and effort come from upstream metadata.
 /// Desktop's Fable effort metadata matches a prefix; suffixed Sonnet/Opus
 /// names do not inherit their exact-ID controls. The opaque suffix preserves
 /// each model's distinct route.

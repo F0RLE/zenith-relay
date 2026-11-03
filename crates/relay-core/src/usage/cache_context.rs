@@ -13,12 +13,78 @@ pub struct CacheContextDiagnostics {
     pub client_history: CacheHistoryDiagnostics,
     pub upstream_history: CacheHistoryDiagnostics,
     pub relay_history: CacheHistoryDiagnostics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_policy: Option<CachePolicyDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_policy: Option<CachePolicyDiagnostics>,
     pub candidate_changed: Option<bool>,
     pub previous_completed_age_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderCacheDiagnostics>,
     #[serde(skip)]
     pub(crate) provider_response_id: Option<String>,
+}
+
+/// Observed request controls, not inferred model support, defaults or cache hits.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachePolicyDiagnostics {
+    pub mode: CachePolicyMode,
+    pub ttl: CachePolicyTtl,
+    pub prewarm: CachePrewarm,
+    pub key: CacheKeyPresence,
+    pub breakpoints: CacheBreakpointDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CachePolicyMode {
+    Omitted,
+    Implicit,
+    Explicit,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CachePolicyTtl {
+    Omitted,
+    #[serde(rename = "30m")]
+    ThirtyMinutes,
+    #[serde(rename = "12h")]
+    TwelveHours,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CachePrewarm {
+    Omitted,
+    Enabled,
+    Disabled,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheKeyPresence {
+    Omitted,
+    Present,
+    Empty,
+    Other,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheBreakpointDiagnostics {
+    /// Explicit markers on message content or function/custom tool output blocks.
+    pub explicit: u32,
+    pub ttl_overrides: u32,
+    pub other: u32,
+    /// One-based position in input, never a token offset.
+    pub last_input_item: Option<u32>,
+    /// False means counts describe only the bounded inspected prefix.
+    pub complete: bool,
 }
 
 /// Provider classifications, not a substitute for observed cache-token counters.

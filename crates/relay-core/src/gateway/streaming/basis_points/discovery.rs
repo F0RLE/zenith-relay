@@ -83,7 +83,7 @@ impl From<AdapterError> for DiscoveryFailure {
 }
 
 struct DiscoveryStream {
-    inner: UpstreamStream,
+    inner: Option<UpstreamStream>,
     discovery: StreamingDiscovery,
     settlement: Arc<StreamCompletionSettlement>,
     progress: Arc<Mutex<DiscoveryProgress>>,
@@ -134,31 +134,43 @@ impl DiscoveryStream {
     }
 
     fn ingest(&mut self, bytes: Bytes) -> Result<(), AdapterError> {
-        self.received_bytes = self.received_bytes.saturating_add(bytes.len());
-        if self.received_bytes > MAX_RESPONSE_BYTES {
+        if self.round_terminal {
+            return Ok(());
+        }
+        let count = bytes
+            .len()
+            .min(MAX_RESPONSE_BYTES.saturating_sub(self.received_bytes));
+        self.received_bytes += count;
+        let mut result = Ok(());
+        if self.sse {
+            let mut pending = std::mem::take(&mut self.pending);
+            crate::protocol::sse::consume_frames(
+                &mut pending,
+                &bytes[..count],
+                self,
+                |state| state.round_terminal,
+                |state, frame| {
+                    if let Err(error) = state.ingest_frame(frame) {
+                        result = Err(error);
+                        state.round_terminal = true;
+                    }
+                },
+            );
+            self.pending = pending;
+        } else {
+            self.raw.extend_from_slice(&bytes[..count]);
+        }
+        if self.round_terminal {
+            self.inner = None;
+        }
+        // Inspect the permitted prefix first: a terminal within the budget
+        // ends this round even when the network coalesces excess trailing data.
+        // A real overflow still fails, retaining prior usage/error evidence.
+        if !self.round_terminal && count < bytes.len() {
             return Err(
                 AdapterError::upstream_stream_invalid().with_parameter("stream.response_size")
             );
         }
-        if !self.sse {
-            self.raw.extend_from_slice(&bytes);
-            return Ok(());
-        }
-        let mut pending = std::mem::take(&mut self.pending);
-        let mut result = Ok(());
-        crate::protocol::sse::consume_frames(
-            &mut pending,
-            &bytes,
-            self,
-            |state| state.round_terminal,
-            |state, frame| {
-                if let Err(error) = state.ingest_frame(frame) {
-                    result = Err(error);
-                    state.round_terminal = true;
-                }
-            },
-        );
-        self.pending = pending;
         result
     }
 
@@ -247,6 +259,7 @@ impl DiscoveryStream {
     }
 
     fn reject(&mut self, error: DiscoveryFailure) {
+        self.inner = None;
         self.update_progress();
         self.output.push_back(match error {
             DiscoveryFailure::Adapter(error) => adapter_failure(error),
@@ -261,6 +274,9 @@ impl DiscoveryStream {
     }
 
     async fn finish_round(&mut self) -> Result<(), DiscoveryFailure> {
+        // The completed reader is no longer needed for validation or replay.
+        // Release it before waiting for another generation's response headers.
+        self.inner = None;
         let mut event = self.event.clone();
         event.attempt = u16::from(self.discovery.budget.dispatches());
         event.latency_ms = self.started.elapsed().as_millis() as u64;
@@ -297,6 +313,9 @@ impl DiscoveryStream {
         let mut terminal: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AdapterError::upstream_response_invalid())?;
         populate_tokens(&mut event, &self.raw);
+        if let Some(capture) = &self.settlement.upstream_usage {
+            crate::poison::mutex(capture).apply_to(&mut event);
+        }
         // The parsed terminal now owns the required output. Release retained
         // wire frames before waiting for another lookup round or client poll.
         self.raw = Vec::new();
@@ -436,7 +455,7 @@ impl DiscoveryStream {
             });
         let capture = self.settlement.upstream_usage.clone();
         let sse = self.sse;
-        self.inner = guard_progress(
+        self.inner = Some(guard_progress(
             Box::pin(
                 response
                     .bytes_stream()
@@ -452,7 +471,7 @@ impl DiscoveryStream {
             } else {
                 crate::transport::basis_points_progress_timeout()
             },
-        );
+        ));
         self.raw.clear();
         self.received_bytes = 0;
         self.saw_generation = false;
@@ -473,7 +492,7 @@ pub(in crate::gateway::streaming) fn translate_stream(
     started: Instant,
 ) -> UpstreamStream {
     let mut state = DiscoveryStream {
-        inner: remaining,
+        inner: Some(remaining),
         discovery,
         settlement,
         progress,
@@ -514,13 +533,18 @@ pub(in crate::gateway::streaming) fn translate_stream(
                 }
                 continue;
             }
-            match state.inner.next().await {
+            let next = match state.inner.as_mut() {
+                Some(inner) => inner.next().await,
+                None => None,
+            };
+            match next {
                 Some(Ok(bytes)) => {
                     if let Err(error) = state.ingest(bytes) {
                         state.reject(error.into());
                     }
                 }
                 Some(Err(error)) => {
+                    state.inner = None;
                     state.terminal = true;
                     return Some((Err(error), state));
                 }

@@ -103,7 +103,20 @@ pub fn parse_codex_usage(
         .map_err(|_| QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false))?;
     let supplemental = collect_supplemental_windows(&usage_payload, observed_at_ms);
     let provider_credits = provider_credits(&usage_payload);
-    let explicit_limit_reached = usage_payload.rate_limit_reached_type.is_some();
+    // Optional placeholders are not evidence of exhaustion. Keep populated
+    // provider markers conservative, but never let false/empty metadata
+    // override explicit allowance and full remaining quota windows.
+    let explicit_limit_reached =
+        usage_payload
+            .rate_limit_reached_type
+            .as_ref()
+            .is_some_and(|marker| match marker {
+                serde_json::Value::Null | serde_json::Value::Bool(false) => false,
+                serde_json::Value::String(kind) => !kind.trim().is_empty(),
+                serde_json::Value::Array(kinds) => !kinds.is_empty(),
+                serde_json::Value::Object(fields) => !fields.is_empty(),
+                _ => true,
+            });
     let (primary, secondary, allowed, limit_reached) = match usage_payload.rate_limit {
         Some(rate_limit) => (
             rate_limit

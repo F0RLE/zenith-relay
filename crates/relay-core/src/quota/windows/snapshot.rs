@@ -350,6 +350,65 @@ mod tests {
     }
 
     #[test]
+    fn quota_publication_converges_across_reordered_and_repeated_observations() {
+        let observation =
+            |snapshot_ms, primary_ms, primary, secondary_ms, secondary, ledger_ms, credits| {
+                let mut primary_window = open_window(QuotaWindowKind::Primary, primary);
+                primary_window.observed_at_ms = primary_ms;
+                let mut secondary_window = open_window(QuotaWindowKind::Secondary, secondary);
+                secondary_window.observed_at_ms = secondary_ms;
+                QuotaSnapshot {
+                    primary: Some(primary_window),
+                    secondary: Some(secondary_window),
+                    available_credits_micro_units: Some(credits),
+                    provider_credits_available: true,
+                    provider_credits_observed_at_ms: Some(ledger_ms),
+                    updated_at_ms: Some(snapshot_ms),
+                    ..Default::default()
+                }
+            };
+        let observations = [
+            observation(3_000, 3_000, 0, 1_000, 7_000, 2_000, 700),
+            observation(4_000, 1_000, 9_000, 4_000, 6_000, 1_000, 900),
+            observation(3_500, 3_500, 8_000, 2_000, 6_500, 3_500, 650),
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut quota = QuotaSnapshot::default();
+            for index in order {
+                quota.merge_observation(&observations[index]);
+            }
+            assert_eq!(
+                quota.primary.as_ref().unwrap().available_basis_points,
+                Some(8_000),
+                "{order:?}"
+            );
+            assert_eq!(
+                quota.secondary.as_ref().unwrap().available_basis_points,
+                Some(6_000),
+                "{order:?}"
+            );
+            assert_eq!(quota.available_credits_micro_units, Some(650), "{order:?}");
+            assert_eq!(quota.provider_credits_observed_at_ms, Some(3_500));
+            assert_eq!(quota.updated_at_ms, Some(4_000));
+            let settled = quota.clone();
+            for incoming in &observations {
+                quota.merge_observation(incoming);
+            }
+            assert_eq!(
+                quota, settled,
+                "repeated publication changed settled evidence: {order:?}"
+            );
+        }
+    }
+
+    #[test]
     fn delayed_exhaustion_cannot_zero_a_newer_primary_window() {
         let mut quota = QuotaSnapshot {
             primary: Some(open_window(QuotaWindowKind::Primary, 9000)),

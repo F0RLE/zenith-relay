@@ -1,6 +1,7 @@
 use super::super::catalog::client_tools;
 use super::*;
 
+mod envelope;
 mod preparation;
 
 fn dispatch_runtime() -> crate::GatewayRuntime {
@@ -233,7 +234,10 @@ fn bps_tool_history_preserves_exact_wire_bytes() {
     let tools = client_tools(&request).unwrap();
     for tool in tools.iter() {
         for encoded in [false, true] {
-            let mut call = json!({"call_id":"call_wire"});
+            let mut call = json!({
+                "type":if tool.kind == "custom" {"custom_tool_call"} else {"function_call"},
+                "call_id":"call_wire","name":tool.name,"namespace":tool.namespace
+            });
             let code = if tool.kind == "custom" {
                 call["input"] = json!(script);
                 script
@@ -250,15 +254,15 @@ fn bps_tool_history_preserves_exact_wire_bytes() {
                 &expected_code
             };
             let expected_envelope = json!({
-                "summary":format!("Run client tool {}", tool.call_name()),
+                "summary":format!("Run client tool {}", tool.key()),
                 "extended_summary":"Relay client tool through the Excel / Basis Points transport",
-                "destructive":false,"references":[tool.call_name()],"code":code
+                "destructive":false,"references":[tool.key()],"code":code
             });
             let expected = json!({
                 "type":"function_call","id":"fc_call_wire","call_id":"call_wire",
                 "name":"run_officejs","arguments":expected_envelope.to_string(),"status":"completed"
             });
-            let actual = transport_call(call.as_object().unwrap(), tool).unwrap();
+            let actual = transport_call(call.as_object().unwrap(), tool.key()).unwrap();
             assert_eq!(
                 serde_json::to_vec(&actual).unwrap(),
                 serde_json::to_vec(&expected).unwrap()
@@ -337,9 +341,9 @@ fn measure_bps_tool_history_replay() {
         let header = json!({"field":field,"args":other_arguments});
         let code = format!("{}{}\n{raw}", super::super::FUNCTION_STRING_PREFIX, header);
         let envelope = json!({
-            "summary":format!("Run client tool {}", tool.call_name()),
+            "summary":format!("Run client tool {}", tool.key()),
             "extended_summary":"Relay client tool through the Excel / Basis Points transport",
-            "destructive":false,"references":[tool.call_name()],"code":code
+            "destructive":false,"references":[tool.key()],"code":code
         });
         json!({
             "type":"function_call","id":"fc_call_measure","call_id":"call_measure",
@@ -352,11 +356,12 @@ fn measure_bps_tool_history_replay() {
         let script = "Write-Output \"synthetic\"\n$x = 'C:\\synthetic\\q'\n".repeat(bytes / 48 + 1);
         let arguments = json!({"cmd":script,"workdir":r"C:\synthetic\project","limit":3});
         for encoded in [false, true] {
-            let call = json!({"call_id":"call_measure","arguments":if encoded {
+            let call = json!({"type":"function_call","name":tools[0].name,
+                "call_id":"call_measure","arguments":if encoded {
                 json!(arguments.to_string())
             } else {arguments.clone()}});
             let call = call.as_object().unwrap();
-            let expected = transport_call(call, &tools[0]).unwrap();
+            let expected = transport_call(call, tools[0].key()).unwrap();
             assert_eq!(
                 cloned_replay(call, &tools[0]).to_string(),
                 expected.to_string()
@@ -374,7 +379,7 @@ fn measure_bps_tool_history_replay() {
                         if old {
                             black_box(cloned_replay(black_box(call), &tools[0]));
                         } else {
-                            black_box(transport_call(black_box(call), &tools[0]).unwrap());
+                            black_box(transport_call(black_box(call), tools[0].key()).unwrap());
                         }
                     }
                     if trial > 0 {
@@ -388,7 +393,7 @@ fn measure_bps_tool_history_replay() {
             }
             legacy.sort_unstable();
             direct.sort_unstable();
-            assert_eq!(transport_call(call, &tools[0]).unwrap(), expected);
+            assert_eq!(transport_call(call, tools[0].key()).unwrap(), expected);
             eprintln!(
                 "bps-tool-history bytes={} json_string={encoded} warmup=1 paired_trials=9 iterations=10 legacy_median_us={} direct_median_us={}",
                 script.len(),

@@ -15,6 +15,9 @@ mod tests;
 mod tray;
 
 fn main() {
+    if let Some(code) = local_pool::accounts::proxy::diagnose::run_if_requested() {
+        std::process::exit(code);
+    }
     diagnostics::install_panic_hook();
     portable_update::run_helper_if_requested();
     desktop::run();

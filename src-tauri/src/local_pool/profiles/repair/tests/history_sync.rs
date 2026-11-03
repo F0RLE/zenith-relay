@@ -101,6 +101,28 @@ fn automatic_sync_supports_ready_api_and_reuses_matching_history() {
 }
 
 #[test]
+fn saved_custom_provider_repairs_both_rollouts_and_database_rows() {
+    let (root, state, backups, profile, rollout, database) = fixture("snapshot-custom-api");
+    let result = synchronize_provider(&state, &backups, &profile, "saved-custom-api")
+        .unwrap()
+        .unwrap();
+    assert_eq!(rollout_provider_from_file(&rollout), "saved-custom-api");
+    assert_eq!(database_provider(&database), "saved-custom-api");
+    assert!(
+        synchronize_provider(&state, &backups, &profile, "saved-custom-api")
+            .unwrap()
+            .is_none()
+    );
+    rollback(&backups, &result.backup_id).unwrap();
+    assert_eq!(rollout_provider_from_file(&rollout), "openai");
+    assert_eq!(database_provider(&database), "openai");
+    for invalid in ["", " unsafe", "unsafe\n", "unsafe\0"] {
+        assert!(synchronize_provider(&state, &backups, &profile, invalid).is_err());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn matching_history_does_not_consume_the_rewrite_budget() {
     let (root, state, backups, profile, rollout, database) = fixture("rewrite-budget");
     let matching = profile.join("sessions").join("already-matching.jsonl");

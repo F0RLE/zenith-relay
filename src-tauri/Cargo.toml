@@ -26,6 +26,7 @@ pedantic = { level = "allow", priority = -1 }
 tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
+age = { version = "0.11.5", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 chrono = "0.4.45"
@@ -75,3 +76,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 incremental = false
+
+# Avoid the Windows rustc crash when the large core crate uses a single unit.
+# Keep release optimization and cross-crate LTO enabled.
+[profile.release.package.zenith-relay-core]
+codegen-units = 16

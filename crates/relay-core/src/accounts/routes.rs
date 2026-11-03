@@ -101,7 +101,7 @@ pub fn validate_account_route_groups(groups: &[AccountRouteGroup]) -> Result<(),
     Ok(())
 }
 
-/// Plan a selection without changing stored records or granting pool admission.
+/// Build a read-only route selection plan; pool admission is separate.
 pub fn select_account_route_group(
     groups: &[AccountRouteGroup],
     current: &str,

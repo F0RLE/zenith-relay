@@ -154,6 +154,9 @@ pub(crate) async fn prepare_account_credentials(
     let stored = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
+    // A valid access token does not prove that this SIWC grant permits plan
+    // usage. Check before its newer generation can enter the shared authority.
+    super::super::records::require_plan_permission(&stored)?;
     let gateway = state.store()?.gateway().clone();
     let proxy = effective_proxy_config(&gateway, &stored)
         .map_err(|error| LocalPoolError::new(ErrorCode::GatewayUnavailable, error.message))?;
@@ -222,6 +225,7 @@ pub(crate) async fn prepare_account_credentials(
     let current_credentials = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
+    super::super::records::require_plan_permission(&current_credentials)?;
     let provider_account_id = current_credentials
         .provider_account_id()
         .map(str::to_string)
@@ -241,6 +245,7 @@ pub(crate) async fn prepare_account_credentials(
     )?;
     Ok(PreparedAccountCredentials {
         oauth_client_kind: current_credentials.oauth_client_kind(),
+        token_revision: prepared.dispatch_revision().clone(),
         tokens: prepared.tokens,
         provider_account_id,
         proxy,

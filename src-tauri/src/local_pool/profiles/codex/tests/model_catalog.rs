@@ -1019,7 +1019,7 @@ fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
             fs::write(&catalog_path, "externally changed").unwrap();
         }
 
-        discard_managed_binding_locked(&home, &backups, &secrets).unwrap();
+        discard_managed_binding_locked(&home, &backups, false, &secrets).unwrap();
 
         assert_eq!(catalog_path.exists(), changed);
         fs::remove_dir_all(root).unwrap();

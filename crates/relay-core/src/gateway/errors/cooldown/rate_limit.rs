@@ -8,6 +8,8 @@ pub(crate) struct RateLimitBodyHint {
     pub(crate) retry_after_ms: Option<u64>,
     pub(crate) explicit_retry_after_ms: Option<u64>,
     pub(crate) chatgpt_subscription: bool,
+    /// Exact SIWC quota discriminator, never inferred from diagnostic prose.
+    pub(crate) siwc_usage_limit: bool,
     pub(crate) global: bool,
     pub(crate) shared_bucket: Option<[u8; 32]>,
 }
@@ -27,7 +29,10 @@ pub(crate) fn rate_limit_body_hint(response_body: &[u8]) -> RateLimitBodyHint {
 }
 
 pub(crate) fn rate_limit_body_hint_at(response_body: &[u8], now: SystemTime) -> RateLimitBodyHint {
-    let Ok(rate_limit_payload) = serde_json::from_slice::<Value>(response_body) else {
+    let Some(rate_limit_payload) = std::str::from_utf8(response_body)
+        .ok()
+        .and_then(|body| crate::strict_json::parse(body).ok())
+    else {
         return RateLimitBodyHint::default();
     };
     rate_limit_body_hint_value(&rate_limit_payload, now)
@@ -66,17 +71,20 @@ pub(crate) fn rate_limit_body_hint_value(
             })
         })
         .or(explicit_retry_after_ms);
-    let chatgpt_subscription = ["", "/error", "/body/error", "/response/error"]
-        .into_iter()
-        .filter_map(|path| rate_limit_payload.pointer(path))
-        .any(|error| {
-            ["code", "type"].into_iter().any(|field| {
-                matches!(
-                    error.get(field).and_then(Value::as_str),
-                    Some("usage_limit_reached" | "subscription_sharing_usage_limit_exceeded")
-                )
-            })
-        });
+    let siwc_usage_limit = super::super::classify::siwc_error_code(rate_limit_payload)
+        == Some("subscription_sharing_usage_limit_exceeded");
+    let chatgpt_subscription = siwc_usage_limit
+        || ["", "/error", "/body/error", "/response/error"]
+            .into_iter()
+            .filter_map(|path| rate_limit_payload.pointer(path))
+            .any(|error| {
+                ["code", "type"].into_iter().any(|field| {
+                    matches!(
+                        error.get(field).and_then(Value::as_str),
+                        Some("usage_limit_reached")
+                    )
+                })
+            });
     let global = [
         "/type",
         "/code",
@@ -104,6 +112,7 @@ pub(crate) fn rate_limit_body_hint_value(
         retry_after_ms,
         explicit_retry_after_ms,
         chatgpt_subscription,
+        siwc_usage_limit,
         global,
         shared_bucket: organization_rate_limit_bucket(rate_limit_payload),
     }

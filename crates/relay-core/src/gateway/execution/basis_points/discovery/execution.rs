@@ -196,7 +196,8 @@ pub(in crate::gateway::execution) async fn resolve(
             .runtime
             .block_degraded_routes_enabled()
             .then_some(context.route.source_model.as_str());
-        let raw = match crate::transport::collect_with_progress_limit(
+        let mut timing = crate::gateway::response::BufferedResponseTiming::default();
+        let collected = crate::transport::collect_with_progress_limit(
             response,
             if session.is_native() {
                 None
@@ -204,10 +205,16 @@ pub(in crate::gateway::execution) async fn resolve(
                 crate::transport::basis_points_progress_timeout()
             },
             MAX_RESPONSE_BYTES,
-            |frame| crate::gateway::response::stop_basis_points_event(frame, expected_model),
+            |frame| {
+                let observed = crate::gateway::streaming::parse_sse_event(frame);
+                timing.observe(&observed, context.started.elapsed().as_millis() as u64);
+                crate::gateway::response::should_stop_basis_points_event(&observed, expected_model)
+            },
         )
-        .await
-        {
+        .await;
+        timing.finish(context.started.elapsed().as_millis() as u64);
+        timing.apply(&mut event);
+        let raw = match collected {
             Ok(raw) => raw,
             Err(partial) => {
                 populate_tokens(&mut event, &partial.bytes);
@@ -271,6 +278,8 @@ pub(in crate::gateway::execution) async fn resolve(
                 )
             })?;
             let mut completed = Response::new(Bytes::from(bytes));
+            // Retain measured upstream arrivals across the synthetic JSON body.
+            completed.extensions_mut().insert(timing);
             *completed.status_mut() = status;
             *completed.headers_mut() = headers;
             for name in [
@@ -371,8 +380,8 @@ pub(in crate::gateway) async fn dispatch_continuation(
         )
         .body(body);
     let mut response = runtime
-        .send_catalog_continuation(
-            route,
+        .send_account_request_with_owner(
+            &route.candidate_id,
             request,
             AuthorizationDispatch {
                 client_version: None,
@@ -411,7 +420,9 @@ pub(in crate::gateway) fn record_lookup(
             session.rounds,
         );
     }
+    let provider_usage = event.tool_use.provider_usage.take();
     event.tool_use = tool_use.clone();
+    event.tool_use.provider_usage = provider_usage;
     event.tool_use.tool_call_count = 0;
     event.tool_use.finish();
     if let Some(checkpoint) = session.preload_checkpoint {

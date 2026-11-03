@@ -1,7 +1,7 @@
 use super::super::import_session::SecretBackendError;
 use super::super::oauth::CODEX_OAUTH_CALLBACK_PORTS;
 use super::callback::MAX_REQUEST_HEADER_BYTES;
-use super::callback::{CallbackLanguage, callback_language, callback_success_html};
+use super::callback::render_callback_success_html;
 use super::snapshot::validate_snapshot;
 use super::snapshot::{ensure_pending_directory, pending_directory};
 use super::*;
@@ -175,21 +175,37 @@ async fn loopback_callback_validates_state_and_stores_only_secret_material() {
 }
 
 #[test]
-fn callback_success_page_uses_supported_browser_language() {
-    assert_eq!(
-        callback_language("GET / HTTP/1.1\r\nAccept-Language: ru-RU,ru;q=0.9,en;q=0.8"),
-        CallbackLanguage::Russian
-    );
-    assert_eq!(
-        callback_language("GET / HTTP/1.1\r\nAccept-Language: de-DE,de;q=0.9,en;q=0.8"),
-        CallbackLanguage::English
-    );
+fn callback_success_page_has_an_independent_english_fallback() {
+    let html = render_callback_success_html(None);
+    assert!(html.contains("You can close this window now."));
+    assert!(html.contains("lang=\"en\" dir=\"ltr\""));
+}
+
+#[test]
+fn callback_success_page_escapes_copy_without_replacing_translation_content() {
+    use crate::platform::localization::{NativeMessages, Presentation};
+    let presentation = Presentation {
+        language: "ar".into(),
+        direction: "rtl",
+        messages: NativeMessages {
+            open: "Open".into(),
+            quit: "Quit".into(),
+            start_pool: "Start".into(),
+            stop_pool: "Stop".into(),
+            pool_running: "Running".into(),
+            pool_stopped: "Stopped".into(),
+            sign_in: "Sign in".into(),
+            connected: "You can close this window now. <script>\"&'".into(),
+            close_window: "Account connected & ready".into(),
+        },
+    };
+    let html = render_callback_success_html(Some(&presentation));
+    assert!(html.contains("lang=\"ar\" dir=\"rtl\""));
     assert!(
-        callback_success_html(CallbackLanguage::Russian).contains("Теперь это окно можно закрыть.")
+        html.contains("<h1>You can close this window now. &lt;script&gt;&quot;&amp;&#39;</h1>")
     );
-    assert!(
-        callback_success_html(CallbackLanguage::English).contains("You can close this window now.")
-    );
+    assert!(html.contains("<p>Account connected &amp; ready</p>"));
+    assert!(!html.contains("<script>"));
 }
 
 #[tokio::test]

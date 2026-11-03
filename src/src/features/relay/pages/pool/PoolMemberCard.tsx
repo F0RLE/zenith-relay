@@ -28,7 +28,6 @@ type PoolMemberCardProps = {
   selected: boolean;
   checked: boolean;
   onToggleSelected: () => void;
-  isNext: boolean;
   isLastUsed: boolean;
   sourceState: SourceStatsState | undefined;
   rotationMode: PoolRoutingMode | null;
@@ -48,7 +47,6 @@ export function PoolMemberCard({
   selected,
   checked,
   onToggleSelected,
-  isNext,
   isLastUsed,
   sourceState,
   rotationMode,
@@ -122,11 +120,10 @@ export function PoolMemberCard({
 
   return (
     <article
-      className={`pool-member-card${selected || checked ? " selected" : ""}${isCurrent ? " current" : ""}${isNext ? " next" : ""}${isLastUsed ? " last-used" : ""}`}
+      className={`pool-member-card${selected || checked ? " selected" : ""}${isCurrent ? " current" : ""}${isLastUsed ? " last-used" : ""}`}
       role="listitem"
       data-member-label={memberName}
       data-current={isCurrent ? "true" : "false"}
-      data-next={isNext ? "true" : "false"}
       data-last-used={isLastUsed ? "true" : "false"}
       data-member-kind={member.kind}
       data-selected={checked}

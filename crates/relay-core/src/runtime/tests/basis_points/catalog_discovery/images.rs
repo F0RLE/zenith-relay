@@ -1,5 +1,94 @@
 use super::*;
 
+mod authorization;
+
+async fn assert_attachment_throttle(
+    stream: bool,
+    retry_after: Option<&str>,
+    expected: Option<&str>,
+) {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let mut headers = HeaderMap::new();
+    if let Some(retry_after) = retry_after {
+        headers.insert(reqwest::header::RETRY_AFTER, retry_after.parse().unwrap());
+    }
+    *crate::poison::mutex(&server.state.attachment_failure) =
+        Some((StatusCode::TOO_MANY_REQUESTS, headers));
+    *crate::poison::mutex(&server.state.attachment_file_id) =
+        Some("file-synthetic-after-throttle".to_string());
+    *crate::poison::mutex(&server.state.generation_body) = final_response();
+    let runtime = Arc::new(retry_admission::pool_runtime(&server, 2, false).await);
+    let (base, task) = recovery::gateway(runtime.clone()).await;
+    let mut request = catalog_request(stream);
+    request["input"] = json!([{"role":"user","content":[{
+        "type":"input_image",
+        "image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    }]}]);
+    let client = retry_admission::bounded_client();
+    let response = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let actual = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .map(|value| value.to_str().unwrap().to_string());
+    let body: Value = response.json().await.unwrap();
+    task.abort();
+    assert_eq!(server.state.attachment_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+    assert!(!body.to_string().contains("synthetic-private-upload-error"));
+    assert_eq!(actual.as_deref(), expected, "stream={stream}");
+    {
+        let scheduler = runtime.lock_scheduler();
+        for index in 0..2 {
+            let candidate = scheduler
+                .candidate(&format!("synthetic-account-{index}"))
+                .unwrap();
+            assert!(candidate.enabled);
+            assert!(candidate.cooldowns.is_empty());
+        }
+    }
+    // An explicit later request may retry: upload failures must not become
+    // cached file references or account-wide cooldowns.
+    *crate::poison::mutex(&server.state.attachment_failure) = None;
+    let (base, task) = recovery::gateway(runtime).await;
+    let response = client
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.bytes().await.unwrap();
+    task.abort();
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.windows(b"Ready".len()).any(|part| part == b"Ready"));
+    assert_eq!(server.state.attachment_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn attachment_throttle_preserves_retry_after() {
+    for stream in [false, true] {
+        assert_attachment_throttle(stream, Some("17"), Some("17")).await;
+    }
+}
+
+#[tokio::test]
+async fn attachment_throttle_does_not_invent_retry_after() {
+    for stream in [false, true] {
+        for retry_after in [None, Some("not-a-delay")] {
+            assert_attachment_throttle(stream, retry_after, None).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn resolved_images_survive_json_sse_discovery_and_warm_requests() {
     for stream in [false, true] {

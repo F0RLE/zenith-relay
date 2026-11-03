@@ -19,6 +19,8 @@ pub struct ProxyCheckResult {
     pub proxy_id: String,
     pub checked_at_ms: u64,
     pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ProxyCheckTiming>,
     pub ip: Option<IpAddr>,
     #[serde(default)]
     pub ipv4: Option<std::net::Ipv4Addr>,
@@ -38,6 +40,19 @@ pub struct ProxyCheckResult {
     #[serde(default)]
     pub location_error_code: Option<String>,
     pub error_code: Option<String>,
+}
+
+/// Probe offsets start after the check queue; total includes queue and optional
+/// location/address work. Headers include setup/gate/upstream wait, not just TCP.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyCheckTiming {
+    pub queue_ms: u64,
+    pub total_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_headers_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_complete_ms: Option<u64>,
 }
 
 pub async fn check(proxy_id: String, proxy: &ProxyConfig, checked_at_ms: u64) -> ProxyCheckResult {
@@ -60,16 +75,28 @@ async fn check_at(
     location_base: &str,
     family_endpoints: Option<(&str, &str)>,
 ) -> ProxyCheckResult {
+    let total_started = Instant::now();
     let _permit = CHECK_LIMIT
         .acquire()
         .await
         .expect("proxy check limiter is never closed");
     let started = Instant::now();
+    let mut timing = ProxyCheckTiming {
+        queue_ms: total_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+        ..Default::default()
+    };
     let budget = Duration::from_secs(12);
     // Measure only the bounded HTTPS exit-IP probe, never optional geolocation.
-    let probe = tokio::time::timeout(budget, proxy_check_request(proxy, check_url, budget))
-        .await
-        .unwrap_or(Err(error_codes::PROXY_CHECK_TIMEOUT));
+    let probe = tokio::time::timeout(
+        budget,
+        proxy_check_request(proxy, check_url, budget, started, &mut timing),
+    )
+    .await
+    .unwrap_or(Err(error_codes::PROXY_CHECK_TIMEOUT));
     let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     let mut result = ProxyCheckResult {
         proxy_id,
@@ -127,6 +154,12 @@ async fn check_at(
         }
         Err(code) => result.error_code = Some(code.to_owned()),
     }
+    timing.total_ms = total_started
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    result.timing = Some(timing);
     result
 }
 
@@ -134,14 +167,26 @@ async fn proxy_check_request(
     proxy: &ProxyConfig,
     url: &str,
     timeout: Duration,
+    started: Instant,
+    timing: &mut ProxyCheckTiming,
 ) -> Result<(IpAddr, Option<String>), &'static str> {
-    parse_trace(&proxy_check_body(proxy, url, timeout).await?)
+    parse_trace(&proxy_check_body_observed(proxy, url, timeout, started, Some(timing)).await?)
 }
 
 async fn proxy_check_body(
     proxy: &ProxyConfig,
     url: &str,
     timeout: Duration,
+) -> Result<Vec<u8>, &'static str> {
+    proxy_check_body_observed(proxy, url, timeout, Instant::now(), None).await
+}
+
+async fn proxy_check_body_observed(
+    proxy: &ProxyConfig,
+    url: &str,
+    timeout: Duration,
+    started: Instant,
+    mut timing: Option<&mut ProxyCheckTiming>,
 ) -> Result<Vec<u8>, &'static str> {
     // Do not inherit environment proxies, follow redirects, or retry directly.
     // Only the chosen proxy receives its credentials; no account/API key is used.
@@ -162,6 +207,10 @@ async fn proxy_check_body(
                 error_codes::PROXY_CHECK_CONNECTION_FAILED
             }
         })?;
+    if let Some(timing) = timing.as_mut() {
+        timing.response_headers_ms =
+            Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+    }
     if proxy_check_response.status() == reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         return Err(error_codes::PROXY_CHECK_AUTH_FAILED);
     }
@@ -182,6 +231,10 @@ async fn proxy_check_body(
         response_bytes.extend_from_slice(&chunk);
     }
     drop(permit);
+    if let Some(timing) = timing {
+        timing.response_complete_ms =
+            Some(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+    }
     Ok(response_bytes)
 }
 
@@ -280,6 +333,7 @@ mod tests {
             "ip": "203.0.113.9", "countryCode": "NL", "timezone": "Europe/Amsterdam", "errorCode": null,
         })).unwrap();
         assert!(result.location_source.is_none());
+        assert!(result.timing.is_none());
         assert_eq!(result.timezone.as_deref(), Some("Europe/Amsterdam"));
     }
 
@@ -302,6 +356,11 @@ mod tests {
         assert_eq!(result.timezone.as_deref(), Some("Europe/Amsterdam"));
         assert_eq!(result.location_source.as_deref(), Some("ipwhois"));
         assert!(started.elapsed().as_millis() >= u128::from(result.elapsed_ms) + 40);
+        let timing = result.timing.unwrap();
+        assert!(timing.response_headers_ms.is_some());
+        assert!(timing.response_complete_ms.unwrap() >= timing.response_headers_ms.unwrap());
+        assert!(timing.response_complete_ms.unwrap() <= result.elapsed_ms);
+        assert!(timing.total_ms >= result.elapsed_ms + timing.queue_ms + 40);
         server.abort();
     }
 
@@ -381,14 +440,19 @@ mod tests {
     #[tokio::test]
     async fn check_uses_selected_proxy_and_bounds_failures() {
         let (proxy, server) = mock_proxy().await;
+        let mut timing = ProxyCheckTiming::default();
         let check_result = proxy_check_request(
             &proxy,
             "http://unreachable.invalid/trace",
             Duration::from_secs(2),
+            Instant::now(),
+            &mut timing,
         )
         .await
         .unwrap();
         assert_eq!(check_result.0.to_string(), "203.0.113.9");
+        assert!(timing.response_headers_ms.is_some());
+        assert!(timing.response_complete_ms.unwrap() >= timing.response_headers_ms.unwrap());
         for (path, expected) in [
             ("auth", error_codes::PROXY_CHECK_AUTH_FAILED),
             ("redirect", error_codes::PROXY_CHECK_REJECTED),
@@ -400,7 +464,9 @@ mod tests {
                 proxy_check_request(
                     &proxy,
                     &format!("http://unreachable.invalid/{path}"),
-                    Duration::from_millis(100)
+                    Duration::from_millis(100),
+                    Instant::now(),
+                    &mut ProxyCheckTiming::default(),
                 )
                 .await
                 .unwrap_err(),
@@ -440,10 +506,13 @@ mod tests {
         ))
         .unwrap();
         drop(closed);
+        let mut timing = ProxyCheckTiming::default();
         let code = proxy_check_request(
             &proxy,
             &format!("http://{address}/trace"),
             Duration::from_millis(250),
+            Instant::now(),
+            &mut timing,
         )
         .await
         .unwrap_err();
@@ -452,6 +521,8 @@ mod tests {
                 || code == error_codes::PROXY_CHECK_TIMEOUT
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(timing.response_headers_ms.is_none());
+        assert!(timing.response_complete_ms.is_none());
         server.abort();
     }
 }

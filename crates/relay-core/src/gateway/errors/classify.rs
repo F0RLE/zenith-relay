@@ -5,7 +5,9 @@ use axum::http::StatusCode;
 use serde_json::Value;
 
 mod scoped;
+mod siwc;
 mod text;
+pub(super) use siwc::error_code as siwc_error_code;
 use text::classify_upstream_error_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,24 +40,10 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
-    if matches!(status, StatusCode::FORBIDDEN | StatusCode::BAD_GATEWAY)
-        && [
-            "/code",
-            "/type",
-            "/error/code",
-            "/error/type",
-            "/error/upstream_error/code",
-            "/error/upstream_error/type",
-            "/response/error/code",
-            "/response/error/type",
-        ]
-        .iter()
-        .filter_map(|path| error_payload.pointer(path).and_then(Value::as_str))
-        .any(|code| code == "subscription_sharing_user_not_eligible")
-    {
+    if let Some(category) = siwc::category(status, error_payload) {
         return UpstreamErrorClassification {
-            category: error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE,
-            message: upstream_failure_message(error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE),
+            category,
+            message: upstream_failure_message(category),
         };
     }
     // Normalization and stream guards emit typed local failures into the stream.
@@ -131,6 +119,14 @@ pub(in crate::gateway) fn classify_upstream_error_value(
         };
     }
     let classification = classify_upstream_error_text(status, &upstream_error_text(error_payload));
+    if let Some(category) =
+        scoped::capacity_category(status, error_payload, classification.category)
+    {
+        return UpstreamErrorClassification {
+            category,
+            message: upstream_failure_message(category),
+        };
+    }
     // Narrow compatibility evidence may refine a generic refusal, never hide
     // an explicit account, workspace, quota or policy discriminator.
     if matches!(

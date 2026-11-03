@@ -22,8 +22,8 @@ impl RequestCatalog {
     }
 }
 
-/// Owns the exact body from which the catalog was prepared. Only immutable
-/// access is exposed, so discovery and final validation cannot see stale tools.
+/// Owns the exact body during preparation and discovery. After dispatch, the
+/// stream keeps only response-validation state and the same parsed declarations.
 pub(in crate::gateway) struct PreparedClientRequest {
     body: Value,
     catalog: RequestCatalog,
@@ -31,6 +31,31 @@ pub(in crate::gateway) struct PreparedClientRequest {
 }
 
 impl PreparedClientRequest {
+    pub(in crate::gateway) fn into_response_context(mut self) -> Result<Self, AdapterError> {
+        // Resolve incremental declarations before releasing their history. The
+        // immutable catalog remains authoritative for selection and validation.
+        self.catalog.tools(&self.body)?;
+        if let Some(body) = self.body.as_object_mut() {
+            let history = body.remove("input");
+            let call_ids = history
+                .as_ref()
+                .into_iter()
+                .flat_map(|input| {
+                    input
+                        .as_array()
+                        .map_or(std::slice::from_ref(input), Vec::as_slice)
+                })
+                .filter_map(|item| item.get("call_id"))
+                .filter_map(Value::as_str)
+                .map(|call_id| serde_json::json!({"call_id": call_id}))
+                .collect::<Vec<_>>();
+            body.insert("input".into(), Value::Array(call_ids));
+            body.remove("instructions");
+            body.remove("tools");
+        }
+        Ok(self)
+    }
+
     pub(in crate::gateway::execution) fn prepare(
         body: Value,
         schema_validation_ms: &mut Option<u64>,
@@ -132,8 +157,16 @@ impl ClientTool {
             .unwrap_or_else(|| self.name.clone())
     }
 
-    pub(super) fn call_name(&self) -> String {
-        self.key()
+    /// Match the exact qualified key without allocating or normalizing an alias.
+    pub(super) fn matches_key(&self, key: &str) -> bool {
+        match self.namespace.as_deref() {
+            Some(namespace) => {
+                key.strip_prefix(namespace)
+                    .and_then(|suffix| suffix.strip_prefix('.'))
+                    == Some(self.name.as_str())
+            }
+            None => key == self.name,
+        }
     }
 
     pub(super) fn validate_parameter_schema(&self) -> Result<(), AdapterError> {
@@ -258,7 +291,14 @@ pub(super) fn client_tools(request_body: &Value) -> Result<Vec<ClientTool>, Adap
             }
         }
     }
-    // Current declarations are authoritative; history fills omitted tools only.
+    // An explicit current catalog replaces historical permissions, including
+    // when it is empty. Still validate historical declarations above: they are
+    // replayed separately at their original positions. Clients omitting the
+    // root catalog retain the incremental-declaration protocol.
+    if request_body.get("tools").is_some() {
+        client_tools.clear();
+        positions.clear();
+    }
     collect_tools(
         request_body.get("tools"),
         None,
@@ -328,7 +368,7 @@ pub(super) fn choice_matches_tool(choice_value: &Value, tool: &ClientTool) -> bo
     };
     let name_matches = match choice_value.get("namespace").and_then(Value::as_str) {
         Some(namespace) => tool.namespace.as_deref() == Some(namespace) && tool.name == tool_name,
-        None => tool_name == tool.name || tool_name == tool.key(),
+        None => tool_name == tool.name || tool.matches_key(tool_name),
     };
     name_matches
         && choice_value
@@ -356,7 +396,10 @@ pub(super) fn tool_spec<'a>(
 ) -> Option<&'a ClientTool> {
     // A qualified namespace is authoritative. A bare name is only safe when
     // it identifies one tool; otherwise it could dispatch to the wrong client.
-    if let Some(tool) = tools.iter().find(|tool| tool.key() == requested_tool_name) {
+    if let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.matches_key(requested_tool_name))
+    {
         return Some(tool);
     }
     let mut matches = tools.iter().filter(|tool| tool.name == requested_tool_name);
@@ -383,33 +426,6 @@ pub(super) fn client_tool_call_name(tool_call_object: &Map<String, Value>) -> St
     } else {
         format!("{namespace}.{client_tool_name}")
     }
-}
-
-/// A later turn, including compaction, may no longer carry the tool catalog.
-/// The historical call still has its name and payload, so it can be restored
-/// to the native transport without looking the tool up again.
-pub(super) fn history_tool(tool_call_object: &Map<String, Value>) -> Option<ClientTool> {
-    // Reuse the qualified client name. Storing the namespace again would turn
-    // an already qualified historical call into namespace.namespace.name.
-    let qualified_tool_name = client_tool_call_name(tool_call_object);
-    if qualified_tool_name.is_empty() {
-        return None;
-    }
-    let kind = if tool_call_object.get("type").and_then(Value::as_str) == Some("custom_tool_call") {
-        "custom"
-    } else {
-        "function"
-    };
-    Some(ClientTool {
-        name: qualified_tool_name,
-        namespace: None,
-        kind: kind.to_string(),
-        spec: Arc::new(Map::new()),
-        serialized_spec: Arc::from("{}"),
-        schema_size: Arc::new(OnceLock::new()),
-        schema_validated: Arc::new(OnceLock::new()),
-        presentation: Arc::new(OnceLock::new()),
-    })
 }
 
 #[cfg(test)]

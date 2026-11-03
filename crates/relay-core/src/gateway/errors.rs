@@ -42,7 +42,7 @@ pub(super) use failure::{
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    retryable_failure,
+    responses_tool_search_item_id_requires_tsc_prefix, retryable_failure,
 };
 
 #[cfg(test)]
@@ -85,11 +85,13 @@ pub(super) fn retryable_recovery_wait(
 pub(super) fn route_forbids_fallback(
     route: &ExecutorRoute,
     status: StatusCode,
-    category: &str,
+    failure: &AttemptFailure,
 ) -> bool {
+    let category = failure.category;
     if route.account_transport == crate::runtime::AccountTransport::Siwc {
         return status != StatusCode::TOO_MANY_REQUESTS
-            || category != error_codes::UPSTREAM_QUOTA_EXHAUSTED;
+            || category != error_codes::UPSTREAM_QUOTA_EXHAUSTED
+            || !failure.cooldown_hint.siwc_usage_limit;
     }
     route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints
         && (matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
@@ -123,13 +125,13 @@ pub(crate) fn basis_points_transport_rejected(status: u16, category: Option<&str
 pub(super) fn retryable_route_failure(
     route: &ExecutorRoute,
     status: StatusCode,
-    category: &'static str,
+    failure: &AttemptFailure,
     has_previous_response_id: bool,
 ) -> bool {
-    if route_forbids_fallback(route, status, category) {
+    if route_forbids_fallback(route, status, failure) {
         return false;
     }
-    retryable_failure(status, category, has_previous_response_id)
+    retryable_failure(status, failure.category, has_previous_response_id)
 }
 
 pub(super) fn retryable_route_status(
@@ -138,7 +140,7 @@ pub(super) fn retryable_route_status(
     has_previous_response_id: bool,
 ) -> bool {
     let failure = AttemptFailure::status_with_body(status, None);
-    retryable_route_failure(route, status, failure.category, has_previous_response_id)
+    retryable_route_failure(route, status, &failure, has_previous_response_id)
 }
 
 pub(super) fn admission_failure(

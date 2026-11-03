@@ -11,34 +11,62 @@
     // Storage can be unavailable on the first WebView load.
   }
   html.dataset.theme = theme;
-  html.lang = language.toLowerCase().startsWith("ru") ? "ru" : "en";
+  html.lang = canonicalLanguage(language) || "en";
+  html.dir = "ltr";
 
   var phase = "interface";
   var slow = false;
   var finished = false;
   var copy = {
-    en: {
-      interface: "Preparing the interface…",
-      runtime: "Loading your workspace…",
-      slow: "Startup is taking longer than usual",
-      error: "Relay could not start",
-      reload: "Reload",
-    },
-    ru: {
-      interface: "Подготовка интерфейса…",
-      runtime: "Загрузка рабочего пространства…",
-      slow: "Запуск занимает больше времени",
-      error: "Не удалось запустить Relay",
-      reload: "Перезагрузить",
-    },
+    interface: "Preparing the interface…",
+    runtime: "Loading your workspace…",
+    slow: "Startup is taking longer than usual",
+    error: "Relay could not start",
+    reload: "Reload",
   };
+  function canonicalLanguage(value) {
+    if (typeof value !== "string" || !value || value.length > 100) return null;
+    try {
+      return Intl.getCanonicalLocales(value.split(/[.@]/)[0].replace(/_/g, "-"))[0] || null;
+    } catch (_) { return null; }
+  }
+
+  function matchesLanguage(cached) {
+    var candidate = canonicalLanguage(html.lang);
+    while (candidate) {
+      if (cached.locale === candidate || (Array.isArray(cached.aliases) && cached.aliases.indexOf(candidate) !== -1)) return true;
+      var separator = candidate.lastIndexOf("-");
+      candidate = separator === -1 ? null : candidate.slice(0, separator);
+    }
+    return false;
+  }
+
+  function currentCopy() {
+    try {
+      var rawCopy = localStorage.getItem("relay.startupCopy");
+      if (rawCopy && rawCopy.length < 8192) {
+        var cached = JSON.parse(rawCopy);
+        if (cached && typeof cached.locale === "string" && canonicalLanguage(cached.locale) === cached.locale && matchesLanguage(cached) &&
+            (cached.direction === "ltr" || cached.direction === "rtl") && cached.copy &&
+            ["interface", "runtime", "slow", "error", "reload"].every(function (key) {
+              return typeof cached.copy[key] === "string" && cached.copy[key].trim().length > 0 && cached.copy[key].length < 1024;
+            })) {
+          html.dir = cached.direction;
+          return cached.copy;
+        }
+      }
+    } catch (_) { /* A display cache never blocks startup. */ }
+    return copy;
+  }
+
+  currentCopy();
 
   function render() {
     if (finished) return;
     html.dataset.startupState = phase;
     var message = document.getElementById("splash-message");
     if (!message) return;
-    var text = copy[html.lang.startsWith("ru") ? "ru" : "en"];
+    var text = currentCopy();
     var failed = phase === "error";
     message.textContent = failed ? text.error : slow ? text.slow : text[phase];
     var reload = document.getElementById("splash-reload");

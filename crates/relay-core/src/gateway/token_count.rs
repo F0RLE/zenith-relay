@@ -285,6 +285,7 @@ async fn execute(
                 lease: Some(&lease),
                 usage_event: None,
             },
+            None,
         )
         .await;
     let response = match upstream {
@@ -303,7 +304,7 @@ async fn execute(
                 } else {
                     ExecutionObservation::unknown()
                 },
-                // A successful tokenizer does not establish generation health.
+                // Tokenizer and generation health are separate observations.
                 health: HealthObservation::Unknown,
             },
             super::now_ms(),

@@ -35,6 +35,16 @@ impl WebsocketTransportObservation {
 }
 
 impl GatewayRuntime {
+    pub(in crate::runtime) fn request_proxy(&self, candidate_id: &str) -> Option<&ProxyConfig> {
+        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+            return account.clients.proxy.as_ref();
+        }
+        self.source_candidate_bindings
+            .get(candidate_id)
+            .and_then(|binding| self.sources.get(&binding.source_id))
+            .and_then(|source| source.proxy.as_ref())
+    }
+
     pub(super) fn direct_http_route(&self, candidate_id: &str) -> bool {
         self.chatgpt_accounts.get(candidate_id).map_or_else(
             || {

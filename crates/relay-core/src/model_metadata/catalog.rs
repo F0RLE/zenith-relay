@@ -262,8 +262,8 @@ impl ModelMetadataCatalog {
     }
 
     /// Prefer the manufacturer's native API for known model groups.
-    /// Exact source endpoint declarations take
-    /// precedence; this preference does not establish endpoint support.
+    /// Exact source endpoint declarations take precedence over group preference;
+    /// endpoint support requires separate evidence.
     ///
     /// The group comes from the validated reference record: the canonical
     /// model ID's namespace first, then a first-party namespace, then the

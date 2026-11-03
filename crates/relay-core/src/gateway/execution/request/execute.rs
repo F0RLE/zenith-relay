@@ -11,7 +11,9 @@ use super::state::AttemptState;
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
 ) -> Response<Body> {
-    let scope = context.runtime.track_request_usage(&context.request_id);
+    let scope = context
+        .runtime
+        .track_request_usage(&context.request_id, &context.budget);
     let response = execute_request_inner(context).await;
     let streaming = response.status().is_success()
         && response

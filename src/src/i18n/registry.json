@@ -1,0 +1,20 @@
+[
+  {
+    "code": "en",
+    "nativeName": "English",
+    "englishName": "English",
+    "direction": "ltr",
+    "fallbacks": [],
+    "helpLocale": "en",
+    "format": "ts"
+  },
+  {
+    "code": "ru",
+    "nativeName": "Русский",
+    "englishName": "Russian",
+    "direction": "ltr",
+    "fallbacks": ["en"],
+    "helpLocale": "ru",
+    "format": "ts"
+  }
+]

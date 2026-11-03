@@ -101,10 +101,10 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
   </>;
 }
 
-export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false, align = "end", fitContent = false, listClassName = "", showSelectionIndicator = true }: {
+export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false, align = "end", fitContent = false, listClassName = "", showSelectionIndicator = true, search }: {
   label: string;
   value: string;
-  options: Array<{ value: string; label: string; shortLabel?: string }>;
+  options: Array<{ value: string; label: string; shortLabel?: string; searchText?: string }>;
   icon?: ReactNode;
   onChange: (value: string) => void;
   className?: string;
@@ -113,16 +113,22 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   fitContent?: boolean;
   listClassName?: string;
   showSelectionIndicator?: boolean;
+  search?: { label: string; empty: string };
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const normalize = (text: string) => text.normalize("NFKD").replace(/\p{M}/gu, "").toLocaleLowerCase();
+  const terms = normalize(query).split(/\s+/).filter(Boolean);
+  const visibleOptions = search && terms.length ? options.filter(option => terms.every(term => normalize(`${option.label} ${option.value} ${option.searchText ?? ""}`).includes(term))) : options;
   const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const selected: (typeof options)[number] | undefined = options.find((option) => option.value === value)
     ?? (value ? { value, label: value } : options[0]);
 
   const close = (restoreFocus = false) => {
     setOpen(false);
+    setQuery("");
     setPosition(null);
     if (restoreFocus) triggerRef.current?.focus();
   };
@@ -160,13 +166,16 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
         + pixels(listStyle.borderRightWidth),
       );
     };
-    const preferredWidth = fitContent ? measuredWidth() : trigger.width;
+    const preferredWidth = search ? Math.max(260, trigger.width) : fitContent ? measuredWidth() : trigger.width;
     const width = Math.min(preferredWidth, window.innerWidth - margin * 2);
     // Measure wrapping at the final field width before choosing above/below.
     list.style.width = `${width}px`;
-    const preferredLeft = align === "start"
+    const logicalAlign = getComputedStyle(triggerRef.current!).direction === "rtl"
+      ? align === "start" ? "end" : align === "end" ? "start" : align
+      : align;
+    const preferredLeft = logicalAlign === "start"
       ? trigger.left
-      : align === "center"
+      : logicalAlign === "center"
         ? trigger.left + (trigger.width - width) / 2
         : trigger.right - width;
     const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - width - margin));
@@ -178,7 +187,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     const height = Math.min(list.offsetHeight, maxHeight);
     const top = opensBelow ? below : trigger.top - height - gap;
     setPosition({ left, top: Math.max(contentTop, top), width, maxHeight });
-  }, [align, fitContent, open, options.length, showSelectionIndicator]);
+  }, [align, fitContent, open, options.length, showSelectionIndicator, query]);
 
   useEffect(() => {
     if (!open) return;
@@ -186,7 +195,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     const openingFrame = window.requestAnimationFrame(() => {
       // The portal stays hidden until its measured position is committed.
       const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-      selectedOption?.focus({ preventScroll: true });
+      const searchInput = listRef.current?.querySelector<HTMLInputElement>('input[type="search"]');
+      (searchInput ?? selectedOption)?.focus({ preventScroll: true });
       opening = false;
     });
     const onPointerDown = (event: PointerEvent) => {
@@ -229,7 +239,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
 
   const moveFocus = (event: React.KeyboardEvent<HTMLElement>, index: number) => {
     const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : direction ? (index + direction + options.length) % options.length : -1;
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? visibleOptions.length - 1 : direction && visibleOptions.length ? (index + direction + visibleOptions.length) % visibleOptions.length : -1;
     if (event.key === "Escape") {
       event.preventDefault();
       close(true);
@@ -270,13 +280,21 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       <div
         ref={listRef}
         className={`relay-option-list relay-popover-panel ${listClassName}`.trim()}
-        role="listbox"
+        role={search ? undefined : "listbox"}
         aria-label={label}
         data-positioned={Boolean(position)}
         data-selection-indicator={showSelectionIndicator}
         style={position ? { left: position.left, top: position.top, width: position.width, maxHeight: `min(280px, ${position.maxHeight}px)` } : undefined}
       >
-        {options.map((option, index) => <button
+        {search ? <input type="search" className="relay-language-search" aria-label={search.label} placeholder={search.label} value={query}
+          onChange={event => setQuery(event.target.value)} onKeyDown={event => {
+            if (event.key === "ArrowDown" || event.key === "Enter") {
+              event.preventDefault();
+              listRef.current?.querySelector<HTMLElement>('[role="option"]')?.focus();
+            }
+          }} /> : null}
+        <div className={search ? "relay-language-results" : "relay-option-items"} role={search ? "listbox" : undefined} aria-label={search ? label : undefined}>
+        {visibleOptions.map((option, index) => <button
           key={option.value}
           type="button"
           className="relay-popover-item"
@@ -292,6 +310,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
           <span>{option.label}</span>
           {showSelectionIndicator && option.value === value ? <Check aria-hidden /> : null}
         </button>)}
+        </div>
+        {search && visibleOptions.length === 0 ? <p role="status">{search.empty}</p> : null}
       </div>,
       document.body,
     ) : null}

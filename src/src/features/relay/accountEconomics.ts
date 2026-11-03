@@ -44,10 +44,7 @@ export function formatRemainingApiEquivalent(value: Pick<RemainingApiEquivalentE
 }
 
 /**
- * Builds the shared display projection for account usage cards.
- *
- * These values do not affect quota state, routing, provider cost, or customer
- * billing.
+ * Builds display-only estimates for account usage cards.
  */
 export function buildAccountValueProjection(
   usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
@@ -68,7 +65,7 @@ export function buildAccountValueProjection(
 /**
  * Applies the same persisted workload calibration to comparable subscriptions.
  * Native code owns pairing, pricing coverage, cohort selection and ledger identity.
- * Old per-account cumulative/recent evidence is deliberately not a fallback.
+ * Requires the current workload calibration.
  */
 export function estimateRemainingApiEquivalent(
   quota?: Pick<QuotaSnapshot, "primary" | "secondary" | "directBalanceMicroUsd">,

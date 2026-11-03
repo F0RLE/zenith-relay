@@ -51,7 +51,7 @@ pub(crate) async fn open_hosted_preview(
         return Err("Start the local web preview on 127.0.0.1:1441 first.".into());
     }
     let url = Url::parse(PREVIEW_URL).map_err(|_| "Invalid local preview address.")?;
-    // This label has no desktop capability; the demo never receives native authority.
+    // This preview window is isolated from Desktop capabilities and native authority.
     WebviewWindowBuilder::new(&app, PREVIEW_WINDOW, WebviewUrl::External(url))
         .title("Relay Hosted — DEMO")
         .inner_size(1280.0, 900.0)

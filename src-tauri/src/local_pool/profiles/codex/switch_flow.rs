@@ -119,7 +119,7 @@ pub(super) fn switch_to_account_with_intent(
                 })?;
             let profile_dir = canonical_profile_dir(codex_home)?;
             let auth_path = profile_dir.join(AUTH_FILE);
-            let auth_bytes = read_optional_bytes(&auth_path)?;
+            let auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
             let config_path = profile_dir.join(CONFIG_FILE);
             let config_bytes = read_optional_bytes(&config_path)?;
             let config_document =
@@ -245,7 +245,9 @@ pub(super) fn restore_with(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let _profile_guard = lock_codex_profile();
-    local::restore_local_locked(codex_home, backup_root, secrets)
+    switch_transaction::run(codex_home, secrets, |secrets| {
+        local::restore_local_locked(codex_home, backup_root, secrets)
+    })
 }
 
 #[cfg(test)]
@@ -275,5 +277,7 @@ pub(super) fn restore_account_with(
     secrets: &impl SecretBackend,
 ) -> Result<Option<ProfileBinding>> {
     let _profile_guard = lock_codex_profile();
-    account::restore_account_locked(codex_home, backup_root, secrets)
+    switch_transaction::run(codex_home, secrets, |secrets| {
+        account::restore_account_locked(codex_home, backup_root, secrets)
+    })
 }

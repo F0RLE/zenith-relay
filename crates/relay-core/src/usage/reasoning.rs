@@ -3,9 +3,8 @@ use crate::WireApi;
 use serde_json::Value;
 /// Whitelisted reasoning effort metadata for one Usage event.
 ///
-/// This is diagnostics only. It records the client-facing request value and
-/// the value present in the exact prepared upstream payload; it never infers
-/// capability from a model or changes request routing.
+/// Read-only record of the requested and prepared-wire values. Capability
+/// resolution and routing belong to their respective owners.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReasoningEffortDiagnostics {
     pub(crate) requested: Option<String>,

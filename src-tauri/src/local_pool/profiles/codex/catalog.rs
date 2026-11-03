@@ -14,7 +14,7 @@ use zenith_relay_core::{
 // Keep the desktop catalog bound aligned with the shared model-discovery
 // transport limit. Native ChatGPT catalogs can legitimately exceed 512 KiB
 // once capability metadata for the full visible inventory is included.
-const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+pub(super) const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 mod installed;

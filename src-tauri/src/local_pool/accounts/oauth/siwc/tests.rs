@@ -16,7 +16,7 @@ fn sign(claims: &Value) -> String {
 fn now_ms() -> u64 {
     jsonwebtoken::get_current_timestamp() * 1000
 }
-fn registration() -> SiwcRegistration {
+pub(super) fn registration() -> SiwcRegistration {
     SiwcRegistration {
         client_id: "oaiapp_synthetic".into(),
         host_id: "urn:uuid:synthetic-host".into(),

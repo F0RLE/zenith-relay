@@ -1,6 +1,33 @@
 import { expect, test } from "../bun-playwright";
-import { installTauriMock } from "./tauri-mock";
+import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 import { chooseOption } from "./operations/helpers";
+
+test("background context changes preserve newer typing until its own autosave", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true,
+    modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_000_000, policy: { mode: "custom", tokens: 240000 } } } });
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+  const row = page.locator('[data-model-id="gpt-5.4"]');
+  const tokens = row.getByRole("spinbutton", { name: "Context limit, tokens", exact: true });
+  await expect(tokens).toHaveValue("240000");
+  await tokens.fill("250000");
+  await page.evaluate(async () => {
+    await (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args: unknown) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("set_local_model_context", { input: { modelId: "gpt-5.4", contextPolicy: { mode: "custom", tokens: 260000 } } });
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await page.clock.runFor(250);
+  await expect(tokens).toHaveValue("250000");
+  await expect(tokens).toBeFocused();
+  await page.clock.runFor(600);
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { contextPolicy?: unknown } } }>;
+  }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_context")?.args.input?.contextPolicy))
+    .toEqual({ mode: "custom", tokens: 250000 });
+  await expect(tokens).toHaveValue("250000");
+});
 
 test("model pricing edits long Flex without changing the application context mode", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceDetectedModelPrices: {
@@ -213,6 +240,46 @@ test("failed custom autosave restores the confirmed value without a retry loop",
   expect(await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string }>;
   }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_model_context").length)).toBe(1);
+});
+
+test("a rejected older context save preserves newer typing and saves it next", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true,
+    modelContext: { "gpt-5.4": { configurable: true, contextLimit: 1_000_000, policy: { mode: "custom", tokens: 240000 } } } });
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules", exact: true }).click();
+  await page.evaluate(() => {
+    const target = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      __REJECT_CONTEXT__?: () => void;
+    };
+    const invoke = target.__TAURI_INTERNALS__.invoke;
+    let first = true;
+    target.__TAURI_INTERNALS__.invoke = (name, args, options) => {
+      if (name !== "set_local_model_context" || !first) return invoke(name, args, options);
+      first = false;
+      return new Promise((_, reject) => { target.__REJECT_CONTEXT__ = () => reject({ code: "synthetic_rejection", message: "Synthetic rejected save" }); });
+    };
+  });
+  const tokens = page.locator('[data-model-id="gpt-5.4"]').getByRole("spinbutton");
+  await tokens.fill("250000");
+  await page.clock.runFor(500);
+  await tokens.fill("260000");
+  await page.evaluate(() => {
+    const reject = (window as unknown as { __REJECT_CONTEXT__?: () => void }).__REJECT_CONTEXT__;
+    if (!reject) throw new Error("Synthetic context save did not start");
+    reject();
+  });
+  await page.clock.runFor(50);
+  await expect(page.locator('[data-model-id="gpt-5.4"] .model-context-toggle')).toHaveAttribute("aria-busy", "false");
+  await expect(tokens).toHaveValue("260000");
+  await expect(tokens).toBeFocused();
+  await page.clock.runFor(600);
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { contextPolicy?: unknown } } }>;
+  }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "set_local_model_context")?.args.input?.contextPolicy))
+    .toEqual({ mode: "custom", tokens: 260000 });
 });
 
 for (const defaultTokens of [undefined, 200_000]) {

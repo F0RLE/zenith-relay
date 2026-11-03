@@ -55,7 +55,10 @@ impl OAuthCompletionCheckpoint {
         issued_at_ms: u64,
     ) -> LocalResult<Self> {
         client_kind
-            .validate_token_hints(tokens.id_token(), Some(tokens.access_token()))
+            .validate_token_hints(
+                tokens.id_token(),
+                (!tokens.access_token().is_empty()).then_some(tokens.access_token()),
+            )
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         let claims = tokens
             .identity_claims()
@@ -116,6 +119,29 @@ impl OAuthCompletionCheckpoint {
         local_account_id: &str,
         generation: u64,
     ) -> Result<StoredCodexCredentials, CredentialError> {
+        if self.client_kind == OAuthClientKind::Siwc && self.access_token.is_empty() {
+            let invalid = || CredentialError {
+                code: crate::local_pool::accounts::credentials::CredentialErrorCode::InvalidSecret,
+                message: "SIWC identity-only completion is invalid".into(),
+            };
+            let registration = self.siwc.clone().ok_or_else(invalid)?;
+            if self.refresh_token.is_some()
+                || self.expires_at_ms.is_some()
+                || self.provider_account_id != registration.identity_key()
+                || self.provider_user_id.as_deref() != Some(registration.subject.as_str())
+                || self.account_is_fedramp
+            {
+                return Err(invalid());
+            }
+            return StoredCodexCredentials::new_siwc_identity(
+                local_account_id,
+                registration,
+                self.id_token.clone().ok_or_else(invalid)?,
+                self.email.clone(),
+                self.issued_at_ms,
+                generation,
+            );
+        }
         StoredCodexCredentials::new(
             local_account_id,
             self.access_token.clone(),
@@ -301,3 +327,7 @@ pub(super) fn completion_secret_error() -> LocalPoolError {
         "OAuth completion secret storage is unavailable",
     )
 }
+
+#[cfg(test)]
+#[path = "checkpoint/siwc_tests.rs"]
+mod siwc_tests;

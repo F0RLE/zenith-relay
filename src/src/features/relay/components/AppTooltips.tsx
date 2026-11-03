@@ -73,12 +73,8 @@ export function AppTooltips() {
     };
   }, [anchorRef, hide, show, showNow]);
 
-  useEffect(() => {
-    if (describedBy) return;
-    anchorRef.current = null;
-    setHint(null);
-  }, [anchorRef, describedBy]);
-
+  // Keep the bounded last target across hiding. Clearing it in a passive effect
+  // can erase a newer keyboard activation; visibility owns ARIA cleanup below.
   useLayoutEffect(() => {
     const target = hint?.target;
     if (!target || !describedBy) return;

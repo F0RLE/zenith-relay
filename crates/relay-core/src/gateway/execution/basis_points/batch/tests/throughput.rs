@@ -85,6 +85,126 @@ fn failed_late_batch_leaves_values_and_allocations_unchanged() {
     );
 }
 
+fn single_call(bytes: usize, stringified: bool) -> Value {
+    let unit = "synthetic \"quoted\"\\path\r\nстрока\t";
+    let code = json!({"path":unit.repeat(bytes / unit.len() + 1)}).to_string();
+    let mut arguments = json!({"references":["inspect"],"code":code});
+    if stringified {
+        arguments = Value::String(arguments.to_string());
+    }
+    json!({"type":"function_call","name":TRANSPORT_TOOL,"call_id":"single",
+        "arguments":arguments,"status":"completed"})
+}
+
+#[test]
+fn batch_probe_preserves_single_call_storage_and_json_reference_semantics() {
+    let request = request();
+    let tools = client_tools(&request).unwrap();
+    for stringified in [false, true] {
+        let mut items = vec![single_call(4096, stringified)];
+        let before = items.clone();
+        let pointer = items.as_ptr();
+        expand_output(&mut items, &request, &tools).unwrap();
+        assert_eq!(items, before);
+        assert_eq!(items.as_ptr(), pointer);
+    }
+
+    let code =
+        serde_json::to_string(&format!("{PREFIX}[{{\"path\":\"a\"}},{{\"path\":\"b\"}}]")).unwrap();
+    // Escape the marker so these cases exercise metadata screening rather than
+    // its conservative literal-marker shortcut.
+    let code = code.replacen("relay-tool-batch-v1", r"\u0072elay-tool-batch-v1", 1);
+    for (fields, count) in [
+        (
+            r#""references":["inspect"],"references":["inspect","inspect"]"#,
+            2,
+        ),
+        (
+            r#""references":["inspect","inspect"],"references":["inspect"]"#,
+            1,
+        ),
+        (r#""refere\u006eces":["inspect","inspect"]"#, 2),
+        (
+            r#""metadata":{"references":["inspect","inspect"]},"references":["inspect"]"#,
+            1,
+        ),
+        (r#""references":null"#, 1),
+        (r#""references":{"nested":["inspect","inspect"]}"#, 1),
+        (r#""references":[]"#, 1),
+    ] {
+        let text = format!("{{{fields},\"code\":{code}}}");
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        let mut expected = vec![pair()];
+        expected[0]["arguments"] = parsed;
+        expand_output(&mut expected, &request, &tools).unwrap();
+        let mut items = vec![pair()];
+        items[0]["arguments"] = Value::String(text);
+        let before = items.clone();
+        expand_output(&mut items, &request, &tools).unwrap();
+        assert_eq!(items.len(), count, "fields={fields}");
+        if count == 1 {
+            assert_eq!(items, before);
+        } else {
+            assert_eq!(items, expected);
+        }
+    }
+}
+
+#[test]
+fn batch_probe_never_releases_malformed_single_call_arguments() {
+    for arguments in [
+        r#"{"references":["inspect"],"code":"\uD800"}"#,
+        r#"{"references":["inspect"],"code":"\q"}"#,
+        r#"{"references":["inspect"],"code":"{}"} trailing"#,
+        r#"{"references":["inspect"],"code":"{}""#,
+        r#"{"references":["inspect","inspect"],"code":"\uD800"}"#,
+        r#"{"references":["inspect"],"code":"relay-tool-batch-v1\uD800"}"#,
+    ] {
+        let mut item = pair();
+        item["arguments"] = json!(arguments);
+        let error = translate_response_value(response(item), &request()).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.arguments"));
+    }
+}
+
+#[test]
+#[ignore = "local BPS single-call batch inspection benchmark; no provider requests"]
+fn measure_bps_single_call_batch_probe() {
+    use std::{hint::black_box, time::Instant};
+
+    let request = request();
+    let tools = client_tools(&request).unwrap();
+    for bytes in [4096, 1024 * 1024] {
+        for stringified in [false, true] {
+            for batch in [false, true] {
+                let mut source = vec![single_call(bytes, stringified)];
+                if batch {
+                    source.push(pair());
+                }
+                let wire_bytes = serde_json::to_vec(&source).unwrap().len();
+                let mut expected = source.clone();
+                expand_output(&mut expected, &request, &tools).unwrap();
+                let mut samples = Vec::new();
+                for trial in 0..16 {
+                    let mut items = source.clone();
+                    let started = Instant::now();
+                    expand_output(black_box(&mut items), &request, &tools).unwrap();
+                    let elapsed = started.elapsed().as_nanos();
+                    assert_eq!(items, expected);
+                    if trial > 0 {
+                        samples.push(elapsed);
+                    }
+                }
+                samples.sort_unstable();
+                eprintln!(
+                    "bps-batch-probe stringified={stringified} batch={batch} wire_bytes={wire_bytes} trials=15 median_ns={} p90_ns={}",
+                    samples[7], samples[13]
+                );
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore = "local BPS batch expansion benchmark; no provider requests"]
 fn measure_bps_batch_passthrough() {

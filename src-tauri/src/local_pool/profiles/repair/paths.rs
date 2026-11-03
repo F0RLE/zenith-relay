@@ -13,10 +13,11 @@ pub(super) fn canonical_child(root: &Path, path: &Path) -> Result<PathBuf, Strin
 }
 
 pub(super) fn validate_target_provider(provider_name: &str) -> Result<(), String> {
-    if matches!(
-        provider_name,
-        "openai" | "zenith_relay_local" | "codex_local_access"
-    ) {
+    if !provider_name.is_empty()
+        && provider_name.len() <= 256
+        && provider_name.trim() == provider_name
+        && !provider_name.chars().any(char::is_control)
+    {
         Ok(())
     } else {
         Err("repair target provider is invalid".to_string())

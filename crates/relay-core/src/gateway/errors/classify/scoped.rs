@@ -3,6 +3,43 @@
 use super::*;
 use serde::Deserialize;
 
+pub(super) fn capacity_category(
+    status: StatusCode,
+    payload: &Value,
+    category: &str,
+) -> Option<&'static str> {
+    if matches!(
+        status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::PAYMENT_REQUIRED
+    ) || !matches!(
+        category,
+        error_codes::UPSTREAM_STATUS
+            | error_codes::UPSTREAM_ERROR
+            | error_codes::UPSTREAM_UNAVAILABLE
+            | error_codes::UPSTREAM_SERVER_ERROR
+            | error_codes::UPSTREAM_BAD_GATEWAY
+            | error_codes::UPSTREAM_OVERLOADED
+            | error_codes::UPSTREAM_RATE_LIMITED
+    ) {
+        return None;
+    }
+    // A relay hop can preserve capacity rejection with generic display text.
+    // Read only the discriminator; echoed inputs and prose are not evidence.
+    [
+        "/code",
+        "/error/code",
+        "/response/error/code",
+        "/body/error/code",
+    ]
+    .iter()
+    .filter_map(|path| payload.pointer(path).and_then(Value::as_str))
+    .any(|code| {
+        code.trim()
+            .eq_ignore_ascii_case("upstream_capacity_exhausted")
+    })
+    .then_some(error_codes::UPSTREAM_MODEL_CAPACITY)
+}
+
 pub(super) fn forbidden_category(status: StatusCode, payload: &Value) -> Option<&'static str> {
     if status != StatusCode::FORBIDDEN {
         return None;

@@ -77,14 +77,8 @@ pub(super) async fn install_connected(
         attempt,
         started,
     } = connected;
-    let _ = send_message(
-        upstream,
-        UpstreamMessage::Close {
-            code: UpstreamCloseCode::Normal,
-            reason: String::new(),
-        },
-    )
-    .await;
+    // The retired connection must not delay a ready replacement while its
+    // peer is stalled. Dropping it does not replay either generation.
     *upstream = next_upstream;
     install_in_flight(
         runtime,

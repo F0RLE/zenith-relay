@@ -2,6 +2,59 @@ import { expect, test } from "../bun-playwright";
 import type { PoolRoutingMode, RuntimeSnapshot } from "../../src/features/relay/api/types";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
+test("pool fallback sorts linked quota without a runtime and expires it while idle", async ({ page }, testInfo) => {
+  await page.clock.install();
+  await installTauriMock(page, { locale: "en", populated: true, usageActive: false, accountCount: 5 });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = native.invoke.bind(native);
+    const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+    const now = Date.now();
+    runtime.sources = [];
+    runtime.accounts.forEach((account, index) => {
+      account.label = account.identityHint = ["Quota 34", "Quota 28", "Quota 9", "SIWC 56", "Linked reference"][index]!;
+      account.inPool = index !== 4;
+      account.enabled = account.secretAvailable = account.proxyAvailable = true;
+      account.draining = false;
+      account.operationalStatus = "rotation";
+      account.authState = { state: "active" };
+      account.health = "healthy";
+      account.lastErrorCode = null;
+      account.oauthClientKind = index === 3 ? "siwc" : "excel_bps";
+      account.routeGroupId = index >= 3 ? "linked" : null;
+      account.routeInactive = index === 4;
+      account.quotaRefreshStatus = "updated";
+      account.refreshState = { ...account.refreshState!, quota: "fresh" };
+      account.subscription.activeUntilMs = now + 86_400_000;
+      account.quota = { ...account.quota, supplemental: [], limitReached: false, error: null,
+        primary: index === 3 ? null : { ...account.quota.primary!, availableBasisPoints: [3_400, 2_800, 900, 0, 5_600][index]!,
+          observedAtMs: now, resetAtMs: now + (index === 4 ? 5_000 : 3_600_000) }, secondary: null };
+    });
+    runtime.gateway.running = false;
+    runtime.gateway.routingOrder = [];
+    runtime.gateway.poolRouting = { ...runtime.gateway.poolRouting!, version: 3, mode: "automatic",
+      members: runtime.accounts.filter((account) => account.inPool).map((account) => ({ kind: "account", id: account.id, weight: 1, maxConcurrency: 0 })) };
+    native.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") return structuredClone(runtime);
+      if (command === "get_local_runtime_order") return [];
+      return invoke(command, args, options);
+    };
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const cards = page.locator(".pool-member-card");
+  await expect(cards.locator(".pool-member-name")).toHaveText(["SIWC 56", "Quota 34", "Quota 28", "Quota 9"]);
+  await expect(cards.first().locator(".pool-member-card-quota")).toContainText("56%");
+  await page.screenshot({ path: testInfo.outputPath("pool-linked-quota.png"), fullPage: true });
+  await page.clock.fastForward(6_000);
+  await expect(cards.locator(".pool-member-name")).toHaveText(["Quota 34", "Quota 28", "Quota 9", "SIWC 56"]);
+  await expect(cards.last().locator('.quota-stack[data-stale="true"]')).toHaveCount(1);
+  const mutations = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: { command: string }[] })
+    .__TAURI_TEST_INVOKES__.filter((call) => ["refresh_local_account_quota", "update_local_routing"].includes(call.command)));
+  expect(mutations).toHaveLength(0);
+});
+
 for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] satisfies PoolRoutingMode[]) {
   for (const width of [2451, 1160, 390]) {
     test(`pool cards follow ${mode} preference and highlight only active work at ${width}px`, async ({ page }, testInfo) => {
@@ -58,7 +111,7 @@ for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robi
       await page.getByRole("button", { name: "Pool", exact: true }).click();
       const cards = page.locator(".pool-member-card");
       await expect(cards.locator(".pool-member-name")).toHaveText(["Member 4", "Member 5", "Member 6", "Member 3", "Member 7", "Member 2", "Member 1"]);
-      await expect(cards.nth(1)).toHaveAttribute("data-next", "true");
+      await expect(page.locator(".pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
       await expect(cards.nth(0)).toHaveAttribute("data-current", "true");
       await expect(page.locator(".pool-member-card.current")).toHaveCount(1);
       await expect(cards.locator(".pool-member-activity")).toHaveCount(0);
@@ -157,11 +210,14 @@ for (const width of [1160, 390]) {
         candidate.inFlight = candidate.activeRequestCount = index === 0 ? 1 : 0;
       });
     });
+    const readsBeforeActivity = await page.evaluate(() => (window as unknown as { __POOL_ORDER_READS__: number }).__POOL_ORDER_READS__);
     await activity("account_synthetic", 21, 1);
     await expect(firstAccount).toHaveAttribute("data-current", "true");
     // No full state event: activity must refresh the authoritative rank before the 5s fallback.
+    // The next-candidate badge is intentionally absent; wait for the snapshot itself.
+    await expect.poll(async () => page.evaluate(() => (window as unknown as { __POOL_ORDER_READS__: number }).__POOL_ORDER_READS__), { timeout: 2_000 }).toBe(readsBeforeActivity + 1);
     await expect(cards.locator(".pool-member-name")).toHaveText(["Account 1", "Account 2", "Example compatible API"], { timeout: 2_000 });
-    await expect(cards.nth(1)).toHaveAttribute("data-next", "true", { timeout: 2_000 });
+    await expect(page.locator(".pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
 
     await page.evaluate(() => {
       const runtime = (window as unknown as { __POOL_RUNTIME__: RuntimeSnapshot }).__POOL_RUNTIME__;

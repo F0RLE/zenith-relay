@@ -6,7 +6,7 @@ pub enum WireApi {
     ChatCompletions,
     Messages,
     Gemini,
-    /// Native-only Interactions; never inferred from Generate Content support.
+    /// Native-only Interactions with independent capability evidence.
     GeminiInteractions,
 }
 

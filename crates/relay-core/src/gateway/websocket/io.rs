@@ -2,6 +2,17 @@ use futures_util::{Sink, SinkExt};
 use std::time::Duration;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub(super) async fn send_close_message<S, M>(socket: &mut S, message: M) -> Result<(), ()>
+where
+    S: Sink<M> + Unpin,
+{
+    match tokio::time::timeout(CLOSE_TIMEOUT, socket.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        _ => Err(()),
+    }
+}
 
 pub(super) async fn send_message<S, M>(socket: &mut S, message: M) -> Result<(), ()>
 where
@@ -22,16 +33,31 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    #[tokio::test(start_paused = true)]
-    async fn stalled_write_times_out_without_resending() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let mut socket = Box::pin(futures_util::sink::unfold(
-            attempts.clone(),
+    fn stalled_socket(attempts: Arc<AtomicUsize>) -> impl Sink<u8, Error = ()> + Unpin {
+        Box::pin(futures_util::sink::unfold(
+            attempts,
             |attempts, _: u8| async move {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 std::future::pending::<Result<Arc<AtomicUsize>, ()>>().await
             },
-        ));
+        ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_close_does_not_use_the_data_write_timeout_or_resend() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut socket = stalled_socket(attempts.clone());
+        let started = tokio::time::Instant::now();
+        assert_eq!(send_close_message(&mut socket, 1).await, Err(()));
+        assert_eq!(started.elapsed(), CLOSE_TIMEOUT);
+        assert!(started.elapsed() < WRITE_TIMEOUT);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_write_times_out_without_resending() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut socket = stalled_socket(attempts.clone());
         let started = tokio::time::Instant::now();
         assert_eq!(send_message(&mut socket, 1).await, Err(()));
         assert_eq!(started.elapsed(), WRITE_TIMEOUT);

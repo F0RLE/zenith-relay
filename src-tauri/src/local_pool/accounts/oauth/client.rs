@@ -197,6 +197,11 @@ impl CodexOAuthClient {
                     .query_pairs_mut()
                     .append_pair("prompt", "consent");
             }
+            if let Some(email) = siwc.login_hint.as_deref() {
+                authorization_url
+                    .query_pairs_mut()
+                    .append_pair("login_hint", email);
+            }
         } else {
             authorization_url
                 .query_pairs_mut()

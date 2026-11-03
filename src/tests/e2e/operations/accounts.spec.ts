@@ -59,7 +59,7 @@ test("profile switch reminder can cancel a switch and be disabled", async ({ pag
   const launch = page.getByRole("button", { name: "Launch in ChatGPT" });
   await launch.click();
   const reminder = page.getByRole("dialog", { name: "Before switching ChatGPT" });
-  await expect(reminder).toContainText("protected automatic backup");
+  await expect(reminder).toContainText("Relay securely backs up your ChatGPT login and settings before switching.");
   await reminder.getByRole("button", { name: "Cancel" }).click();
   expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_account"))).toBe(false);
 
@@ -331,7 +331,10 @@ for (const locale of ["en", "ru"] as const) {
     await page.locator(".account-bulk-menu summary").click();
     await page.getByRole("menuitem", { name: locale === "en" ? "Export all" : "Экспортировать все", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: locale === "en" ? "Export accounts" : "Экспорт учётных записей" });
-    await expect(dialog.getByRole("alert")).toContainText(locale === "en" ? "After import, sign in again" : "После импорта войдите повторно");
+    await expect(dialog.getByRole("alert")).toContainText(locale === "en" ? "Sign in after import" : "После импорта войдите заново");
+    await expect(dialog.getByRole("alert")).toContainText(locale === "en"
+      ? "never use copied refresh tokens on two devices"
+      : "копию refresh-токена нельзя использовать на двух устройствах");
     await expect(dialog.getByRole("radio")).toHaveCount(1);
     await expect(dialog.getByRole("radio", { name: "Zenith", exact: true })).toHaveAttribute("aria-checked", "true");
     await dialog.getByRole("button", { name: locale === "en" ? "Download JSON" : "Скачать JSON", exact: true }).click();
@@ -803,7 +806,8 @@ test("legacy personal-server accounts require confirmed offline recovery and rem
   await expect(page.getByRole("menuitem", { name: "Return to this computer" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Recover local account" }).click();
   const dialog = page.getByRole("dialog", { name: "Recover local account" });
-  await expect(dialog).toContainText("First stop its use on the old server");
+  await expect(dialog).toContainText("Stop its use on the old server first");
+  await expect(dialog).toContainText("that copy stays there");
   await expect(dialog).toContainText("stays disabled and outside the pool");
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((item) => item.command === "recover_local_account"))).toBe(false);

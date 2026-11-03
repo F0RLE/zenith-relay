@@ -1,4 +1,4 @@
-use super::catalog::{ClientTool, client_tool_call_name, history_tool, tool_spec};
+use super::catalog::client_tool_call_name;
 use super::codec::{encode_function_arguments, parse_function_arguments};
 use super::{TRANSPORT_TOOL, is_transport_tool};
 use crate::gateway::request::responses_item_has_ciphertext as has_item_ciphertext;
@@ -11,6 +11,7 @@ mod identifiers;
 mod messages;
 
 pub(super) use handoff::is_thread_handoff;
+pub(super) use identifiers::{replay_call_id, replay_call_ids};
 pub(super) use messages::separate_tool_images;
 
 pub(in crate::gateway::execution::basis_points) use identifiers::fit_responses_id as fit_item_id;
@@ -36,8 +37,11 @@ struct TransportCallArguments<'a> {
 
 pub(super) fn transport_call(
     tool_call_object: &Map<String, Value>,
-    tool: &ClientTool,
+    tool_name: String,
 ) -> Result<Value, AdapterError> {
+    if tool_name.is_empty() {
+        return Err(AdapterError::invalid_request().with_parameter("input.name"));
+    }
     let call_id = tool_call_object
         .get("call_id")
         .and_then(Value::as_str)
@@ -47,18 +51,19 @@ pub(super) fn transport_call(
     // `references` field. Replay function calls with the same encoding taught
     // for new calls; otherwise history teaches nested escaping again.
     // Custom input stays opaque.
-    let code = if tool.kind == "custom" {
-        Cow::Borrowed(
+    let code = match tool_call_object.get("type").and_then(Value::as_str) {
+        Some("custom_tool_call") => Cow::Borrowed(
             tool_call_object
                 .get("input")
                 .and_then(Value::as_str)
                 .ok_or_else(|| AdapterError::invalid_request().with_parameter("input"))?,
-        )
-    } else {
-        let arguments = parse_function_arguments(tool_call_object)?;
-        Cow::Owned(encode_function_arguments(&arguments)?)
+        ),
+        Some("function_call") => {
+            let arguments = parse_function_arguments(tool_call_object)?;
+            Cow::Owned(encode_function_arguments(&arguments)?)
+        }
+        _ => return Err(AdapterError::invalid_request().with_parameter("input.type")),
     };
-    let tool_name = tool.call_name();
     let arguments = serde_json::to_string(&TransportCallArguments {
         summary: format!("Run client tool {tool_name}"),
         extended_summary: "Relay client tool through the Excel / Basis Points transport",
@@ -78,36 +83,23 @@ pub(super) fn transport_call(
     ])))
 }
 
-pub(super) fn record_client_call(
-    tool_call_object: &Map<String, Value>,
-    tool: &ClientTool,
-    translated_items: &mut Vec<Value>,
-    transport_call_ids: &mut std::collections::HashSet<String>,
-) -> Result<(), AdapterError> {
-    let transport_call = transport_call(tool_call_object, tool)?;
-    if let Some(call_id) = tool_call_object.get("call_id").and_then(Value::as_str) {
-        transport_call_ids.insert(call_id.to_string());
-    }
-    translated_items.push(transport_call);
-    Ok(())
-}
-
 #[cfg(test)]
-pub(super) fn translate_input_items(
-    input_items: Vec<Value>,
-    tools: &[ClientTool],
-) -> Result<Vec<Value>, AdapterError> {
-    translate_input_items_with_catalog(input_items, tools, &serde_json::json!({}))
+pub(super) fn translate_input_items(input_items: Vec<Value>) -> Result<Vec<Value>, AdapterError> {
+    translate_input_items_with_context(input_items, &serde_json::json!({}))
 }
 
-pub(super) fn translate_input_items_with_catalog(
+struct HistoricalCall {
+    result_type: Option<&'static str>,
+    result_seen: bool,
+}
+
+pub(super) fn translate_input_items_with_context(
     input_items: Vec<Value>,
-    tools: &[ClientTool],
     request: &Value,
 ) -> Result<Vec<Value>, AdapterError> {
-    let input_items = super::batch::collapse_history(input_items, tools)?;
+    let input_items = super::batch::collapse_history(input_items)?;
     let mut translated_items = Vec::with_capacity(input_items.len());
-    let mut transport_call_ids = std::collections::HashSet::new();
+    let mut transport_calls = std::collections::HashMap::new();
     for input_item in input_items {
         let mut input_item = messages::normalize_message(input_item)?;
         let Some(input_object) = input_item.as_object() else {
@@ -118,31 +110,48 @@ pub(super) fn translate_input_items_with_catalog(
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if item_type == "item_reference"
+            || (input_object.len() == 1 && input_object.contains_key("id"))
+        {
+            // This transport has no provider-side item store. Explicit and
+            // shorthand references must not become a successful context loss.
+            // Untyped items carrying actual encrypted history are not references.
+            return Err(AdapterError::parameter_unsupported_for(
+                "input.item_reference",
+            ));
+        }
         match item_type {
             "function_call" | "custom_tool_call" => {
                 let tool_name = client_tool_call_name(input_object);
-                if is_transport_tool(&tool_name) {
-                    if let Some(call_id) = input_object.get("call_id").and_then(Value::as_str) {
-                        transport_call_ids.insert(call_id.to_string());
-                    }
-                    translated_items.push(input_item);
-                } else if let Some(tool) = tool_spec(tools, &tool_name) {
-                    record_client_call(
-                        input_object,
-                        tool,
-                        &mut translated_items,
-                        &mut transport_call_ids,
-                    )?;
-                } else if let Some(tool) = history_tool(input_object) {
-                    record_client_call(
-                        input_object,
-                        &tool,
-                        &mut translated_items,
-                        &mut transport_call_ids,
-                    )?;
+                let native = is_transport_tool(&tool_name);
+                // A native envelope may carry either client kind. Unwrapped
+                // client calls must retain their own recorded result kind.
+                let result_type = if native {
+                    None
+                } else if item_type == "custom_tool_call" {
+                    Some("custom_tool_call_output")
                 } else {
-                    return Err(AdapterError::invalid_request().with_parameter("input.name"));
+                    Some("function_call_output")
+                };
+                if !native {
+                    // Replay the recorded identity and kind, never a current
+                    // definition that may have been removed, renamed or replaced.
+                    input_item = transport_call(input_object, tool_name)?;
                 }
+                if let Some(call_id) = input_item.get("call_id").and_then(Value::as_str)
+                    && transport_calls
+                        .insert(
+                            call_id.to_string(),
+                            HistoricalCall {
+                                result_type,
+                                result_seen: false,
+                            },
+                        )
+                        .is_some()
+                {
+                    return Err(AdapterError::invalid_request().with_parameter("input.call_id"));
+                }
+                translated_items.push(input_item);
             }
             "function_call_output" | "custom_tool_call_output" => {
                 // Named native results without a call ID do not belong to our transport.
@@ -163,7 +172,17 @@ pub(super) fn translate_input_items_with_catalog(
                     .ok_or_else(|| {
                         AdapterError::invalid_request().with_parameter("input.call_id")
                     })?;
-                if transport_call_ids.contains(call_id) {
+                if let Some(call) = transport_calls.get_mut(call_id) {
+                    if call.result_seen {
+                        return Err(AdapterError::invalid_request().with_parameter("input.call_id"));
+                    }
+                    if call
+                        .result_type
+                        .is_some_and(|expected| expected != item_type)
+                    {
+                        return Err(AdapterError::invalid_request().with_parameter("input.type"));
+                    }
+                    call.result_seen = true;
                     let output_id = function_transport_id(call_id);
                     let translated_output = input_item.as_object_mut().unwrap();
                     translated_output.insert(
@@ -202,11 +221,10 @@ pub(super) fn translate_input_items_with_catalog(
                     ));
                 }
             }
-            "item_reference" => {}
             _ => translated_items.push(input_item),
         }
     }
-    identifiers::limit_responses_identifiers(&mut translated_items);
+    identifiers::limit_responses_identifiers(&mut translated_items)?;
     Ok(translated_items)
 }
 

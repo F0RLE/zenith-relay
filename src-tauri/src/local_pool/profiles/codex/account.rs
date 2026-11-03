@@ -29,7 +29,7 @@ pub(super) fn attach_account_locked(
     let auth_path = profile_dir.join(AUTH_FILE);
     let backup_path = account_backup_path(backup_root, &profile_dir);
     let original_config_bytes = read_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_optional_bytes(&auth_path)?;
+    let original_auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let original_backup_bytes = read_optional_bytes(&backup_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let original_auth = snapshot_text(&original_auth_bytes, &auth_path)?;
@@ -201,7 +201,9 @@ pub(super) fn attach_account_locked(
             ),
         ));
     }
-    if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
+    if let Err(error) =
+        snapshot_credentials::update_auth(&profile_dir, &original_auth_bytes, Some(&managed_auth))
+    {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
         let backup_rollback = rollback_account_backup(
             created_backup,
@@ -251,7 +253,7 @@ pub(super) fn restore_account_locked(
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
     let original_config_bytes = read_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_optional_bytes(&auth_path)?;
+    let original_auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
     if backup.projection_secret_ref.is_none() && !account_managed_config_matches(&document) {
@@ -306,12 +308,14 @@ pub(super) fn restore_account_locked(
     } else {
         original_auth_bytes.clone()
     };
-    let auth_result = match (auth_matches_managed, restored.auth.as_deref()) {
-        (true, Some(previous_auth)) => {
-            replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
-        }
-        (true, None) => remove_if_unchanged(&auth_path, &original_auth_bytes),
-        (false, _) => Ok(()),
+    let auth_result = if auth_matches_managed {
+        snapshot_credentials::update_auth(
+            &profile_dir,
+            &original_auth_bytes,
+            restored.auth.as_deref(),
+        )
+    } else {
+        Ok(())
     };
     if let Err(error) = auth_result {
         return Err(with_rollback(
@@ -324,8 +328,15 @@ pub(super) fn restore_account_locked(
         ));
     }
     if let Err(error) = remove_if_unchanged(&backup_path, &backup_bytes) {
-        let auth_rollback =
-            restore_snapshot_if_unchanged(&auth_path, &restored_auth_bytes, &original_auth_bytes);
+        let auth_rollback = if auth_matches_managed {
+            snapshot_credentials::update_auth(
+                &profile_dir,
+                &restored_auth_bytes,
+                snapshot_text(&original_auth_bytes, &auth_path)?,
+            )
+        } else {
+            Ok(())
+        };
         let config_rollback = restore_snapshot_if_unchanged(
             &config_path,
             &restored_config_bytes,
@@ -342,8 +353,15 @@ pub(super) fn restore_account_locked(
         secrets,
     ) {
         let backup_rollback = restore_snapshot_if_unchanged(&backup_path, &None, &backup_bytes);
-        let auth_rollback =
-            restore_snapshot_if_unchanged(&auth_path, &restored_auth_bytes, &original_auth_bytes);
+        let auth_rollback = if auth_matches_managed {
+            snapshot_credentials::update_auth(
+                &profile_dir,
+                &restored_auth_bytes,
+                snapshot_text(&original_auth_bytes, &auth_path)?,
+            )
+        } else {
+            Ok(())
+        };
         let config_rollback = restore_snapshot_if_unchanged(
             &config_path,
             &restored_config_bytes,
@@ -374,7 +392,7 @@ pub(super) fn sync_account_profile_with(
     };
     let next_hash = key_hash(tokens.access_token());
     let auth_path = profile_dir.join(AUTH_FILE);
-    let auth = read_optional_bytes(&auth_path)?;
+    let auth = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let auth_matches_previous =
         account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
     let auth_matches_next =

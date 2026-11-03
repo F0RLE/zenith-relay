@@ -3,7 +3,7 @@ use super::codec::{
     as_input_items, basis_points_metadata, basis_points_reasoning_effort,
     encode_function_arguments, text_message,
 };
-use super::history::{separate_tool_images, translate_input_items_with_catalog};
+use super::history::{separate_tool_images, translate_input_items_with_context};
 use super::response::has_encrypted_agent_message;
 use super::schema::{PROMPT_SCHEMA_NOTATION, matches as schema_matches, parameter_schema};
 use super::{FUNCTION_RELAY_ENCODING, TRANSPORT_TOOL, TRANSPORT_TOOL_ALIAS, is_transport_tool};
@@ -337,11 +337,8 @@ pub(in crate::gateway::execution) fn prepare_request_with_catalog(
     // Transport-generated user messages (agent context and tool images) must
     // not create a new logical user turn or reset agent_iteration.
     let metadata = basis_points_metadata(request_object, &input_items);
-    let mut input_items = separate_tool_images(translate_input_items_with_catalog(
-        input_items,
-        all_tools,
-        request,
-    )?);
+    let mut input_items =
+        separate_tool_images(translate_input_items_with_context(input_items, request)?);
     let mut prologue = Vec::new();
     if let Some(instructions) = request_object.get("instructions").and_then(Value::as_str)
         && !instructions.trim().is_empty()
@@ -388,7 +385,9 @@ pub(in crate::gateway::execution) fn prepare_request_with_catalog(
     {
         turn_policy.push_str(&format!("Client tool_choice: {choice}."));
     }
-    if !all_tools.is_empty() && callable.is_empty() {
+    if callable.is_empty()
+        && (!all_tools.is_empty() || super::catalog::has_historical_declarations(request))
+    {
         turn_policy.push_str(
             " No client tools are permitted this turn. Do not call any tools, including the transport or catalog lookup. Return the answer as assistant text.",
         );
@@ -432,7 +431,7 @@ pub(in crate::gateway::execution) fn prepare_request_with_catalog(
     Ok(Value::Object(upstream_request))
 }
 
-/// Structured `text.format` is not implemented on this transport. Dropping it
+/// Structured `text.format` needs local validation or native support. Dropping it
 /// and returning ordinary text would look like a successful JSON response.
 pub(in crate::gateway::execution) fn output_format_error(request: &Value) -> Option<AdapterError> {
     match super::structured_output::prepare(request) {

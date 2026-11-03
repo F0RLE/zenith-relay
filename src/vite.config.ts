@@ -17,7 +17,7 @@ export default defineConfig({
     // Spend a little more build time to reduce shipped JavaScript without
     // changing lazy-entry boundaries or the supported WebView target.
     minify: "terser",
-    terserOptions: { compress: { passes: 2 } },
+    terserOptions: { compress: { passes: 3 } },
     // The following bundle gate reports gzip sizes once, using its exact limits.
     reportCompressedSize: false,
     outDir: "dist",
@@ -33,6 +33,9 @@ export default defineConfig({
           groups: [
             { name: "react-runtime", test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/, priority: 40 },
             { name: "icons", test: /node_modules[\\/]lucide-react[\\/]/ },
+            // Descriptions always need this reader. Share their lazy chunk with
+            // Help's Markdown renderer instead of shipping a tiny extra entry.
+            { name: "markdown", test: /(?:node_modules[\\/]react-markdown[\\/]|features[\\/]relay[\\/]components[\\/](?:MarkdownDescription\.tsx|remarkGfmReadOnly\.ts)$)/, priority: 10 },
           ],
         },
       },

@@ -44,6 +44,86 @@ fn history() -> Vec<Value> {
 }
 
 #[test]
+fn unbatched_history_keeps_storage_values_and_order() {
+    let items = vec![
+        json!({"role":"user","content":"Synthetic task"}),
+        json!({"type":"custom_tool_call","name":"patch","call_id":"call_synthetic","input":"call_rb1. is literal payload"}),
+        json!({"type":"custom_tool_call_output","call_id":"call_synthetic","output":"Synthetic result"}),
+        json!({"role":"developer","content":"Synthetic boundary"}),
+    ];
+    let before = items.clone();
+    let pointer = items.as_ptr();
+    let restored = collapse_history(items).unwrap();
+    assert_eq!(restored, before);
+    assert_eq!(restored.as_ptr(), pointer);
+    let invalid = vec![json!({"type":"function_call","call_id":"call_rb1.invalid"})];
+    assert_eq!(
+        collapse_history(invalid).unwrap_err().parameter(),
+        Some("input.run_officejs.batch.call_id")
+    );
+}
+
+#[test]
+fn replayed_call_ids_reserve_batch_parents_in_single_item_history() {
+    let alias = Alias {
+        parent: "parent".into(),
+        count: 3,
+        index: 0,
+    }
+    .encode();
+    for kind in ["function_call", "function_call_output"] {
+        let mut request = request();
+        request["input"] = json!({"type":kind,"call_id":alias});
+        let error = translate_response_value(response(pair()), &request).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.call_id"));
+        let mut fresh = pair();
+        fresh["call_id"] = json!("fresh");
+        assert!(translate_response_value(response(fresh), &request).is_ok());
+    }
+}
+
+#[test]
+fn history_kind_changes_preserve_batch_payloads() {
+    let mut request = request();
+    let output = translate_response_value(
+        response(native(
+            json!(["inspect", "files.patch"]),
+            json!([{"path":"synthetic"}, "raw synthetic patch"]),
+        )),
+        &request,
+    )
+    .unwrap();
+    let mut history = output["output"].as_array().unwrap().clone();
+    for call in history.clone() {
+        history.push(
+            json!({"type":format!("{}_output",call["type"].as_str().unwrap()),
+            "call_id":call["call_id"],"output":"Synthetic result"}),
+        );
+    }
+    request["input"] = json!(history);
+    let replay = |request: &Value| {
+        super::super::prepare_request(request).unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item["type"].as_str(),
+                    Some("function_call" | "function_call_output")
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let expected = replay(&request);
+    request["tools"] = json!([
+        {"type":"custom","name":"inspect"},
+        {"type":"namespace","name":"files","tools":[{"type":"function","name":"patch"}]}
+    ]);
+    assert_eq!(replay(&request), expected);
+}
+
+#[test]
 fn batch_payload_accepts_crlf_without_changing_custom_input() {
     let raw = "*** Begin Patch\r\n+literal \\n and \"quotes\"\r\n*** End Patch";
     let mut item = native(json!(["inspect", "files.patch"]), json!([{"path":"a"},raw]));
@@ -177,8 +257,7 @@ fn repeated_tools_namespaces_and_raw_payloads_roundtrip_without_losing_reasoning
         json!({"type":"function_call_output","call_id":items[2]["call_id"],"output":"{\"literal\":true}"}),
         json!({"type":"function_call_output","call_id":items[1]["call_id"],"output":"failed: synthetic","is_error":true}),
     ]);
-    let tools = client_tools(&request()).unwrap();
-    let restored = translate_input_items(items.clone(), &tools).unwrap();
+    let restored = translate_input_items(items).unwrap();
     assert_eq!(restored[0], reasoning);
     assert_eq!(restored[1]["call_id"], "parent");
     assert_eq!(restored[2]["call_id"], "parent");
@@ -203,8 +282,6 @@ fn repeated_tools_namespaces_and_raw_payloads_roundtrip_without_losing_reasoning
     assert_eq!(with_images[3]["role"], "user");
     assert_eq!(with_images[3]["content"][2], image);
     assert_eq!(with_images[2]["output"][6], file);
-    // Current schemas can change or disappear without corrupting old history.
-    assert!(translate_input_items(items, &[]).is_ok());
 }
 
 #[test]
@@ -219,7 +296,7 @@ fn bounded_aliases_are_stable_canonical_and_reconstruct_before_id_limiting() {
         history
             .push(json!({"type":"function_call_output","call_id":call["call_id"],"output":"ok"}));
     }
-    let restored = translate_input_items(history, &client_tools(&request()).unwrap()).unwrap();
+    let restored = translate_input_items(history).unwrap();
     assert_eq!(restored[0]["call_id"], parent);
     assert_eq!(restored[1]["call_id"], parent);
     for id in [
@@ -246,7 +323,7 @@ fn near_limit_function_objects_replay_without_double_encoding() {
         history
             .push(json!({"type":"function_call_output","call_id":call["call_id"],"output":"ok"}));
     }
-    let restored = collapse_history(history, &client_tools(&request()).unwrap()).unwrap();
+    let restored = collapse_history(history).unwrap();
     let replay = translate_response_value(response(restored[0].clone()), &request()).unwrap();
     assert_eq!(replay["output"], reply["output"]);
 }
@@ -424,7 +501,6 @@ fn interleaved_parallel_batches_and_single_results_preserve_identity_and_boundar
         .unwrap()
         .clone();
     assert_eq!(calls.len(), 5);
-    let tools = client_tools(&request()).unwrap();
     for (order, parents) in [
         ([3, 1, 4, 2, 0], ["other", "parent", "solo"]),
         ([0, 2, 4, 1, 3], ["parent", "other", "solo"]),
@@ -439,30 +515,28 @@ fn interleaved_parallel_batches_and_single_results_preserve_identity_and_boundar
         }
         let boundary = json!({"role":"developer","content":"Must remain after the results"});
         items.push(boundary.clone());
-        for catalog in [&tools[..], &[][..]] {
-            let restored = collapse_history(items.clone(), catalog).unwrap();
-            assert_eq!(restored.len(), 7);
-            assert_eq!(restored[6], boundary);
-            for (result, parent) in restored[3..6].iter().zip(parents) {
-                assert_eq!(result["call_id"], parent);
-                if parent == "solo" {
-                    assert_eq!(result["output"], "result-4");
-                } else {
-                    let first = if parent == "parent" { 0 } else { 2 };
-                    assert_eq!(result["output"][1]["text"], format!("result-{first}"));
-                    assert_eq!(result["output"][3]["text"], format!("result-{}", first + 1));
-                    assert!(
-                        result["output"][0]["text"]
-                            .as_str()
-                            .unwrap()
-                            .contains(calls[first]["call_id"].as_str().unwrap())
-                    );
-                }
+        let restored = collapse_history(items.clone()).unwrap();
+        assert_eq!(restored.len(), 7);
+        assert_eq!(restored[6], boundary);
+        for (result, parent) in restored[3..6].iter().zip(parents) {
+            assert_eq!(result["call_id"], parent);
+            if parent == "solo" {
+                assert_eq!(result["output"], "result-4");
+            } else {
+                let first = if parent == "parent" { 0 } else { 2 };
+                assert_eq!(result["output"][1]["text"], format!("result-{first}"));
+                assert_eq!(result["output"][3]["text"], format!("result-{}", first + 1));
+                assert!(
+                    result["output"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains(calls[first]["call_id"].as_str().unwrap())
+                );
             }
         }
         let mut interrupted = items.clone();
         interrupted.insert(7, boundary.clone());
-        let restored = collapse_history(interrupted, &tools).unwrap();
+        let restored = collapse_history(interrupted).unwrap();
         assert_eq!(restored.iter().filter(|item| **item == boundary).count(), 2);
         let duplicate = items[5..10]
             .iter()
@@ -470,13 +544,12 @@ fn interleaved_parallel_batches_and_single_results_preserve_identity_and_boundar
             .unwrap()
             .clone();
         items.insert(6, duplicate);
-        assert!(collapse_history(items, &tools).is_err());
+        assert!(collapse_history(items).is_err());
     }
 }
 
 #[test]
 fn interrupted_batch_results_replay_independently_without_moving_messages() {
-    let tools = client_tools(&request()).unwrap();
     for boundary in [
         json!({"type":"message","role":"developer","content":[{"type":"input_text","text":"Synthetic service instruction"}]}),
         json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Synthetic user message"}]}),
@@ -491,26 +564,25 @@ fn interrupted_batch_results_replay_independently_without_moving_messages() {
             boundary.clone(),
             json!({"type":"function_call_output","call_id":second,"output":"synthetic result","is_error":true}),
         ]);
-        for catalog in [&tools[..], &[][..]] {
-            let restored = translate_input_items(items.clone(), catalog).unwrap();
-            assert_eq!(restored.len(), 5);
-            assert_eq!(restored[0]["name"], TRANSPORT_TOOL);
-            assert_eq!(restored[1]["name"], TRANSPORT_TOOL);
-            assert_eq!(restored[0]["call_id"], first);
-            assert_eq!(restored[1]["call_id"], second);
-            assert_ne!(restored[0]["call_id"], restored[1]["call_id"]);
-            assert_eq!(restored[2]["call_id"], restored[0]["call_id"]);
-            assert_eq!(restored[2]["output"][0], image);
-            assert_eq!(restored[3], boundary);
-            assert_eq!(restored[4]["call_id"], restored[1]["call_id"]);
-            assert_eq!(restored[4]["output"], "synthetic result");
-            assert_eq!(restored[4]["is_error"], true);
-            for item in &restored {
-                if let Some(id) = item["id"].as_str() {
-                    assert!(id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')));
-                }
+        let restored = translate_input_items(items).unwrap();
+        assert_eq!(restored.len(), 5);
+        assert_eq!(restored[0]["name"], TRANSPORT_TOOL);
+        assert_eq!(restored[1]["name"], TRANSPORT_TOOL);
+        assert_eq!(restored[0]["call_id"], first);
+        assert_eq!(restored[1]["call_id"], second);
+        assert_ne!(restored[0]["call_id"], restored[1]["call_id"]);
+        assert_eq!(restored[2]["call_id"], restored[0]["call_id"]);
+        assert_eq!(restored[2]["output"][0], image);
+        assert_eq!(restored[3], boundary);
+        assert_eq!(restored[4]["call_id"], restored[1]["call_id"]);
+        assert_eq!(restored[4]["output"], "synthetic result");
+        assert_eq!(restored[4]["is_error"], true);
+        for item in &restored {
+            if let Some(id) = item["id"].as_str() {
+                assert!(
+                    id.bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                );
             }
         }
     }
@@ -518,7 +590,6 @@ fn interrupted_batch_results_replay_independently_without_moving_messages() {
 
 #[test]
 fn interrupted_batch_history_still_rejects_missing_duplicate_or_mismatched_children() {
-    let tools = client_tools(&request()).unwrap();
     let mut baseline = history();
     baseline.insert(3, json!({"role":"developer","content":"Must remain here"}));
     let mut cases = Vec::new();
@@ -554,13 +625,12 @@ fn interrupted_batch_history_still_rejects_missing_duplicate_or_mismatched_child
     duplicate_definition[1] = duplicate_definition[0].clone();
     cases.push(duplicate_definition);
     for (index, items) in cases.into_iter().enumerate() {
-        assert!(collapse_history(items, &tools).is_err(), "case {index}");
+        assert!(collapse_history(items).is_err(), "case {index}");
     }
 }
 
 #[test]
 fn incomplete_or_ambiguous_history_fails_closed_without_reordering_authority() {
-    let tools = client_tools(&request()).unwrap();
     let baseline = history();
     let mut cases = vec![baseline[..2].to_vec(), baseline[2..].to_vec()];
     for index in 0..4 {
@@ -594,12 +664,12 @@ fn incomplete_or_ambiguous_history_fails_closed_without_reordering_authority() {
     repeated.extend(baseline.clone());
     cases.push(repeated);
     for (index, items) in cases.into_iter().enumerate() {
-        assert!(collapse_history(items, &tools).is_err(), "case {index}");
+        assert!(collapse_history(items).is_err(), "case {index}");
     }
     let message = json!({"role":"developer","content":"must stay here"});
     let mut items = baseline;
     items.insert(2, message.clone());
-    let output = collapse_history(items, &tools).unwrap();
+    let output = collapse_history(items).unwrap();
     assert_eq!(output[1], message);
 }
 

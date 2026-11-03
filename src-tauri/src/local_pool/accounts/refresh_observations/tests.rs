@@ -1,10 +1,80 @@
 use super::*;
 
+mod siwc;
+
 #[test]
 fn empty_client_catalog_does_not_replace_account_probe_errors() {
     let code = ErrorCode::PoolModelsUnavailable;
     assert_eq!(quota_refresh_error_kind(code), None);
     assert_eq!(model_refresh_error_kind(code), None);
+}
+
+#[test]
+fn partial_subscription_plan_is_committed_without_inventing_expiry_freshness() {
+    with_store(|store, scope| {
+        let mut baseline = scope.initial_account.clone();
+        baseline.account.subscription = Subscription::normalize(SubscriptionInput {
+            plan_type: Some("plus".into()),
+            active_until_ms: Some(20_000),
+            forbidden: false,
+            observed_at_ms: 50,
+        });
+        store.upsert_account(baseline.clone()).unwrap();
+        let scope = AccountRefreshScope {
+            initial_account: baseline,
+            fence: scope.fence.clone(),
+            started_at_ms: scope.started_at_ms,
+        };
+        let partial = Subscription {
+            plan_type: Some("free".into()),
+            active_until_ms: None,
+            status: zenith_relay_core::quota::SubscriptionStatus::Active,
+            updated_at_ms: None,
+        };
+        let applied = apply_quota_read(
+            store,
+            &scope,
+            quota(50.0, 100),
+            SubscriptionObservation::Partial(partial.clone()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(applied.account.account.subscription, partial);
+        assert_eq!(
+            store.account("test-account").unwrap().account.subscription,
+            partial,
+        );
+    });
+}
+
+#[test]
+fn partial_subscription_does_not_overwrite_a_concurrent_subscription_update() {
+    with_store(|store, scope| {
+        let mut current = scope.initial_account.clone();
+        current.account.subscription = Subscription::normalize(SubscriptionInput {
+            plan_type: Some("pro".into()),
+            active_until_ms: Some(30_000),
+            forbidden: false,
+            observed_at_ms: 200,
+        });
+        store.upsert_account(current.clone()).unwrap();
+        let applied = apply_quota_read(
+            store,
+            scope,
+            quota(50.0, 100),
+            SubscriptionObservation::Partial(Subscription {
+                plan_type: Some("free".into()),
+                updated_at_ms: None,
+                ..Default::default()
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            applied.account.account.subscription,
+            current.account.subscription
+        );
+    });
 }
 
 #[test]
@@ -281,7 +351,13 @@ fn later_quota_subscription_wins_over_an_earlier_subscription_read() {
 #[test]
 fn models_and_quota_modify_only_their_own_observations() {
     with_store(|store, scope| {
-        let models = apply_models_read(store, scope, Ok(vec!["gpt-new".into()])).unwrap();
+        let models = apply_models_read(
+            store,
+            scope,
+            OAuthClientKind::Codex,
+            Ok(vec!["gpt-new".into()]),
+        )
+        .unwrap();
         assert!(models.refresh_result);
         assert_eq!(
             models.account.account.quota,
@@ -296,7 +372,8 @@ fn models_and_quota_modify_only_their_own_observations() {
         )
         .unwrap();
         assert_eq!(quota.account.effective_models(), ["gpt-new"]);
-        let failed = apply_models_read(store, scope, models_failure()).unwrap();
+        let failed =
+            apply_models_read(store, scope, OAuthClientKind::Codex, models_failure()).unwrap();
         assert!(!failed.refresh_result);
         assert_eq!(failed.account.effective_models(), ["gpt-new"]);
         assert_eq!(failed.account.account.quota, quota.account.account.quota);
@@ -310,6 +387,7 @@ fn model_timeout_preserves_inventory_and_recovers_without_reauthentication() {
         let failed = apply_models_read(
             store,
             scope,
+            OAuthClientKind::Codex,
             Err(ModelDiscoveryFailure {
                 code: ModelDiscoveryFailureCode::Timeout,
                 retryable: true,
@@ -337,9 +415,13 @@ fn model_timeout_preserves_inventory_and_recovers_without_reauthentication() {
             fence,
             started_at_ms: 200,
         };
-        let recovered =
-            apply_models_read(store, &retry_scope, Ok(initial.effective_models().to_vec()))
-                .unwrap();
+        let recovered = apply_models_read(
+            store,
+            &retry_scope,
+            OAuthClientKind::Codex,
+            Ok(initial.effective_models().to_vec()),
+        )
+        .unwrap();
         assert!(!recovered.refresh_result);
         assert_eq!(
             recovered.account.account.auth_state,
@@ -361,8 +443,15 @@ fn rejected_revision_never_applies_success_or_failure_for_either_kind() {
     with_store(|store, scope| {
         store.invalidate_account_refresh(&["test-account"]).unwrap();
         let current = store.account("test-account").unwrap().clone();
-        assert!(apply_models_read(store, scope, Ok(vec!["gpt-stale".into()])).is_err());
-        assert!(apply_models_read(store, scope, models_failure()).is_err());
+        for client_kind in [OAuthClientKind::Codex, OAuthClientKind::Siwc] {
+            for result in [
+                Ok(vec!["gpt-stale".into()]),
+                Ok(Vec::new()),
+                models_failure(),
+            ] {
+                assert!(apply_models_read(store, scope, client_kind, result).is_err());
+            }
+        }
         assert!(
             apply_quota_read(store, scope, quota(0.0, 100), Subscription::default(), None).is_err()
         );
@@ -391,7 +480,8 @@ fn model_failure_does_not_overwrite_a_newer_authentication_failure() {
         current.account.health = AccountHealthState::Unhealthy;
         current.account.last_error_code = Some("token_invalidated".into());
         store.upsert_account(current.clone()).unwrap();
-        let applied = apply_models_read(store, scope, models_failure()).unwrap();
+        let applied =
+            apply_models_read(store, scope, OAuthClientKind::Codex, models_failure()).unwrap();
         assert_eq!(applied.account.account.health, current.account.health);
         assert_eq!(
             applied.account.account.last_error_code,

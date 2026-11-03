@@ -32,13 +32,13 @@ for (const locale of ["ru", "en"] as const) {
       await openRules(page, locale);
       const before = await mutationCommands(page);
       const expected = locale === "ru" ? {
-        unknown: "Это не означает, что размышление не поддерживается",
+        unknown: "в этом снимке неизвестны",
         toggle: "включение и выключение", budget: "бюджетом токенов", adaptive: "адаптивное размышление",
-        supported: "список уровней не передан", unsupported: "явно сообщает", mismatch: "Причина расхождения",
+        supported: "список уровней недоступен", unsupported: "явно сообщает", mismatch: "Причина: неизвестна",
       } : {
-        unknown: "This does not mean reasoning is unsupported",
+        unknown: "unknown in this snapshot",
         toggle: "on/off control", budget: "token-budget control", adaptive: "adaptive reasoning",
-        supported: "no confirmed level list", unsupported: "explicitly reports", mismatch: "does not report why",
+        supported: "confirmed level list is unavailable", unsupported: "explicitly reports", mismatch: "Cause: unknown",
       };
       for (const [suffix, text] of Object.entries(expected)) {
         const row = page.locator(`[data-model-id="synthetic-${suffix}"]`);
@@ -98,7 +98,7 @@ test("an open diagnostic follows new metadata without reopening or saving policy
   await openRules(page, "en");
   await page.locator('[data-model-id="synthetic-refresh"] [data-model-reasoning-diagnostics]').click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("status")).toContainText("This does not mean reasoning is unsupported");
+  await expect(dialog.getByRole("status")).toContainText("unknown in this snapshot");
   const before = await mutationCommands(page);
   // The mock IPC delivers a newer synthetic snapshot through the normal event path.
   await page.evaluate(() => {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
+import { CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier } from "../../api/types";
@@ -67,9 +67,21 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const savedRoutingMembers = runtime?.gateway.poolRouting?.members;
   const rotationMode = runtime?.gateway.poolRouting && runtime.gateway.poolRouting.version !== 1 ? runtime.gateway.poolRouting.mode : null;
   const routingTitle = t(rotationMode === "automatic" ? "pool.distributionTitle" : rotationMode === "failover" ? "pool.failoverTitle" : "pool.priorityTitle");
+  const memberTimestamps = useMemo(() => poolMembers.flatMap((member) => [
+    member.kind === "account" && !member.recoveryRequired ? member.credentialDiagnostics?.expiresAtMs : null,
+    runtimeByMember.get(member.id)?.nextRetryAtMs,
+  ]).concat((runtime?.accounts ?? []).flatMap((account) => [
+    accountMetadataObservation(account, "plan").staleAtMs,
+    accountMetadataObservation(account, "quota").staleAtMs,
+    account.subscription.activeUntilMs,
+    account.quota.primary?.resetAtMs,
+    account.quota.secondary?.resetAtMs,
+    ...(account.quota.supplemental ?? []).map((window) => window.window.resetAtMs),
+  ])), [poolMembers, runtimeByMember, runtime?.accounts]);
+  const nowMs = useRelativeTimeClock(memberTimestamps);
   const members = useMemo(
-    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode, runtimeByMember),
-    [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers, runtimeByMember],
+    () => orderedPoolMembers(poolMembers, runtimeOrder, savedRoutingMembers, rotationMode, runtimeByMember, runtime?.accounts, nowMs),
+    [poolMembers, rotationMode, runtimeOrder, savedRoutingMembers, runtimeByMember, runtime?.accounts, nowMs],
   );
   const selectedMembers = members.filter((member) => selectedIds.includes(poolMemberKey(member)));
   const allSelected = members.length > 0 && selectedMembers.length === members.length;
@@ -94,24 +106,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   // Statistics follow inventory facts, not the activity-driven display order.
   const sourceMembers = useMemo(() => poolMembers.filter((member): member is Extract<Member, { kind: "source" }> => member.kind === "source"), [poolMembers]);
   const { stats: sourceStats, refresh: readSourceStats } = useSourceStats(mode, sourceMembers);
-  const memberTimestamps = useMemo(() => members.flatMap((member) => [
-    ...(member.kind === "account" ? [
-      member.subscription.activeUntilMs,
-      !member.recoveryRequired ? member.credentialDiagnostics?.expiresAtMs : null,
-      member.quota.primary?.resetAtMs,
-      member.quota.secondary?.resetAtMs,
-      ...(member.quota.supplemental ?? []).map((quotaWindow) => quotaWindow.window.resetAtMs),
-    ] : []),
-    runtimeByMember.get(member.id)?.nextRetryAtMs,
-  ]).concat((runtime?.accounts ?? []).flatMap((account) => [
-    accountMetadataObservation(account, "plan").staleAtMs,
-    accountMetadataObservation(account, "quota").staleAtMs,
-    account.subscription.activeUntilMs,
-    account.quota.primary?.resetAtMs,
-    account.quota.secondary?.resetAtMs,
-    ...(account.quota.supplemental ?? []).map((window) => window.window.resetAtMs),
-  ])), [members, runtimeByMember, runtime?.accounts]);
-  const nowMs = useRelativeTimeClock(memberTimestamps);
   const refreshSourceStats = async (sourceId: string, refreshModels = false, operationManaged = false) => {
     let modelRefreshError: unknown;
     if (refreshModels && mode === "local") {
@@ -125,7 +119,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   };
   const {
     activeMembers,
-    nextMember,
     activeRequestTotal,
     activeModels,
     lastUsedRuntime,
@@ -144,18 +137,11 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const noAvailableModels = availability === "noModels";
   const counts = poolMemberStatusCounts(members, runtimeByMember);
   const firstActiveMember = activeMembers[0];
-  const recentRoute = !activeMembers.length && lastActivityMember && nextMember && lastActivityMember.id !== nextMember.id
-    ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember)} · ${t("pool.nextRoute")}: ${memberName(nextMember)}`
-    : null;
   const idleRouteSummary = noAvailableModels
     ? t("pool.noAvailableModels")
-    : recentRoute
-      ? recentRoute
-      : nextMember
-        ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-        : (lastActivityMember ?? lastUsedMember)
-          ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
-          : t(availability === "ready" ? "pool.awaitingRoute" : "pool.priorityEmpty");
+    : (lastActivityMember ?? lastUsedMember)
+      ? `${t("pool.lastRoute")}: ${memberName(lastActivityMember ?? lastUsedMember!)}`
+      : t(availability === "ready" ? "pool.awaitingRoute" : "pool.priorityEmpty");
   const routingSummary = firstActiveMember
     ? activeMembers.length === 1
       ? `${t("pool.currentRoute")}: ${memberName(firstActiveMember)}`
@@ -165,9 +151,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     : activeMembers.length > 1
       ? t("pool.activeRoutes", { count: activeMembers.length })
       : idleRouteSummary;
-  const nextRouteSummary = firstActiveMember && nextMember
-    ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
-    : null;
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
     const ok = await perform(`pool-remove-${member.id}`, () => updatePoolMembership(mode, {
@@ -252,7 +235,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           <div className="pool-runtime-strip">
             <div className="pool-route-summary">
               <strong className="pool-current-route" data-active={activeRequestTotal > 0} data-relay-tooltip={routingSummary}>{routingSummary}</strong>
-              {nextRouteSummary ? <span className="pool-next-route" data-relay-tooltip={nextRouteSummary}><ArrowRight aria-hidden /><span>{nextRouteSummary}</span></span> : null}
             </div>
             <span
               className="pool-active-models"
@@ -324,7 +306,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(member.id);
         const isCurrent = activeRequestCount(runtimeState) > 0;
-        const isNext = !isCurrent && nextMember?.kind === member.kind && nextMember.id === member.id;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.lastUsedAtMs != null && runtimeState.lastUsedAtMs === lastUsedRuntime?.lastUsedAtMs;
         return <PoolMemberCard
           key={`${member.kind}-${member.id}`}
@@ -334,7 +315,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
           selected={selectedId === memberId}
           checked={selectedIds.includes(memberId)}
           onToggleSelected={() => setSelectedIds((ids) => toggleSelectedId(ids, memberId))}
-          isNext={isNext}
           isLastUsed={isLastUsed}
           sourceState={member.kind === "source" ? sourceStats[member.id] : undefined}
           rotationMode={rotationMode}

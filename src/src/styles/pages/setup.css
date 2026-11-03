@@ -17,13 +17,15 @@
   position: relative;
   isolation: isolate;
   overflow: auto;
+  justify-content: flex-start;
   padding-top: 42px;
   background: var(--relay-bg);
 }
 
 .setup-shell-intro::before {
   content: "";
-  position: absolute;
+  /* Oversized decoration must not become scrollable page content. */
+  position: fixed;
   z-index: -1;
   inset: -20%;
   pointer-events: none;
@@ -139,7 +141,7 @@
 .product-intro {
   width: min(1080px, 100%);
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 1 0 auto;
   display: grid;
   align-content: center;
   gap: 16px;

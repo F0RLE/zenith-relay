@@ -72,6 +72,12 @@ pub fn validate_authorization_url(
         } else if !super::siwc::valid_client_id(&client_id) {
             return Err(invalid());
         }
+        if let Some(email) = pairs.remove("login_hint")
+            && (client_id == zenith_relay_core::providers::chatgpt::SIWC_BOOTSTRAP_CLIENT_ID
+                || !super::siwc::valid_login_hint(&email))
+        {
+            return Err(invalid());
+        }
         let host = pairs.remove("ext_agent_host_id").ok_or_else(invalid)?;
         if host.is_empty() || host.len() > 256 || host.chars().any(char::is_control) {
             return Err(invalid());

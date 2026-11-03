@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { Maximize2, Minimize2, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ModelContextPolicy } from "../../api/types";
+import { useRefreshSafeDraft } from "../../hooks/useRefreshSafeDraft";
 import { contextWindowTokens, customContextMaximum, knownContextMaximum, MIN_CUSTOM_CONTEXT } from "./modelContextPolicy";
 
 export type { ModelContextPolicy } from "../../api/types";
@@ -35,15 +36,14 @@ export function PoolContextControl({
   const groupRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cancelBlur = useRef(false);
-  const [customTokens, setCustomTokens] = useState(String(
-    value.mode === "custom" ? value.tokens : customSeed,
-  ));
   const selectedKey = value.mode;
+  const savedTokens = value.mode === "custom" ? value.tokens : customSeed;
+  const [customTokens, setCustomTokens] = useRefreshSafeDraft(String(savedTokens), selectedKey);
   const parsedTokens = Number(customTokens);
   const customTokensValid = Number.isInteger(parsedTokens) && parsedTokens >= MIN_CUSTOM_CONTEXT && parsedTokens <= customMaximum;
-  const savedTokens = value.mode === "custom" ? value.tokens : customSeed;
   const range = t("pool.contextPolicies.customTokensRange", { min: number(MIN_CUSTOM_CONTEXT), max: number(customMaximum) });
   const submittedTokens = useRef(savedTokens);
+  const previousReset = useRef(resetRevision);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const commitCustomTokens = useCallback(() => {
@@ -53,10 +53,12 @@ export function PoolContextControl({
     }
   }, [selectedKey, disabled, customTokensValid, parsedTokens]);
   useEffect(() => {
-    const requestedTokens = submittedTokens.current;
+    const submitted = submittedTokens.current;
     submittedTokens.current = savedTokens;
-    // Preserve newer typing on acknowledgement; restore the confirmed value on rejection.
-    if (document.activeElement !== inputRef.current || requestedTokens !== savedTokens) setCustomTokens(String(savedTokens));
+    if (previousReset.current !== resetRevision) {
+      setCustomTokens((draft) => Number(draft) === submitted ? String(savedTokens) : draft);
+      previousReset.current = resetRevision;
+    }
   }, [selectedKey, savedTokens, resetRevision]);
   useEffect(() => {
     if (selectedKey !== "custom" || disabled || !customTokensValid || parsedTokens === submittedTokens.current) return;

@@ -14,6 +14,8 @@ use crate::local_pool::{
 
 use std::collections::BTreeSet;
 
+mod siwc_models;
+
 #[test]
 fn automatic_login_request_preserves_legacy_bool_and_rejects_extra_route_fields() {
     use super::AutomaticLoginRequest;
@@ -105,7 +107,7 @@ use uuid::Uuid;
 
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
-    providers::chatgpt::{AgentIdentityCredential, ModelDiscoveryFailure},
+    providers::chatgpt::{AgentIdentityCredential, ModelDiscoveryFailure, OAuthClientKind},
 };
 
 use super::account::{
@@ -504,7 +506,7 @@ fn duplicate_identity_preserves_local_id_and_user_settings() {
             .unwrap();
     let mut updated_account = account("account_existing", "provider-account", "new-refresh");
     updated_account.models = vec!["new-model".into()];
-    preserve_existing_settings(&mut updated_account, existing);
+    preserve_existing_settings(&mut updated_account, existing, OAuthClientKind::Codex);
 
     assert_eq!(updated_account.account.id, "account_existing");
     assert_eq!(updated_account.account.label, "My Codex");
@@ -545,7 +547,7 @@ fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
     updated_account.models.clear();
     updated_account.discovered_models = Some(Vec::new());
 
-    preserve_existing_settings(&mut updated_account, &current);
+    preserve_existing_settings(&mut updated_account, &current, OAuthClientKind::Codex);
 
     assert_eq!(updated_account.models, current.models);
     assert!(updated_account.discovered_models.is_none());
@@ -564,7 +566,7 @@ fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
         },
     );
     let mut updated_account = account("account_expired", "provider-account", "new-refresh");
-    preserve_existing_settings(&mut updated_account, &current);
+    preserve_existing_settings(&mut updated_account, &current, OAuthClientKind::Codex);
 
     assert_eq!(updated_account.account.subscription.active_until_ms, None);
     assert_eq!(

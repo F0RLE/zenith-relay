@@ -40,6 +40,14 @@ mod switch_transaction;
 mod transaction;
 
 mod account_ops;
+mod snapshot;
+mod snapshot_binding;
+mod snapshot_credentials;
+pub(super) use snapshot::history_provider as snapshot_history_provider;
+pub(super) use snapshot::validate_snapshot_catalog;
+pub(super) use snapshot_binding::ManagedBindingSnapshot;
+pub(crate) use snapshot_credentials::validate_capture_mode as validate_snapshot_capture_mode;
+pub(super) use snapshot_credentials::validate_legacy_snapshot_auth;
 
 pub(crate) fn official_codex_ultra_models() -> std::collections::HashMap<String, serde_json::Value>
 {
@@ -55,7 +63,7 @@ mod service_tier;
 mod switch_flow;
 
 pub use account_ops::{attach_account, attach_account_explicit, restore_account_profile};
-pub(super) use account_ops::{restore_full_user_profile_snapshot, snapshot_user_profile};
+pub(super) use account_ops::{capture_user_profile_snapshot, restore_full_user_profile_snapshot};
 use backup::{
     account_auth_content, account_auth_matches_snapshot, account_auth_matches_tokens,
     account_backup_for_profile, account_backup_path, account_backup_secret_ref,
@@ -63,9 +71,9 @@ use backup::{
     auth_snapshot_json, binding_from_backup, canonical_profile_dir, cleanup_account_attach_secrets,
     cleanup_created_backup_secret, credential_kind_locked, delete_backup_secrets, discard_backup,
     discard_managed_binding_locked, ensure_single_profile_backup, fill_missing_account_config,
-    parse_account_backup_snapshot, parse_backup_snapshot, previous_auth_snapshot,
-    read_account_backup, restore_account_config, restore_secret_snapshot, rollback_account_backup,
-    rollback_backup, serialize_account_backup, serialize_backup,
+    parse_account_backup_snapshot, parse_backup_snapshot, read_account_backup,
+    restore_account_config, restore_secret_snapshot, rollback_account_backup, rollback_backup,
+    serialize_account_backup, serialize_backup,
 };
 use bindings::managed_token;
 pub use bindings::{
@@ -320,7 +328,7 @@ pub(crate) struct OAuthAttachOptions<'a> {
     pub supports_websockets: bool,
 }
 
-trait SecretBackend {
+pub(super) trait SecretBackend {
     fn save(&self, secret_ref: &str, secret_value: &str) -> Result<()>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
     fn delete(&self, secret_ref: &str) -> Result<()>;

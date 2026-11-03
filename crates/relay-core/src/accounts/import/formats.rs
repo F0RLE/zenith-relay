@@ -1,8 +1,8 @@
 use super::*;
+use crate::strict_json;
 
 mod bundles;
 mod lines;
-mod strict_json;
 
 use bundles::{
     is_portable_bundle, is_zenith_bundle, parse_account_container, parse_portable_bundle,

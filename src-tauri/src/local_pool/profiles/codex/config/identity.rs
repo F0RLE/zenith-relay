@@ -44,17 +44,6 @@ pub(in crate::local_pool::profiles::codex) fn previous_config_matches(
         && root_model_catalog_json(document) == backup.previous_model_catalog_json
 }
 
-pub(in crate::local_pool::profiles::codex) fn model_catalog_to_restore(
-    document: &DocumentMut,
-    backup: &ProfileBackup,
-) -> Option<String> {
-    if backup.managed_model_catalog_path.is_some() {
-        backup.previous_model_catalog_json.clone()
-    } else {
-        root_model_catalog_json(document)
-    }
-}
-
 pub(in crate::local_pool::profiles::codex) fn external_provider_took_over(
     document: &DocumentMut,
     backup: &ProfileBackup,

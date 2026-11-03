@@ -54,7 +54,7 @@ fn bps_owned_reasoning_history_keeps_visible_text_without_copying_or_changing_st
         if !encrypted {
             expected.as_object_mut().unwrap().remove("id");
         }
-        let translated = translate_input_items(vec![item], &[]).unwrap();
+        let translated = translate_input_items(vec![item]).unwrap();
         assert_eq!(translated, vec![expected]);
         assert_eq!(
             translated[0]["summary"][0]["text"]
@@ -661,10 +661,12 @@ fn large_historical_catalog_keeps_current_definitions_without_duplicates() {
     });
     let prepared = prepare_request(&request).unwrap();
     let instructions = current_catalog_text(&prepared);
-    assert_eq!(instructions.matches(". Parameters: ").count(), 201);
+    assert_eq!(instructions.matches(". Parameters: ").count(), 2);
     assert_eq!(instructions.matches("- fixture_37 (function)").count(), 1);
     assert!(instructions.contains("Current definition wins."));
     assert!(!instructions.contains("Historical definition 37."));
+    assert!(!instructions.contains("fixture_38"));
+    assert!(prompt_text(&prepared).contains("Historical definition 38."));
 }
 
 #[test]
@@ -817,12 +819,12 @@ fn discovery_checkpoints_borrow_the_exact_prepared_catalog_with_instruction_offs
 }
 
 #[test]
-fn structured_text_format_is_rejected_instead_of_dropped() {
+fn malformed_structured_text_format_is_rejected_instead_of_dropped() {
     let mut request = request_with_tool();
     request["text"] = json!({"format": {"type": "json_schema", "name": "answer"}});
     assert_eq!(
         prepare_request(&request).unwrap_err().parameter(),
-        Some("text.format")
+        Some("text.format.schema")
     );
     request["text"] = json!({"format": {"type": "text"}});
     assert!(prepare_request(&request).is_ok());

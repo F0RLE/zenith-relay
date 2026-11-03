@@ -4,7 +4,8 @@ use super::import_orchestrator::{
 #[cfg(test)]
 use super::refresh_observations::model_refresh_error_kind;
 use super::refresh_observations::{
-    AccountRefreshScope, RefreshReadKind, apply_models_read, apply_quota_read, record_read_error,
+    AccountRefreshScope, RefreshReadKind, SubscriptionObservation, apply_models_read,
+    apply_quota_read, record_read_error,
 };
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::authority::{
@@ -37,9 +38,9 @@ use zenith_relay_core::accounts::{AccountAuthState, ReauthReason, TokenSet};
 use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{
     AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, CodexSubscriptionClient,
-    CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-    QuotaRefreshOutcome, is_agent_identity_task_invalid_failure, merge_subscription_metadata_at,
-    subscription_refresh_due,
+    CodexSubscriptionMetadata, CodexSubscriptionRead, ModelDiscoveryFailure,
+    ModelDiscoveryFailureCode, QuotaRefreshOutcome, is_agent_identity_task_invalid_failure,
+    merge_subscription_metadata_at, subscription_refresh_due,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};
 use zenith_relay_core::scheduler::refresh::{RefreshKind, http::ManagementHttpScope};

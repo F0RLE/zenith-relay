@@ -7,6 +7,13 @@ use crate::local_pool::{
 use std::collections::HashSet;
 
 impl ProxyPool {
+    pub(crate) fn load_read_only(vault_root: &std::path::Path) -> Result<Self> {
+        let Some(content) = secret_store::load_read_only(vault_root, PROXY_POOL_SECRET_REF)? else {
+            return Ok(Self::default());
+        };
+        Self::from_json(&content)
+    }
+
     pub(crate) fn load() -> Result<Self> {
         let Some(content) = secret_store::load(PROXY_POOL_SECRET_REF)? else {
             return Ok(Self::default());

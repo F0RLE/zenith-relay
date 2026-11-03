@@ -11,6 +11,59 @@ async function calls(page: Page) {
   return page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
 }
 
+test("switching methods reuses an eligible saved connection instead of signing in again", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"] });
+  await openAccounts(page);
+  const codex = page.locator(".account-card").filter({ has: page.locator('.account-route-selector > button[data-value="codex"]') });
+  await expect(page.locator(".account-card")).toHaveCount(2);
+  await codex.locator(".account-route-selector > button").click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+  const recorded = await calls(page);
+  expect(recorded.filter((call) => call.command === "select_local_account_route").map((call) => call.args)).toEqual([
+    { accountId: "account_synthetic_1", connectionId: "account_synthetic_2", attach: true },
+  ]);
+  expect(recorded.some((call) => call.command === "start_codex_oauth")).toBe(false);
+});
+
+test("ambiguous saved connections do not create another login or select an arbitrary account", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc", "siwc"] });
+  await openAccounts(page);
+  const codex = page.locator(".account-card").filter({ has: page.locator('.account-route-selector > button[data-value="codex"]') });
+  await codex.locator(".account-route-selector > button").click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await page.getByRole("button", { name: "Show details", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Error details", exact: true })).toContainText("Multiple saved connections match this account and sign-in method");
+  await expect(page.locator(".account-card")).toHaveCount(3);
+  const recorded = await calls(page);
+  expect(recorded.some((call) => ["start_codex_oauth", "select_local_account_route"].includes(call.command))).toBe(false);
+});
+
+test("the route selector stays locked while saved connections are inspected", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"] });
+  await openAccounts(page);
+  await page.evaluate(() => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = native.invoke.bind(native);
+    native.invoke = async (command, args, options) => {
+      if (command === "local_account_route_candidates") {
+        await new Promise<void>((resolve) => window.addEventListener("relay-test-release-candidates", () => resolve(), { once: true }));
+      }
+      return invoke(command, args, options);
+    };
+  });
+  const selector = page.locator('.account-route-selector > button[data-value="codex"]');
+  await selector.click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await expect(selector).toBeDisabled();
+  expect((await calls(page)).some((call) => ["start_codex_oauth", "select_local_account_route"].includes(call.command))).toBe(false);
+  await page.evaluate(() => window.dispatchEvent(new Event("relay-test-release-candidates")));
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  await expect(page.locator(".account-route-selector > button")).toBeEnabled();
+  expect((await calls(page)).filter((call) => call.command === "select_local_account_route")).toHaveLength(1);
+});
+
 for (const locale of ["en", "ru"] as const) {
   for (const theme of ["light", "dark"] as const) {
     test(`one grouped account keeps SIWC selected while displaying linked metadata ${locale} ${theme}`, async ({ page }) => {
@@ -394,7 +447,37 @@ test("a newly authorized route is associated only after OAuth completion", async
   await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
   const commands = await calls(page);
   expect(commands.findIndex((call) => call.command === "complete_codex_oauth")).toBeLessThan(commands.findIndex((call) => call.command === "select_local_account_route"));
+  const completion = commands.findIndex((call) => call.command === "complete_codex_oauth");
+  const association = commands.findIndex((call) => call.command === "select_local_account_route");
+  expect(commands.slice(completion + 1, association).some((call) => call.command === "get_local_runtime_state")).toBe(false);
   expect(commands.find((call) => call.command === "select_local_account_route")?.args).toEqual({ accountId: "account_synthetic_1", connectionId: "account_synthetic_route", attach: true });
+});
+
+test("a failed association preserves the completed login and reports the switch error", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex"], oauthCompletedRouteKind: "siwc", accountRouteSelectError: true });
+  await openAccounts(page);
+  await page.locator(".account-route-selector > button").click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Sign in", exact: true })).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  await expect.poll(async () => (await calls(page)).some((call) => call.command === "select_local_account_route")).toBe(true);
+  await expect(page.getByRole("dialog", { name: "Sign in", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Show details", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Error details", exact: true })).toContainText("Synthetic route switch rejected");
+  const savedIds = await page.evaluate(async () => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<{ accounts: Array<{ id: string }> }> } }).__TAURI_INTERNALS__;
+    return (await native.invoke("get_local_runtime_state")).accounts.map((account) => account.id);
+  });
+  expect(savedIds).toEqual(["account_synthetic_1", "account_synthetic_route"]);
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
+  await page.keyboard.press("Escape");
+  await page.locator('.account-route-selector > button[data-value="codex"]').click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await expect.poll(async () => (await calls(page)).filter((call) => call.command === "select_local_account_route").length).toBe(2);
+  const recorded = await calls(page);
+  expect(recorded.filter((call) => call.command === "complete_codex_oauth")).toHaveLength(1);
+  expect(recorded.filter((call) => call.command === "start_codex_oauth")).toHaveLength(1);
+  expect(recorded.some((call) => call.command.includes("delete_local_account"))).toBe(false);
 });
 
 test("an account-targeted automation follows the selected route and remains editable", async ({ page }) => {

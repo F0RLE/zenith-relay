@@ -7,7 +7,7 @@
 
 use super::super::super::errors::AttemptFailure;
 use crate::GatewayRuntime;
-use crate::runtime::AuthorizationIdentityPolicy;
+use crate::runtime::{AuthorizationIdentityPolicy, AuthorizationIncarnation};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
@@ -39,6 +39,11 @@ struct AttachmentScope<'a> {
     endpoint: &'a str,
     candidate_id: &'a str,
     credential: &'a [u8; 32],
+}
+
+struct AttachmentCredential {
+    fingerprint: [u8; 32],
+    owner: AuthorizationIncarnation,
 }
 
 enum ImageJob {
@@ -82,33 +87,41 @@ pub(in crate::gateway::execution) async fn attach_input_images(
     responses_url: &url::Url,
     headers: &HeaderMap,
     request_fields: &mut Value,
-) -> Result<(), AttachmentFailure> {
+) -> Result<Option<AuthorizationIncarnation>, AttachmentFailure> {
     // Work on the already prepared body. Encoding inline images here and
     // reparsing them both for uploads and discovery needlessly copies history.
     if input_image_parts(request_fields).next().is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let endpoint = attachment_url(responses_url).map_err(|_| upload_failed())?;
-    let (jobs, credential_fingerprint) = stage_input_images_with_credentials(
+    let (jobs, credential) = stage_input_images_with_credentials(
         request_fields,
         &endpoint,
         candidate_id,
-        runtime.basis_points_credential_fingerprint(candidate_id),
+        prepare_attachment_credential(runtime, candidate_id),
     )
     .await?;
-    let credential_fingerprint = credential_fingerprint.unwrap_or_default();
     resolve_input_images(request_fields, jobs, |image| {
         let endpoint = &endpoint;
+        let credential = credential.as_ref();
         async move {
+            let credential = credential.ok_or_else(upload_failed)?;
             let key = attachment_key(
                 endpoint,
                 candidate_id,
-                &credential_fingerprint,
+                &credential.fingerprint,
                 image.media_type,
                 &image.bytes,
             );
             let file_id = cached_upload(key, || {
-                upload_image(runtime, candidate_id, endpoint, headers, &image)
+                upload_image(
+                    runtime,
+                    candidate_id,
+                    endpoint,
+                    headers,
+                    &image,
+                    &credential.owner,
+                )
             })
             .await?;
             // Only a validated, successfully uploaded image can seed this shortcut.
@@ -119,7 +132,29 @@ pub(in crate::gateway::execution) async fn attach_input_images(
             Ok(file_id)
         }
     })
-    .await
+    .await?;
+    Ok(credential.map(|credential| credential.owner))
+}
+
+async fn prepare_attachment_credential(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+) -> Result<AttachmentCredential, AttachmentFailure> {
+    // Refresh before either cache lookup, then bind uploads and generation to
+    // this same prepared OAuth incarnation. A missing credential is not a key.
+    let prepared = runtime
+        .prepare_authorization(candidate_id, crate::unix_time_ms())
+        .await
+        .map_err(|error| AttachmentFailure::Retry(AttemptFailure::prepare(error)))?;
+    let generation = prepared.token_generation.ok_or_else(upload_failed)?;
+    let mut digest = Sha256::new();
+    digest.update(b"zenith-relay-basis-points-attachment-v2");
+    digest.update(generation.to_be_bytes());
+    digest.update(prepared.credential_fingerprint());
+    Ok(AttachmentCredential {
+        fingerprint: digest.finalize().into(),
+        owner: prepared.incarnation(),
+    })
 }
 
 async fn resolve_input_images<F>(
@@ -173,22 +208,22 @@ async fn stage_input_images_with_credentials(
     request_fields: &Value,
     endpoint: &str,
     candidate_id: &str,
-    credential: impl std::future::Future<Output = Option<[u8; 32]>>,
-) -> Result<(Vec<LocatedJob>, Option<[u8; 32]>), AttachmentFailure> {
+    credential: impl std::future::Future<Output = Result<AttachmentCredential, AttachmentFailure>>,
+) -> Result<(Vec<LocatedJob>, Option<AttachmentCredential>), AttachmentFailure> {
     // Existing file IDs are still validated and normalized, but do not use
     // the upload cache or require a credential lookup. Inline cache hits must
     // still check the current credential so rotation never reuses an old ID.
     let needs_credential = input_image_parts(request_fields)
         .any(|(_, _, fields)| fields.get("image_url").is_some_and(|url| !url.is_null()));
     let credential = if needs_credential {
-        credential.await
+        Some(credential.await?)
     } else {
         None
     };
     let scope = credential.as_ref().map(|credential| AttachmentScope {
         endpoint,
         candidate_id,
-        credential,
+        credential: &credential.fingerprint,
     });
     let jobs = stage_input_images_with_cache(request_fields, scope.as_ref())?;
     Ok((jobs, credential))
@@ -423,6 +458,7 @@ async fn upload_image(
     endpoint: &str,
     headers: &HeaderMap,
     image: &InlineImage,
+    owner: &AuthorizationIncarnation,
 ) -> Result<String, AttachmentFailure> {
     let (content_type, multipart_bytes) = multipart_body(image);
     let mut headers = headers.clone();
@@ -438,7 +474,7 @@ async fn upload_image(
         .timeout(std::time::Duration::from_secs(30))
         .body(multipart_bytes);
     let upstream = runtime
-        .send_authorized_request(
+        .send_account_request_with_owner(
             candidate_id,
             upload_request,
             crate::runtime::AuthorizationDispatch {
@@ -449,9 +485,13 @@ async fn upload_image(
                 lease: None,
                 usage_event: None,
             },
+            owner,
         )
         .await
         .map_err(|error| match error {
+            crate::runtime::AuthorizedRequestError::NotReplayable => {
+                AttachmentFailure::Reject(AttemptFailure::authorized_request(error))
+            }
             crate::runtime::AuthorizedRequestError::Transport(error) => {
                 AttachmentFailure::Retry(AttemptFailure::transport(&error))
             }
@@ -459,7 +499,8 @@ async fn upload_image(
         })?;
     let status = upstream.response.status();
     if !status.is_success() {
-        let failure = AttemptFailure::status_with_body(status, None);
+        let failure = AttemptFailure::status_with_body(status, None)
+            .with_retry_headers(upstream.response.headers());
         let no_fallback = matches!(
             status,
             StatusCode::UNAUTHORIZED

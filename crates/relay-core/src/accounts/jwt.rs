@@ -4,7 +4,7 @@ use serde::Deserialize;
 const MAX_UNVERIFIED_JWT_BYTES: usize = 64 * 1024;
 const MAX_UNVERIFIED_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 
-/// Decodes a bounded JWT payload without verifying its signature.
+/// Decodes an unverified, bounded JWT payload.
 ///
 /// Use the result only as non-authoritative metadata. Authentication and
 /// authorization must always be performed by the upstream provider.

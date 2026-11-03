@@ -66,14 +66,7 @@ async fn read_account_quota(
         .as_ref()
         .filter(|_| quota_refresh_was_unauthorized(&refreshed))
     {
-        match recover_account_authorization(
-            state,
-            account_id,
-            Some(rejected_tokens.generation()),
-            current_time_ms(),
-        )
-        .await
-        {
+        match recover_account_authorization(state, account_id, &prepared, current_time_ms()).await {
             Ok(recovered) => {
                 prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
                 scope.validate(state)?;
@@ -143,6 +136,8 @@ async fn read_account_quota(
     // The independent read has one owner and runs after authorization recovery.
     // Quota-only replies must neither duplicate it nor postpone its next poll.
     let observed_at_ms = current_time_ms();
+    let mut successful_subscription = false;
+    let mut partial_subscription = false;
     if force_subscription_refresh
         || subscription_refresh_due(
             subscription.active_until_ms,
@@ -150,13 +145,17 @@ async fn read_account_quota(
             observed_at_ms,
         )
     {
-        let mut subscription_guard = state.subscription_refresh_guard().await;
-        scope.validate(state)?;
         let identity = scope.fence.identity();
-        // Manual refresh also respects the metadata endpoint's floor, without
-        // delaying independent quota reads or auth recovery for this account.
-        if subscription_guard.can_refresh(&identity, state.refresh.now_ms()) {
+        // The account's quota lock owns single-flight. Keep the shared floor
+        // mutex out of network I/O and persistence for unrelated accounts.
+        let can_refresh = {
+            let mut subscription_guard = state.subscription_refresh_guard().await;
+            scope.validate(state)?;
+            subscription_guard.can_refresh(&identity, state.refresh.now_ms())
+        };
+        if can_refresh {
             let observed_at_ms = current_time_ms();
+            let subscription_started = std::time::Instant::now();
             let metadata = subscription::request_subscription_metadata(
                 &prepared,
                 request_timeout,
@@ -166,15 +165,48 @@ async fn read_account_quota(
             .await;
             scope.validate(state)?;
             match metadata {
-                Ok(Some(metadata)) => subscription::apply_subscription_read(
-                    &mut quota,
-                    &mut subscription,
-                    metadata,
-                    observed_at_ms,
-                ),
+                Ok(Some(read)) => {
+                    if let Some(failure) = read.fallback_failure {
+                        partial_subscription = true;
+                        subscription::apply_partial_subscription_read(
+                            &mut quota,
+                            &mut subscription,
+                            read.metadata,
+                            observed_at_ms,
+                        );
+                        subscription::record_subscription_failure(
+                            account_id,
+                            &prepared,
+                            &failure,
+                            subscription_started.elapsed(),
+                        );
+                        let mut subscription_guard = state.subscription_refresh_guard().await;
+                        scope.validate(state)?;
+                        subscription_guard.record_failure(
+                            &identity,
+                            state.refresh.now_ms(),
+                            &failure,
+                        );
+                    } else {
+                        subscription::apply_subscription_read(
+                            &mut quota,
+                            &mut subscription,
+                            read.metadata,
+                            observed_at_ms,
+                        );
+                        successful_subscription = true;
+                    }
+                }
                 Ok(None) => {}
                 Err(failure) => {
-                    subscription::record_subscription_failure(account_id, &prepared, &failure);
+                    subscription::record_subscription_failure(
+                        account_id,
+                        &prepared,
+                        &failure,
+                        subscription_started.elapsed(),
+                    );
+                    let mut subscription_guard = state.subscription_refresh_guard().await;
+                    scope.validate(state)?;
                     subscription_guard.record_failure(&identity, state.refresh.now_ms(), &failure);
                 }
             }
@@ -183,6 +215,11 @@ async fn read_account_quota(
     let _mutation = state.setup_guard().await;
     let applied = {
         let mut store = state.store()?;
+        let subscription = if partial_subscription {
+            SubscriptionObservation::Partial(subscription)
+        } else {
+            SubscriptionObservation::Timestamped(subscription)
+        };
         apply_quota_read(&mut store, scope, quota, subscription, None)?
     };
     if zenith_relay_core::quota::subscription_plan_changed(
@@ -205,6 +242,11 @@ async fn read_account_quota(
         applied.refresh_result.models_changed,
     )
     .await?;
+    if successful_subscription {
+        let mut subscription_guard = state.subscription_refresh_guard().await;
+        scope.validate(state)?;
+        subscription_guard.record_success(&scope.fence.identity(), state.refresh.now_ms());
+    }
     Ok(AccountQuotaRefreshResponse {
         account: applied.account,
         quota: applied.refresh_result.outcome,

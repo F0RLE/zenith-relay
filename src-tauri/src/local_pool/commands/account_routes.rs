@@ -128,6 +128,7 @@ fn validate_route_connection(
 #[tauri::command]
 pub async fn local_account_route_candidates(
     account_id: String,
+    client_kind: Option<OAuthClientKind>,
     state: State<'_, DesktopState>,
 ) -> std::result::Result<Vec<String>, CommandError> {
     let (accounts, gateway) = {
@@ -137,23 +138,42 @@ pub async fn local_account_route_candidates(
     let candidates = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>> {
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let connections = route_group_connections(&accounts, &gateway, &account_id, &credentials)?;
-        Ok(accounts
-            .iter()
-            .filter(|account| {
-                account.recovery.is_none()
-                    && gateway.account_route_group(&account.account.id).is_none()
-                    && account.account.id != account_id
-            })
-            .filter_map(|account| {
-                let candidate = credentials.load(&account.account.id).ok().flatten()?;
-                validate_route_connection(&connections, account, &candidate)
-                    .is_ok()
-                    .then(|| account.account.id.clone())
-            })
-            .collect())
+        filter_route_candidates(
+            accounts
+                .iter()
+                .filter(|account| {
+                    account.recovery.is_none()
+                        && gateway.account_route_group(&account.account.id).is_none()
+                        && account.account.id != account_id
+                })
+                .filter_map(|account| {
+                    let candidate = credentials.load(&account.account.id).ok().flatten()?;
+                    validate_route_connection(&connections, account, &candidate)
+                        .is_ok()
+                        .then(|| (account.account.id.clone(), candidate.oauth_client_kind()))
+                }),
+            client_kind,
+        )
     })
     .await
     .map_err(|_| conflict("Could not inspect account connections"))??;
+    Ok(candidates)
+}
+
+fn filter_route_candidates(
+    candidates: impl IntoIterator<Item = (String, OAuthClientKind)>,
+    client_kind: Option<OAuthClientKind>,
+) -> Result<Vec<String>> {
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, kind)| client_kind.is_none_or(|requested| requested == *kind))
+        .map(|(id, _)| id)
+        .collect();
+    if client_kind.is_some() && candidates.len() > 1 {
+        return Err(conflict(
+            "Multiple saved connections match this account and sign-in method",
+        ));
+    }
     Ok(candidates)
 }
 

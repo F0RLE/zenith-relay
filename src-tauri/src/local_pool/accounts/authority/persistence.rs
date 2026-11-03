@@ -84,8 +84,7 @@ where
                 updated
             }
         };
-        // A successful primary write completes a previously checkpointed
-        // rotation. Cleanup is retried as persistence, never as another grant.
+        // The grant is already rotated; retry checkpoint cleanup as persistence only.
         self.credentials
             .clear_token_rotation(account_id)
             .map_err(|_| TokenPersistenceFailure::new(error_codes::CREDENTIAL_PERSIST_FAILED))?;

@@ -51,6 +51,14 @@ pub fn load_named_secret_result(user: &str) -> Result<Option<String>, String> {
     Ok(Some(legacy_secret))
 }
 
+pub(crate) fn load_named_secret_read_only(user: &str) -> Result<Option<String>, String> {
+    let _guard = keyring_guard()?;
+    if let Some(secret) = load_secret_from_service(KEYRING_SERVICE, user)? {
+        return Ok(Some(secret));
+    }
+    load_secret_from_service(LEGACY_KEYRING_SERVICE, user)
+}
+
 pub fn delete_named_secret_result(user: &str) -> Result<(), String> {
     let _guard = keyring_guard()?;
     let current_keyring_result = delete_secret_from_service(KEYRING_SERVICE, user);
@@ -63,13 +71,13 @@ fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
     KEYRING_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| "Хранилище секретов заблокировано после внутренней ошибки".to_string())
+        .map_err(|_| "Secret storage is locked after an internal error".to_string())
 }
 
 #[cfg(not(test))]
 fn keyring_entry_for_service(service: &str, user: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(service, user)
-        .map_err(|error| format!("Не удалось открыть хранилище секретов ОС: {error}"))
+        .map_err(|error| format!("Could not open OS secret storage: {error}"))
 }
 
 fn save_to_service(service: &str, user: &str, secret_value: &str) -> Result<(), String> {
@@ -92,7 +100,7 @@ fn save_to_service(service: &str, user: &str, secret_value: &str) -> Result<(), 
 
     let chunks = split_secret(secret_value);
     if chunks.len() > MAX_CHUNKS {
-        return Err("Секрет слишком велик для защищённого хранилища ОС".to_string());
+        return Err("Secret exceeds the OS protected-storage limit".to_string());
     }
 
     let generation = uuid::Uuid::new_v4().simple().to_string();
@@ -146,8 +154,7 @@ fn verify_saved_secret(service: &str, user: &str, expected: &str) -> Result<(), 
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error
-        .unwrap_or_else(|| "Не удалось проверить сохранённый секрет в хранилище ОС".to_string()))
+    Err(last_error.unwrap_or_else(|| "Could not verify the saved secret in OS storage".to_string()))
 }
 
 fn restore_raw_secret(
@@ -175,12 +182,12 @@ fn load_secret_from_service(service: &str, user: &str) -> Result<Option<String>,
     for index in 0..manifest.count {
         let chunk_user = chunk_user(user, &manifest.generation, index);
         let Some(chunk) = load_raw_from_service(service, &chunk_user)? else {
-            return Err("Защищённый секрет повреждён: отсутствует фрагмент".to_string());
+            return Err("Protected secret is damaged: a fragment is missing".to_string());
         };
         reassembled_secret.push_str(&chunk);
     }
     if sha256_hex(reassembled_secret.as_bytes()) != manifest.sha256 {
-        return Err("Защищённый секрет повреждён: контрольная сумма не совпадает".to_string());
+        return Err("Protected secret is damaged: checksum mismatch".to_string());
     }
     Ok(Some(reassembled_secret))
 }
@@ -200,7 +207,7 @@ fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
 fn set_password(service: &str, user: &str, secret_value: &str) -> Result<(), String> {
     keyring_entry_for_service(service, user)?
         .set_password(secret_value)
-        .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
+        .map_err(|err| format!("Could not save the secret in OS storage: {err}"))
 }
 
 #[cfg(test)]
@@ -218,7 +225,7 @@ fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, St
         Ok(secret_value) => Ok(Some(secret_value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(format!(
-            "Не удалось прочитать секрет из хранилища ОС: {error}"
+            "Could not read the secret from OS storage: {error}"
         )),
     }
 }
@@ -235,7 +242,7 @@ fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
     match keyring_entry_for_service(service, user)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!(
-            "Не удалось удалить секрет из хранилища ОС: {error}"
+            "Could not delete the secret from OS storage: {error}"
         )),
     }
 }
@@ -258,6 +265,28 @@ fn test_keyring() -> Result<MutexGuard<'static, TestKeyring>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_keyring_reads_preserve_legacy_entries_without_migration() {
+        let user = "synthetic-readonly-diagnostic";
+        save_to_service(LEGACY_KEYRING_SERVICE, user, "synthetic-secret").unwrap();
+        assert_eq!(
+            load_named_secret_read_only(user).unwrap().as_deref(),
+            Some("synthetic-secret")
+        );
+        assert!(
+            load_secret_from_service(KEYRING_SERVICE, user)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            load_secret_from_service(LEGACY_KEYRING_SERVICE, user)
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-secret")
+        );
+        delete_secret_from_service(LEGACY_KEYRING_SERVICE, user).unwrap();
+    }
 
     #[test]
     fn chunks_respect_utf16_limit_and_preserve_unicode() {

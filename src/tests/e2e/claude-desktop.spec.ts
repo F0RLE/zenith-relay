@@ -60,7 +60,7 @@ test("Claude recovery inspection failures are explicit and retryable", async ({ 
         : invoke(command, args, options);
   });
   const panel = await openRecovery(page);
-  await expect(panel.getByRole("alert")).toContainText("Some recovery data could not be loaded.");
+  await expect(panel.getByRole("alert")).toContainText("Some recovery data is unavailable. Backups are unchanged.");
   await expect(panel.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
   await expect(panel.getByRole("button", { name: "Create snapshot", exact: true })).toBeDisabled();
   await page.evaluate(() => { (window as unknown as { __FAIL_DESKTOP_STATUS__: boolean }).__FAIL_DESKTOP_STATUS__ = false; });

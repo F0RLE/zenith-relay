@@ -2,6 +2,8 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { isTooltipFocusSuppressed } from "./focus";
+import { positionTooltip } from "./tooltipPosition";
+import type { TooltipPosition } from "./tooltipPosition";
 
 export function mergeDescribedBy(...values: Array<string | undefined>) {
   const describedByIds = new Set(values.flatMap((describedByValue) => describedByValue?.split(/\s+/).filter(Boolean) ?? []));
@@ -18,7 +20,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
   const [visible, setVisible] = useState(false);
   const [instant, setInstant] = useState(false);
   const [activation, setActivation] = useState(0);
-  const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom"; arrowLeft: number } | null>(null);
+  const [position, setPosition] = useState<TooltipPosition | null>(null);
 
   const hide = useCallback(() => {
     setVisible(false);
@@ -43,28 +45,8 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     const anchor = anchorRef.current?.getBoundingClientRect();
     const tooltip = tooltipRef.current;
     if (!anchor || !tooltip) return;
-    const margin = 9;
-    // The 7px pointer and a small breathing space keep the arrow connected to
-    // its trigger without making the tooltip feel attached to the control.
-    const gap = 10;
-    let placement: "top" | "bottom" = "bottom";
-    let top = anchor.bottom + gap;
-    if (top + tooltip.offsetHeight > window.innerHeight - margin && anchor.top - tooltip.offsetHeight - gap >= margin) {
-      placement = "top";
-      top = anchor.top - tooltip.offsetHeight - gap;
-    }
-    const anchorCenter = anchor.left + anchor.width / 2;
-    const centered = anchorCenter - tooltip.offsetWidth / 2;
-    const left = Math.max(margin, Math.min(centered, window.innerWidth - tooltip.offsetWidth - margin));
-    // Keep the arrow on the trigger even when the tooltip itself must be
-    // clamped inside the viewport.
-    const arrowInset = 8;
-    const arrowLeft = Math.max(
-      arrowInset,
-      Math.min(anchorCenter - left, tooltip.offsetWidth - arrowInset),
-    );
-    top = Math.max(margin, Math.min(top, window.innerHeight - tooltip.offsetHeight - margin));
-    setPosition({ left, top, placement, arrowLeft });
+    setPosition(positionTooltip(anchor, { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
+      { width: window.innerWidth, height: window.innerHeight }, anchorRef.current?.closest(".relay-sidebar") ? "right" : "bottom"));
   }, [label, visible, activation]);
 
   useEffect(() => () => {
@@ -123,6 +105,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
         left: position.left,
         top: position.top,
         "--relay-tooltip-arrow-left": `${position.arrowLeft}px`,
+        "--relay-tooltip-arrow-top": `${position.arrowTop}px`,
       } as CSSProperties : undefined}
     >
       {label}

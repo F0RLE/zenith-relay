@@ -1,11 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Bug, Database, FileText, FileWarning, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { setI18nLanguage } from "../../../../i18n";
+import { LanguagePicker } from "../../../../i18n/LanguagePicker";
 import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
 import { relayCommands } from "../../api/commands";
 import type { DiagnosticSettings, RelayStorageInfo } from "../../api/types";
-import { Button, OptionMenu, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
+import { Button, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { CodexTextModelsControl } from "./CodexTextModelsControl";
@@ -26,7 +26,7 @@ function loadStorageInfo() {
 }
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState(() => cachedStorageInfo);
@@ -67,13 +67,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
         <div className="settings-control-row">
           <div><strong>{t("settings.language")}</strong></div>
-          <OptionMenu
-            className="field-option-menu"
-            label={t("settings.language")}
-            value={i18n.language.startsWith("ru") ? "ru" : "en"}
-            onChange={(languageCode) => void setI18nLanguage(languageCode)}
-            options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]}
-          />
+          <LanguagePicker />
         </div>
         <div className="settings-control-row">
           <div><strong>{t("settings.theme")}</strong></div>

@@ -3,14 +3,19 @@ use serde_json::Value;
 use std::{cell::Cell, collections::HashSet, fmt};
 
 #[derive(Debug)]
-pub(super) enum ParseError {
+pub(crate) enum ParseError {
     DuplicateField,
     Invalid,
 }
 
-pub(super) fn parse(input: &str) -> Result<Value, ParseError> {
+pub(crate) fn parse(input: &str) -> Result<Value, ParseError> {
     // Validate before materializing Value: preserve serde_json's arbitrary-precision
     // number handling without depending on its private deserializer map protocol.
+    validate(input)?;
+    serde_json::from_str(input).map_err(|_| ParseError::Invalid)
+}
+
+pub(crate) fn validate(input: &str) -> Result<(), ParseError> {
     let duplicate = Cell::new(false);
     let mut deserializer = serde_json::Deserializer::from_str(input);
     UniqueFields(&duplicate)
@@ -20,7 +25,7 @@ pub(super) fn parse(input: &str) -> Result<Value, ParseError> {
     if duplicate.get() {
         return Err(ParseError::DuplicateField);
     }
-    serde_json::from_str(input).map_err(|_| ParseError::Invalid)
+    Ok(())
 }
 
 struct UniqueFields<'a>(&'a Cell<bool>);

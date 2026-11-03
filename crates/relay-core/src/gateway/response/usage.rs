@@ -102,6 +102,10 @@ pub(in crate::gateway) fn populate_tokens(event: &mut UsageEvent, response_body:
             let data = crate::protocol::sse::event_data(&response_body[offset..offset + end]);
             if let Ok(payload) = serde_json::from_slice::<Value>(&data) {
                 event.observe_response_metadata(&payload);
+                event.tool_use.observe_provider_usage(&payload);
+                if let Some(tier) = response_service_tier(&payload) {
+                    event.applied_service_tier = Some(tier);
+                }
                 if let Some(usage) = find_usage(&payload) {
                     crate::protocol::merge_usage(&mut usage_snapshot, usage);
                 }
@@ -144,6 +148,7 @@ pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut Usag
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
+    normalize_client_cancellation(&mut event);
     if event.success
         && event.error_category.is_none()
         && let Some(origin) = runtime.request_origin(&event.request_id)
@@ -168,12 +173,25 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
     let mut event = event;
+    normalize_client_cancellation(&mut event);
     if let Some(routing) = event.routing.as_mut()
         && event.success
     {
         routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
+}
+
+fn normalize_client_cancellation(event: &mut UsageEvent) {
+    // Internal telemetry only: the disconnected client cannot receive a status.
+    if !event.success
+        && event.error_category.as_deref() == Some(crate::error_codes::CLIENT_CANCELLED)
+    {
+        event.http_status = 499;
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::ClientDisconnected);
+        }
+    }
 }
 
 pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
@@ -344,7 +362,10 @@ pub(in crate::gateway) fn response_id_from_bytes(response_body: &[u8]) -> Option
 }
 
 pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) -> Option<String> {
-    let mut windows = Vec::new();
+    let mut windows = crate::usage::reported_cache_write_buckets(usage)
+        .filter(|(_, count)| *count > 0)
+        .map(|(ttl, _)| ttl.to_string())
+        .collect::<Vec<_>>();
     let mut usage_objects = vec![usage];
     for field in [
         "input_tokens_details",
@@ -377,25 +398,6 @@ pub(in crate::gateway::response) fn cache_write_ttl_from_usage(usage: &Value) ->
                     && let Some(window) = cache_window_from_token_field(usage_field_name)
                 {
                     windows.push(window);
-                }
-            }
-        }
-
-        if let Some(cache_creation_fields) = usage_object
-            .get("cache_creation")
-            .or_else(|| usage_object.get("cacheCreation"))
-            .and_then(Value::as_object)
-        {
-            for (cache_field_name, cache_token_value) in cache_creation_fields {
-                let window = cache_field_name
-                    .strip_prefix("ephemeral_")
-                    .and_then(|key| key.strip_suffix("_input_tokens"));
-                if cache_token_value
-                    .as_u64()
-                    .is_some_and(|token_count| token_count > 0)
-                    && let Some(window) = window
-                {
-                    windows.push(window.to_string());
                 }
             }
         }

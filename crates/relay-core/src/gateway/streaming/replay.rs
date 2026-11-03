@@ -138,6 +138,12 @@ impl NativeReplayCapture {
                         .collect(),
                 ),
             );
+        } else {
+            crate::protocol::response_snapshots::retain_completed_reasoning_items(
+                &self.captured_items,
+                response_object.get_mut("output")?.as_array_mut()?,
+            )
+            .ok()?;
         }
         crate::json_size::serialized_len(&replay_response, MAX_CAPTURE_BYTES)?;
         Some(replay_response)
@@ -158,6 +164,42 @@ mod tests {
              "content":[{"type":"output_text","text":"hello"}]}
         ]});
         assert_eq!(capture.finish(Some(response.clone()), None), Some(response));
+    }
+
+    #[test]
+    fn terminal_snapshot_keeps_completed_reasoning_ciphertext() {
+        let reasoning = json!({"type":"reasoning","id":"rs_synthetic","summary":[],
+            "status":"completed","encrypted_content":"synthetic-done-cipher"});
+        let call = json!({"type":"function_call","id":"fc_synthetic","call_id":"call_synthetic",
+            "name":"lookup","arguments":"{}","status":"completed"});
+        for replacement in [
+            None,
+            Some(Value::Null),
+            Some(json!("synthetic-terminal-cipher")),
+        ] {
+            let mut terminal_reasoning = reasoning.clone();
+            terminal_reasoning
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+            if let Some(replacement) = replacement {
+                terminal_reasoning["encrypted_content"] = replacement;
+            }
+            let mut capture = NativeReplayCapture::default();
+            capture.observe(
+                &json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            );
+            capture
+                .observe(&json!({"type":"response.output_item.done","output_index":1,"item":call}));
+            let response = capture
+                .finish(
+                    Some(json!({"id":"resp_synthetic","status":"completed",
+                "output":[terminal_reasoning,call]})),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(response["output"], json!([reasoning, call]));
+        }
     }
 
     #[test]

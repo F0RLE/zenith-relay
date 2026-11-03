@@ -49,14 +49,20 @@ async fn inline_cache_hits_still_read_the_current_credential() {
             "credential-stage-test",
             async {
                 reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Some([generation; 32])
+                Ok(AttachmentCredential {
+                    fingerprint: [generation; 32],
+                    owner: AuthorizationIncarnation::Source,
+                })
             },
         )
         .await
         else {
             panic!("valid inline image must be staged");
         };
-        assert_eq!(credential, Some([generation; 32]));
+        assert_eq!(
+            credential.as_ref().map(|credential| credential.fingerprint),
+            Some([generation; 32])
+        );
         assert_eq!(matches!(&jobs[0].job, ImageJob::File(_)), cached);
         if let ImageJob::Upload(image) = &jobs[0].job {
             remember_file_id(image.source_key.unwrap(), "file-staged".into());

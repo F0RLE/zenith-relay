@@ -14,6 +14,48 @@ const WARMUPS: usize = 2;
 const SAMPLES: usize = 9;
 const OUTPUT_DELAY: Duration = Duration::from_millis(5);
 
+#[test]
+#[ignore = "local synthetic compression comparison; no provider requests"]
+fn compare_reusable_compression_contexts() {
+    for size in [64 * 1024, 512 * 1024, 2 * 1024 * 1024] {
+        for opaque in [false, true] {
+            let body = fixture(size, opaque);
+            let mut reusable = zstd::bulk::Compressor::new(1).unwrap();
+            reusable.window_log(18).unwrap();
+            let mut timings = [Vec::new(), Vec::new()];
+            let mut lengths = [0, 0];
+            for trial in 0..12 {
+                for mode in [trial % 2, 1 - trial % 2] {
+                    let started = Instant::now();
+                    let encoded = if mode == 0 {
+                        zstd::stream::encode_all(body.as_ref(), 1).unwrap()
+                    } else {
+                        reusable.compress(&body).unwrap()
+                    };
+                    let micros = started.elapsed().as_micros() as u64;
+                    assert_eq!(
+                        zstd::stream::decode_all(encoded.as_slice()).unwrap(),
+                        body.as_ref()
+                    );
+                    lengths[mode] = encoded.len();
+                    if trial >= 3 {
+                        timings[mode].push(micros);
+                    }
+                }
+            }
+            println!(
+                "compression_context bytes={} opaque={opaque} stream_p50_ms={:.3} reusable_p50_ms={:.3} stream_bytes={} reusable_bytes={} window_bytes={}",
+                body.len(),
+                percentile(&timings[0], 50),
+                percentile(&timings[1], 50),
+                lengths[0],
+                lengths[1],
+                1 << 18
+            );
+        }
+    }
+}
+
 #[derive(Clone)]
 struct MockUpstream {
     expected: Bytes,

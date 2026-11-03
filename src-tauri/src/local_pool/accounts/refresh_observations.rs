@@ -18,7 +18,7 @@ use crate::local_pool::{
 };
 use zenith_relay_core::{
     error_codes,
-    providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome},
+    providers::chatgpt::{ModelDiscoveryFailure, OAuthClientKind, QuotaRefreshOutcome},
     quota::{QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription},
 };
 
@@ -65,13 +65,29 @@ pub(in crate::local_pool) struct AppliedQuotaRead {
     pub models_changed: bool,
 }
 
+pub(in crate::local_pool) enum SubscriptionObservation {
+    Timestamped(Subscription),
+    /// Authenticated fields from an account check whose optional lookup failed.
+    Partial(Subscription),
+}
+
+impl From<Subscription> for SubscriptionObservation {
+    fn from(subscription: Subscription) -> Self {
+        Self::Timestamped(subscription)
+    }
+}
+
 pub(in crate::local_pool) fn apply_quota_read(
     store: &mut LocalPoolStore,
     scope: &AccountRefreshScope,
     quota: QuotaRefreshOutcome,
-    subscription: Subscription,
+    subscription: impl Into<SubscriptionObservation>,
     models: Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
 ) -> Result<AppliedAccountRefresh<AppliedQuotaRead>> {
+    let (subscription, partial_subscription) = match subscription.into() {
+        SubscriptionObservation::Timestamped(subscription) => (subscription, false),
+        SubscriptionObservation::Partial(subscription) => (subscription, true),
+    };
     store.apply_account_refresh(&scope.fence, |account| {
         let account_snapshot = account.clone();
         let observed_subscription = match &quota {
@@ -84,14 +100,15 @@ pub(in crate::local_pool) fn apply_quota_read(
         };
         let subscription = observed_subscription
             .filter(|observed| {
-                observed.updated_at_ms > subscription.updated_at_ms
-                    || (observed.updated_at_ms == subscription.updated_at_ms
-                        && (observed.active_until_ms.is_some()
-                            || subscription.active_until_ms.is_none()
-                            || zenith_relay_core::quota::subscription_plan_changed(
-                                subscription.plan_type.as_deref(),
-                                observed.plan_type.as_deref(),
-                            )))
+                !partial_subscription
+                    && (observed.updated_at_ms > subscription.updated_at_ms
+                        || (observed.updated_at_ms == subscription.updated_at_ms
+                            && (observed.active_until_ms.is_some()
+                                || subscription.active_until_ms.is_none()
+                                || zenith_relay_core::quota::subscription_plan_changed(
+                                    subscription.plan_type.as_deref(),
+                                    observed.plan_type.as_deref(),
+                                ))))
             })
             .unwrap_or(subscription);
         let (outcome, exhaustion_transitions) = if quota_is_newer(account, scope) {
@@ -123,8 +140,10 @@ pub(in crate::local_pool) fn apply_quota_read(
         };
         // Passive quota headers do not supersede an independent subscription read.
         if account_snapshot.account.subscription != scope.initial_account.account.subscription
-            || subscription.updated_at_ms.is_none()
-            || subscription.updated_at_ms < scope.initial_account.account.subscription.updated_at_ms
+            || (!partial_subscription
+                && (subscription.updated_at_ms.is_none()
+                    || subscription.updated_at_ms
+                        < scope.initial_account.account.subscription.updated_at_ms))
         {
             account.account.subscription = account_snapshot.account.subscription.clone();
         } else {
@@ -145,11 +164,27 @@ pub(in crate::local_pool) fn apply_quota_read(
 pub(in crate::local_pool) fn apply_models_read(
     store: &mut LocalPoolStore,
     scope: &AccountRefreshScope,
+    client_kind: OAuthClientKind,
     models: std::result::Result<Vec<String>, ModelDiscoveryFailure>,
 ) -> Result<AppliedAccountRefresh<bool>> {
     store.apply_account_refresh(&scope.fence, |account| {
         let account_snapshot = account.clone();
-        let changed = apply_model_discovery(account, models);
+        let changed = match models {
+            Ok(models) if client_kind == OAuthClientKind::Siwc && models.is_empty() => {
+                // The selected grant returned no visible models. Keep the saved
+                // baseline, but do not publish it as current SIWC entitlement.
+                let changed = !account.effective_models().is_empty();
+                account.discovered_models = Some(models);
+                let state = &mut account.account;
+                zenith_relay_core::accounts::recover_model_discovery_state(
+                    &mut state.auth_state,
+                    &mut state.health,
+                    &mut state.last_error_code,
+                );
+                changed
+            }
+            result => apply_model_discovery(account, result),
+        };
         preserve_newer_account_state(account, &scope.initial_account, &account_snapshot);
         Ok(changed)
     })

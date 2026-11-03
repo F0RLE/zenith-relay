@@ -15,6 +15,7 @@ mod catalog_discovery;
 mod quota_rotation;
 mod rate_limits;
 mod recovery;
+mod request_integrity;
 mod request_timezone;
 mod retry_admission;
 mod routing;
@@ -35,11 +36,17 @@ struct AccessState {
     generation_requests: AtomicUsize,
     attachment_requests: AtomicUsize,
     attachment_file_id: Mutex<Option<String>>,
+    attachment_failure: Mutex<Option<(StatusCode, HeaderMap)>>,
+    attachment_started: Notify,
+    attachment_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
     stream_generations: AtomicBool,
+    stream_bodies: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_prefixes: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
+    generation_header_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
+    stream_closures: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>>,
     first_started: Notify,
     first_release: Semaphore,
     hold_first: bool,
@@ -73,11 +80,17 @@ impl AccessServer {
             generation_requests: AtomicUsize::new(0),
             attachment_requests: AtomicUsize::new(0),
             attachment_file_id: Mutex::new(None),
+            attachment_failure: Mutex::new(None),
+            attachment_started: Notify::new(),
+            attachment_gates: Mutex::new(Default::default()),
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
             stream_generations: AtomicBool::new(false),
+            stream_bodies: Mutex::new(Default::default()),
             stream_prefixes: Mutex::new(Default::default()),
             stream_gates: Mutex::new(Default::default()),
+            generation_header_gates: Mutex::new(Default::default()),
+            stream_closures: Mutex::new(Default::default()),
             first_started: Notify::new(),
             first_release: Semaphore::new(0),
             hold_first,
@@ -119,7 +132,20 @@ impl AccessServer {
 
 async fn attachment(State(state): State<Arc<AccessState>>) -> Response {
     state.attachment_requests.fetch_add(1, Ordering::SeqCst);
+    if let Some((status, headers)) = crate::poison::mutex(&state.attachment_failure).clone() {
+        return (
+            status,
+            headers,
+            Json(json!({"error":{"message":"synthetic-private-upload-error"}})),
+        )
+            .into_response();
+    }
     let file_id = crate::poison::mutex(&state.attachment_file_id).clone();
+    let gate = crate::poison::mutex(&state.attachment_gates).pop_front();
+    if let Some(gate) = gate {
+        state.attachment_started.notify_one();
+        gate.acquire().await.unwrap().forget();
+    }
     match file_id {
         Some(file_id) => Json(json!({"openai_file_id":file_id})).into_response(),
         None => StatusCode::BAD_GATEWAY.into_response(),
@@ -155,6 +181,10 @@ async fn access(State(state): State<Arc<AccessState>>, uri: Uri, headers: Header
 
 async fn generation(State(state): State<Arc<AccessState>>, Json(body): Json<Value>) -> Response {
     state.generation_requests.fetch_add(1, Ordering::SeqCst);
+    let header_gate = crate::poison::mutex(&state.generation_header_gates).pop_front();
+    if let Some(gate) = header_gate {
+        gate.acquire().await.unwrap().forget();
+    }
     let explicit_messages = body["input"].as_array().is_some_and(|items| {
         items.iter().all(|item| {
             item.get("role").is_none() || (item["type"] == "message" && item["content"].is_array())
@@ -202,9 +232,15 @@ fn generation_reply(
     let mut wire = crate::poison::mutex(&state.stream_prefixes)
         .pop_front()
         .unwrap_or_default();
-    wire.extend(crate::gateway::test_support::basis_points_stream(
-        &serde_json::to_vec(&body).unwrap(),
-    ));
+    wire.extend(
+        crate::poison::mutex(&state.stream_bodies)
+            .pop_front()
+            .unwrap_or_else(|| {
+                crate::gateway::test_support::basis_points_stream(
+                    &serde_json::to_vec(&body).unwrap(),
+                )
+            }),
+    );
     let mut pending = wire.clone();
     let mut split = wire.len();
     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
@@ -221,12 +257,22 @@ fn generation_reply(
     let first = axum::body::Bytes::copy_from_slice(&wire[..split]);
     let rest = axum::body::Bytes::copy_from_slice(&wire[split..]);
     let gate = crate::poison::mutex(&state.stream_gates).pop_front();
+    let closed = crate::poison::mutex(&state.stream_closures).pop_front();
     let stream = futures_util::stream::once(async { Ok::<_, std::convert::Infallible>(first) })
         .chain(futures_util::stream::once(async move {
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
             }
             Ok(rest)
+        }))
+        .chain(futures_util::stream::once(async move {
+            if let Some(closed) = closed {
+                // Keep this synthetic HTTP body open after its terminal event.
+                // Dropping the body closes the receiver without a sent value.
+                let _closed = closed;
+                std::future::pending::<()>().await;
+            }
+            Ok(axum::body::Bytes::new())
         }));
     Response::builder()
         .status(status)

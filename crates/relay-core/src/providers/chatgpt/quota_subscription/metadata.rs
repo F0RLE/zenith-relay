@@ -5,6 +5,13 @@ pub struct CodexSubscriptionMetadata {
     pub active_until_ms: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexSubscriptionRead {
+    pub metadata: CodexSubscriptionMetadata,
+    /// The account check succeeded, but the optional expiry lookup failed.
+    pub fallback_failure: Option<crate::quota::QuotaRefreshFailure>,
+}
+
 pub const SUBSCRIPTION_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1_000;
 
 pub fn subscription_refresh_due(

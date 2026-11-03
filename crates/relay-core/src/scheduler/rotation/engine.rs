@@ -41,12 +41,13 @@ struct CandidateRuntime {
     in_flight: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct HealthRuntime {
     failure_score_milli: u32,
     first_output_latency_ms: Option<u64>,
     latency_observed_at_ms: Option<u64>,
     observed_at_ms: Option<u64>,
+    latency_window: LatencyWindow,
 }
 
 #[derive(Clone, Debug)]

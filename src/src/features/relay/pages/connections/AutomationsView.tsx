@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { automationDefaultNames } from "../../../../i18n/automationNames";
 import { relayCommands } from "../../api/commands";
 import type { WakeTask } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, ToggleSwitch, useConfirm } from "../../components/Ui";
@@ -155,7 +156,8 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   if (!modelOptions.length) modelOptions.push({ value: "", label: t("automations.noPoolModels") });
   const save = async () => {
     if (!valid) return;
-    const submission = buildAutomationSubmission({ task, automationName, triggerKind, selectorKind, accountIds, selectedModel });
+    const storedName = customName?.trim() || (triggerKind === "weekly" ? automationDefaultNames.en.weeklyDefaultName : automationDefaultNames.en.defaultName);
+    const submission = buildAutomationSubmission({ task, automationName: storedName, triggerKind, selectorKind, accountIds, selectedModel });
     const ok = await perform(
       submission.operationId,
       () => task

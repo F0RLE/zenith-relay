@@ -8,9 +8,8 @@ use std::panic;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-/// Install the process-wide panic hook before Tauri starts constructing the
-/// application.  The hook is intentionally best effort: diagnostics must
-/// never turn a useful panic into a second panic.
+/// Install a best-effort process-wide panic hook before Tauri starts.
+/// Preserve the original panic even if diagnostic collection fails.
 pub(crate) fn install_panic_hook() {
     if PANIC_HOOK_INSTALLED.set(()).is_err() {
         return;

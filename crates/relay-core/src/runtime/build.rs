@@ -372,6 +372,7 @@ impl GatewayRuntime {
             tool_policy: RwLock::new(options.tool_policy.clone()),
             clients,
             http3: super::http3::Http3Transport::new(),
+            http_recovery: super::http_recovery::HttpRecovery::default(),
             discovery_client,
             sources: source_parts.executors,
             source_http_clients,

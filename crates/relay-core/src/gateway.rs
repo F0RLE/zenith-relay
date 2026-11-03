@@ -31,7 +31,7 @@ mod token_count;
 mod turn_state;
 mod websocket;
 
-/// Read-only cache accounting. These categories are not additive process RSS.
+/// Read-only cache accounting; report categories individually, separate from RSS.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheMemoryDiagnostics {

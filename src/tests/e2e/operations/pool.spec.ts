@@ -63,7 +63,7 @@ test("pool places idle unavailable accounts after ready members", async ({ page 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-next", "true");
+  await expect(page.locator(".pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
   await expect(page.locator(".pool-member-card").last()).toHaveAttribute("data-member-label", "Personal Plus");
 });
 
@@ -348,14 +348,15 @@ test("pool keeps the last completed route visible after its lease is released", 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const priority = page.locator(".pool-controls");
   await expect(priority).toContainText("Request distribution");
-  await expect(priority).toContainText("Next candidate: Pro account");
+  await expect(priority).toContainText("Last request: Pro account");
+  await expect(priority).not.toContainText("Next candidate");
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
-  await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-next", "true");
+  await expect(page.locator(".pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
 
-test("pool does not show the next route's models before any request", async ({ page }) => {
+test("pool waits for actual requests without predicting an account or models", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
@@ -369,7 +370,9 @@ test("pool does not show the next route's models before any request", async ({ p
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   const priority = page.locator(".pool-controls");
-  await expect(priority).toContainText("Next candidate: Personal Plus");
+  await expect(priority).toContainText("Waiting for the first request");
+  await expect(priority).not.toContainText("Next candidate");
+  await expect(page.locator(".pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
   await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(priority).not.toContainText("gpt-5.4");
   await expect(priority).not.toContainText("claude-opus-4-8");

@@ -4,11 +4,8 @@ pub(super) fn assert_direct_reads_reject(home: &Path, backups: &Path) {
     let secrets = MemorySecrets::default();
     let tokens = TokenSet::new("synthetic-access", None, None, None, 1, 1).unwrap();
     assert_unsafe_backup_error(active_managed_account_id(home, backups).unwrap_err());
-    assert_unsafe_backup_error(
-        account_ops::snapshot_user_profile_with(home, backups, &secrets)
-            .err()
-            .expect("unsafe account backup must be rejected before snapshotting"),
-    );
+    // Explicit snapshots read the current profile, not attachment backup paths.
+    account_ops::snapshot_user_profile(home).unwrap();
     assert_unsafe_backup_error(
         attach_account_with(
             home,

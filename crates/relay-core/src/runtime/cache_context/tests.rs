@@ -54,6 +54,7 @@ fn event(
             cache_affinity: None,
             attempt_outcome: None,
             request_timing: None,
+            route_latency: None,
         }),
         requested_model: Some("synthetic".into()),
         resolved_model: Some("synthetic".into()),
@@ -535,6 +536,14 @@ fn routing_json_accepts_legacy_rows_and_round_trips_safe_comparisons() {
         routing
     );
 
+    let context = encoded["cacheContext"].as_object_mut().unwrap();
+    context.remove("clientPolicy");
+    context.remove("upstreamPolicy");
+    let legacy_policy = serde_json::from_value::<RoutingDiagnostics>(encoded.clone()).unwrap();
+    let context = legacy_policy.cache_context.unwrap();
+    assert!(context.client_policy.is_none());
+    assert!(context.upstream_policy.is_none());
+
     encoded.as_object_mut().unwrap().remove("cacheContext");
     let legacy = serde_json::from_value::<RoutingDiagnostics>(encoded).unwrap();
     assert!(legacy.cache_context.is_none());
@@ -544,4 +553,26 @@ fn routing_json_accepts_legacy_rows_and_round_trips_safe_comparisons() {
             .get("cacheContext")
             .is_none()
     );
+}
+
+#[test]
+fn policy_observations_distinguish_client_controls_from_the_last_dispatch() {
+    use crate::usage::{CacheKeyPresence, CachePrewarm};
+    let store = CacheContextStore::default();
+    let request = payload();
+    let observed = begin(&store, &request, "policy", 10);
+    let diagnostics = store.prepare(&observed, &request, "candidate-a", 11);
+    let mut completion = event("policy", "candidate-a", diagnostics, true);
+    let mut sent = request.clone();
+    sent["prompt_cache_key"] = json!("synthetic-derived-key");
+    sent["prompt_cache_options"] = json!({"prewarm":true});
+    store.prepare(&observed, &sent, "candidate-a", 12);
+    store.finish(&mut completion, 13);
+    let diagnostics = completion.routing.unwrap().cache_context.unwrap();
+    let client = diagnostics.client_policy.unwrap();
+    let upstream = diagnostics.upstream_policy.unwrap();
+    assert_eq!(client.key, CacheKeyPresence::Omitted);
+    assert_eq!(upstream.key, CacheKeyPresence::Present);
+    assert_eq!(client.prewarm, CachePrewarm::Omitted);
+    assert_eq!(upstream.prewarm, CachePrewarm::Enabled);
 }

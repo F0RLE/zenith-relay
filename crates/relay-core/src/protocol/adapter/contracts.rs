@@ -23,7 +23,7 @@ pub use replay::NativeResponsesReplayState;
 pub(in crate::protocol::adapter) use replay::custom_tool_item_id;
 pub(crate) use replay::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids,
+    repair_custom_tool_item_ids, repair_tool_search_item_ids,
 };
 pub(in crate::protocol::adapter) use validation::{
     validate_bridge_fields, validate_responses_bridge_request,

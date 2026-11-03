@@ -10,8 +10,7 @@ pub(super) use document::{
 pub(super) use identity::{
     auth_content, external_account_provider_took_over, external_model_catalog,
     external_provider_took_over, managed_auth_matches_snapshot, managed_config_matches,
-    model_catalog_to_restore, normalize_managed_provider_name, previous_auth_matches_snapshot,
-    previous_config_matches,
+    normalize_managed_provider_name, previous_auth_matches_snapshot, previous_config_matches,
 };
 pub(super) use mutation::{
     attach_config, clear_account_routing_overrides, enable_show_ultra_picker,

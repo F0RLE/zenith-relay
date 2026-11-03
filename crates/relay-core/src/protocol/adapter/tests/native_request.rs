@@ -189,7 +189,7 @@ fn native_responses_request_keeps_image_input_opaque() {
     assert_eq!(prepared.upstream_body()["input"], request["input"]);
 }
 #[test]
-fn response_bridges_share_the_complete_client_tool_catalog() {
+fn response_bridges_use_the_current_client_tool_catalog() {
     let request = json!({
         "model": "bridge-test",
         "tools": [{
@@ -234,15 +234,11 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
         .unwrap();
     assert_eq!(
         messages.upstream_body()["tools"].as_array().unwrap().len(),
-        2
+        1
     );
+    assert_eq!(messages.upstream_body()["tools"][0]["name"], "root_tool");
     assert_eq!(
-        messages.upstream_body()["tools"][0]["name"],
-        "deferred_tool"
-    );
-    assert_eq!(messages.upstream_body()["tools"][1]["name"], "root_tool");
-    assert_eq!(
-        messages.upstream_body()["tools"][1]["description"],
+        messages.upstream_body()["tools"][0]["description"],
         "Current declaration"
     );
 
@@ -264,18 +260,14 @@ fn response_bridges_share_the_complete_client_tool_catalog() {
             .as_array()
             .unwrap()
             .len(),
-        2
+        1
     );
     assert_eq!(
         gemini.upstream_body()["tools"][0]["functionDeclarations"][0]["name"],
-        "deferred_tool"
-    );
-    assert_eq!(
-        gemini.upstream_body()["tools"][0]["functionDeclarations"][1]["name"],
         "root_tool"
     );
     assert_eq!(
-        gemini.upstream_body()["tools"][0]["functionDeclarations"][1]["description"],
+        gemini.upstream_body()["tools"][0]["functionDeclarations"][0]["description"],
         "Current declaration"
     );
 }

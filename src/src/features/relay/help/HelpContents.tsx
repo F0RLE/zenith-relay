@@ -20,8 +20,7 @@ export function HelpContents({ documentRef, language }: {
     const scroller = article?.closest<HTMLElement>(".relay-content");
     if (!article || !scroller) return;
 
-    // Reuse the guide's own links and headings so translations do not need
-    // a second, manually maintained navigation tree.
+    // Derive navigation from the selected guide's links and headings.
     const nextSections = Array.from(article.querySelectorAll<HTMLAnchorElement>(".help-source-contents a"))
       .flatMap((link): Section[] => {
         const anchorId = decodeURIComponent(link.hash.slice(1));

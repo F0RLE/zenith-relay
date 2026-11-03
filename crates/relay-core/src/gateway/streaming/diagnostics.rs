@@ -1,6 +1,43 @@
 use crate::{error_codes, usage::UpstreamErrorDetails};
 use serde_json::json;
 
+pub(super) fn incomplete_stream(
+    http_status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+    inspected: usize,
+) -> UpstreamErrorDetails {
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or_default().trim());
+    let format = match content_type {
+        Some(value) if value.eq_ignore_ascii_case("text/event-stream") => "sse",
+        Some(value) if value.eq_ignore_ascii_case("application/json") => "json",
+        Some(value) if value.eq_ignore_ascii_case("text/html") => "html",
+        Some(_) => "other",
+        None => "missing",
+    };
+    let kind = match body.trim_ascii().first() {
+        None => "empty",
+        Some(b'{') => "object",
+        Some(b'[') => "array_or_marker",
+        Some(b'<') => "markup",
+        _ => "other",
+    };
+    UpstreamErrorDetails::from_value(
+        Some(http_status),
+        &json!({
+            "code": error_codes::STREAM_INCOMPLETE,
+            "type": "relay_stream_eof",
+            "message": format!(
+                "Upstream ended before a usable SSE event: content_type={format}; body_bytes={}; framed_bytes={inspected}; pending_bytes={}; kind={kind}",
+                body.len(), body.len().saturating_sub(inspected),
+            ),
+        }),
+    )
+}
+
 pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> UpstreamErrorDetails {
     let mut source = Some(error);
     let mut timeout = false;

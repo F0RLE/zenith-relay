@@ -1,8 +1,14 @@
 use super::*;
 
 mod cache_context;
+mod cache_policy;
 mod catalog;
 mod continuation;
+mod errors;
+mod inventory;
+mod json;
+mod reasoning;
+mod streaming;
 mod warmup;
 
 async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
@@ -23,7 +29,7 @@ async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRunti
 
 #[tokio::test]
 async fn siwc_uses_sse_upstream_for_both_client_modes_and_preserves_tool_history() {
-    for stream in [false, true] {
+    for (stream, debug) in [(false, false), (true, false), (false, true), (true, true)] {
         let siwc = AccessServer::start(json!([]), false).await;
         let native = AccessServer::start(json!([]), false).await;
         siwc.state.stream_generations.store(true, Ordering::SeqCst);
@@ -34,7 +40,17 @@ async fn siwc_uses_sse_upstream_for_both_client_modes_and_preserves_tool_history
                 }]
             }]
         });
-        let runtime = runtime(&siwc, &native).await;
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let finished = Arc::new(Notify::new());
+        let notified = finished.clone();
+        let mut runtime = runtime(&siwc, &native).await;
+        let settings = Arc::get_mut(&mut runtime).unwrap();
+        settings.diagnostics_enabled = if debug { || true } else { || false };
+        settings.usage = Arc::new(move |event| {
+            crate::poison::mutex(&captured).push(event);
+            notified.notify_one();
+        });
         let (base, task) = recovery::gateway(runtime).await;
         let input = json!([
             {"type":"function_call","name":"lookup","call_id":"call_synthetic","arguments":"{}"},
@@ -62,6 +78,28 @@ async fn siwc_uses_sse_upstream_for_both_client_modes_and_preserves_tool_history
                 serde_json::from_str::<Value>(&text).unwrap()["status"],
                 "completed"
             );
+        }
+        tokio::time::timeout(Duration::from_secs(3), finished.notified())
+            .await
+            .unwrap();
+        let events = crate::poison::mutex(&events);
+        let attempts: Vec<_> = events
+            .iter()
+            .filter(|event| !event.is_request_completion())
+            .collect();
+        assert_eq!(attempts.len(), 1);
+        let first = attempts[0].ttft_ms.expect("upstream SSE first output");
+        assert!(first <= attempts[0].latency_ms);
+        assert_eq!(
+            attempts[0].generation_ms,
+            Some(attempts[0].latency_ms - first)
+        );
+        let transport = attempts[0].routing.as_ref().unwrap().transport.as_ref();
+        assert_eq!(transport.is_some(), debug);
+        if debug && !stream {
+            let transport = transport.unwrap();
+            assert_eq!(transport.upstream_response_ms, Some(attempts[0].latency_ms));
+            assert!(transport.client_response_ready_ms.unwrap() >= attempts[0].latency_ms);
         }
         let bodies = crate::poison::mutex(&siwc.state.generation_bodies);
         assert_eq!(bodies.len(), 1);
@@ -209,19 +247,14 @@ async fn siwc_compaction_rejects_foreign_state_and_never_falls_back_after_dispat
 #[tokio::test]
 async fn siwc_quota_rejection_before_output_rotates_to_the_next_pool_account() {
     for client_stream in [false, true] {
-        for rejection in ["http", "sse", "sse_message_only"] {
+        for rejection in ["http", "sse"] {
             let exhausted = AccessServer::start(json!([]), false).await;
             let next = AccessServer::start(json!([]), false).await;
-            let mut error = json!({
+            let error = json!({
                 "code":"subscription_sharing_usage_limit_exceeded",
                 "type":"invalid_request_error",
                 "message":"Synthetic subscription sharing usage limit exceeded"
             });
-            if rejection == "sse_message_only" {
-                error.as_object_mut().unwrap().remove("code");
-                error["message"] =
-                    json!("The ChatGPT user has reached their Subscription Sharing usage limit.");
-            }
             if rejection != "http" {
                 exhausted
                     .state
@@ -353,6 +386,23 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "subscription_sharing_usage_unavailable",
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "subscription_sharing_user_unavailable",
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            "subscription_sharing_route_not_supported",
+        ),
+        (StatusCode::FORBIDDEN, "chatpass_v2_scope_not_authorized"),
+        (
+            StatusCode::FORBIDDEN,
+            "chatpass_v2_invalid_authorization_context",
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            "subscription_sharing_unsupported_capability",
         ),
         (StatusCode::BAD_REQUEST, "invalid_encrypted_content"),
     ] {

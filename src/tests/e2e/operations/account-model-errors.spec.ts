@@ -23,7 +23,7 @@ test("empty pool catalogs expose a specific localized IPC error", async ({ page 
   const feedback = page.locator(".global-feedback.error");
   await feedback.locator(".global-feedback-error-trigger").click();
   const details = page.getByRole("dialog", { name: "Error details" });
-  await expect(details).toContainText("The pool has no models available for ChatGPT");
+  await expect(details).toContainText("No ChatGPT pool models. Refresh models for enabled connections and check access errors.");
   await expect(details).toContainText('"code": "pool_models_unavailable"');
   await expect(details).toContainText('"reason": "empty_model_catalog"');
   await expect(details).not.toContainText("The current state conflicts");

@@ -14,12 +14,15 @@ pub(super) struct StructuredOutput {
 }
 
 pub(in crate::gateway::execution) fn requires_buffering(request: &Value) -> bool {
-    match request.get(OPTION) {
-        Some(Value::Bool(true)) => true,
-        None => {
-            request.pointer("/text/format/type").and_then(Value::as_str) == Some("json_schema")
-                && request.pointer("/text/format/strict") == Some(&Value::Bool(false))
-        }
+    if !matches!(request.get(OPTION), None | Some(Value::Bool(true))) {
+        return false;
+    }
+    match request.pointer("/text/format/type").and_then(Value::as_str) {
+        Some("json_object") => true,
+        Some("json_schema") => matches!(
+            request.pointer("/text/format/strict"),
+            None | Some(Value::Null | Value::Bool(false))
+        ),
         _ => false,
     }
 }
@@ -28,9 +31,22 @@ pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, Adapt
     if request.get(OPTION).is_some_and(|value| !value.is_boolean()) {
         return Err(AdapterError::invalid_request().with_parameter(OPTION));
     }
-    // An explicit non-strict schema can use the existing local validator.
-    // Omitted strictness, strict requests, and explicit opt-outs do not silently
-    // acquire this compatibility mode. Admission and both stream paths share it.
+    // Name the unsupported strict constraint even without the private option.
+    // An explicit opt-out still requires a compatible native format route.
+    if request.get(OPTION) != Some(&Value::Bool(false))
+        && request.pointer("/text/format/type").and_then(Value::as_str) == Some("json_schema")
+        && request
+            .pointer("/text/format/strict")
+            .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
+    {
+        return Err(AdapterError::parameter_unsupported_for(
+            "text.format.strict",
+        ));
+    }
+    // Responses text formats default to non-strict for absent/null strictness.
+    // JSON mode and non-strict schemas share terminal local validation. Plain
+    // text needs no buffer, even with the option enabled. Admission and both
+    // stream paths share this decision; opt-outs keep native requirements.
     if !requires_buffering(request) {
         return Ok(None);
     }
@@ -54,7 +70,7 @@ pub(super) fn prepare(request: &Value) -> Result<Option<StructuredOutput>, Adapt
     // instruction-based implementation merely because this option was enabled.
     if fields
         .get("strict")
-        .is_some_and(|value| value != &Value::Bool(false))
+        .is_some_and(|value| !matches!(value, Value::Null | Value::Bool(false)))
     {
         return Err(AdapterError::parameter_unsupported_for(
             "text.format.strict",

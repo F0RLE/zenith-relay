@@ -1,5 +1,61 @@
 use super::*;
 use crate::gateway::test_support::test_usage_event;
+use serde_json::Value;
+
+#[test]
+fn responses_cache_buckets_survive_json_and_partial_sse_without_double_counting() {
+    for (streaming, terminal) in [(false, true), (true, true), (true, false)] {
+        let response = serde_json::json!({
+            "status":"completed","prompt_cache_options":{"ttl":"30m"},
+            "usage":{"input_tokens":12000,"output_tokens":25,
+                "input_tokens_details":{"cached_tokens":4000,"cache_write_tokens":7000,
+                    "cache_write_tokens_details":{"ttl_30m_tokens":3000,"ttl_12h_tokens":4000}}}
+        });
+        let body = if streaming {
+            let observed = serde_json::json!({"type":"response.in_progress","response":response});
+            let finish = if terminal {
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"type":"response.completed","response":response})
+                )
+            } else {
+                "data: {\"type\":\"response.completed\"".to_string()
+            };
+            format!("data: {observed}\n\n{finish}").into_bytes()
+        } else {
+            serde_json::to_vec(&response).unwrap()
+        };
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, &body);
+        assert_eq!(event.input_tokens, Some(12000));
+        assert_eq!(event.cached_input_tokens, Some(4000));
+        assert_eq!(event.cache_write_input_tokens, Some(7000));
+        assert_eq!(event.output_tokens, Some(25));
+        assert_eq!(event.total_tokens, Some(12025));
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("30m, 12h"));
+        let observed = event.tool_use.provider_usage.as_ref().unwrap();
+        assert_eq!(observed.cache_write_tokens_by_ttl.get("30m"), Some(&3000));
+        assert_eq!(observed.cache_write_tokens_by_ttl.get("12h"), Some(&4000));
+    }
+}
+
+#[test]
+fn cache_buckets_do_not_invent_missing_totals_or_positive_write_windows() {
+    for (short, long, ttl) in [(0, 0, None), (0, 40, Some("12h"))] {
+        let body = serde_json::json!({"usage":{"input_tokens_details":{
+            "cache_write_tokens_details":{"ttl_30m_tokens":short,"ttl_12h_tokens":long}
+        }}});
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, &serde_json::to_vec(&body).unwrap());
+        assert_eq!(event.cache_write_input_tokens, None);
+        assert_eq!(event.input_tokens, None);
+        assert_eq!(event.total_tokens, None);
+        assert_eq!(event.cache_write_ttl.as_deref(), ttl);
+        let observed = event.tool_use.provider_usage.as_ref().unwrap();
+        assert_eq!(observed.cache_write_tokens_by_ttl.get("30m"), Some(&short));
+        assert_eq!(observed.cache_write_tokens_by_ttl.get("12h"), Some(&long));
+    }
+}
 
 #[test]
 fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
@@ -31,6 +87,40 @@ fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
 use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
+
+#[test]
+fn buffered_responses_keep_completed_reasoning_instead_of_terminal_ciphertext() {
+    let item = serde_json::json!({"type":"reasoning","id":"rs_synthetic","summary":[],
+        "status":"completed","encrypted_content":"synthetic-done-cipher"});
+    for replacement in [
+        None,
+        Some(Value::Null),
+        Some(serde_json::json!("synthetic-terminal-cipher")),
+    ] {
+        let mut terminal = item.clone();
+        terminal
+            .as_object_mut()
+            .unwrap()
+            .remove("encrypted_content");
+        if let Some(value) = replacement {
+            terminal["encrypted_content"] = value;
+        }
+        let frames = [
+            serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}),
+            serde_json::json!({"type":"response.completed","response":{
+                "id":"resp_synthetic","status":"completed","output":[terminal]}}),
+        ];
+        let bytes = frames
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>();
+        let response = completed_upstream_response(bytes.as_bytes(), true, None)
+            .ok()
+            .expect("completed reasoning is valid");
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["output"], serde_json::json!([item]));
+    }
+}
 
 #[test]
 fn generation_evidence_uses_protocol_usage_without_inventing_a_first_token() {
@@ -181,9 +271,22 @@ fn buffered_timing_preserves_unobserved_transports_and_known_zero() {
 }
 
 #[tokio::test]
-async fn basis_points_collector_times_fragmented_output_and_keeps_partial_failures() {
+async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for outcome in ["completed", "failed", "truncated", "json"] {
+    for (basis_points, prewarm, outcome) in [(true, false), (false, false), (false, true)]
+        .into_iter()
+        .flat_map(|(basis_points, prewarm)| {
+            [
+                "completed",
+                "failed",
+                "truncated",
+                "json",
+                "snapshot",
+                "bootstrap_failed",
+            ]
+            .map(move |outcome| (basis_points, prewarm, outcome))
+        })
+    {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -201,11 +304,24 @@ async fn basis_points_collector_times_fragmented_output_and_keeps_partial_failur
                 return;
             }
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-            let terminal = if outcome == "failed" {
+            let terminal = if matches!(outcome, "failed" | "bootstrap_failed") {
                 "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"synthetic_failure\",\"message\":\"Synthetic failure\"}}}\n\n".to_string()
             } else {
                 format!("data: {{\"type\":\"response.completed\",\"response\":{response}}}\n\n")
             };
+            if matches!(outcome, "snapshot" | "bootstrap_failed") {
+                let prefix = if outcome == "bootstrap_failed" {
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n"
+                } else {
+                    ""
+                };
+                let frame = format!("{prefix}{terminal}");
+                socket
+                    .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+            }
             for frame in [
                 ": heartbeat\n\ndata: {\"type\":\"response.created\"}\n\n".to_string(),
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"syn".to_string(),
@@ -229,20 +345,35 @@ async fn basis_points_collector_times_fragmented_output_and_keeps_partial_failur
         let started = std::time::Instant::now();
         let upstream = reqwest::get(format!("http://{address}/")).await.unwrap();
         let mut timing = BufferedResponseTiming::default();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing),
-        )
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            if basis_points {
+                collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing)
+                    .await
+            } else {
+                super::collect_upstream_response(
+                    upstream,
+                    true,
+                    Some("gpt-6-astra"),
+                    prewarm,
+                    started,
+                    &mut timing,
+                )
+                .await
+            }
+        })
         .await;
         server.abort();
         let result = result.expect("collector must stop without waiting for EOF");
         let bytes = match result {
             Ok(bytes) => {
-                assert!(matches!(outcome, "completed" | "json"));
+                assert!(matches!(outcome, "completed" | "json" | "snapshot"));
                 bytes
             }
             Err(failure) => {
-                assert!(matches!(outcome, "failed" | "truncated"));
+                assert!(matches!(
+                    outcome,
+                    "failed" | "truncated" | "bootstrap_failed"
+                ));
                 failure.partial_body
             }
         };
@@ -250,7 +381,7 @@ async fn basis_points_collector_times_fragmented_output_and_keeps_partial_failur
         event.latency_ms = u64::MAX;
         timing.apply(&mut event);
         assert_ne!(event.latency_ms, u64::MAX);
-        if outcome == "json" {
+        if matches!(outcome, "json" | "snapshot") {
             assert_eq!(event.ttft_ms, None);
             assert_eq!(event.generation_ms, None);
         } else {
@@ -392,6 +523,24 @@ fn usage_overflow_does_not_reuse_an_older_total() {
     assert_eq!(event.input_tokens, Some(u64::MAX));
     assert_eq!(event.output_tokens, Some(1));
     assert_eq!(event.total_tokens, None);
+}
+
+#[test]
+fn buffered_stream_retains_reported_tier_after_incomplete_or_failed_response() {
+    for tail in [
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n",
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n",
+        "data: {\"type\":\"response.",
+    ] {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        let frames = format!(
+            "data: {{\"type\":\"response.in_progress\",\"response\":{{\"service_tier\":\"flex\",\"usage\":{{\"input_tokens\":7}}}}}}\n\n{tail}"
+        );
+        populate_tokens(&mut event, frames.as_bytes());
+        assert_eq!(event.input_tokens, Some(7));
+        assert_eq!(event.applied_service_tier.as_deref(), Some("flex"));
+    }
 }
 
 #[test]
@@ -638,7 +787,15 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                 assert_eq!(event.generation_ms, None);
                 bytes
             } else {
-                super::collect_upstream_response(upstream, true, Some("gpt-6-astra")).await
+                super::collect_upstream_response(
+                    upstream,
+                    true,
+                    Some("gpt-6-astra"),
+                    false,
+                    std::time::Instant::now(),
+                    &mut BufferedResponseTiming::default(),
+                )
+                .await
             }
         })
         .await;

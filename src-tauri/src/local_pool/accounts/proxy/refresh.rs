@@ -1,7 +1,7 @@
 use super::super::{
     authority::CodexRefreshClient,
     credentials::CredentialRefresh,
-    oauth::{CodexOAuthClient, OAuthClientKind},
+    oauth::{CodexOAuthClient, OAuthClientKind, siwc::PendingSiwcRefresh},
 };
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use std::{
@@ -79,6 +79,25 @@ impl CodexRefreshClient for ProxyRefreshClient {
         now_ms: u64,
     ) -> Pin<
         Box<
+            dyn Future<Output = std::result::Result<PendingSiwcRefresh, TokenRefreshFailure>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let client = self.client_for_account(local_account_id)?;
+            client
+                .exchange_siwc_refresh(registration, refresh_token, now_ms)
+                .await
+        })
+    }
+    fn verify_siwc_refresh<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        pending: PendingSiwcRefresh,
+        now_ms: u64,
+    ) -> Pin<
+        Box<
             dyn Future<Output = std::result::Result<CredentialRefresh, TokenRefreshFailure>>
                 + Send
                 + 'a,
@@ -86,9 +105,7 @@ impl CodexRefreshClient for ProxyRefreshClient {
     > {
         Box::pin(async move {
             let client = self.client_for_account(local_account_id)?;
-            let tokens = client
-                .exchange_siwc_refresh(registration, refresh_token, now_ms)
-                .await?;
+            let tokens = client.verify_pending_siwc_refresh(pending, now_ms).await?;
             CredentialRefresh::from_oauth(tokens).map_err(|_| {
                 TokenRefreshFailure::new(
                     TokenRefreshFailureKind::Transient,

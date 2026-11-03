@@ -103,8 +103,15 @@ impl RotationEngine {
                 id != &candidate_id
                     || candidate.routes.get(key) == runtime.candidate.routes.get(key)
             });
-            self.health
-                .retain(|(id, key), _| id != &candidate_id || candidate.routes.contains_key(key));
+            self.health.retain(|(id, key), health| {
+                if id != &candidate_id {
+                    return true;
+                }
+                if candidate.routes.get(key) != runtime.candidate.routes.get(key) {
+                    health.latency_window = LatencyWindow::default();
+                }
+                candidate.routes.contains_key(key)
+            });
             runtime.candidate = candidate;
         } else {
             let generation = self

@@ -96,6 +96,7 @@ async fn incompatible_bps_preparation_does_not_restart_recovery_or_access_reads(
             .bearer_auth("local-secret")
             .json(&json!({
                 "model":"gpt-test", "input":"private-preparation-sentinel",
+                "relay_bps_output_validation":false,
                 "text":{"format":{"type":"json_object"}}
             }))
             .send()
@@ -186,6 +187,7 @@ async fn incompatible_bps_pool_does_not_block_a_later_compatible_request() {
             .bearer_auth("local-secret")
             .json(&json!({
                 "model":"gpt-test", "input":"Synthetic input",
+                "relay_bps_output_validation":false,
                 "text":{"format":{"type":"json_object"}}
             }))
             .send()

@@ -4,10 +4,16 @@ use super::SharedRequestBudget;
 use std::time::Duration;
 use tokio::time::Instant;
 
+mod diagnostics;
+pub(crate) use diagnostics::RequestWaitKind;
+use diagnostics::WaitStats;
+pub use diagnostics::{RequestWaitDiagnostics, WaitSummary};
+
 const MAX_ACCUMULATED_WAIT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AdmissionStopReason {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionStopReason {
     QueueFull,
     WaitExpired,
 }
@@ -19,6 +25,9 @@ pub(crate) struct QueueWaitBudget {
     elapsed: Duration,
     started: Option<Instant>,
     stopped: Option<AdmissionStopReason>,
+    kind: RequestWaitKind,
+    stats: [WaitStats; 3],
+    last_recovery_delay_ms: Option<u64>,
 }
 
 impl SharedRequestBudget {
@@ -44,19 +53,29 @@ impl SharedRequestBudget {
             .get_or_insert(reason);
     }
 
-    pub(crate) fn begin_queue_wait(&self) -> bool {
+    pub(crate) fn begin_queue_wait(&self, kind: RequestWaitKind) -> bool {
         let mut waiting = crate::poison::mutex(&self.waiting);
         if waiting.started.is_some() || waiting.stopped.is_some() {
             return false;
         }
         waiting.started = Some(Instant::now());
+        waiting.kind = kind;
+        let stats = &mut waiting.stats[kind.index()];
+        stats.count = stats.count.saturating_add(1);
+        if let RequestWaitKind::Recovery { delay_ms } = kind {
+            waiting.last_recovery_delay_ms = Some(delay_ms);
+        }
         true
     }
 
     pub(crate) fn finish_queue_wait(&self) {
         let mut waiting = crate::poison::mutex(&self.waiting);
         if let Some(started) = waiting.started.take() {
-            waiting.elapsed = waiting.elapsed.saturating_add(started.elapsed());
+            let elapsed = started.elapsed();
+            waiting.elapsed = waiting.elapsed.saturating_add(elapsed);
+            let index = waiting.kind.index();
+            let stats = &mut waiting.stats[index];
+            stats.elapsed = stats.elapsed.saturating_add(elapsed);
         }
     }
 

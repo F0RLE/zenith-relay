@@ -4,6 +4,7 @@ use crate::error_codes;
 use crate::quota::QuotaRefreshFailure;
 use chrono::{TimeZone, Utc};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 pub fn parse_accounts_check(
     account_check_response: &Value,
     preferred_account_id: &str,
@@ -15,27 +16,28 @@ pub fn parse_accounts_check(
             false,
         ));
     }
-    let ordered_key = account_check_response
-        .get("account_ordering")
-        .and_then(Value::as_array)
-        .and_then(|ordering_entries| ordering_entries.first())
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|ordered_account_id| !ordered_account_id.is_empty());
-    let selected = account_check_records
-        .iter()
-        .find(|account_record| {
-            record_account_id(account_record).as_deref() == Some(preferred_account_id)
-        })
-        .or_else(|| {
-            ordered_key.and_then(|ordered_key| {
+    let preferred_account_id = preferred_account_id.trim();
+    let selected = if preferred_account_id.is_empty() {
+        &account_check_records[0]
+    } else {
+        // A canonical id or an alias supplied by this authenticated response
+        // can identify the account. Provider ordering cannot replace it.
+        account_check_records
+            .iter()
+            .find(|account_record| {
+                record_account_id(account_record)
+                    .as_deref()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(preferred_account_id))
+            })
+            .or_else(|| {
                 account_check_records.iter().find(|account_record| {
-                    account_record.map_key.as_deref() == Some(ordered_key)
-                        || record_account_id(account_record).as_deref() == Some(ordered_key)
+                    account_record
+                        .map_key
+                        .is_some_and(|id| id.eq_ignore_ascii_case(preferred_account_id))
                 })
             })
-        })
-        .unwrap_or(&account_check_records[0]);
+            .ok_or_else(|| super::failure(error_codes::SUBSCRIPTION_ACCOUNT_MISSING, false))?
+    };
     let selected_account_object = selected
         .account_value
         .as_object()
@@ -71,7 +73,13 @@ pub fn parse_accounts_check(
 pub(super) fn parse_subscriptions(
     subscription_response: &Value,
     account_id: &str,
-) -> CodexSubscriptionMetadata {
+) -> Result<CodexSubscriptionMetadata, QuotaRefreshFailure> {
+    if !subscription_response.is_object() {
+        return Err(super::failure(
+            error_codes::SUBSCRIPTION_INVALID_RESPONSE,
+            false,
+        ));
+    }
     let candidates = [
         Some(subscription_response),
         subscription_response.get("data"),
@@ -89,6 +97,7 @@ pub(super) fn parse_subscriptions(
         .flatten()
         .filter_map(Value::as_object)
     {
+        validate_subscription_account(subscription_object, account_id)?;
         metadata.plan_type = metadata.plan_type.or_else(|| {
             string_field(
                 subscription_object,
@@ -108,12 +117,42 @@ pub(super) fn parse_subscriptions(
             )
         });
     }
-    metadata
+    Ok(metadata)
 }
 
-struct AccountCheckRecord {
-    map_key: Option<String>,
-    account_value: Value,
+fn validate_subscription_account(
+    object: &Map<String, Value>,
+    account_id: &str,
+) -> Result<(), QuotaRefreshFailure> {
+    let account = object.get("account").and_then(Value::as_object);
+    for value in [
+        object.get("account_id"),
+        object.get("accountId"),
+        account.and_then(|account| account.get("id")),
+        account.and_then(|account| account.get("account_id")),
+        account.and_then(|account| account.get("accountId")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let returned_id = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| super::failure(error_codes::SUBSCRIPTION_INVALID_RESPONSE, false))?;
+        if !returned_id.eq_ignore_ascii_case(account_id) {
+            return Err(super::failure(
+                error_codes::SUBSCRIPTION_ACCOUNT_MISSING,
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct AccountCheckRecord<'a> {
+    map_key: Option<&'a str>,
+    account_value: &'a Value,
 }
 
 /// The result of an authenticated ChatGPT account-check response is the only
@@ -207,17 +246,17 @@ pub fn unverified_chatgpt_account_id_hints(token: &str) -> Vec<String> {
     account_ids
 }
 
-fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord> {
+fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord<'_>> {
     let Some(accounts) = account_check_response.get("accounts") else {
         return (account_check_response.is_object()
             && record_account_id(&AccountCheckRecord {
                 map_key: None,
-                account_value: account_check_response.clone(),
+                account_value: account_check_response,
             })
             .is_some())
-        .then(|| AccountCheckRecord {
+        .then_some(AccountCheckRecord {
             map_key: None,
-            account_value: account_check_response.clone(),
+            account_value: account_check_response,
         })
         .into_iter()
         .collect();
@@ -228,11 +267,12 @@ fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord> {
             .filter(|account_value| account_value.is_object())
             .map(|account_value| AccountCheckRecord {
                 map_key: None,
-                account_value: account_value.clone(),
+                account_value,
             })
             .collect(),
         Value::Object(account_map) => {
             let mut account_records = Vec::with_capacity(account_map.len());
+            let mut seen = HashSet::with_capacity(account_map.len());
             let ordered_keys = account_check_response
                 .get("account_ordering")
                 .and_then(Value::as_array)
@@ -243,10 +283,11 @@ fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord> {
                 if let Some(account_value) = account_map
                     .get(map_key)
                     .filter(|account_value| account_value.is_object())
+                    && seen.insert(map_key)
                 {
                     account_records.push(AccountCheckRecord {
-                        map_key: Some(map_key.to_string()),
-                        account_value: account_value.clone(),
+                        map_key: Some(map_key),
+                        account_value,
                     });
                 }
             }
@@ -254,12 +295,10 @@ fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord> {
                 .iter()
                 .filter(|(_, account_value)| account_value.is_object())
             {
-                if !account_records.iter().any(|account_record| {
-                    account_record.map_key.as_deref() == Some(map_key.as_str())
-                }) {
+                if seen.insert(map_key.as_str()) {
                     account_records.push(AccountCheckRecord {
-                        map_key: Some(map_key.clone()),
-                        account_value: account_value.clone(),
+                        map_key: Some(map_key),
+                        account_value,
                     });
                 }
             }
@@ -269,7 +308,7 @@ fn account_records(account_check_response: &Value) -> Vec<AccountCheckRecord> {
     }
 }
 
-fn record_account_id(account_record: &AccountCheckRecord) -> Option<String> {
+fn record_account_id(account_record: &AccountCheckRecord<'_>) -> Option<String> {
     let account_value = account_record.account_value.as_object()?;
     let account_object = account_value
         .get("account")
@@ -279,20 +318,20 @@ fn record_account_id(account_record: &AccountCheckRecord) -> Option<String> {
         account_object,
         &["account_id", "id", "chatgpt_account_id", "workspace_id"],
     )
-    .or_else(|| account_record.map_key.clone())
+    .or_else(|| account_record.map_key.and_then(bounded_text))
 }
 
 fn string_field(record_fields: &Map<String, Value>, field_names: &[&str]) -> Option<String> {
     field_names
         .iter()
         .find_map(|field_name| record_fields.get(*field_name).and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|text_value| {
-            !text_value.is_empty()
-                && text_value.len() <= 128
-                && !text_value.chars().any(char::is_control)
-        })
-        .map(str::to_string)
+        .and_then(bounded_text)
+}
+
+fn bounded_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
 }
 
 fn timestamp_field(record_fields: &Map<String, Value>, field_names: &[&str]) -> Option<u64> {
@@ -339,4 +378,65 @@ fn normalize_epoch_ms(epoch_value: u64) -> Option<u64> {
     let signed = i64::try_from(normalized_epoch).ok()?;
     Utc.timestamp_millis_opt(signed).single()?;
     Some(normalized_epoch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn account_ordering_borrows_each_object_once() {
+        let payload = json!({
+            "accounts": {"a": {}, "b": {}, "c": {}, "invalid": null},
+            "account_ordering": ["b", "missing", "b", "invalid", "a", 7]
+        });
+        let records = account_records(&payload);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.map_key)
+                .collect::<Vec<_>>(),
+            [Some("b"), Some("a"), Some("c")]
+        );
+        for record in records {
+            assert!(std::ptr::eq(
+                record.account_value,
+                &payload["accounts"][record.map_key.unwrap()]
+            ));
+        }
+        for payload in [
+            json!({"id": "single"}),
+            json!({"accounts": [{"id": "array"}]}),
+        ] {
+            let records = account_records(&payload);
+            let expected = payload
+                .get("accounts")
+                .map_or(&payload, |accounts| &accounts[0]);
+            assert_eq!(records.len(), 1);
+            assert!(std::ptr::eq(records[0].account_value, expected));
+        }
+    }
+
+    #[test]
+    fn account_map_keys_use_the_same_bounds_as_explicit_ids() {
+        for key in [
+            "".to_owned(),
+            " ".to_owned(),
+            "bad\nid".to_owned(),
+            "x".repeat(129),
+        ] {
+            let payload = json!({"accounts": {key: {}}});
+            assert!(account_ids_from_check_response(&payload).is_empty());
+            assert_eq!(
+                resolve_account_check_account_id(&payload, &[]),
+                Err(AccountCheckIdentityError::Missing)
+            );
+        }
+        let payload = json!({"accounts": {" alias ": {}, "other": {"id": "canonical"}}});
+        assert_eq!(
+            account_ids_from_check_response(&payload),
+            ["alias", "canonical"]
+        );
+    }
 }

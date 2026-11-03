@@ -2,6 +2,7 @@ use super::*;
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message, Upgrade};
 
+mod full_history;
 mod lifecycle;
 
 fn request(stream: bool) -> Value {
@@ -86,6 +87,8 @@ async fn siwc_native_catalog_loads_only_requested_tools_and_preserves_roundtrip(
         siwc.state.stream_generations.store(true, Ordering::SeqCst);
         let mut first = lookup("resp_native_lookup");
         first["output"].as_array_mut().unwrap().insert(0, json!({"type":"reasoning","id":"rs_synthetic","encrypted_content":"synthetic-opaque-reasoning","summary":[]}));
+        crate::poison::mutex(&siwc.state.stream_bodies)
+            .push_back(super::reasoning::reasoning_stream(&first));
         crate::poison::mutex(&siwc.state.generation_replies)
             .extend([(StatusCode::OK, first), (StatusCode::OK, calls())]);
         *crate::poison::mutex(&siwc.state.generation_body) = answer();
@@ -103,6 +106,10 @@ async fn siwc_native_catalog_loads_only_requested_tools_and_preserves_roundtrip(
         let text = result.text().await.unwrap();
         assert_eq!(status, StatusCode::OK, "{text}");
         let result = terminal(&text, stream);
+        assert_eq!(
+            result["output"][0]["encrypted_content"],
+            "synthetic-opaque-reasoning"
+        );
         assert_eq!(result["output"][1], calls()["output"][0]);
         assert_eq!(result["output"][2], calls()["output"][1]);
         assert_eq!(result["usage"]["input_tokens_details"]["cached_tokens"], 64);
@@ -263,54 +270,171 @@ async fn siwc_native_catalog_rejects_invalid_calls_without_retrying_execution() 
 
 #[tokio::test]
 async fn siwc_native_catalog_reports_actual_per_generation_usage_and_loaded_counts() {
-    let siwc = AccessServer::start(json!([]), false).await;
-    let native = AccessServer::start(json!([]), false).await;
-    siwc.state.stream_generations.store(true, Ordering::SeqCst);
-    crate::poison::mutex(&siwc.state.generation_replies).extend([
-        (StatusCode::OK, lookup("resp_usage_lookup")),
-        (StatusCode::OK, calls()),
-    ]);
-    let mut runtime = runtime(&siwc, &native).await;
-    let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
-    let captured = events.clone();
-    Arc::get_mut(&mut runtime).unwrap().diagnostics_enabled = || true;
-    Arc::get_mut(&mut runtime).unwrap().usage =
-        Arc::new(move |event| crate::poison::mutex(&captured).push(event));
-    let (base, task) = recovery::gateway(runtime).await;
-    let result = retry_admission::bounded_client()
-        .post(format!("{base}/v1/responses"))
-        .bearer_auth("local-secret")
-        .json(&request(true))
-        .send()
-        .await
-        .unwrap();
-    let text = result.text().await.unwrap();
-    terminal(&text, true);
-    let events = crate::poison::mutex(&events);
-    assert_eq!(events.len(), 2);
-    assert!(!events[0].success);
-    assert_eq!(
-        events[0].routing.as_ref().unwrap().attempt_outcome,
-        Some(crate::AttemptOutcome::ToolDiscovery)
-    );
-    assert!(events[1].success);
-    assert_eq!(events[0].tool_use.forwarded_tool_count, 1);
-    assert_eq!(events[1].tool_use.forwarded_tool_count, 3);
-    for event in events.iter() {
-        assert_eq!(event.input_tokens, Some(100));
-        assert_eq!(event.output_tokens, Some(10));
-        assert_eq!(event.cached_input_tokens, Some(64));
-        assert_eq!(event.cache_write_input_tokens, None);
+    for (stream, debug, upstream_stream) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+        (false, true, false),
+        (true, true, false),
+    ] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let native = AccessServer::start(json!([]), false).await;
+        siwc.state
+            .stream_generations
+            .store(upstream_stream, Ordering::SeqCst);
+        let mut lookup_response = lookup("resp_usage_lookup");
+        let mut final_response = calls();
+        for (index, response) in [&mut lookup_response, &mut final_response]
+            .into_iter()
+            .enumerate()
+        {
+            response["service_tier"] = json!(if index == 0 { "default" } else { "priority" });
+            response["usage"]["input_tokens_details"]["cache_write_tokens"] = json!(20);
+            response["usage"]["input_tokens_details"]["cache_write_tokens_details"] = json!({
+                "ttl_30m_tokens":if index == 0 { 20 } else { 0 },
+                "ttl_12h_tokens":if index == 0 { 0 } else { 20 }
+            });
+        }
+        crate::poison::mutex(&siwc.state.generation_replies).extend([
+            (StatusCode::OK, lookup_response),
+            (StatusCode::OK, final_response),
+        ]);
+        let mut runtime = runtime(&siwc, &native).await;
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        Arc::get_mut(&mut runtime).unwrap().diagnostics_enabled =
+            if debug { || true } else { || false };
+        Arc::get_mut(&mut runtime).unwrap().usage =
+            Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        let (base, task) = recovery::gateway(runtime).await;
+        let result = retry_admission::bounded_client()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&request(stream))
+            .send()
+            .await
+            .unwrap();
+        let text = result.text().await.unwrap();
+        terminal(&text, stream);
+        let events = crate::poison::mutex(&events);
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].success);
+        assert_eq!(
+            events[0].routing.as_ref().unwrap().attempt_outcome,
+            Some(crate::AttemptOutcome::ToolDiscovery)
+        );
+        assert!(events[1].success);
+        assert_eq!(events[0].tool_use.forwarded_tool_count, 1);
+        assert_eq!(events[1].tool_use.forwarded_tool_count, 3);
+        for (index, event) in events.iter().enumerate() {
+            let (short, long, ttl) = if index == 0 {
+                (20, 0, "30m")
+            } else {
+                (0, 20, "12h")
+            };
+            assert_eq!(event.input_tokens, Some(100));
+            assert_eq!(event.output_tokens, Some(10));
+            assert_eq!(event.cached_input_tokens, Some(64));
+            assert_eq!(event.cache_write_input_tokens, Some(20));
+            assert_eq!(event.total_tokens, Some(110));
+            assert_eq!(
+                event.applied_service_tier.as_deref(),
+                Some(if index == 0 { "default" } else { "priority" })
+            );
+            assert_eq!(event.cache_write_ttl.as_deref(), Some(ttl));
+            let observed = event.tool_use.provider_usage.as_ref().unwrap();
+            assert_eq!(observed.cache_write_tokens_by_ttl.get("30m"), Some(&short));
+            assert_eq!(observed.cache_write_tokens_by_ttl.get("12h"), Some(&long));
+            if upstream_stream {
+                let first = event.ttft_ms.unwrap_or_else(|| {
+                    panic!(
+                        "missing upstream timing: stream={stream}, debug={debug}, attempt={}",
+                        event.attempt
+                    )
+                });
+                assert!(first <= event.latency_ms);
+                assert_eq!(event.generation_ms, Some(event.latency_ms - first));
+            } else {
+                assert_eq!(event.ttft_ms, None, "JSON has no first-token evidence");
+                assert_eq!(event.generation_ms, None);
+            }
+        }
+        assert_eq!(events[1].tool_use.tool_call_count, 2);
+        let catalog = events[1].tool_use.basis_points_catalog.as_ref();
+        assert_eq!(catalog.is_some(), debug);
+        if let Some(catalog) = catalog {
+            assert_eq!(catalog.loaded_tool_count, 2);
+            assert_eq!(catalog.discovery_latency_ms, Some(events[0].latency_ms));
+        }
+        assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+        task.abort();
     }
-    assert_eq!(events[1].tool_use.tool_call_count, 2);
-    assert_eq!(
-        events[1]
-            .tool_use
-            .basis_points_catalog
-            .as_ref()
-            .unwrap()
-            .loaded_tool_count,
-        2
-    );
-    task.abort();
+}
+
+#[tokio::test]
+async fn siwc_buffered_catalog_keeps_timing_without_lookup_and_after_upstream_failure() {
+    for completed in [true, false] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let native = AccessServer::start(json!([]), false).await;
+        siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        let mut terminal_response = answer();
+        let kind = if completed {
+            "response.completed"
+        } else {
+            terminal_response["status"] = json!("failed");
+            terminal_response["error"] = json!({
+                "code":"synthetic_failure","message":"Synthetic failure after output"
+            });
+            "response.failed"
+        };
+        let terminal_event = json!({"type":kind,"response":terminal_response});
+        crate::poison::mutex(&siwc.state.stream_bodies).push_back(
+            format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"Synthetic ready\"}}\n\ndata: {terminal_event}\n\n"
+            )
+            .into_bytes(),
+        );
+        let mut runtime = runtime(&siwc, &native).await;
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        Arc::get_mut(&mut runtime).unwrap().diagnostics_enabled = || true;
+        Arc::get_mut(&mut runtime).unwrap().usage =
+            Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        let (base, task) = recovery::gateway(runtime).await;
+        let response = retry_admission::bounded_client()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&request(false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().is_success(), completed);
+        let _ = response.bytes().await.unwrap();
+        let events = crate::poison::mutex(&events);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.success, completed);
+        let first = event
+            .ttft_ms
+            .expect("actual delta survives catalog buffering");
+        assert!(first <= event.latency_ms);
+        assert_eq!(event.generation_ms, Some(event.latency_ms - first));
+        assert_eq!(event.input_tokens, Some(100));
+        assert_eq!(event.cached_input_tokens, Some(64));
+        assert_eq!(event.output_tokens, Some(10));
+        assert_eq!(
+            event
+                .tool_use
+                .basis_points_catalog
+                .as_ref()
+                .unwrap()
+                .discovery_rounds,
+            0
+        );
+        assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
 }

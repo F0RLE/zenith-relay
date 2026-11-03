@@ -76,7 +76,38 @@ impl StoredCodexCredentials {
                     "stored Agent Identity credential is invalid",
                 )
             })?;
-        let credentials = if wire.access_token.is_empty() {
+        let identity_only =
+            wire.access_token.is_empty() && wire.oauth_client_kind == OAuthClientKind::Siwc;
+        let credentials = if identity_only {
+            let invalid = || {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored SIWC identity-only connection is invalid",
+                )
+            };
+            if wire.refresh_token.is_some()
+                || wire.expires_at_ms.is_some()
+                || agent_identity.is_some()
+                || wire.organization_id.is_some()
+                || wire.account_is_fedramp
+            {
+                return Err(invalid());
+            }
+            let registration = wire.siwc.as_ref().ok_or_else(invalid)?;
+            if wire.provider_account_id.as_deref() != Some(registration.identity_key().as_str())
+                || wire.provider_user_id.as_deref() != Some(registration.subject.as_str())
+            {
+                return Err(invalid());
+            }
+            Self::new_siwc_identity(
+                &wire.local_account_id,
+                registration.clone(),
+                wire.id_token.ok_or_else(invalid)?,
+                wire.email,
+                wire.issued_at_ms,
+                wire.generation,
+            )?
+        } else if wire.access_token.is_empty() {
             Self::new_agent_identity(
                 &wire.local_account_id,
                 agent_identity.ok_or_else(|| {

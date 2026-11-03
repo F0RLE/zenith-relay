@@ -627,12 +627,14 @@
 
 .relay-tooltip {
   --relay-tooltip-arrow-left: 50%;
+  --relay-tooltip-arrow-top: 50%;
+  box-sizing: border-box;
   position: fixed;
   z-index: 1000;
   max-width: min(300px, calc(100vw - 16px));
-  padding: 7px 9px;
+  padding: 7px 10px;
   border: 1px solid var(--relay-border-strong);
-  border-radius: 5px;
+  border-radius: 7px;
   background: var(--relay-tooltip-bg);
   box-shadow: var(--relay-shadow);
   color: var(--relay-tooltip-text);
@@ -645,40 +647,47 @@
   opacity: 0;
 }
 
-.relay-tooltip::before,
-.relay-tooltip::after {
+.relay-tooltip::before {
   position: absolute;
   left: var(--relay-tooltip-arrow-left);
-  width: 0;
-  height: 0;
-  border-style: solid;
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  background: var(--relay-tooltip-bg);
+  border: 0 solid var(--relay-border-strong);
+  border-radius: 1px;
   content: "";
   pointer-events: none;
-  transform: translateX(-50%);
+  transform: translateX(-50%) rotate(45deg);
 }
 
 .relay-tooltip[data-placement="bottom"]::before {
-  top: -7px;
-  border-width: 0 7px 7px;
-  border-color: transparent transparent var(--relay-border-strong);
-}
-
-.relay-tooltip[data-placement="bottom"]::after {
-  top: -6px;
-  border-width: 0 6px 6px;
-  border-color: transparent transparent var(--relay-tooltip-bg);
+  top: -4px;
+  border-top-width: 1px;
+  border-left-width: 1px;
 }
 
 .relay-tooltip[data-placement="top"]::before {
-  bottom: -7px;
-  border-width: 7px 7px 0;
-  border-color: var(--relay-border-strong) transparent transparent;
+  bottom: -4px;
+  border-bottom-width: 1px;
+  border-right-width: 1px;
 }
 
-.relay-tooltip[data-placement="top"]::after {
-  bottom: -6px;
-  border-width: 6px 6px 0;
-  border-color: var(--relay-tooltip-bg) transparent transparent;
+.relay-tooltip[data-placement="right"]::before {
+  left: -4px;
+  top: var(--relay-tooltip-arrow-top);
+  border-bottom-width: 1px;
+  border-left-width: 1px;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.relay-tooltip[data-placement="left"]::before {
+  left: auto;
+  right: -4px;
+  top: var(--relay-tooltip-arrow-top);
+  border-top-width: 1px;
+  border-right-width: 1px;
+  transform: translateY(-50%) rotate(45deg);
 }
 
 .relay-tooltip[data-positioned="true"] {

@@ -316,8 +316,7 @@ fn quota_exhausted(status: StatusCode, text: &str) -> Option<&'static str> {
             "out of credits",
             "add credits to continue",
         ],
-    ) || (text.contains("has reached") && text.contains("subscription sharing usage limit"))
-        || status == StatusCode::PAYMENT_REQUIRED)
+    ) || status == StatusCode::PAYMENT_REQUIRED)
         .then_some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
 }
 
@@ -367,6 +366,9 @@ fn invalid_request(status: StatusCode, text: &str) -> Option<&'static str> {
                 "expected an id that begins with 'ctc_'",
                 "expected an id that starts with 'ctc'",
                 "expected an id that begins with 'msg'",
+                "expected an id that begins with 'tsc'",
+                "expected an id that begins with 'tsc_'",
+                "expected an id that starts with 'tsc'",
             ],
         )))
     .then_some(error_codes::UPSTREAM_INVALID_REQUEST)

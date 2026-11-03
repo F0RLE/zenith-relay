@@ -6,7 +6,7 @@ use super::presentation::{
 use super::response::{invalid_tool_output, parse_transport_envelope, validate_tool_completion};
 use crate::protocol::AdapterError;
 use crate::usage::ToolUseDiagnostics;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::gateway) mod execution;
@@ -16,6 +16,31 @@ pub(in crate::gateway::execution) use execution::{DiscoveryExecution, resolve};
 const MAX_LOOKUP_ROUNDS: u8 = 8;
 const MAX_LOOKUP_TOOLS: usize = 8;
 const MAX_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;
+
+fn local_lookup_envelope(item: &Value) -> Option<Map<String, Value>> {
+    let fields = item.as_object()?;
+    if !fields
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(super::is_transport_tool)
+    {
+        return None;
+    }
+    // Explicit references decide routing; code remains opaque here. Missing
+    // or uncertain metadata keeps legacy parsing, and actual lookups still
+    // pass the full decoder. Client calls retain their terminal validation.
+    if let Ok(Some(references)) = super::codec::transport_references(fields.get("arguments"))
+        && !references.as_array().is_some_and(|references| {
+            references.len() == 1 && references[0].as_str() == Some(LOOKUP_TOOL)
+        })
+    {
+        return None;
+    }
+    parse_transport_envelope(fields)
+        .ok()
+        .map(|(envelope, _)| envelope)
+        .filter(|envelope| envelope.get("tool").and_then(Value::as_str) == Some(LOOKUP_TOOL))
+}
 
 pub(in crate::gateway::execution) fn capture(request: &Value, tool_use: &mut ToolUseDiagnostics) {
     if tool_use.client_context.is_none() {
@@ -99,23 +124,8 @@ impl DiscoverySession {
         let loaded = loaded_names(&tools.iter().collect::<Vec<_>>(), request);
         let rendered_schema_bytes =
             diagnostics_enabled.then(|| loaded_schema_bytes(&tools, &loaded));
-        let call_ids = request
-            .get("input")
-            .into_iter()
-            .flat_map(|input| {
-                input
-                    .as_array()
-                    .map_or(std::slice::from_ref(input), Vec::as_slice)
-            })
-            .filter_map(|item| {
-                item.get("call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .flat_map(|id| {
-                let parent = super::batch::parent_call_id(&id);
-                std::iter::once(id).chain(parent)
-            })
+        let call_ids = super::history::replay_call_ids(request)
+            .map(|id| id.into_owned())
             .collect();
         Ok(Some(Self {
             model: request["model"].as_str().unwrap_or_default().to_string(),
@@ -223,17 +233,12 @@ impl DiscoverySession {
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
                 .ok_or_else(|| invalid_tool_output("output.relay.catalog.call_id"))?;
-            if !response_call_ids.insert(call_id) || self.call_ids.contains(call_id) {
+            let replay_id = super::history::replay_call_id(call_id);
+            if self.call_ids.contains(replay_id.as_ref()) || !response_call_ids.insert(replay_id) {
                 return Err(invalid_tool_output("output.relay.catalog.call_id"));
             }
-            let envelope = item
-                .as_object()
-                .and_then(|item| parse_transport_envelope(item).ok())
-                .map(|(envelope, _)| envelope);
-            if envelope.as_ref().is_some_and(|envelope| {
-                envelope.get("tool").and_then(Value::as_str) == Some(LOOKUP_TOOL)
-            }) {
-                lookups.push((item, envelope.unwrap()));
+            if let Some(envelope) = local_lookup_envelope(item) {
+                lookups.push((item, envelope));
             } else {
                 client_calls += 1;
             }
@@ -250,31 +255,30 @@ impl DiscoverySession {
             return Err(invalid_tool_output("output.relay.catalog.limit"));
         }
         let mut outputs = Vec::new();
-        let mut call_ids = BTreeSet::new();
+        let mut call_ids = Vec::with_capacity(lookups.len());
+        let mut lookup_contracts = BTreeMap::new();
+        let mut rendered_schema_bytes = self.rendered_schema_bytes;
         for (item, envelope) in lookups {
-            let call_id = item["call_id"]
-                .as_str()
-                .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| invalid_tool_output("output.relay.catalog.call_id"))?;
-            if !call_ids.insert(call_id) || !self.call_ids.insert(call_id.to_string()) {
-                return Err(invalid_tool_output("output.relay.catalog.call_id"));
-            }
+            // Stage only this round's changes. A late invalid item, byte limit,
+            // or request error must not partially advance the session.
+            let call_id = item["call_id"].as_str().unwrap();
             let item_id = item["id"]
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
                 .ok_or_else(|| invalid_tool_output("output.relay.catalog.call_id"))?;
+            call_ids.push(super::history::replay_call_id(call_id).into_owned());
+            if client_calls != 0 {
+                // These results will not be rendered or sent to another
+                // generation. Preserve native identity validation, but do not
+                // resolve an unused query or mark unseen contracts as loaded.
+                continue;
+            }
             let arguments = envelope
                 .get("args")
                 .and_then(|arguments| super::codec::function_arguments(arguments).ok());
             let selected = arguments
                 .as_ref()
                 .and_then(|arguments| lookup(&self.tools, arguments).ok());
-            if client_calls != 0 {
-                // These definitions will not be rendered or sent to another
-                // generation. Validate the lookup without cloning its schemas
-                // or marking unseen contracts as loaded in diagnostics.
-                continue;
-            }
             let selected = match selected {
                 Some(selected) => selected,
                 None => {
@@ -293,18 +297,26 @@ impl DiscoverySession {
                     continue;
                 }
             };
-            self.loaded.extend(selected.iter().map(|tool| tool.key()));
             let mut contracts = Vec::new();
             let mut reused = Vec::new();
             for tool in selected {
                 let name = tool.key();
-                if let Some(prior_call) = self.lookup_contracts.get(&name) {
+                if let Some(prior_call) = self
+                    .lookup_contracts
+                    .get(&name)
+                    .or_else(|| lookup_contracts.get(&name))
+                {
                     reused.push(json!({"name":name,"call_id":prior_call}));
                     continue;
                 }
-                self.lookup_contracts
-                    .insert(name.clone(), call_id.to_string());
-                if let Some(bytes) = self.rendered_schema_bytes.as_mut() {
+                if self.loaded.contains(&name) {
+                    // These current contracts are already rendered after history.
+                    // Reuse that visible source, not a fabricated lookup call ID.
+                    reused.push(json!({"name":name,"source":"loaded_tool_contracts"}));
+                    continue;
+                }
+                lookup_contracts.insert(name.clone(), call_id.to_string());
+                if let Some(bytes) = rendered_schema_bytes.as_mut() {
                     *bytes += super::schema::parameter_schema(tool)
                         .map(crate::tool_policy::serialized_bytes)
                         .unwrap_or(0);
@@ -323,28 +335,54 @@ impl DiscoverySession {
             // Schema lookups are local, side-effect-free reads. Consume them
             // without another generation: the existing client calls must be
             // validated and returned, never replayed before their results.
+            self.call_ids.extend(call_ids);
             return Ok(false);
         }
-        let mut continuation = items.clone();
-        continuation.extend(outputs);
+        let mut continuation = Value::Array(items.clone());
+        continuation.as_array_mut().unwrap().extend(outputs);
         // Bound only the state introduced by local discovery. The original
         // request already passed admission; charging it again made every
         // lookup in a large, valid conversation fail before continuation.
+        // Account for the assembled allocation directly, without a second
+        // deep copy solely for inspecting its retained size.
         let continuation_bytes = self.continuation_bytes.saturating_add(
-            crate::gateway::request_body::retained_request_bytes(&Value::Array(
-                continuation.clone(),
-            )),
+            crate::gateway::request_body::retained_request_bytes(&continuation),
         );
         if continuation_bytes > MAX_CONTINUATION_BYTES {
             return Err(invalid_tool_output("output.relay.catalog.bytes"));
         }
+        if !upstream.get("input").is_some_and(Value::is_array) {
+            return Err(invalid_tool_output("input"));
+        }
+        let next_iteration = upstream
+            .get("metadata")
+            .and_then(Value::as_object)
+            .map(|metadata| {
+                metadata
+                    .get("agent_iteration")
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .and_then(|v| v.checked_add(1))
+                    .ok_or_else(|| invalid_tool_output("metadata.agent_iteration"))
+            })
+            .transpose()?;
+
+        // All fallible validation is complete. Commit the request and the
+        // staged catalog together; no history or existing catalog was cloned.
         let input = upstream
             .get_mut("input")
             .and_then(Value::as_array_mut)
-            .ok_or_else(|| invalid_tool_output("input"))?;
+            .unwrap();
         // Replay the exact native items, including opaque reasoning, to the same
         // owner. Only the local lookup results are synthesized.
-        input.extend(continuation);
+        input.append(continuation.as_array_mut().unwrap());
+        if let Some(next) = next_iteration {
+            upstream["metadata"]["agent_iteration"] = json!(next.to_string());
+        }
+        self.call_ids.extend(call_ids);
+        self.loaded.extend(lookup_contracts.keys().cloned());
+        self.lookup_contracts.extend(lookup_contracts);
+        self.rendered_schema_bytes = rendered_schema_bytes;
         self.continuation_bytes = continuation_bytes;
         self.prior_messages.extend(
             items
@@ -358,15 +396,6 @@ impl DiscoverySession {
                 .cloned(),
         );
         self.rounds += 1;
-        if let Some(metadata) = upstream.get_mut("metadata").and_then(Value::as_object_mut) {
-            let next = metadata
-                .get("agent_iteration")
-                .and_then(Value::as_str)
-                .and_then(|v| v.parse::<u64>().ok())
-                .and_then(|v| v.checked_add(1))
-                .ok_or_else(|| invalid_tool_output("metadata.agent_iteration"))?;
-            metadata.insert("agent_iteration".to_string(), json!(next.to_string()));
-        }
         Ok(true)
     }
 
@@ -382,12 +411,7 @@ impl DiscoverySession {
                                 Some("function_call" | "custom_tool_call")
                             ));
                 }
-                !item
-                    .as_object()
-                    .and_then(|item| parse_transport_envelope(item).ok())
-                    .is_some_and(|(envelope, _)| {
-                        envelope.get("tool").and_then(Value::as_str) == Some(LOOKUP_TOOL)
-                    })
+                local_lookup_envelope(item).is_none()
             });
             items.splice(0..0, self.prior_messages.iter().cloned());
         }
@@ -427,11 +451,11 @@ fn lookup<'a>(
             let name = name.as_str().ok_or_else(invalid)?;
             let tool = tools
                 .iter()
-                .find(|tool| tool.key() == name)
+                .find(|tool| tool.matches_key(name))
                 .ok_or_else(invalid)?;
             if !selected
                 .iter()
-                .any(|selected: &&ClientTool| selected.key() == name)
+                .any(|selected: &&ClientTool| selected.matches_key(name))
             {
                 selected.push(tool);
             }
@@ -461,28 +485,46 @@ fn lookup<'a>(
         .filter(|term| !term.is_empty())
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
-    let mut matches = tools
-        .iter()
-        .filter_map(|tool| {
-            let name = tool.key().to_lowercase();
-            let text = format!("{} {}", name, tool.serialized_spec.as_ref()).to_lowercase();
-            let score = terms
-                .iter()
-                .map(|term| usize::from(text.contains(term)) + 3 * usize::from(name.contains(term)))
-                .sum::<usize>();
-            (score > 0).then_some((score, tool))
-        })
-        .collect::<Vec<_>>();
-    matches.sort_by(|(left_score, left), (right_score, right)| {
-        right_score
-            .cmp(left_score)
-            .then_with(|| left.key().cmp(&right.key()))
-    });
-    Ok(matches
-        .into_iter()
-        .take(limit)
-        .map(|(_, tool)| tool)
-        .collect())
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut matches = Vec::<(usize, String, &ClientTool)>::with_capacity(limit);
+    for tool in tools {
+        let key = tool.key();
+        let name = key.to_lowercase();
+        let mut schema = None;
+        let score = terms
+            .iter()
+            .map(|term| {
+                // Terms cannot span the space between the name and declaration.
+                // A name match already earns both the text and name weights.
+                if name.contains(term) {
+                    4
+                } else {
+                    usize::from(
+                        schema
+                            .get_or_insert_with(|| tool.serialized_spec.to_lowercase())
+                            .contains(term),
+                    )
+                }
+            })
+            .sum::<usize>();
+        if score == 0 {
+            continue;
+        }
+        // Keep only the requested top results, reusing each exact key for ties.
+        // Insert after equal entries to preserve the original stable ordering.
+        let position = matches.partition_point(|(other_score, other_key, _)| {
+            other_score > &score || (other_score == &score && other_key <= &key)
+        });
+        if position < limit {
+            if matches.len() == limit {
+                matches.pop();
+            }
+            matches.insert(position, (score, key, tool));
+        }
+    }
+    Ok(matches.into_iter().map(|(_, _, tool)| tool).collect())
 }
 
 #[cfg(test)]

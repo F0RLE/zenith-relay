@@ -499,6 +499,17 @@ mod tests {
     #[test]
     fn basis_points_output_format_is_checked_before_admission() {
         let tier = ServiceTierPolicy::pool_owned(&json!({}));
+        for stream in [false, true] {
+            assert!(
+                basis_points_route_error(
+                    &json!({"text":{"format":{"type":"json_object"}}}),
+                    stream,
+                    &tier,
+                    DefaultServiceTier::Standard,
+                )
+                .is_none()
+            );
+        }
         let mut request = json!({"text":{"format":{
             "type":"json_schema","name":"command_review","strict":false,
             "schema":{"type":"object","properties":{"approved":{"type":"boolean"}},

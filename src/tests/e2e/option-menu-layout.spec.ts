@@ -3,12 +3,19 @@ import { installTauriMock } from "./tauri-mock";
 
 async function expectFieldWidth(page: Page, trigger: Locator) {
   await trigger.click();
-  const list = page.getByRole("listbox");
+  const list = page.locator(".relay-option-list");
   await expect(list).toHaveAttribute("data-positioned", "true");
   const anchor = (await trigger.boundingBox())!;
   const panel = (await list.boundingBox())!;
-  expect(Math.abs(panel.width - anchor.width)).toBeLessThanOrEqual(1);
-  expect(Math.abs(panel.x - anchor.x)).toBeLessThanOrEqual(1);
+  if (await list.getByRole("searchbox").count()) {
+    // Language search is a wider, viewport-clamped panel, not a field-sized list.
+    expect(panel.width).toBeGreaterThanOrEqual(anchor.width);
+    expect(panel.x).toBeGreaterThanOrEqual(8);
+    expect(panel.x + panel.width).toBeLessThanOrEqual(page.viewportSize()!.width - 7);
+  } else {
+    expect(Math.abs(panel.width - anchor.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(panel.x - anchor.x)).toBeLessThanOrEqual(1);
+  }
   expect(panel.y).toBeGreaterThanOrEqual(44);
   expect(panel.y + panel.height).toBeLessThanOrEqual(page.viewportSize()!.height - 8 + 1);
   expect(await list.evaluate((element) => element.scrollWidth <= element.clientWidth + 1

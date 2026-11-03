@@ -350,6 +350,11 @@ async fn accumulated_wait_survives_passes_and_budget_clones_without_new_thirty_s
     assert!(!request.budget.can_dispatch());
     assert_eq!(request.budget.dispatches(), 0);
     assert_eq!(queued(&runtime), (0, 0));
+    let waiting = request.budget.wait_diagnostics().unwrap();
+    assert_eq!(waiting.total_ms, 30_000);
+    assert_eq!(waiting.capacity.as_ref().unwrap().count, 2);
+    assert_eq!(waiting.capacity.as_ref().unwrap().duration_ms, 30_000);
+    assert_eq!(waiting.stop_reason, Some(AdmissionStopReason::WaitExpired));
     drop(lease);
 }
 
@@ -373,6 +378,11 @@ async fn recovery_wait_is_bounded_and_an_unsupported_head_needs_events_not_polli
         request.budget.admission_stop_reason(),
         Some(AdmissionStopReason::WaitExpired)
     );
+    let waiting = request.budget.wait_diagnostics().unwrap();
+    assert_eq!(waiting.pool_event.as_ref().unwrap().count, 1);
+    assert_eq!(waiting.pool_event.as_ref().unwrap().duration_ms, 120_000);
+    assert!(waiting.recovery.is_none());
+    assert_eq!(waiting.stop_reason, Some(AdmissionStopReason::WaitExpired));
     assert_eq!(queued(&runtime), (0, 0));
 }
 
@@ -417,6 +427,15 @@ async fn due_timer_and_release_before_await_are_not_lost() {
     assert!(waiting.await);
     assert_eq!(queued(&runtime), (0, 0));
     assert_eq!(request.budget.dispatches(), 0);
+    let diagnostics = request.budget.wait_diagnostics().unwrap();
+    assert_eq!(diagnostics.total_ms, 2_000);
+    assert_eq!(diagnostics.recovery.as_ref().unwrap().count, 1);
+    assert_eq!(diagnostics.recovery.as_ref().unwrap().duration_ms, 2_000);
+    assert!(
+        diagnostics
+            .last_recovery_delay_ms
+            .is_some_and(|delay| delay <= 2_000)
+    );
     let started = Instant::now();
     // A due time already elapsed is a ready retry, never a new timeout.
     assert!(

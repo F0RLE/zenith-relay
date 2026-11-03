@@ -45,14 +45,7 @@ async fn read_account_models(
         .as_ref()
         .filter(|_| model_discovery_was_unauthorized(&Some(discovered_models.clone())))
     {
-        match recover_account_authorization(
-            state,
-            account_id,
-            Some(rejected_tokens.generation()),
-            current_time_ms(),
-        )
-        .await
-        {
+        match recover_account_authorization(state, account_id, &prepared, current_time_ms()).await {
             Ok(recovered) => {
                 prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
                 scope.validate(state)?;
@@ -92,7 +85,12 @@ async fn read_account_models(
     let succeeded = discovered_models.is_ok();
     let applied = {
         let mut store = state.store()?;
-        apply_models_read(&mut store, scope, discovered_models)?
+        apply_models_read(
+            &mut store,
+            scope,
+            prepared.oauth_client_kind,
+            discovered_models,
+        )?
     };
     sync_refreshed_account_or_rollback(
         state,

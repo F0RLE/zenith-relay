@@ -220,6 +220,11 @@ impl PoolScheduler {
             usize::try_from(selected.eligible_candidates).unwrap_or(usize::MAX),
             lane,
         )?;
+        diagnostics.route_latency = Some(self.rotation.latency_diagnostics(
+            &selected.candidate_id,
+            &rotation_request.route_key,
+            request.now_ms,
+        ));
         if let Some(key) = request.prompt_affinity_key {
             let preferred = rotation_request
                 .preferred

@@ -139,7 +139,7 @@ impl GatewayManager {
         Ok(address)
     }
 
-    /// Publish a fully prepared runtime without draining the listener. Already
+    /// Publish a prepared runtime while keeping the listener active. Already
     /// dispatched streams keep their router; delayed old dispatches are fenced.
     /// A port change still needs the regular bind/rollback path.
     #[cfg(test)]
@@ -162,8 +162,7 @@ impl GatewayManager {
         else {
             return false;
         };
-        // Re-publishing the same snapshot is a no-op, not a replacement. In
-        // particular, never retire the runtime that remains in the listener.
+        // Idempotent republication preserves the listener's active runtime.
         if gateway
             .routes
             .borrow()

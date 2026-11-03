@@ -1,6 +1,7 @@
 use super::*;
 
 mod cache_diagnostics;
+mod latency_diagnostics;
 mod quota_affinity;
 
 fn candidate(id: &str, priority: i32, weight: u32) -> RotationCandidate {
@@ -514,7 +515,7 @@ fn soft_failure_score_decays_after_its_half_life() {
     let health = engine
         .health
         .get(&("a".to_owned(), "responses:gpt".to_owned()))
-        .copied()
+        .cloned()
         .unwrap();
 
     assert_eq!(health.failure_score_milli, 250);
@@ -600,7 +601,7 @@ fn soft_health_uses_a_common_baseline_before_affinity_and_weights() {
 #[test]
 fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
-    engine.observe_first_output_latency("a", "responses:gpt", 100, 0);
+    engine.observe_first_output_latency("a", "responses:gpt", Some(100), 0);
     assert_eq!(
         engine
             .select(&preferred_request(1, "b"), 0)
@@ -608,7 +609,7 @@ fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
             .candidate_id,
         "b"
     );
-    engine.observe_first_output_latency("b", "responses:gpt", 1_000, 0);
+    engine.observe_first_output_latency("b", "responses:gpt", Some(1_000), 0);
     assert_eq!(
         engine
             .select(&preferred_request(2, "b"), 0)
@@ -628,8 +629,8 @@ fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
 #[test]
 fn future_latency_observations_do_not_override_fresh_owner_preference() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
-    engine.observe_first_output_latency("a", "responses:gpt", 1, 101);
-    engine.observe_first_output_latency("b", "responses:gpt", 1_000, 100);
+    engine.observe_first_output_latency("a", "responses:gpt", Some(1), 101);
+    engine.observe_first_output_latency("b", "responses:gpt", Some(1_000), 100);
     assert_eq!(
         engine
             .select(&preferred_request(1, "b"), 100)
@@ -657,7 +658,7 @@ fn ignored_health_observations_do_not_mutate_the_failure_score() {
         },
         0,
     );
-    let before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    let before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())].clone();
     for observation in [
         HealthObservation::Cancelled,
         HealthObservation::Unknown,
@@ -666,7 +667,7 @@ fn ignored_health_observations_do_not_mutate_the_failure_score() {
     ] {
         engine.observe_health("a", "responses:gpt", observation, HEALTH_HALF_LIFE_MS * 2);
     }
-    let after = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    let after = &engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
     assert_eq!(after.failure_score_milli, before.failure_score_milli);
     assert_eq!(after.observed_at_ms, before.observed_at_ms);
 }
@@ -1123,7 +1124,7 @@ fn late_success_does_not_clear_a_newer_failure() {
         )
         .unwrap();
     let before = engine.circuit("a", "responses:gpt");
-    let health_before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    let health_before = engine.health[&("a".to_owned(), "responses:gpt".to_owned())].clone();
     engine
         .settle_with_latency(
             previous_lease.lease_id,
@@ -1137,7 +1138,7 @@ fn late_success_does_not_clear_a_newer_failure() {
         )
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:gpt"), before);
-    let health_after = engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
+    let health_after = &engine.health[&("a".to_owned(), "responses:gpt".to_owned())];
     assert_eq!(
         health_after.failure_score_milli,
         health_before.failure_score_milli

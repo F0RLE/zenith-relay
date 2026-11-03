@@ -12,41 +12,44 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use url::Url;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CallbackLanguage {
-    English,
-    Russian,
+pub(super) fn callback_success_html() -> String {
+    render_callback_success_html(crate::platform::localization::current().as_ref())
 }
 
-macro_rules! callback_success_html {
-    ($language:literal, $heading:literal, $message:literal) => {
+pub(super) fn render_callback_success_html(
+    presentation: Option<&crate::platform::localization::Presentation>,
+) -> String {
+    use crate::platform::localization::escape_html;
+    let (language, direction, heading, message) = presentation.map_or(
+        (
+            "en",
+            "ltr",
+            "Account connected",
+            "You can close this window now.",
+        ),
+        |presentation| {
+            (
+                presentation.language.as_str(),
+                presentation.direction,
+                presentation.messages.connected.as_str(),
+                presentation.messages.close_window.as_str(),
+            )
+        },
+    );
+    format!(
         concat!(
-            "<!doctype html><html lang=\"",
-            $language,
-            "\"><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><title>Zenith Relay</title><style>",
-            "body{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText;user-select:none;-webkit-user-select:none}",
-            "main{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}",
-            "h1{margin:0 0 8px;font-size:24px}",
-            "p{margin:0;color:GrayText;line-height:1.5}",
-            "</style><body><main><h1>",
-            $heading,
-            "</h1><p>",
-            $message,
-            "</p></main></body></html>",
-        )
-    };
-}
-
-const CALLBACK_SUCCESS_HTML_EN: &str =
-    callback_success_html!("en", "Account connected", "You can close this window now.");
-const CALLBACK_SUCCESS_HTML_RU: &str =
-    callback_success_html!("ru", "Аккаунт подключён", "Теперь это окно можно закрыть.");
-
-pub(super) fn callback_success_html(language: CallbackLanguage) -> &'static str {
-    match language {
-        CallbackLanguage::English => CALLBACK_SUCCESS_HTML_EN,
-        CallbackLanguage::Russian => CALLBACK_SUCCESS_HTML_RU,
-    }
+            "<!doctype html><html lang=\"{}\" dir=\"{}\"><meta charset=\"utf-8\"><meta name=\"color-scheme\" content=\"light dark\"><title>Zenith Relay</title><style>",
+            "body{{min-height:100vh;display:grid;place-items:center;box-sizing:border-box;margin:0;padding:24px;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText;user-select:none;-webkit-user-select:none}}",
+            "main{{width:min(100%,420px);box-sizing:border-box;padding:32px;text-align:center}}",
+            "h1{{margin:0 0 8px;font-size:24px}}",
+            "p{{margin:0;color:GrayText;line-height:1.5}}",
+            "</style><body><main><h1>{}</h1><p>{}</p></main></body></html>",
+        ),
+        escape_html(language),
+        escape_html(direction),
+        escape_html(heading),
+        escape_html(message),
+    )
 }
 
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
@@ -135,7 +138,7 @@ where
     };
     match inner.accept_callback(&snapshot.login_id, &callback_url) {
         Ok(()) => {
-            let _ = write_callback_success(&mut stream, request.language).await;
+            let _ = write_callback_success(&mut stream).await;
             RequestOutcome::Accepted
         }
         Err(error) if error.code == OAuthFlowErrorCode::CallbackInvalid => {
@@ -167,7 +170,6 @@ enum RequestReadError {
 
 struct CallbackRequest {
     target: String,
-    language: CallbackLanguage,
 }
 
 async fn read_request(stream: &mut TcpStream) -> Result<CallbackRequest, RequestReadError> {
@@ -209,42 +211,11 @@ async fn read_request(stream: &mut TcpStream) -> Result<CallbackRequest, Request
         }
         Ok(CallbackRequest {
             target: target.to_string(),
-            language: callback_language(header),
         })
     };
     tokio::time::timeout(REQUEST_READ_TIMEOUT, read)
         .await
         .map_err(|_| RequestReadError::Io)?
-}
-
-pub(super) fn callback_language(headers: &str) -> CallbackLanguage {
-    let Some(accept_language_header) = headers.lines().find_map(|line| {
-        line.split_once(':')
-            .filter(|(name, _)| name.eq_ignore_ascii_case("accept-language"))
-            .map(|(_, header_value)| header_value)
-    }) else {
-        return CallbackLanguage::English;
-    };
-
-    for preference in accept_language_header.split(',') {
-        match preference
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            language if language == "ru" || language.starts_with("ru-") => {
-                return CallbackLanguage::Russian;
-            }
-            language if language == "en" || language.starts_with("en-") => {
-                return CallbackLanguage::English;
-            }
-            _ => {}
-        }
-    }
-    CallbackLanguage::English
 }
 
 fn callback_url(pending: &OAuthPendingSession, target: &str) -> Result<String, OAuthFlowError> {
@@ -278,15 +249,12 @@ async fn write_response(
     write_http_response(stream, status, "text/plain; charset=utf-8", response_body).await
 }
 
-async fn write_callback_success(
-    stream: &mut TcpStream,
-    language: CallbackLanguage,
-) -> io::Result<()> {
+async fn write_callback_success(stream: &mut TcpStream) -> io::Result<()> {
     write_http_response(
         stream,
         200,
         "text/html; charset=utf-8",
-        callback_success_html(language),
+        &callback_success_html(),
     )
     .await
 }

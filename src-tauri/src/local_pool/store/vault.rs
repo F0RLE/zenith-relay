@@ -91,6 +91,21 @@ impl Vault {
         root.join("secrets.enc").exists() || root.join("secrets.enc.bak").exists()
     }
 
+    pub(crate) fn read_secret(
+        root: &Path,
+        key: [u8; 32],
+        secret_ref: &str,
+    ) -> Result<Option<String>, String> {
+        validate_ref(secret_ref)?;
+        let metadata = fs::symlink_metadata(root).map_err(io_error)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("secret vault directory is unsafe".into());
+        }
+        let data = decrypt_file(&root.join("secrets.enc"), &key)?;
+        validate_data(&data)?;
+        Ok(data.secrets_by_ref.get(secret_ref).cloned())
+    }
+
     pub fn open(root: &Path, key: [u8; 32]) -> Result<Self, String> {
         ensure_directory(root)?;
         let path = root.join("secrets.enc");
@@ -304,6 +319,35 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_vault_reads_do_not_create_recover_or_change_files() {
+        let root = crate::files::test_temp_root("vault-diagnostic-read");
+        let vault = Vault::open(&root, [3; 32]).unwrap();
+        vault.save("proxy:pool", "synthetic-proxy-data").unwrap();
+        let path = root.join("secrets.enc");
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            Vault::read_secret(&root, [3; 32], "proxy:pool")
+                .unwrap()
+                .as_deref(),
+            Some("synthetic-proxy-data")
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(
+            Vault::read_secret(&root, [3; 32], "missing")
+                .unwrap()
+                .is_none()
+        );
+        fs::rename(&path, root.join("secrets.enc.bak")).unwrap();
+        assert!(Vault::read_secret(&root, [3; 32], "proxy:pool").is_err());
+        assert!(!path.exists());
+        assert_eq!(fs::read(root.join("secrets.enc.bak")).unwrap(), bytes);
+        let missing = root.join("missing");
+        assert!(Vault::read_secret(&missing, [3; 32], "proxy:pool").is_err());
+        assert!(!missing.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn oversized_vault_is_rejected_without_replacing_the_file() {

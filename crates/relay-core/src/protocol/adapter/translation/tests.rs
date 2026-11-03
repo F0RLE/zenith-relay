@@ -20,6 +20,7 @@ mod chat_usage;
 mod citations;
 mod continuation_identity;
 mod documents;
+mod messages_inline_tools;
 mod messages_options;
 mod messages_reasoning;
 mod messages_tool_search;

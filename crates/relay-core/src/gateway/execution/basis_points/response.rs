@@ -53,7 +53,10 @@ fn validate_function_arguments(arguments: Value, tool: &ClientTool) -> Result<Va
         || schema.get("patternProperties").is_some()
         || properties.contains_key(name_key)
         || properties.contains_key(args_key)
-        || envelope.get(name_key).and_then(Value::as_str) != Some(tool.key().as_str())
+        || !envelope
+            .get(name_key)
+            .and_then(Value::as_str)
+            .is_some_and(|name| tool.matches_key(name))
     {
         return Err(original_error);
     }
@@ -156,11 +159,13 @@ pub(super) fn parse_transport_envelope(
     if !is_transport_tool(tool_name) {
         return Err(invalid_tool_output("output.run_officejs.name"));
     }
-    let outer = parse_json_object(tool_call_item.get("arguments"))
-        .and_then(|arguments_value| arguments_value.as_object().cloned())
-        .ok_or_else(|| invalid_tool_output("output.run_officejs.arguments"))?;
+    let Some(Value::Object(mut outer)) = parse_json_object(tool_call_item.get("arguments")) else {
+        return Err(invalid_tool_output("output.run_officejs.arguments"));
+    };
+    // The decoded envelope is already owned. Move large executable payloads
+    // out of it rather than cloning the map and then copying code once more.
     let code = outer
-        .get("code")
+        .remove("code")
         .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
 
     // Explicit references route the client payload. Function-wrapper recovery
@@ -175,13 +180,13 @@ pub(super) fn parse_transport_envelope(
             .filter(|tool_name| !tool_name.trim().is_empty())
             .filter(|tool_name| !is_transport_tool(tool_name))
             .ok_or_else(|| invalid_tool_output("output.run_officejs.references"))?;
-        let code = code
-            .as_str()
-            .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+        let Value::String(code) = code else {
+            return Err(invalid_tool_output("output.run_officejs.code"));
+        };
         return Ok((
             Map::from_iter([
                 ("tool".to_string(), Value::String(tool.to_string())),
-                ("args".to_string(), Value::String(code.to_string())),
+                ("args".to_string(), Value::String(code)),
             ]),
             false,
         ));
@@ -189,11 +194,9 @@ pub(super) fn parse_transport_envelope(
 
     // Accept the legacy nested envelope for already materialized history, but
     // never generate it for new calls.
-    let (mut inner, direct_call) = match parse_json_object(Some(code))
-        .and_then(|nested_code_value| nested_code_value.as_object().cloned())
-    {
-        Some(inner) => (inner, false),
-        None => {
+    let (mut inner, direct_call) = match parse_json_object(Some(&code)) {
+        Some(Value::Object(inner)) => (inner, false),
+        _ => {
             let code = code
                 .as_str()
                 .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
@@ -212,9 +215,10 @@ pub(super) fn parse_transport_envelope(
         let nested_code = inner
             .get("code")
             .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
-        inner = parse_json_object(Some(nested_code))
-            .and_then(|nested_code_value| nested_code_value.as_object().cloned())
-            .ok_or_else(|| invalid_tool_output("output.run_officejs.code"))?;
+        let Some(Value::Object(nested)) = parse_json_object(Some(nested_code)) else {
+            return Err(invalid_tool_output("output.run_officejs.code"));
+        };
+        inner = nested;
     }
     // Normalize only the already-supported legacy envelope field aliases.
     // Discovery and client translation must see the same identity and payload;
@@ -327,17 +331,9 @@ pub(in crate::gateway) fn translate_response_with_catalog(
     let all_tools = catalog.tools(request_body)?;
     super::batch::expand_output(output_items, request_body, all_tools)?;
     let tools = selected_tools(request_body, all_tools);
+    // expand_output already reserved native and replay-normalized history IDs
+    // before fan-out. Count/check the resulting client aliases in this pass.
     let mut call_ids = std::collections::HashSet::new();
-    let history_call_ids = request_body
-        .get("input")
-        .into_iter()
-        .flat_map(|input| {
-            input
-                .as_array()
-                .map_or(std::slice::from_ref(input), Vec::as_slice)
-        })
-        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
-        .collect::<std::collections::HashSet<_>>();
     for output_item in output_items.iter_mut() {
         let Some(output_object) = output_item.as_object_mut() else {
             continue;
@@ -374,7 +370,7 @@ pub(in crate::gateway) fn translate_response_with_catalog(
             .filter(|call_id| !call_id.trim().is_empty())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.call_id"))?
             .to_string();
-        if history_call_ids.contains(call_id.as_str()) || !call_ids.insert(call_id.clone()) {
+        if !call_ids.insert(call_id.clone()) {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
         }
         let item_id = fit_item_id(&if tool.kind == "custom" {
@@ -434,7 +430,22 @@ pub(in crate::gateway) fn translate_response_with_catalog(
         }
         *output_item = Value::Object(translated);
     }
-    if completed && requires_tool_call(request_body.get("tool_choice")) && call_ids.is_empty() {
+    if completed
+        && requires_tool_call(request_body.get("tool_choice"))
+        && call_ids.is_empty()
+        && !output_items.iter().any(|item| {
+            item["type"] == "message"
+                && item["role"] == "assistant"
+                && item["content"].as_array().is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part["type"] == "refusal"
+                            && part.get("refusal").is_some_and(Value::is_string)
+                    })
+                })
+        })
+    {
+        // Required tools reject ordinary text-only completion, not a refusal.
+        // Every executable call was still validated above before this exception.
         return Err(invalid_tool_output("output.tool_call"));
     }
     if request_body.get("parallel_tool_calls") == Some(&Value::Bool(false)) && call_ids.len() > 1 {

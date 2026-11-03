@@ -4,7 +4,7 @@ use zenith_relay_core::quota::QuotaRefreshFailure;
 use zenith_relay_core::scheduler::refresh::RefreshIdentity;
 
 /// Transport floors for optional subscription reads, not quota/access health.
-/// The existing global subscription lock serializes both requests and floors.
+/// Account quota locks own single-flight; this shared state only guards floors.
 #[derive(Default)]
 pub(crate) struct SubscriptionRefreshState {
     retry_at: BTreeMap<String, (RefreshIdentity, u64)>,
@@ -43,6 +43,12 @@ impl SubscriptionRefreshState {
         );
     }
 
+    pub(crate) fn record_success(&mut self, identity: &RefreshIdentity, now_ms: u64) {
+        // A successful read can legitimately omit the expiry. Preserve its
+        // polling interval without inventing a date or changing quota freshness.
+        self.respect_retry_after(identity, now_ms, SUBSCRIPTION_REFRESH_INTERVAL_MS);
+    }
+
     pub(crate) fn respect_retry_after(
         &mut self,
         identity: &RefreshIdentity,
@@ -66,6 +72,28 @@ impl SubscriptionRefreshState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_metadata_without_expiry_keeps_its_own_polling_interval() {
+        let identity = RefreshIdentity::new("account", 1, 2);
+        let mut state = SubscriptionRefreshState::default();
+        state.record_success(&identity, 100);
+        assert!(!state.can_refresh(&identity, 101));
+        assert!(!state.can_refresh(&identity, 100 + SUBSCRIPTION_REFRESH_INTERVAL_MS - 1));
+        assert!(state.can_refresh(&RefreshIdentity::new("account", 2, 2), 101));
+        assert!(state.can_refresh(&RefreshIdentity::new("account", 1, 3), 101));
+        assert!(state.can_refresh(&identity, 100 + SUBSCRIPTION_REFRESH_INTERVAL_MS));
+    }
+
+    #[test]
+    fn successful_metadata_preserves_a_longer_provider_pause() {
+        let identity = RefreshIdentity::new("account", 1, 2);
+        let mut state = SubscriptionRefreshState::default();
+        state.respect_retry_after(&identity, 100, 2 * SUBSCRIPTION_REFRESH_INTERVAL_MS);
+        state.record_success(&identity, 200);
+        assert!(!state.can_refresh(&identity, 100 + 2 * SUBSCRIPTION_REFRESH_INTERVAL_MS - 1));
+        assert!(state.can_refresh(&identity, 100 + 2 * SUBSCRIPTION_REFRESH_INTERVAL_MS));
+    }
 
     #[test]
     fn subscription_failure_without_retry_after_does_not_repeat_on_each_quota_poll() {

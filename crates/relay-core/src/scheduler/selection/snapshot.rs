@@ -113,6 +113,8 @@ pub struct RoutingDiagnostics {
     /// Logical execution timing; the event's latency/TTFT still describe its send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timing: Option<RequestTiming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_latency: Option<super::super::rotation::RouteLatencyDiagnostics>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -122,6 +124,9 @@ pub struct RequestTiming {
     pub ttft_ms: Option<u64>,
     /// A request-loop finalization, not another physical attempt or quota observation.
     pub projection_only: bool,
+    /// Observed local waits, cumulative across retries and transport handoffs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<super::super::rotation::RequestWaitDiagnostics>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -408,6 +413,7 @@ impl PoolScheduler {
             cache_affinity: None,
             attempt_outcome: None,
             request_timing: None,
+            route_latency: None,
         })
     }
 }

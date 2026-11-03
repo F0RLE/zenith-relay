@@ -21,6 +21,6 @@ pub(super) use account::{
 };
 pub(super) use profile::{
     cleanup_created_backup_secret, delete_backup_secrets, discard_backup,
-    discard_managed_binding_locked, parse_backup_snapshot, previous_auth_snapshot,
-    restore_secret_snapshot, rollback_backup, serialize_backup,
+    discard_managed_binding_locked, parse_backup_snapshot, restore_secret_snapshot,
+    rollback_backup, serialize_backup,
 };

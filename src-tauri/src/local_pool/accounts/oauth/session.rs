@@ -48,6 +48,13 @@ impl OAuthPendingSession {
         )?;
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(self.code_verifier.as_bytes()));
         if let Some(siwc) = self.siwc.as_ref() {
+            let login_hint = authorization
+                .query_pairs()
+                .find(|(key, _)| key == "login_hint")
+                .map(|(_, value)| value.into_owned());
+            if login_hint != siwc.login_hint {
+                return Err(OAuthError::new(OAuthErrorCode::InvalidConfiguration, false));
+            }
             if authorization
                 .query_pairs()
                 .any(|(key, value)| key == "prompt" && value == "consent")

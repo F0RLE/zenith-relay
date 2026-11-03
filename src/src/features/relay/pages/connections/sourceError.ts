@@ -2,7 +2,11 @@ import type { TFunction } from "i18next";
 import { sanitizeFeedbackError } from "../../state/feedback";
 
 /** Keep provider diagnostics redacted and show a short reason on the card. */
-export function sourceErrorDetails(message: string | null | undefined, t: TFunction) {
+export function sourceErrorDetails(message: string | number | null | undefined, t: TFunction) {
+  if (typeof message === "number") {
+    if (message < 400) return null;
+    message = `HTTP ${message}`;
+  }
   if (!message?.trim()) return null;
   const error = sanitizeFeedbackError(message, "source_check_failed");
   const statusMatch = error.message.match(/\bHTTP\s+([45]\d{2})\b/i);

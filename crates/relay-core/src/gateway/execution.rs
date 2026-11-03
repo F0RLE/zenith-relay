@@ -16,6 +16,7 @@ use super::errors::{
 use super::errors::{
     responses_custom_tool_item_id_requires_ctc_prefix,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    responses_tool_search_item_id_requires_tsc_prefix,
 };
 use super::now_ms;
 use super::request::response_tool_call_ids;
@@ -25,7 +26,7 @@ use crate::WireApi;
 use crate::error_codes;
 use crate::protocol::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids,
+    repair_custom_tool_item_ids, repair_tool_search_item_ids,
 };
 use crate::runtime::{AuthenticatedKey, GatewayRuntime};
 use crate::scheduler::rotation::RotationOperation;
@@ -43,6 +44,7 @@ pub(super) struct AttemptRepairs {
     pub(super) native_replay: bool,
     pub(super) function_item_id: bool,
     pub(super) custom_tool_item_id: bool,
+    pub(super) tool_search_item_id: bool,
     pub(super) message_item_id: bool,
     pub(super) legacy_call_id: bool,
     pub(super) model_switch_reset: bool,
@@ -243,14 +245,15 @@ pub(super) fn repair_once(
     true
 }
 
-/// One-shot flags for the three Responses item-id repairs.
+/// One-shot flags for Responses item-id repairs.
 pub(super) struct ResponsesItemPrefixRepairs<'a> {
     pub(super) function_ids: &'a mut bool,
     pub(super) custom_tool_ids: &'a mut bool,
+    pub(super) tool_search_ids: &'a mut bool,
     pub(super) message_ids: &'a mut bool,
 }
 
-/// Repairs `fc_`, `ctc_`, and `msg_` item ids in that order, at most one per call.
+/// Repairs call/search/message item IDs, at most one namespace per rejection.
 ///
 /// `enabled` is false for an adapted ordinary request. Account execution and
 /// WebSocket are already native Responses, so they pass true. The caller still
@@ -280,6 +283,13 @@ pub(super) fn repair_responses_item_prefixes(
             candidate_id,
             lease,
             || repair_custom_tool_item_ids(request),
+        ) || repair_once(
+            repairs.tool_search_ids,
+            responses_tool_search_item_id_requires_tsc_prefix(error_response_body),
+            tried,
+            candidate_id,
+            lease,
+            || repair_tool_search_item_ids(request),
         ) || repair_once(
             repairs.message_ids,
             responses_message_item_id_requires_msg_prefix(error_response_body),

@@ -61,25 +61,10 @@ pub(in crate::local_pool::profiles::codex) fn restore_secret_snapshot(
     }
 }
 
-pub(in crate::local_pool::profiles::codex) fn previous_auth_snapshot(
-    secret_ref: Option<&str>,
-    secrets: &impl SecretBackend,
-) -> Result<Option<String>> {
-    secret_ref
-        .map(|secret_ref| {
-            secrets.load(secret_ref)?.ok_or_else(|| {
-                LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    "ChatGPT profile backup secret is missing",
-                )
-            })
-        })
-        .transpose()
-}
-
 pub(in crate::local_pool::profiles::codex) fn discard_managed_binding_locked(
     codex_home: &Path,
     backup_root: &Path,
+    preserve_catalog: bool,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     if let Some(path) = super::account_backup_for_profile(codex_home, backup_root)? {
@@ -110,7 +95,9 @@ pub(in crate::local_pool::profiles::codex) fn discard_managed_binding_locked(
         backup.projection_secret_ref.as_deref(),
         secrets,
     )?;
-    remove_managed_model_catalog_if_unchanged(&backup);
+    if !preserve_catalog {
+        remove_managed_model_catalog_if_unchanged(&backup);
+    }
     Ok(())
 }
 

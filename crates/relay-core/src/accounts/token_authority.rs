@@ -105,6 +105,13 @@ pub struct PreparedToken {
     pub(crate) dispatch_revision: TokenDispatchRevision,
 }
 
+impl PreparedToken {
+    /// Identifies the exact credential incarnation used by an upstream request.
+    pub fn dispatch_revision(&self) -> &TokenDispatchRevision {
+        &self.dispatch_revision
+    }
+}
+
 struct TokenSlot {
     tokens: TokenSet,
     auth_state: AccountAuthState,

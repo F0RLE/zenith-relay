@@ -6,6 +6,7 @@ use crate::local_pool::{error::ErrorCode, models::GatewaySettings};
 use zenith_relay_core::protocol::ProxyMode;
 
 pub(crate) mod check;
+pub(crate) mod diagnose;
 pub(crate) mod speed;
 
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";

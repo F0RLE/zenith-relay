@@ -220,7 +220,11 @@ async fn prepare_oauth_completion(
         );
     }
     if let Some(existing) = existing {
-        preserve_existing_settings(&mut account_record, existing);
+        preserve_existing_settings(
+            &mut account_record,
+            existing,
+            credentials.oauth_client_kind(),
+        );
     }
     // Both probes are read-only and independent after agent registration.
     // Discover with the new credentials' plan hint, not the previous record's
@@ -501,12 +505,18 @@ async fn commit_oauth_completion(
     let committed_credentials =
         with_sign_in_proxy(committed_credentials, sign_in_proxy_url.as_deref())?;
     if let Some(previous_account_snapshot) = commit_previous_account.as_ref() {
-        preserve_existing_settings(&mut account_record, previous_account_snapshot);
+        preserve_existing_settings(
+            &mut account_record,
+            previous_account_snapshot,
+            committed_credentials.oauth_client_kind(),
+        );
     }
     account_record.account.token_generation = committed_credentials.generation();
     account_record.account.token_updated_at_ms = Some(committed_credentials.issued_at_ms());
     let authority_tokens = committed_credentials
-        .to_token_set()
+        .has_oauth()
+        .then(|| committed_credentials.to_token_set())
+        .transpose()
         .map_err(credential_error)?;
     // A replaced login may change the provider principal while an old
     // request is waiting to send. Fence that account before committing the
@@ -563,12 +573,14 @@ async fn commit_oauth_completion(
     // snapshot while the account lock is still held. Otherwise the profile
     // observer can read the old desktop token after re-authentication, assign
     // it a newer generation, and overwrite the newly committed token.
-    if let Err(error) = sync_account_profile_bindings(
-        state,
-        &local_account_id,
-        &authority_tokens,
-        &checkpoint.provider_account_id,
-    ) {
+    if let Err(error) = authority_tokens.as_ref().map_or(Ok(()), |tokens| {
+        sync_account_profile_bindings(
+            state,
+            &local_account_id,
+            tokens,
+            &checkpoint.provider_account_id,
+        )
+    }) {
         let profiles_restored = match commit_previous_credentials.as_ref() {
             Some(previous_credentials) => previous_credentials
                 .to_token_set()
@@ -607,37 +619,44 @@ async fn commit_oauth_completion(
             }
         });
     }
+    if authority_tokens.is_none() {
+        // A successful identity-only reauthorization replaces the old grant;
+        // it must not leave the previous login usable in the runtime authority.
+        state.token_authority().remove(&local_account_id);
+    }
     drop(commit_guard);
 
-    let registered = register_active_authority(
-        state,
-        &local_account_id,
-        authority_tokens.clone(),
-        account_record.account.auth_state,
-        "failed to register OAuth account credentials",
-        "OAuth account token state disappeared",
-        "OAuth account authentication state disappeared",
-    )
-    .await?;
-    let authoritative_tokens = registered.tokens;
-    let authoritative_auth_state = registered.auth_state;
-    let authority_state_changed = authoritative_tokens != authority_tokens
-        || authoritative_auth_state != account_record.account.auth_state;
-    if authority_state_changed
-        && reconcile_completion_authority(
+    if let Some(authority_tokens) = authority_tokens {
+        let registered = register_active_authority(
             state,
             &local_account_id,
-            &account_record,
-            &authoritative_tokens,
-            authoritative_auth_state,
+            authority_tokens.clone(),
+            account_record.account.auth_state,
+            "failed to register OAuth account credentials",
+            "OAuth account token state disappeared",
+            "OAuth account authentication state disappeared",
         )
-        .is_err()
-    {
-        return Err(super::super::fail_closed(
-            state,
-            "newer OAuth account state could not be persisted".to_string(),
-        )
-        .await);
+        .await?;
+        let authoritative_tokens = registered.tokens;
+        let authoritative_auth_state = registered.auth_state;
+        let authority_state_changed = authoritative_tokens != authority_tokens
+            || authoritative_auth_state != account_record.account.auth_state;
+        if authority_state_changed
+            && reconcile_completion_authority(
+                state,
+                &local_account_id,
+                &account_record,
+                &authoritative_tokens,
+                authoritative_auth_state,
+            )
+            .is_err()
+        {
+            return Err(super::super::fail_closed(
+                state,
+                "newer OAuth account state could not be persisted".to_string(),
+            )
+            .await);
+        }
     }
     // The OAuth credentials are committed at this point. Runtime failures must
     // not restore a stale account snapshot over a later refresh/login; retry

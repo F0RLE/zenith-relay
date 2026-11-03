@@ -1,7 +1,7 @@
 use crate::protocol::AdapterError;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value, json, value::RawValue};
 use sha2::{Digest, Sha256};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 pub(super) fn as_input_items(request_input: Option<&Value>) -> Vec<Value> {
     match request_input {
@@ -323,6 +323,26 @@ pub(super) fn function_arguments(payload: &Value) -> Result<Value, AdapterError>
             .with_parameter("output.run_officejs.args.object"));
     }
     Ok(arguments)
+}
+
+/// Inspect routing metadata without decoding executable payloads. This is not
+/// validation: callers must retain the full envelope/schema checks before use.
+pub(super) fn transport_references(
+    arguments: Option<&Value>,
+) -> Result<Option<Cow<'_, Value>>, serde_json::Error> {
+    match arguments {
+        Some(Value::Object(fields)) => Ok(fields.get("references").map(Cow::Borrowed)),
+        Some(Value::String(text)) => {
+            // Borrow payload spans and preserve the full decoder's
+            // last-value-wins behavior for duplicate object keys.
+            let fields: HashMap<String, &RawValue> = serde_json::from_str(text)?;
+            fields
+                .get("references")
+                .map(|references| serde_json::from_str(references.get()).map(Cow::Owned))
+                .transpose()
+        }
+        _ => Ok(None),
+    }
 }
 
 pub(super) fn parse_json_object(json_value: Option<&Value>) -> Option<Value> {

@@ -5,10 +5,11 @@ use super::super::{
 use crate::WireApi;
 use serde_json::Value;
 
+mod inline_tools;
 mod tool_search;
 
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
-    let discovery = tool_search::prepare(request_body)?;
+    let discovery = inline_tools::prepare(request_body)?;
     let request_body = discovery.as_ref();
     super::super::options::messages_fields(
         request_body,

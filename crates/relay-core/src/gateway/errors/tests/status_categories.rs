@@ -80,7 +80,7 @@ fn capacity_exhaustion_is_model_scoped_in_json_and_stream_terminals() {
 }
 
 #[test]
-fn siwc_usage_limit_without_an_error_code_is_a_pre_execution_quota_rejection() {
+fn siwc_usage_limit_prose_does_not_prove_quota_exhaustion() {
     let body = serde_json::json!({"error":{
         "type":"invalid_request_error",
         "message":"The ChatGPT user has reached their Subscription Sharing usage limit."
@@ -89,7 +89,7 @@ fn siwc_usage_limit_without_an_error_code_is_a_pre_execution_quota_rejection() {
         StatusCode::TOO_MANY_REQUESTS,
         Some(&serde_json::to_vec(&body).unwrap()),
     );
-    assert_eq!(failure.category, error_codes::UPSTREAM_QUOTA_EXHAUSTED);
+    assert_eq!(failure.category, error_codes::UPSTREAM_RATE_LIMITED);
     assert_eq!(
         failure.execution.certainty,
         crate::scheduler::rotation::ExecutionCertainty::NotSent
@@ -101,11 +101,10 @@ fn siwc_usage_limit_without_an_error_code_is_a_pre_execution_quota_rejection() {
         })
     );
     let terminal = crate::gateway::streaming::parse_sse_event(frame.as_bytes());
-    assert_eq!(
+    assert_ne!(
         terminal.error_category,
         Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED)
     );
-    assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
 }
 
 #[test]

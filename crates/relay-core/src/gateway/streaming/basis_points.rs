@@ -74,15 +74,12 @@ fn failure_frame(mut body: Value) -> Bytes {
 pub(super) fn guard_progress(inner: UpstreamStream, timeout: Option<Duration>) -> UpstreamStream {
     Box::pin(stream::unfold(
         (
-            inner,
+            Some(inner),
             crate::transport::SseProgress::default(),
             timeout,
-            false,
         ),
-        move |(mut inner, mut progress, mut remaining, done)| async move {
-            if done {
-                return None;
-            }
+        move |(inner, mut progress, mut remaining)| async move {
+            let mut inner = inner?;
             let started = tokio::time::Instant::now();
             let next = match remaining {
                 Some(deadline) => tokio::time::timeout(deadline, inner.next()).await,
@@ -91,18 +88,19 @@ pub(super) fn guard_progress(inner: UpstreamStream, timeout: Option<Duration>) -
             match next {
                 Err(_) => Some((
                     Ok(failure(crate::error_codes::STREAM_IDLE_TIMEOUT, None)),
-                    (inner, progress, remaining, true),
+                    (None, progress, remaining),
                 )),
-                Ok(Some(chunk)) => {
-                    if let Ok(bytes) = &chunk {
-                        remaining = if progress.observe(bytes) {
-                            timeout
-                        } else {
-                            remaining.map(|left| left.saturating_sub(started.elapsed()))
-                        };
-                    }
-                    Some((chunk, (inner, progress, remaining, false)))
+                Ok(Some(Ok(bytes))) => {
+                    remaining = if progress.observe(&bytes) {
+                        timeout
+                    } else {
+                        remaining.map(|left| left.saturating_sub(started.elapsed()))
+                    };
+                    Some((Ok(bytes), (Some(inner), progress, remaining)))
                 }
+                // No closed reader survives delivery of a terminal error. A
+                // slow consumer need not poll again to cancel the HTTP body.
+                Ok(Some(Err(error))) => Some((Err(error), (None, progress, remaining))),
                 Ok(None) => None,
             }
         },
@@ -334,23 +332,33 @@ pub(super) fn translate_stream(
     remaining: UpstreamStream,
     request: PreparedClientRequest,
 ) -> UpstreamStream {
+    let request = match request.into_response_context() {
+        Ok(request) => request,
+        Err(error) => return Box::pin(stream::once(async move { Ok(adapter_failure(error)) })),
+    };
     let mut translator = Translator::new(request);
     translator.push(&first);
+    let remaining = (!translator.terminal).then_some(remaining);
     Box::pin(stream::unfold(
         (remaining, translator),
         |(mut inner, mut translator)| async move {
             loop {
+                if translator.terminal {
+                    // Validation has finished. Retain queued client events,
+                    // not the completed provider body, until downstream drains.
+                    inner = None;
+                }
                 if let Some(bytes) = translator.output.pop_front() {
                     return Some((Ok(bytes), (inner, translator)));
                 }
                 if translator.terminal {
                     return None;
                 }
-                match inner.next().await {
+                match inner.as_mut()?.next().await {
                     Some(Ok(bytes)) => translator.push(&bytes),
                     Some(Err(error)) => {
                         translator.terminal = true;
-                        return Some((Err(error), (inner, translator)));
+                        return Some((Err(error), (None, translator)));
                     }
                     None => translator.reject("stream.terminal"),
                 }

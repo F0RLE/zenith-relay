@@ -7,6 +7,33 @@ fn progress(input: u64, output: u64) -> Bytes {
     ))
 }
 
+#[test]
+fn cancelled_usage_is_normalized_for_non_streaming_emitters_without_rewriting_provider_errors() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let callback: crate::UsageCallback =
+        Arc::new(move |event| captured.lock().unwrap().push(event));
+    for category in [
+        error_codes::CLIENT_CANCELLED,
+        error_codes::UPSTREAM_UNAVAILABLE,
+    ] {
+        let mut event = test_usage_event();
+        event.success = false;
+        event.http_status = 503;
+        event.total_tokens = Some(17);
+        event.error_category = Some(category.into());
+        crate::gateway::response::emit_callback(&callback, event);
+    }
+    let events = events.lock().unwrap();
+    assert_eq!(events[0].http_status, 499);
+    assert_eq!(events[0].total_tokens, Some(17));
+    assert_eq!(events[1].http_status, 503);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some(error_codes::UPSTREAM_UNAVAILABLE)
+    );
+}
+
 #[tokio::test]
 async fn cancelling_one_stream_preserves_its_usage_and_does_not_settle_its_peer() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -32,6 +59,7 @@ async fn cancelling_one_stream_preserves_its_usage_and_does_not_settle_its_peer(
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].request_id, "synthetic-cancelled");
         assert_eq!(events[0].total_tokens, Some(12));
+        assert_eq!(events[0].http_status, 499);
         assert_eq!(
             events[0].error_category.as_deref(),
             Some(error_codes::CLIENT_CANCELLED)
@@ -48,6 +76,7 @@ async fn cancelling_one_stream_preserves_its_usage_and_does_not_settle_its_peer(
         .find(|event| event.request_id == "synthetic-peer")
         .unwrap();
     assert!(peer.success);
+    assert_eq!(peer.http_status, StatusCode::OK.as_u16());
     assert_eq!(peer.total_tokens, Some(25));
     assert!(peer.error_category.is_none());
 }
@@ -65,6 +94,7 @@ async fn eof_after_partial_usage_is_not_a_success_and_never_invents_consumption(
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(!events[0].success);
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
     assert_eq!(
         events[0].error_category.as_deref(),
         Some(error_codes::STREAM_INCOMPLETE)

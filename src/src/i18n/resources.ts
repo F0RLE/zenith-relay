@@ -1,14 +1,14 @@
-export const fallbackLanguage = "en";
-export const supportedLanguages = ["en", "ru"] as const;
+import { localeDefinition, resolveLanguage } from "./registry";
+export { fallbackLanguage, supportedLanguages } from "./registry";
+export const normalizeLanguage = resolveLanguage;
+export type SupportedLanguage = string;
+export type TranslationResource = { [key: string]: string | readonly string[] | TranslationResource };
 
-export type SupportedLanguage = (typeof supportedLanguages)[number];
-
-export function normalizeLanguage(locale?: string | null): SupportedLanguage {
-  const language = locale?.toLowerCase().split(/[._-]/)[0];
-  return language === "ru" ? "ru" : fallbackLanguage;
-}
-
-export async function loadTranslations(language: SupportedLanguage) {
-  if (language === "ru") return (await import("./locales/ru")).ru;
-  return (await import("./locales/en")).en;
+/** One registry entry and a data file; no component or loader branches per locale. */
+export async function loadTranslations(language: SupportedLanguage): Promise<TranslationResource> {
+  const locale = localeDefinition(language);
+  const module = locale.format === "json"
+    ? await import(`./locales/${locale.code}.json`)
+    : await import(`./locales/${locale.code}.ts`);
+  return module.default ?? module[locale.code];
 }

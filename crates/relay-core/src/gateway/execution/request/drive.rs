@@ -366,7 +366,9 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
     let validate_output = basis_points_request
         .as_ref()
         .is_some_and(|request| requires_buffering(request));
-    if !stream || (basis_points_route && (!upstream_sse || validate_output)) {
+    let siwc_json =
+        route.account_transport == crate::runtime::AccountTransport::Siwc && !upstream_sse;
+    if !stream || siwc_json || (basis_points_route && (!upstream_sse || validate_output)) {
         match complete_buffered_response(BufferedCompletionInput {
             upstream,
             runtime,

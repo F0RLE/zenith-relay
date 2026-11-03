@@ -63,6 +63,7 @@ pub(in crate::local_pool) async fn prepare_account_request_authorization(
             .map_err(credential_local_error)?,
         subscription_authorization,
         tokens: None,
+        token_revision: None,
         agent_task_id: stored
             .agent_identity()
             .and_then(AgentIdentityCredential::task_id)
@@ -169,11 +170,12 @@ pub(in crate::local_pool::accounts) fn model_discovery_was_unauthorized(
 pub(in crate::local_pool::accounts) async fn recover_account_authorization(
     state: &DesktopState,
     account_id: &str,
-    failed_generation: Option<u64>,
+    rejected: &PreparedAccountAuthorization,
     now_ms: u64,
 ) -> LocalResult<PreparedAccountCredentials> {
-    let generation = failed_generation
-        .ok_or_else(|| LocalPoolError::invalid_state("rejected token generation is missing"))?;
+    let revision = rejected.token_revision.as_ref().ok_or_else(|| {
+        LocalPoolError::invalid_state("rejected token authorization revision is missing")
+    })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let persistence = CredentialPersistence::new(
         credentials,
@@ -182,12 +184,7 @@ pub(in crate::local_pool::accounts) async fn recover_account_authorization(
     );
     state
         .token_authority()
-        .invalidate_access_generation_and_persist(
-            account_id,
-            Some(generation),
-            now_ms,
-            &persistence,
-        )
+        .invalidate_access_revision_and_persist(account_id, revision, now_ms, &persistence)
         .await
         .map_err(|error| {
             LocalPoolError::new(

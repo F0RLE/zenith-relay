@@ -1,5 +1,5 @@
 //! Content-addressed presentation only. Current request policy remains authoritative.
-use super::super::schema::{parameter_schema, prompt_schema};
+use super::super::schema::{compact_prompt_schema, parameter_schema, prompt_schema};
 use super::super::{describe_cache, try_with_cache};
 use super::ClientTool;
 use crate::gateway::CacheMemoryDiagnostics;
@@ -40,13 +40,14 @@ impl ClientTool {
                 }
             } else if let Some(schema) = parameter_schema(self) {
                 let full = schema.to_string();
-                let compact = prompt_schema(schema);
+                let compact = compact_prompt_schema(schema, full.len());
+                let compact_schema = compact.as_deref().unwrap_or(&full);
                 line.push_str(". Parameters: ");
                 return Presentation {
-                    compact: format!("{line}{compact}"),
+                    compact: format!("{line}{compact_schema}"),
                     full: format!("{line}{full}"),
                     schema_bytes: full.len() as u64,
-                    compact_schema_bytes: compact.len() as u64,
+                    compact_schema_bytes: compact_schema.len() as u64,
                 };
             }
             Presentation {

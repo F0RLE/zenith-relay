@@ -551,8 +551,7 @@ fn messages_bridge_flattens_namespace_tools_from_codex_catalogs() {
                         "parameters": {"type": "object"}
                     }]
                 }]
-            }, {"type": "message", "role": "user", "content": "go"}],
-            "tools": []
+            }, {"type": "message", "role": "user", "content": "go"}]
         }),
         "claude-test",
         false,

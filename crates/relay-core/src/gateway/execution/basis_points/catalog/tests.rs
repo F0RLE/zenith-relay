@@ -1,6 +1,10 @@
 use super::*;
 use serde_json::json;
 
+mod identity;
+mod preload;
+mod presentation;
+
 fn declaration(name: &str, minimum: i64) -> Value {
     json!({"type":"function","name":name,"parameters":{
         "type":"object","properties":{"value":{"type":"integer","minimum":minimum}},
@@ -9,7 +13,69 @@ fn declaration(name: &str, minimum: i64) -> Value {
 }
 
 #[test]
-fn resolves_overrides_before_preparing_immutable_declarations() {
+fn response_context_releases_payload_but_preserves_validation() {
+    let request = json!({
+        "model":"synthetic-model",
+        "instructions":"synthetic instructions".repeat(16_384),
+        "input":[
+            {"role":"user","content":"synthetic history".repeat(65_536)},
+            {"type":"additional_tools","tools":[declaration("first", 3)]},
+            {"type":"function_call","call_id":"previous","arguments":"synthetic payload"},
+            {"type":"function_call_output","call_id":"previous","output":"synthetic output"}
+        ],
+        "tool_choice":"required",
+        "parallel_tool_calls":false,
+        "metadata":{"client":"synthetic"}
+    });
+    let original_bytes = request.to_string().len();
+    let mut context = PreparedClientRequest::from(request)
+        .into_response_context()
+        .unwrap();
+    assert!(original_bytes > 1_000_000);
+    assert!(context.body.to_string().len() < 512);
+    eprintln!(
+        "retained synthetic request JSON: {original_bytes} -> {} bytes",
+        context.body.to_string().len()
+    );
+    assert!(context.get("instructions").is_none());
+    assert!(context.get("tools").is_none());
+    assert_eq!(
+        context["input"],
+        json!([{"call_id":"previous"},{"call_id":"previous"}])
+    );
+    let body = context.body.clone();
+    assert_eq!(context.catalog.tools(&body).unwrap()[0].name, "first");
+    let response = |call_id: &str, value: i64| {
+        json!({
+            "status":"completed",
+            "output":[{"type":"function_call","name":"run_officejs","call_id":call_id,
+                "arguments":json!({"code":json!({"tool":"first","args":{"value":value}}).to_string()}).to_string()}]
+        })
+    };
+    let translated = context.translate_value(response("fresh", 3)).unwrap();
+    assert_eq!(translated["output"][0]["name"], "first");
+    assert_eq!(translated["metadata"], json!({"client":"synthetic"}));
+    assert!(context.translate_value(response("previous", 3)).is_err());
+    assert!(context.translate_value(response("fresh", 2)).is_err());
+    assert!(
+        context
+            .translate_value(json!({"status":"completed","output":[]}))
+            .is_err()
+    );
+}
+
+#[test]
+fn response_context_rejects_invalid_incremental_catalog_before_releasing_it() {
+    let request = json!({"input":[{"type":"additional_tools","tools":[{"type":"function"}]}]});
+    assert!(
+        PreparedClientRequest::from(request)
+            .into_response_context()
+            .is_err()
+    );
+}
+
+#[test]
+fn resolves_incremental_overrides_without_restoring_explicitly_removed_tools() {
     let request = json!({
         "input":[
             {"type":"additional_tools","tools":[
@@ -44,6 +110,21 @@ fn resolves_overrides_before_preparing_immutable_declarations() {
     let tools = client_tools(&request).unwrap();
     assert_eq!(
         tools.iter().map(ClientTool::key).collect::<Vec<_>>(),
+        ["nested.tool"]
+    );
+    assert_eq!(
+        tools[0].spec["parameters"]["properties"]["value"]["minimum"],
+        5
+    );
+    assert_eq!(
+        declared_tools(request.get("tools")).unwrap()[0].key(),
+        "nested.tool"
+    );
+    let mut incremental = request;
+    incremental.as_object_mut().unwrap().remove("tools");
+    let tools = client_tools(&incremental).unwrap();
+    assert_eq!(
+        tools.iter().map(ClientTool::key).collect::<Vec<_>>(),
         ["first", "nested.tool", "last"]
     );
     assert_eq!(
@@ -52,11 +133,7 @@ fn resolves_overrides_before_preparing_immutable_declarations() {
     );
     assert_eq!(
         tools[1].spec["parameters"]["properties"]["value"]["minimum"],
-        5
-    );
-    assert_eq!(
-        declared_tools(request.get("tools")).unwrap()[0].key(),
-        "nested.tool"
+        2
     );
 }
 

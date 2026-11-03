@@ -158,9 +158,20 @@ async function launchWindowsBrowser(): Promise<ManagedBrowser> {
       browser,
       close: async () => {
         try {
-          await browser.close();
+          // A CDP-connected browser.close() disconnects without stopping Chromium.
+          // Close our browser before releasing its synthetic profile directory.
+          if (browser.isConnected()) {
+            const session = await browser.newBrowserCDPSession();
+            await session.send("Browser.close");
+          }
+        } catch (error) {
+          if (browser.isConnected()) throw error;
         } finally {
-          await stopBrowserProcess(child, profile);
+          try {
+            await browser.close();
+          } finally {
+            await stopBrowserProcess(child, profile);
+          }
         }
       },
     };

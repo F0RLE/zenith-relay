@@ -48,13 +48,7 @@ pub(super) async fn retry_authorization(
 ) -> LocalResult<PreparedAccountAuthorization> {
     if prepared.tokens.is_some() {
         return PreparedAccountAuthorization::from_tokens(
-            recover_account_authorization(
-                state,
-                account_id,
-                prepared.tokens.as_ref().map(|tokens| tokens.generation()),
-                current_time_ms(),
-            )
-            .await?,
+            recover_account_authorization(state, account_id, prepared, current_time_ms()).await?,
         );
     }
 

@@ -135,32 +135,42 @@ pub(crate) async fn collect_with_progress_limit(
                 });
             }
         };
-        if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
-            return Err(BodyReadFailure {
-                bytes,
-                timed_out: false,
-            });
-        }
+        let count = chunk.len().min(max_bytes.saturating_sub(bytes.len()));
+        // A complete terminal within the budget wins over any trailing bytes
+        // in the same network chunk. Never allocate or parse that excess tail.
+        let retained = &chunk[..count];
         let advanced = if sse {
-            progress.observe(&chunk)
+            progress.observe(retained)
         } else {
-            !chunk.is_empty()
+            !retained.is_empty()
         };
         remaining = if advanced {
             idle_timeout
         } else {
             remaining.map(|time| time.saturating_sub(started.elapsed()))
         };
-        bytes.extend_from_slice(&chunk);
+        // The old incomplete frame has already been scanned. Revisit only its
+        // final byte for a split CRLF instead of rescanning its whole prefix.
+        let mut scan_from = bytes.len().saturating_sub(inspected).saturating_sub(1);
+        bytes.extend_from_slice(retained);
         if sse {
-            while let Some(end) = crate::protocol::sse::event_end(&bytes[inspected..]) {
+            while let Some(end) =
+                crate::protocol::sse::event_end_from(&bytes[inspected..], scan_from)
+            {
                 let terminal = stop_at_event(&bytes[inspected..inspected + end]);
                 inspected += end;
+                scan_from = 0;
                 if terminal {
                     bytes.truncate(inspected);
                     return Ok(bytes);
                 }
             }
+        }
+        if count < chunk.len() {
+            return Err(BodyReadFailure {
+                bytes,
+                timed_out: false,
+            });
         }
     }
 }
@@ -403,5 +413,140 @@ mod progress_tests {
         assert!(progress.observe(b"ta: {\"type\":"));
         assert!(progress.observe(b"\"response.created\"}\n\n"));
         assert!(!progress.observe(b":heartbeat\n\n"));
+    }
+
+    #[tokio::test]
+    async fn bounded_sse_stops_before_an_over_limit_tail() {
+        for (prefix, chunk, expected) in [
+            ("", "data: done\n\ndata: ignored\n\n", "data: done\n\n"),
+            ("data: ", "done\n\ndata: ignored\n\n", "data: done\n\n"),
+            ("", "data: done\r\rdata: ignored\r\r", "data: done\r\r"),
+            (
+                "data: done\r",
+                "\n\r\ndata: ignored\r\n\r\n",
+                "data: done\r\n\r",
+            ),
+        ] {
+            let mut chunks = Vec::new();
+            if !prefix.is_empty() {
+                chunks.push((Duration::ZERO, prefix));
+            }
+            chunks.push((Duration::from_millis(5), chunk));
+            let (response, _server) = stream_response(chunks).await;
+            let mut events = 0;
+            let result = collect_with_progress_limit(
+                response,
+                Some(Duration::from_secs(1)),
+                expected.len(),
+                |event| {
+                    events += 1;
+                    assert_eq!(crate::protocol::sse::event_data(event).as_ref(), b"done");
+                    true
+                },
+            )
+            .await
+            .map_err(|failure| (failure.timed_out, failure.bytes.len()))
+            .expect("a complete terminal inside the budget must win over its trailing bytes");
+            assert_eq!(result, expected.as_bytes());
+            assert_eq!(events, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_sse_keeps_usage_before_an_oversized_event() {
+        let complete = "data: {\"usage\":{\"input_tokens\":7}}\n\n";
+        let (response, _server) = stream_response(vec![(
+            Duration::ZERO,
+            "data: {\"usage\":{\"input_tokens\":7}}\n\ndata: unfinished oversized event",
+        )])
+        .await;
+        let limit = complete.len() + 6;
+        let mut events = 0;
+        let failure =
+            collect_with_progress_limit(response, Some(Duration::from_secs(1)), limit, |event| {
+                events += 1;
+                assert_eq!(event, complete.as_bytes());
+                false
+            })
+            .await
+            .expect_err("an oversized response without a terminal must fail");
+        assert!(!failure.timed_out);
+        assert_eq!(events, 1);
+        assert_eq!(failure.bytes.len(), limit);
+        assert!(failure.bytes.starts_with(complete.as_bytes()));
+    }
+
+    fn synthetic_response(mime: &str, chunks: &[&[u8]]) -> reqwest::Response {
+        let chunks = chunks
+            .iter()
+            .map(|chunk| Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(chunk)))
+            .collect::<Vec<_>>();
+        axum::http::Response::builder()
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+                chunks,
+            )))
+            .unwrap()
+            .into()
+    }
+
+    #[tokio::test]
+    async fn bounded_sse_preserves_every_fragmented_terminal_boundary() {
+        for ending in ["\n\n", "\r\r", "\r\n\r\n", "\n\r\n", "\r\n\n"] {
+            let prefix = "data: first\n\n";
+            let terminal = format!("data: done{ending}");
+            let complete = format!("{prefix}{terminal}");
+            let wire = format!("{complete}data: must not be parsed\n\n");
+            for split in 0..=wire.len() {
+                let mut events = Vec::new();
+                let response = synthetic_response(
+                    "text/event-stream",
+                    &[&wire.as_bytes()[..split], &wire.as_bytes()[split..]],
+                );
+                let bytes = collect_with_progress_limit(response, None, complete.len(), |event| {
+                    let data = crate::protocol::sse::event_data(event);
+                    events.push(data.to_vec());
+                    data.as_ref() == b"done"
+                })
+                .await
+                .map_err(|failure| (failure.timed_out, failure.bytes.len()))
+                .expect("terminal completion must not depend on chunk boundaries");
+                assert_eq!(events, [b"first".to_vec(), b"done".to_vec()]);
+                assert!(
+                    bytes == complete.as_bytes() || {
+                        complete.ends_with("\r\n")
+                            && bytes == complete.as_bytes()[..complete.len() - 1]
+                    }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_json_keeps_its_byte_limit_without_sse_interpretation() {
+        for (body, limit, accepted) in [
+            (b"{}".as_slice(), 2, true),
+            (b"{} ", 2, false),
+            (b"", 0, true),
+            (b"{}", 0, false),
+            (b"data: done\n\nignored", 12, false),
+        ] {
+            let response = synthetic_response("application/json", &[body]);
+            let mut callback_called = false;
+            let result = collect_with_progress_limit(response, None, limit, |_| {
+                callback_called = true;
+                false
+            })
+            .await;
+            assert!(!callback_called, "JSON body invoked the SSE callback");
+            assert_eq!(result.is_ok(), accepted);
+            match result {
+                Ok(bytes) => assert_eq!(bytes, body),
+                Err(failure) => {
+                    assert!(!failure.timed_out);
+                    assert_eq!(failure.bytes, body[..limit]);
+                }
+            }
+        }
     }
 }

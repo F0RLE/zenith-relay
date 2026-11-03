@@ -4,7 +4,8 @@ use super::recovery::{
     adapter_error_response, adapter_error_response_for_origin, replay_native_tool_continuation,
 };
 use super::translate::{
-    CompletedBasisPointsResponse, translate_basis_points_completed, translate_completed_response,
+    CompletedClientResponse, translate_basis_points_completed, translate_completed_response,
+    translate_completed_responses,
 };
 use crate::gateway::errors::current_failure_state;
 
@@ -173,11 +174,7 @@ pub(super) async fn complete_buffered_response(
     {
         event.tool_use.observe_upstream_response(&body);
     }
-    if !route.basis_points_discovery {
-        // Catalog discovery has already buffered upstream bytes. A synthetic
-        // final body is not evidence of first/last-token arrival.
-        timing.apply(&mut event);
-    }
+    timing.apply(&mut event);
     // Accounting reads the actual upstream counters before translation.
     populate_tokens(&mut event, &bytes);
     if basis_points_request.is_some() {
@@ -198,19 +195,21 @@ pub(super) async fn complete_buffered_response(
     }
     let translated = if let Some(responses_request) = basis_points_request.as_ref() {
         translate_basis_points_completed(adapter_request, &bytes, responses_request, stream)
+    } else if route.account_transport == crate::runtime::AccountTransport::Siwc && stream {
+        translate_completed_responses(adapter_request, bytes, true)
     } else {
         translate_completed_response(adapter_request, bytes).map(|(bytes, bridge_response)| {
-            CompletedBasisPointsResponse {
+            CompletedClientResponse {
                 bytes,
                 bridge_response,
                 stream: None,
             }
         })
     };
-    let CompletedBasisPointsResponse {
+    let CompletedClientResponse {
         mut bytes,
         bridge_response,
-        stream: basis_points_stream,
+        stream: client_stream_body,
     } = match translated {
         Ok(response) => response,
         Err(error) => {
@@ -326,7 +325,7 @@ pub(super) async fn complete_buffered_response(
         response_headers,
         forwarded_headers,
         bytes,
-        basis_points_stream,
+        client_stream_body,
         account_route,
         adapter_is_passthrough,
         summarize,
@@ -341,7 +340,7 @@ struct BufferedClientResponse<'a> {
     response_headers: &'a HeaderMap,
     forwarded_headers: &'a HeaderMap,
     bytes: Vec<u8>,
-    basis_points_stream: Option<Vec<u8>>,
+    client_stream_body: Option<Vec<u8>>,
     account_route: bool,
     adapter_is_passthrough: bool,
     summarize: bool,
@@ -356,7 +355,7 @@ fn buffered_client_response(input: BufferedClientResponse<'_>) -> CompletionStep
         response_headers,
         forwarded_headers,
         bytes,
-        basis_points_stream,
+        client_stream_body,
         account_route,
         adapter_is_passthrough,
         summarize,
@@ -364,7 +363,7 @@ fn buffered_client_response(input: BufferedClientResponse<'_>) -> CompletionStep
         selected_error_origin,
         request_id,
     } = input;
-    if let Some(stream_body) = basis_points_stream {
+    if let Some(stream_body) = client_stream_body {
         let mut stream_response =
             proxy_sse_response(status, response_headers, Body::from(stream_body));
         relay_account_response_header(forwarded_headers, response_headers, &mut stream_response);
@@ -435,32 +434,41 @@ async fn read_completed_body(
     usage: &impl Fn(bool, u16, Option<String>) -> UsageEvent,
     timing: &mut crate::gateway::response::BufferedResponseTiming,
 ) -> Result<Vec<u8>, CompletionStep> {
+    let observed_timing = upstream
+        .extensions()
+        .get::<crate::gateway::response::BufferedResponseTiming>()
+        .copied();
     let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
         .then_some(read.route.source_model.as_str());
-    let collected = if read.route.account_transport
-        == crate::runtime::AccountTransport::ExcelBasisPoints
-    {
-        super::super::super::response::collect_basis_points_response(
-            upstream,
-            expected_model,
-            read.started,
-            timing,
-        )
-        .await
-    } else if read.route.account_transport == crate::runtime::AccountTransport::Siwc
-        && (read.request.get("generate") == Some(&Value::Bool(false))
-            || read.request.pointer("/prompt_cache_options/prewarm") == Some(&Value::Bool(true)))
-    {
-        super::super::super::response::collect_upstream_response_with_prewarm(
-            upstream,
-            read.account_route,
-            expected_model,
-            true,
-        )
-        .await
-    } else {
-        collect_upstream_response(upstream, read.account_route, expected_model).await
-    };
+    let collected =
+        if read.route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints {
+            super::super::super::response::collect_basis_points_response(
+                upstream,
+                expected_model,
+                read.started,
+                timing,
+            )
+            .await
+        } else {
+            let prewarm = read.route.account_transport == crate::runtime::AccountTransport::Siwc
+                && (read.request.get("generate") == Some(&Value::Bool(false))
+                    || read.request.pointer("/prompt_cache_options/prewarm")
+                        == Some(&Value::Bool(true)));
+            collect_upstream_response(
+                upstream,
+                read.account_route,
+                expected_model,
+                prewarm,
+                read.started,
+                timing,
+            )
+            .await
+        };
+    if let Some(observed) = observed_timing {
+        // Discovery already consumed the live stream; synthetic-body collection
+        // must not replace its timestamps, including on later validation errors.
+        *timing = observed;
+    }
     match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
@@ -539,7 +547,7 @@ async fn read_completed_body(
             apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(read.route, failure.status, failure.category)
+                || route_forbids_fallback(read.route, failure.status, &failure)
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

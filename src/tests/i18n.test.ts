@@ -10,6 +10,13 @@ import { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } fr
 import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
+  test("shared profile recovery errors do not blame a specific application", () => {
+    for (const locale of [en, ru]) {
+      expect(locale.errors.profile_restore_blocked.length).toBeGreaterThan(0);
+      expect(locale.errors.profile_restore_blocked).not.toMatch(/chatgpt|claude|opencode/i);
+    }
+  });
+
   test("live routing status distinguishes cooldown and recovery probes", () => {
     const candidate = (overrides: Partial<CandidateRuntimeSnapshot> = {}) => ({
       candidateId: "source_1",

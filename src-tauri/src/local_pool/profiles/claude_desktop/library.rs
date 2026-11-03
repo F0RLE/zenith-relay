@@ -243,6 +243,7 @@ fn validate_attach(
     profile: Option<&[u8]>,
     record: Option<&Recovery>,
     config: &Value,
+    reconnect: bool,
 ) -> Result<()> {
     if meta["entries"].as_array().is_some_and(|entries| {
         entries
@@ -252,7 +253,15 @@ fn validate_attach(
         return Err(invalid());
     }
     if let Some(record) = record {
-        if !owns_profile(record, profile) {
+        // An explicit reconnect can re-establish the same gateway ownership
+        // as a lost recovery record. Keep the original recovery point; neither
+        // background refresh nor restore may adopt an externally changed file.
+        if !owns_profile(record, profile)
+            && !(reconnect
+                && !record.pending
+                && owns_entry(meta, PROFILE_ID)
+                && profile.is_some_and(|bytes| matches_gateway(bytes, config)))
+        {
             return Err(invalid());
         }
     } else if (profile.is_some() || meta["appliedId"] == PROFILE_ID || owns_entry(meta, PROFILE_ID))
@@ -268,7 +277,7 @@ pub(super) fn check_attach(library: &Path, recovery_path: &Path, config: &Value)
     let meta = metadata(read(&library.join("_meta.json"))?.as_deref())?;
     let profile = read(&library.join(format!("{PROFILE_ID}.json")))?;
     let record = recovery(recovery_path, library)?;
-    validate_attach(&meta, profile.as_deref(), record.as_ref(), config)?;
+    validate_attach(&meta, profile.as_deref(), record.as_ref(), config, true)?;
     let bytes = serialize(config)?;
     let has_legacy = owns_entry(&meta, "zenith-relay")
         && read(&library.join("zenith-relay.json"))?
@@ -340,6 +349,7 @@ pub(super) fn apply(
         original_profile.as_deref(),
         existing.as_ref(),
         config,
+        select,
     )?;
     if !select && (meta["appliedId"] != PROFILE_ID || !owns_entry(&meta, PROFILE_ID)) {
         return Ok(false);
@@ -355,7 +365,12 @@ pub(super) fn apply(
         .as_deref()
         .is_some_and(|bytes| matches_gateway(bytes, config));
     let bytes = serialize(config)?;
-    if !created && !has_legacy && profile_is_current(&meta, original_profile.as_deref(), &bytes) {
+    if existing
+        .as_ref()
+        .is_some_and(|record| owns_profile(record, original_profile.as_deref()))
+        && !has_legacy
+        && profile_is_current(&meta, original_profile.as_deref(), &bytes)
+    {
         return Ok(false);
     }
     let mut record = existing.unwrap_or_else(|| Recovery {

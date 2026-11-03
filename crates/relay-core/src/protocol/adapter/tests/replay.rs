@@ -467,6 +467,37 @@ fn item_prefixed_message_id_repair_preserves_native_and_tool_item_ids() {
     assert_eq!(input[4]["id"], "item_reasoning_01");
     assert!(!remove_item_prefixed_message_ids(&mut request));
 }
+
+#[test]
+fn tool_search_repair_is_collision_safe_idempotent_and_keeps_call_links() {
+    let mut request = json!({"input":[
+        {"type":"reasoning","id":"rs_native","encrypted_content":"synthetic-opaque"},
+        {"type":"tool_search_call","id":"ts_call","call_id":"stable_first"},
+        {"type":"tool_search_call","id":"call","call_id":"stable_second"},
+        {"type":"tool_search_call","id":"tsc_call","call_id":"stable_native"},
+        {"type":"tool_search_output","call_id":"stable_first","tools":[]},
+        {"type":"item_reference","id":"ts_call"}
+    ]});
+    let original = request.clone();
+    assert!(repair_tool_search_item_ids(&mut request));
+    let first = request["input"][1]["id"].as_str().unwrap();
+    let second = request["input"][2]["id"].as_str().unwrap();
+    assert!(first.starts_with("tsc_"));
+    assert!(second.starts_with("tsc_"));
+    assert_ne!(first, second);
+    assert_ne!(first, "tsc_call");
+    assert_ne!(second, "tsc_call");
+    assert_eq!(request["input"][5]["id"], first);
+    for index in [0, 3, 4] {
+        assert_eq!(request["input"][index], original["input"][index]);
+    }
+    assert_eq!(request["input"][1]["call_id"], "stable_first");
+    assert_eq!(request["input"][2]["call_id"], "stable_second");
+    assert!(!repair_tool_search_item_ids(&mut request));
+    let mut repeated = original;
+    assert!(repair_tool_search_item_ids(&mut repeated));
+    assert_eq!(request, repeated);
+}
 #[test]
 fn native_responses_replay_rejects_model_mismatch() {
     let initial = json!({"model": "alias", "input": "inspect"});

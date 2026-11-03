@@ -76,7 +76,7 @@ pub struct LocalGatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
-    /// Explicit local Images opt-in. Legacy pool membership never grants it.
+    /// Images access requires its own explicit local opt-in.
     #[serde(default)]
     pub image_pool_enabled: bool,
     /// Explicit official pricing family. Older ChatGPT accounts default to
@@ -85,7 +85,7 @@ pub struct LocalAccountRecord {
     pub provider_family: Option<String>,
     #[serde(default)]
     pub purchase_cost_micro_usd: Option<u64>,
-    /// Opaque recovery evidence is retained locally and never grants dispatch access.
+    /// Local recovery evidence; dispatch requires separate admission.
     #[serde(
         default,
         alias = "remoteLocation",

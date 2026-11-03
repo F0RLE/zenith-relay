@@ -8,6 +8,7 @@ mod memory_model;
 mod model_catalog;
 mod reasoning;
 mod recovery;
+mod snapshots;
 mod websocket;
 
 #[derive(Default)]

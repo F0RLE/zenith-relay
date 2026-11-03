@@ -2,7 +2,12 @@ use super::*;
 use crate::gateway::execution::basis_points::presentation::OPTION;
 use crate::gateway::execution::basis_points::{prepare_request, translate_response};
 
+mod atomicity;
+mod continuation;
 mod identity;
+mod inspection;
+mod reuse;
+mod search;
 
 fn catalog_text(prepared: &Value) -> &str {
     prepared["input"]
@@ -408,6 +413,32 @@ fn lookup_call_ids_cannot_reuse_single_item_history() {
     let mut upstream = prepare_request(&request).unwrap();
     let error = session.advance(&lookup, &mut upstream).unwrap_err();
     assert_eq!(error.parameter(), Some("output.relay.catalog.call_id"));
+}
+
+#[test]
+fn replayed_call_ids_cannot_reenter_discovery_under_a_normalized_id() {
+    let original = format!("call_{}", "synthetic".repeat(16));
+    let fitted = super::super::history::fit_item_id(&original);
+    for history in [false, true] {
+        for (previous, next) in [(&original, &fitted), (&fitted, &original)] {
+            let mut request = request();
+            let mut lookup = response(LOOKUP_TOOL, json!({"names":["patch"]}));
+            lookup["output"][0]["call_id"] = json!(previous);
+            if history {
+                request["input"] = json!([{"type":"function_call_output","call_id":previous,"output":"Synthetic result"}]);
+            }
+            let mut session = DiscoverySession::new(&request, true).unwrap().unwrap();
+            let mut upstream = prepare_request(&request).unwrap();
+            if !history {
+                assert!(session.advance(&lookup, &mut upstream).unwrap());
+            }
+            let before = upstream.clone();
+            lookup["output"][0]["call_id"] = json!(next);
+            let error = session.advance(&lookup, &mut upstream).unwrap_err();
+            assert_eq!(error.parameter(), Some("output.relay.catalog.call_id"));
+            assert_eq!(upstream, before);
+        }
+    }
 }
 
 #[test]
@@ -903,7 +934,7 @@ fn known_contracts_use_lossless_compact_schemas_after_unchanged_history_and_pref
 }
 
 #[test]
-fn rendered_schema_diagnostics_count_compact_preloads_and_unique_full_lookups() {
+fn rendered_schema_diagnostics_do_not_recount_visible_preloaded_contracts() {
     let mut request = request();
     request["input"] = json!([
         {"type":"function_call","name":"read","namespace":"files","call_id":"known_read","arguments":"{\"path\":\"synthetic.txt\"}"},
@@ -911,7 +942,6 @@ fn rendered_schema_diagnostics_count_compact_preloads_and_unique_full_lookups() 
     ]);
     let schema = &request["tools"][0]["tools"][0]["parameters"];
     let compact_bytes = super::super::schema::prompt_schema(schema).len() as u64;
-    let full_bytes = schema.to_string().len() as u64;
     let mut diagnostic = crate::gateway::request::tool_use_diagnostics(&request, true);
     capture(&request, &mut diagnostic);
     assert_eq!(
@@ -936,20 +966,16 @@ fn rendered_schema_diagnostics_count_compact_preloads_and_unique_full_lookups() 
         assert!(session.advance(&lookup, &mut upstream).unwrap());
         session.record(&mut diagnostic);
         let catalog = diagnostic.basis_points_catalog.as_ref().unwrap();
-        assert_eq!(catalog.rendered_schema_bytes, compact_bytes + full_bytes);
+        assert_eq!(catalog.rendered_schema_bytes, compact_bytes);
         assert_eq!(catalog.loaded_tool_count, 1);
         let result = upstream["input"].as_array().unwrap().last().unwrap();
         let result: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["tools"], json!([]));
         assert_eq!(
-            result["tools"].as_array().unwrap().len(),
-            usize::from(round == 0)
+            result["reused"],
+            json!([{"name":"files.read","source":"loaded_tool_contracts"}])
         );
-        if round != 0 {
-            assert_eq!(
-                result["reused"],
-                json!([{"name":"files.read","call_id":"lookup_0"}])
-            );
-        }
+        assert_eq!(result["cached"], true);
     }
 }
 

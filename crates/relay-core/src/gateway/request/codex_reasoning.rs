@@ -5,10 +5,9 @@ use crate::{GatewayRuntime, WireApi};
 use axum::http::HeaderMap;
 use serde_json::Value;
 
-/// Codex uses `none` when a Relay picker row has no effort choices. For a
-/// known thinking model without published controls, that is a client placeholder,
-/// not a provider-supported instruction to disable thinking. Keep explicit
-/// controls and requests outside Relay's managed picker unchanged.
+/// Interpret managed-picker `none` as a placeholder for known thinking models
+/// with unpublished controls. Preserve explicit controls and requests outside
+/// Relay's managed picker.
 pub(in crate::gateway) fn normalize_codex_reasoning_placeholder(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,

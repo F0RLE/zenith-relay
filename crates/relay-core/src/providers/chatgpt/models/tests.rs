@@ -7,6 +7,26 @@ use serde_json::json;
 
 mod recovery;
 
+#[test]
+fn siwc_catalog_distinguishes_no_visible_models_from_a_malformed_response() {
+    for body in [
+        br#"{"models":[]}"#.as_slice(),
+        br#"{"models":[{"slug":"gpt-hidden","visibility":"hide"}]}"#.as_slice(),
+    ] {
+        assert!(parse::parse_siwc_models(body).unwrap().is_empty());
+    }
+    for body in [
+        br#"{"data":[]}"#.as_slice(),
+        br#"{"models":null}"#.as_slice(),
+        br#"{"models":[{"slug":"","visibility":"list"}]}"#.as_slice(),
+    ] {
+        assert_eq!(
+            parse::parse_siwc_models(body).unwrap_err().code,
+            ModelDiscoveryFailureCode::InvalidResponse
+        );
+    }
+}
+
 #[tokio::test]
 async fn siwc_catalog_uses_only_bearer_and_preserves_visible_server_order() {
     let router = Router::new().route("/v1/models", get(|headers: HeaderMap, uri: axum::http::Uri| async move {

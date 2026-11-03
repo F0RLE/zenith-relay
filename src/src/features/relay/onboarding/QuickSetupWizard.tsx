@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Clock3, Cloud, ExternalLink, Laptop, Loader2, LogIn, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import relayLogoUrl from "../../../../../src-tauri/icons/zenith-relay.svg?url";
-import { setI18nLanguage } from "../../../i18n";
+import { LanguagePicker } from "../../../i18n/LanguagePicker";
 import { relayCommands } from "../api/commands";
 import type { OAuthClientKind, RelayMode } from "../api/types";
 import { Button, OptionMenu } from "../components/Ui";
@@ -366,16 +366,5 @@ function ReadyStep({ mode, client }: { mode: RelayMode; client: string }) {
 }
 
 function LanguageSelect() {
-  const { i18n, t } = useTranslation();
-  return <OptionMenu
-    className="setup-language-menu"
-    listClassName="setup-language-options"
-    label={t("settings.language")}
-    value={i18n.language.startsWith("ru") ? "ru" : "en"}
-    align="center"
-    fitContent
-    showSelectionIndicator={false}
-    onChange={(languageCode) => void setI18nLanguage(languageCode)}
-    options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
-  />;
+  return <LanguagePicker compact />;
 }

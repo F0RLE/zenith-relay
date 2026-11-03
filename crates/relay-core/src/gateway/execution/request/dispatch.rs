@@ -137,6 +137,7 @@ pub(super) async fn dispatch_request_attempt(
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let attachments_started = preparation_started.map(|_| Instant::now());
+    let mut attachment_owner = None;
     let request_body = if let Some(body) = discovery_body.as_mut() {
         if basis_points_route {
             match super::super::basis_points::attach_input_images(
@@ -148,7 +149,7 @@ pub(super) async fn dispatch_request_attempt(
             )
             .await
             {
-                Ok(()) => {}
+                Ok(owner) => attachment_owner = owner,
                 Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                     return RequestDispatch::Respond(attempt_error_response(
                         failure,
@@ -281,6 +282,7 @@ pub(super) async fn dispatch_request_attempt(
                 lease: Some(lease),
                 usage_event: Some((&authorization_event, started)),
             },
+            attachment_owner.as_ref(),
         )
         .await;
     // Includes internal auth replay; repair and recovery cannot refund a
@@ -336,6 +338,8 @@ pub(super) async fn dispatch_request_attempt(
         }
         Err(error) => {
             let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
+            let attachment_changed = attachment_owner.is_some()
+                && matches!(error, AuthorizedRequestError::NotReplayable);
             let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
             if exhausted && last_failure.is_some() {
                 // Preparation may outlive the retry deadline. Nothing was sent
@@ -364,6 +368,7 @@ pub(super) async fn dispatch_request_attempt(
             // failure either.
             if uncertain
                 || exhausted
+                || attachment_changed
                 || route.account_transport == crate::runtime::AccountTransport::Siwc
             {
                 if let Some(routing) = event.routing.as_mut() {

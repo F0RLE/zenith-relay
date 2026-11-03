@@ -420,19 +420,57 @@ fn refreshed_authority_reconciliation_keeps_a_real_client_login_warning() {
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
-#[test]
-fn prepared_credentials_debug_output_is_redacted() {
+#[tokio::test]
+async fn prepared_credentials_debug_output_is_redacted() {
+    use zenith_relay_core::accounts::{
+        TokenAuthority, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
+        TokenRefreshFailureKind,
+    };
+
+    struct NoRefresh;
+    impl TokenRefreshAdapter for NoRefresh {
+        fn refresh<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: u64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<TokenRefresh, TokenRefreshFailure>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "unexpected_test_refresh",
+                ))
+            })
+        }
+    }
+    let tokens = TokenSet::new(
+        "access-private",
+        Some("refresh-private".into()),
+        None,
+        Some(60_000),
+        1,
+        0,
+    )
+    .unwrap();
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register("test-account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let authorization = authority
+        .prepare("test-account", 2, 0, &NoRefresh)
+        .await
+        .unwrap();
     let prepared = PreparedAccountCredentials {
         oauth_client_kind: Default::default(),
-        tokens: TokenSet::new(
-            "access-private",
-            Some("refresh-private".into()),
-            None,
-            Some(60_000),
-            1,
-            0,
-        )
-        .unwrap(),
+        token_revision: authorization.dispatch_revision().clone(),
+        tokens,
         provider_account_id: "provider-private".into(),
         proxy: None,
     };

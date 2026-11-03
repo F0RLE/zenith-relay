@@ -43,8 +43,8 @@ pub(in crate::protocol::adapter) fn bridged_tool_description(
 }
 
 /// Collects the complete client-side tool catalog for one Responses request.
-/// Historical discoveries fill omitted tools; the current root declarations
-/// override them without duplicating a tool or changing its catalog position.
+/// Explicit root declarations replace historical permissions, including an
+/// empty catalog. Without a root catalog, discoveries remain incremental.
 pub(in crate::protocol::adapter) fn request_tool_catalog(
     request_object: &Map<String, Value>,
 ) -> AdapterResult<Option<Vec<Value>>> {
@@ -70,6 +70,9 @@ pub(in crate::protocol::adapter) fn request_tool_catalog(
     }
     if let Some(root_tools) = request_object.get("tools").filter(|tools| !tools.is_null()) {
         declared = true;
+        // History still validates and replays above, but cannot reauthorize a
+        // tool (or namespace child) omitted from the current explicit catalog.
+        tools.clear();
         merge_tool_definitions(
             &mut tools,
             root_tools

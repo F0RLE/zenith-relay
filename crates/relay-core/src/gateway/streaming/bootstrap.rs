@@ -10,6 +10,46 @@ use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
 use crate::protocol::sse_event_end;
 use axum::body::Bytes;
 use futures_util::StreamExt;
+use std::time::Instant;
+
+pub(in crate::gateway) enum StreamBootstrapObservation<'a> {
+    Transport {
+        started: Instant,
+        transport: &'a mut crate::usage::TransportDiagnostics,
+    },
+    Buffered {
+        started: Instant,
+        timing: &'a mut crate::gateway::response::BufferedResponseTiming,
+    },
+}
+
+impl StreamBootstrapObservation<'_> {
+    fn body(&mut self, nonempty: bool) {
+        if nonempty && let Self::Transport { started, transport } = self {
+            transport
+                .stream_response
+                .get_or_insert_default()
+                .observe_body(true, started.elapsed().as_millis() as u64);
+        }
+    }
+
+    fn event(&mut self, event: &super::events::TerminalEvent) {
+        match self {
+            Self::Transport { started, transport } if event.event_payload.is_some() => transport
+                .stream_response
+                .get_or_insert_default()
+                .observe_event(
+                    true,
+                    event.semantic_output,
+                    started.elapsed().as_millis() as u64,
+                ),
+            Self::Buffered { started, timing } => {
+                timing.observe(event, started.elapsed().as_millis() as u64);
+            }
+            Self::Transport { .. } => {}
+        }
+    }
+}
 
 pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) execution: crate::scheduler::rotation::ExecutionObservation,
@@ -50,6 +90,7 @@ pub(in crate::gateway) fn degraded_route_stream_failure() -> StreamBootstrapFail
     }
 }
 
+#[cfg(test)]
 pub(in crate::gateway) async fn bootstrap_stream(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
@@ -64,34 +105,7 @@ pub(in crate::gateway) async fn bootstrap_stream(
     .await
 }
 
-pub(in crate::gateway) async fn bootstrap_basis_points_stream(
-    upstream: reqwest::Response,
-    expected_model: Option<&str>,
-) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
-    bootstrap_stream_impl(
-        upstream,
-        expected_model,
-        true,
-        crate::protocol::sse::MAX_EVENT_BYTES,
-        false,
-    )
-    .await
-}
-
-pub(in crate::gateway) async fn bootstrap_prewarm_stream(
-    upstream: reqwest::Response,
-    expected_model: Option<&str>,
-) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
-    bootstrap_stream_impl(
-        upstream,
-        expected_model,
-        false,
-        crate::protocol::sse::MAX_EVENT_BYTES,
-        true,
-    )
-    .await
-}
-
+#[cfg(test)]
 pub(super) async fn bootstrap_stream_impl(
     upstream: reqwest::Response,
     expected_model: Option<&str>,
@@ -99,7 +113,33 @@ pub(super) async fn bootstrap_stream_impl(
     max_buffered_bytes: usize,
     prewarm: bool,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    bootstrap_observed_stream(
+        upstream,
+        expected_model,
+        basis_points,
+        max_buffered_bytes,
+        prewarm,
+        None,
+    )
+    .await
+}
+
+pub(in crate::gateway) async fn bootstrap_observed_stream(
+    upstream: reqwest::Response,
+    expected_model: Option<&str>,
+    basis_points: bool,
+    max_buffered_bytes: usize,
+    prewarm: bool,
+    mut observation: Option<StreamBootstrapObservation<'_>>,
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), Box<StreamBootstrapFailure>> {
+    let http_status = upstream.status().as_u16();
     let headers = upstream.headers().clone();
+    // A preserved non-identity encoding means decoding has not been established.
+    // Do not label encoded application reads as decoded or raw wire arrivals.
+    let decoded = headers
+        .get_all(reqwest::header::CONTENT_ENCODING)
+        .iter()
+        .all(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"));
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
     if basis_points {
         stream = super::basis_points::guard_progress(
@@ -122,6 +162,9 @@ pub(super) async fn bootstrap_stream_impl(
     loop {
         match stream.next().await {
             Some(Ok(chunk)) => {
+                if decoded && let Some(observation) = observation.as_mut() {
+                    observation.body(!chunk.is_empty());
+                }
                 let available = max_buffered_bytes.saturating_sub(buffered.len());
                 let prefix_len = available.min(chunk.len());
                 buffered.extend_from_slice(&chunk[..prefix_len]);
@@ -129,6 +172,9 @@ pub(super) async fn bootstrap_stream_impl(
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
                     let absolute_end = inspected + end;
                     let event = parse_sse_event(&buffered[inspected..absolute_end]);
+                    if let Some(observation) = observation.as_mut() {
+                        observation.event(&event);
+                    }
                     saw_generation |= event.semantic_output
                         || event
                             .event_payload
@@ -266,7 +312,50 @@ pub(super) async fn bootstrap_stream_impl(
                 }));
             }
             None => {
+                // Some upstreams return a JSON error even after HTTP 200. Keep its
+                // structured refusal instead of reporting only a missing SSE terminal.
+                if inspected == 0
+                    && buffered.len() <= 64 * 1024
+                    && let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&buffered)
+                    && let Some(category) = super::super::errors::upstream_event_failure_category(
+                        payload.get("type").and_then(serde_json::Value::as_str),
+                        &payload,
+                    )
+                {
+                    let preserved = super::events::preserved_stream_error(&payload);
+                    let failure = AttemptFailure::classified_with_hint(
+                        preserved.as_ref().map_or_else(
+                            || upstream_failure_status(category),
+                            |error| error.status,
+                        ),
+                        category,
+                        super::super::errors::rate_limit_body_hint_value(
+                            &payload,
+                            std::time::SystemTime::now(),
+                        ),
+                    );
+                    return Err(Box::new(StreamBootstrapFailure {
+                        upstream_error: Some(crate::usage::UpstreamErrorDetails::from_response(
+                            Some(http_status),
+                            &buffered,
+                            &headers,
+                        )),
+                        invalid_function_call_output_call_id:
+                            responses_function_call_output_has_invalid_call_id_value(&payload),
+                        responses_tool_call_links_rejected:
+                            responses_tool_call_links_rejected_value(&payload),
+                        preserved,
+                        partial_body: buffered,
+                        ..failure.into()
+                    }));
+                }
                 return Err(Box::new(StreamBootstrapFailure {
+                    upstream_error: Some(super::diagnostics::incomplete_stream(
+                        http_status,
+                        &headers,
+                        &buffered,
+                        inspected,
+                    )),
                     partial_body: buffered,
                     ..AttemptFailure::stream(error_codes::STREAM_INCOMPLETE).into()
                 }));

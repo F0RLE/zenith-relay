@@ -1,5 +1,6 @@
 //! Bounded active-request observations. No bodies, headers or credentials are retained.
 use super::GatewayRuntime;
+use crate::scheduler::rotation::{RequestWaitDiagnostics, SharedRequestBudget};
 use crate::{AttemptOutcome, UsageEvent};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ pub(super) struct RequestUsageRegistry(BTreeMap<String, TrackedRequest>);
 
 struct TrackedRequest {
     started: Instant,
+    budget: Option<SharedRequestBudget>,
     last: Option<UsageEvent>,
     pending: Option<PendingAttempt>,
 }
@@ -26,7 +28,11 @@ pub(crate) struct RequestUsageScope {
 }
 
 impl GatewayRuntime {
-    pub(crate) fn track_request_usage(self: &Arc<Self>, request_id: &str) -> RequestUsageScope {
+    pub(crate) fn track_request_usage(
+        self: &Arc<Self>,
+        request_id: &str,
+        budget: &SharedRequestBudget,
+    ) -> RequestUsageScope {
         let mut registry = crate::poison::mutex(&self.control.request_usage);
         // Recursive compatibility repairs share the original clock and owner.
         let owned = registry.0.len() < 4096 && !registry.0.contains_key(request_id);
@@ -35,6 +41,7 @@ impl GatewayRuntime {
                 request_id.to_owned(),
                 TrackedRequest {
                     started: Instant::now(),
+                    budget: self.diagnostics_enabled().then(|| budget.clone()),
                     last: None,
                     pending: None,
                 },
@@ -83,7 +90,16 @@ impl GatewayRuntime {
                         | AttemptOutcome::ClientDisconnected
                 )
             );
-        apply_timing(event, request.started.elapsed().as_millis() as u64, false);
+        apply_timing(
+            event,
+            request.started.elapsed().as_millis() as u64,
+            false,
+            request
+                .budget
+                .as_ref()
+                .filter(|_| self.diagnostics_enabled())
+                .and_then(SharedRequestBudget::wait_diagnostics),
+        );
         if terminal {
             registry.0.remove(&event.request_id);
         } else {
@@ -135,6 +151,11 @@ impl GatewayRuntime {
             &mut event,
             request.started.elapsed().as_millis() as u64,
             projection_only,
+            request
+                .budget
+                .as_ref()
+                .filter(|_| self.diagnostics_enabled())
+                .and_then(SharedRequestBudget::wait_diagnostics),
         );
         if !projection_only {
             self.finish_cache_context(&mut event, super::runtime_now_ms());
@@ -145,7 +166,12 @@ impl GatewayRuntime {
     }
 }
 
-fn apply_timing(event: &mut UsageEvent, duration_ms: u64, projection_only: bool) {
+fn apply_timing(
+    event: &mut UsageEvent,
+    duration_ms: u64,
+    projection_only: bool,
+    waiting: Option<RequestWaitDiagnostics>,
+) {
     let Some(routing) = event.routing.as_mut() else {
         return;
     };
@@ -165,6 +191,7 @@ fn apply_timing(event: &mut UsageEvent, duration_ms: u64, projection_only: bool)
         duration_ms,
         ttft_ms,
         projection_only,
+        waiting,
     });
 }
 
@@ -194,10 +221,16 @@ mod tests {
     use std::sync::Mutex;
 
     fn usage_runtime() -> (Arc<GatewayRuntime>, Arc<Mutex<Vec<UsageEvent>>>) {
+        usage_runtime_with_diagnostics(|| false)
+    }
+
+    fn usage_runtime_with_diagnostics(
+        diagnostics_enabled: fn() -> bool,
+    ) -> (Arc<GatewayRuntime>, Arc<Mutex<Vec<UsageEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        let runtime = GatewayRuntime::new(
-            crate::ProviderSource {
+        let runtime = GatewayRuntime::from_pool(
+            vec![crate::RuntimeSource::unrestricted(crate::ProviderSource {
                 id: "synthetic".into(),
                 name: "synthetic".into(),
                 base_url: "https://example.test/v1".into(),
@@ -205,10 +238,16 @@ mod tests {
                 proxy_url: None,
                 wire_api: crate::WireApi::Responses,
                 models: vec!["synthetic-model".into()],
-            },
-            crate::LocalGatewayKey {
-                id: "synthetic-local".into(),
-                secret: "synthetic-secret".into(),
+            })],
+            vec![crate::RuntimeLocalKey::unrestricted(
+                crate::LocalGatewayKey {
+                    id: "synthetic-local".into(),
+                    secret: "synthetic-secret".into(),
+                },
+            )],
+            crate::GatewayRuntimeOptions {
+                diagnostics_enabled,
+                ..Default::default()
             },
             Arc::new(move |event| sink.lock().unwrap().push(event)),
         )
@@ -234,7 +273,8 @@ mod tests {
     #[test]
     fn cancellation_before_dispatch_does_not_invent_a_send() {
         let (runtime, events) = usage_runtime();
-        let scope = runtime.track_request_usage("not-sent");
+        let scope =
+            runtime.track_request_usage("not-sent", &SharedRequestBudget::for_incoming_request(3));
         drop(scope);
         assert!(events.lock().unwrap().is_empty());
         assert!(
@@ -255,7 +295,10 @@ mod tests {
             rejected.error_category = Some(crate::error_codes::UPSTREAM_RATE_LIMITED.into());
             rejected.routing.as_mut().unwrap().attempt_outcome =
                 Some(AttemptOutcome::RetrySelection);
-            let scope = runtime.track_request_usage(&rejected.request_id);
+            let scope = runtime.track_request_usage(
+                &rejected.request_id,
+                &SharedRequestBudget::for_incoming_request(3),
+            );
             runtime.track_dispatch_usage(rejected.clone(), std::time::Instant::now());
             runtime.observe_request_usage(&mut rejected);
             (runtime.usage)(rejected.clone());
@@ -294,7 +337,10 @@ mod tests {
     fn settled_send_has_no_second_cancellation_owner() {
         let (runtime, events) = usage_runtime();
         let mut event = pending_event();
-        let scope = runtime.track_request_usage(&event.request_id);
+        let scope = runtime.track_request_usage(
+            &event.request_id,
+            &SharedRequestBudget::for_incoming_request(3),
+        );
         runtime.track_dispatch_usage(event.clone(), std::time::Instant::now());
         event.routing.as_mut().unwrap().attempt_outcome = Some(AttemptOutcome::ReturnedFailure);
         runtime.observe_request_usage(&mut event);
@@ -321,7 +367,7 @@ mod tests {
         event.latency_ms = 6_000;
         event.ttft_ms = Some(1_000);
         event.generation_ms = Some(5_000);
-        apply_timing(&mut event, 14_000, false);
+        apply_timing(&mut event, 14_000, false, None);
         let timing = event
             .routing
             .as_ref()
@@ -331,7 +377,7 @@ mod tests {
             .unwrap();
         assert_eq!((timing.duration_ms, timing.ttft_ms), (14_000, Some(9_000)));
         assert_eq!((event.latency_ms, event.ttft_ms), (6_000, Some(1_000)));
-        apply_timing(&mut event, 30_000, true);
+        apply_timing(&mut event, 30_000, true, None);
         let timing = event
             .routing
             .as_ref()
@@ -342,5 +388,83 @@ mod tests {
         assert_eq!((timing.duration_ms, timing.ttft_ms), (30_000, Some(9_000)));
         assert_eq!(event.generation_ms, Some(5_000));
         assert!(event.is_request_completion());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_recovery_keeps_live_waits_without_inventing_an_attempt() {
+        use crate::scheduler::rotation::RequestWaitKind;
+        use std::time::Duration;
+
+        let (runtime, events) = usage_runtime_with_diagnostics(|| true);
+        let budget = SharedRequestBudget::for_incoming_request(3);
+        let mut rejected = pending_event();
+        rejected.routing.as_mut().unwrap().attempt_outcome = Some(AttemptOutcome::RetrySelection);
+        let scope = runtime.track_request_usage(&rejected.request_id, &budget);
+        runtime.observe_request_usage(&mut rejected);
+        (runtime.usage)(rejected.clone());
+        assert!(budget.begin_queue_wait(RequestWaitKind::PoolEvent));
+        tokio::time::advance(Duration::from_millis(2_500)).await;
+        // A nested repair scope cannot reset the original clock or own finalization.
+        drop(runtime.track_request_usage(&rejected.request_id, &budget.clone()));
+        assert_eq!(events.lock().unwrap().len(), 1);
+        drop(scope);
+        budget.finish_queue_wait();
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[1].is_request_completion());
+        assert_eq!(events[1].attempt, rejected.attempt);
+        let timing = events[1]
+            .routing
+            .as_ref()
+            .unwrap()
+            .request_timing
+            .as_ref()
+            .unwrap();
+        let waiting = timing.waiting.as_ref().unwrap();
+        assert_eq!(timing.duration_ms, 2_500);
+        assert_eq!(waiting.total_ms, 2_500);
+        assert_eq!(waiting.pool_event.as_ref().unwrap().count, 1);
+        assert_eq!(waiting.pool_event.as_ref().unwrap().duration_ms, 2_500);
+        assert!(waiting.recovery.is_none());
+        assert_eq!(budget.dispatches(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_wait_snapshot_respects_diagnostic_opt_out_and_physical_timing() {
+        use crate::scheduler::rotation::RequestWaitKind;
+        use std::time::Duration;
+
+        for enabled in [false, true] {
+            let (runtime, events) =
+                usage_runtime_with_diagnostics(if enabled { || true } else { || false });
+            let budget = SharedRequestBudget::for_incoming_request(3);
+            let mut event = pending_event();
+            let scope = runtime.track_request_usage(&event.request_id, &budget);
+            assert!(budget.begin_queue_wait(RequestWaitKind::Capacity));
+            tokio::time::advance(Duration::from_millis(80)).await;
+            budget.finish_queue_wait();
+            tokio::time::advance(Duration::from_millis(42)).await;
+            event.success = true;
+            event.latency_ms = 42;
+            event.ttft_ms = Some(10);
+            runtime.observe_request_usage(&mut event);
+            drop(scope);
+            let timing = event
+                .routing
+                .as_ref()
+                .unwrap()
+                .request_timing
+                .as_ref()
+                .unwrap();
+            assert_eq!(timing.duration_ms, 122);
+            assert_eq!(timing.ttft_ms, Some(90));
+            assert_eq!((event.latency_ms, event.ttft_ms), (42, Some(10)));
+            assert_eq!(timing.waiting.is_some(), enabled);
+            if let Some(waiting) = &timing.waiting {
+                assert_eq!(waiting.total_ms, 80);
+                assert_eq!(waiting.capacity.as_ref().unwrap().count, 1);
+            }
+            assert!(events.lock().unwrap().is_empty());
+        }
     }
 }

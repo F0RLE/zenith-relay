@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useRefreshSafeDraft } from "../../hooks/useRefreshSafeDraft";
 import type { TFunction } from "i18next";
 import { CircleAlert, CircleCheck, Database, Eye, EyeOff, Globe, Loader2, Network, Pencil, Plus, RefreshCw, Server, Shuffle, Trash2, Upload, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -208,7 +208,7 @@ export function ProxyStorageView({ revision, diagnostics, onImport }: { revision
 
 function ProxyRenameDialog({ proxyEntry, onSaved, onClose }: { proxyEntry: ProxyPoolEntry; onSaved: (pool: ProxyPoolSummary) => void; onClose: () => void }) {
   const { t } = useTranslation();
-  const [label, setLabel] = useState(proxyEntry.label ?? "");
+  const [label, setLabel] = useRefreshSafeDraft(proxyEntry.label ?? "");
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   const save = async () => {
@@ -249,6 +249,10 @@ function ProxyDiagnostic({ state, saved, compact = false }: { state: ProxyCheckS
     proxyCheckResult?.timezone,
     proxyCheckResult?.region,
     proxyCheckResult?.locationErrorCode ? t(`proxies.locationErrors.${proxyCheckResult.locationErrorCode}`, { defaultValue: t("proxies.geoUnknown") }) : null,
+    proxyCheckResult?.timing ? t("proxies.checkTiming", {
+      queue: proxyCheckResult.timing.queueMs, total: proxyCheckResult.timing.totalMs,
+      headers: proxyCheckResult.timing.responseHeadersMs ?? "—", body: proxyCheckResult.timing.responseCompleteMs ?? "—",
+    }) : null,
   ].filter(Boolean).join("\n");
   if (compact && !success && (!proxyCheckResult || pending)) return null;
   return <div className="proxy-diagnostic" data-relay-tooltip={details} data-state={pending ? "pending" : success ? "success" : proxyCheckResult ? "failed" : "unknown"} role="status">
@@ -383,27 +387,19 @@ export function ProxyImportDialog({ diagnostics, onImported, onClose }: { diagno
   </Dialog>;
 }
 
-export function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+type AccountProxyDraft = [choice: AccountProxyChoice, proxyId: string, proxyUrl: string];
+
+export function AccountProxyDialog({ account: initialAccount, onClose }: { account: AccountSummary; onClose: () => void }) {
   const { t } = useTranslation();
   const { busy, perform, runtime } = useRelayState();
+  const account = runtime?.accounts.find((entry) => entry.id === initialAccount.id) ?? initialAccount;
   const { pool } = useProxyPool();
-  const [choice, setChoice] = useState<AccountProxyChoice>(() => account.proxyMode === "common" ? "common" : account.proxyMode === "account" ? "stored" : "direct");
-  const [proxyId, setProxyId] = useState("");
-  const [proxyUrl, setProxyUrl] = useState("");
-  const [unavailable, setUnavailable] = useState(false);
-  const initialized = useRef(false);
-  const assignedProxy = pool?.entries.find((proxyEntry) => proxyEntry.assignedAccountIds.includes(account.id));
   const availableProxies = pool?.entries ?? [];
-  useEffect(() => {
-    if (!pool || initialized.current) return;
-    initialized.current = true;
-    if (assignedProxy) {
-      setChoice("stored");
-      setProxyId(assignedProxy.id);
-    } else if (account.proxyMode === "account") {
-      setChoice("custom");
-    }
-  }, [account.proxyMode, assignedProxy, pool]);
+  const assignedProxy = availableProxies.find((proxyEntry) => proxyEntry.assignedAccountIds.includes(account.id));
+  const savedChoice: AccountProxyChoice = account.proxyMode === "account" ? assignedProxy ? "stored" : "custom" : account.proxyMode ?? "direct";
+  const [draft, setDraft] = useState<AccountProxyDraft | null>(null);
+  const [choice, proxyId, proxyUrl] = draft ?? [savedChoice, assignedProxy?.id ?? "", ""];
+  const [unavailable, setUnavailable] = useState(false);
   const apply = async () => {
     const captured = await captureOperationResult(
       (work) => perform(`proxy-${account.id}`, work, "feedback.saved", { backgroundRefresh: true }),
@@ -431,13 +427,25 @@ export function AccountProxyDialog({ account, onClose }: { account: AccountSumma
   };
   const directBlocked = Boolean(runtime?.gateway.accountProxyRequired);
   const commonConfigured = Boolean(runtime?.gateway.commonProxyConfigured);
-  const valid = Boolean(pool)
-    && (choice !== "direct" || !directBlocked)
-    && (choice !== "common" || commonConfigured)
-    && (choice !== "stored" || proxyId)
-    && (choice !== "custom" || proxyUrl.trim())
-    && (choice !== "automatic" || pool!.total > 0 || Boolean(assignedProxy));
-  const selectChoice = (selectedChoice: AccountProxyChoice) => { setChoice(selectedChoice); setUnavailable(false); };
+  const blocked = {
+    direct: directBlocked,
+    common: !commonConfigured,
+    stored: !availableProxies.some((entry) => entry.id === proxyId),
+    custom: !proxyUrl.trim(),
+    automatic: !(pool?.total || assignedProxy),
+  };
+  const valid = Boolean(pool) && !blocked[choice];
+  const selectChoice = (selectedChoice: AccountProxyChoice) => {
+    setDraft([selectedChoice, selectedChoice === "stored" ? proxyId || availableProxies[0]?.id || "" : proxyId, proxyUrl]);
+    setUnavailable(false);
+  };
+  const routeOption = (optionChoice: AccountProxyChoice, Icon: typeof WifiOff, label: string, disabled = false, hint?: string) => {
+    const selected = choice === optionChoice;
+    return <button type="button" role="radio" aria-checked={selected} disabled={disabled} className={selected ? "selected" : ""} onClick={() => selectChoice(optionChoice)}>
+      <Icon aria-hidden />
+      <span><strong>{label}</strong>{hint ? <small>{hint}</small> : null}</span>
+    </button>;
+  };
   return (
     <Dialog
       title={t("proxies.accountTitle")}
@@ -451,86 +459,22 @@ export function AccountProxyDialog({ account, onClose }: { account: AccountSumma
         {!pool ? null : <>
           <p className="proxy-account-context">{account.label}</p>
           <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
-            <ProxyRouteOption
-              choice="direct"
-              selected={choice === "direct"}
-              disabled={directBlocked}
-              icon={<WifiOff aria-hidden />}
-              label={t("proxies.direct")}
-              hint={directBlocked ? t("proxies.directBlockedHint") : undefined}
-              onSelect={selectChoice}
-            />
-            <ProxyRouteOption
-              choice="automatic"
-              selected={choice === "automatic"}
-              disabled={!pool.total && !assignedProxy}
-              icon={<Shuffle aria-hidden />}
-              label={t("proxies.assignAutomatically")}
-              hint={t("proxies.storedAvailable", { count: pool.total })}
-              onSelect={selectChoice}
-            />
-            <ProxyRouteOption
-              choice="stored"
-              selected={choice === "stored"}
-              disabled={!availableProxies.length}
-              icon={<Database aria-hidden />}
-              label={t("proxies.chooseStored")}
-              onSelect={(selectedChoice) => {
-                selectChoice(selectedChoice);
-                setProxyId((currentId) => currentId || availableProxies[0]?.id || "");
-              }}
-            />
-            <ProxyRouteOption
-              choice="custom"
-              selected={choice === "custom"}
-              icon={<Plus aria-hidden />}
-              label={t("proxies.addCustom")}
-              onSelect={selectChoice}
-            />
-            {commonConfigured ? <ProxyRouteOption choice="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} onSelect={selectChoice} /> : null}
+            {routeOption("direct", WifiOff, t("proxies.direct"), directBlocked, directBlocked ? t("proxies.directBlockedHint") : undefined)}
+            {routeOption("automatic", Shuffle, t("proxies.assignAutomatically"), blocked.automatic, t("proxies.storedAvailable", { count: pool.total }))}
+            {routeOption("stored", Database, t("proxies.chooseStored"), !availableProxies.length)}
+            {routeOption("custom", Plus, t("proxies.addCustom"))}
+            {commonConfigured ? routeOption("common", Network, t("proxies.useCommon")) : null}
           </div>
           {choice === "stored" && availableProxies.length ? <div className="proxy-route-control">
-            <OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId || availableProxies[0]?.id || ""} onChange={setProxyId} options={availableProxies.map((proxyEntry) => ({ value: proxyEntry.id, label: proxyEntry.endpoint }))} />
+            <OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId} onChange={(proxyId) => setDraft([choice, proxyId, proxyUrl])} options={availableProxies.map((proxyEntry) => ({ value: proxyEntry.id, label: proxyEntry.endpoint }))} />
           </div> : null}
           {choice === "custom" ? <div className="proxy-route-control">
-            <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} />
+            <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={(proxyUrl) => setDraft([choice, proxyId, proxyUrl])} placeholder={t("proxies.proxyPlaceholder")} />
           </div> : null}
         </>}
         {unavailable ? <p role="alert" className="form-note error-text">{t("proxies.noStoredProxy")}</p> : null}
       </div>
     </Dialog>
-  );
-}
-
-function ProxyRouteOption({
-  choice,
-  selected,
-  disabled = false,
-  icon,
-  label,
-  hint,
-  onSelect,
-}: {
-  choice: AccountProxyChoice;
-  selected: boolean;
-  disabled?: boolean;
-  icon: ReactNode;
-  label: string;
-  hint?: string | undefined;
-  onSelect: (selectedChoice: AccountProxyChoice) => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      disabled={disabled}
-      className={selected ? "selected" : ""}
-      onClick={() => onSelect(choice)}
-    >
-      {icon}
-      <span><strong>{label}</strong>{hint ? <small>{hint}</small> : null}</span>
-    </button>
   );
 }
 

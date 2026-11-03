@@ -71,7 +71,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         status,
         response_headers,
         runtime,
-        route,
+        mut route,
         lease,
         adapter_request,
         basis_points_request,
@@ -113,20 +113,30 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
     };
     let expected_model = (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
         .then_some(route.source_model.as_str());
-    let opened = if basis_points_request.is_some() {
-        crate::gateway::streaming::bootstrap_basis_points_stream(upstream, expected_model).await
-    } else if route.account_transport == crate::runtime::AccountTransport::Siwc
+    let prewarm = route.account_transport == crate::runtime::AccountTransport::Siwc
         && adapter_request
             .upstream_body()
             .pointer("/prompt_cache_options/prewarm")
-            == Some(&Value::Bool(true))
-    {
-        // A requested warmup deliberately has no generated output. Do not
-        // misclassify its successful terminal as a broken generation stream.
-        crate::gateway::streaming::bootstrap_prewarm_stream(upstream, expected_model).await
-    } else {
-        bootstrap_stream(upstream, expected_model).await
-    };
+            == Some(&Value::Bool(true));
+    let observation = route
+        .routing
+        .as_mut()
+        .and_then(|routing| routing.transport.as_mut())
+        .map(
+            |transport| crate::gateway::streaming::StreamBootstrapObservation::Transport {
+                started,
+                transport,
+            },
+        );
+    let opened = crate::gateway::streaming::bootstrap_observed_stream(
+        upstream,
+        expected_model,
+        basis_points_request.is_some(),
+        crate::protocol::sse::MAX_EVENT_BYTES,
+        prewarm,
+        observation,
+    )
+    .await;
     match opened {
         Ok((headers, first, remaining)) => respond_opened_stream(
             StreamExecution {
@@ -298,7 +308,7 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             let terminal = failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(&route, failure.status, failure.category)
+                || route_forbids_fallback(&route, failure.status, &failure)
                 || failure.execution.certainty != ExecutionCertainty::NotSent;
             if let Some(routing) = event.routing.as_mut() {
                 routing.attempt_outcome = Some(if terminal {

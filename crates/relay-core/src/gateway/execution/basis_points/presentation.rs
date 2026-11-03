@@ -38,7 +38,7 @@ pub(super) fn uses_discovery(tools: &[ClientTool], request: &Value) -> bool {
 }
 
 fn discovery_for_refs(tools: &[&ClientTool], request: &Value) -> bool {
-    if tools.is_empty() || tools.iter().any(|tool| tool.key() == LOOKUP_TOOL) {
+    if tools.is_empty() || tools.iter().any(|tool| tool.matches_key(LOOKUP_TOOL)) {
         return false;
     }
     match requested_mode(request) {
@@ -79,19 +79,25 @@ pub(super) fn loaded_names(tools: &[&ClientTool], request: &Value) -> BTreeSet<S
     let explicit_selection = request["tool_choice"]["type"]
         .as_str()
         .is_some_and(|kind| matches!(kind, "function" | "custom" | "allowed_tools"));
-    let mut ordered = tools.to_vec();
+    let mut ordered = tools
+        .iter()
+        .copied()
+        .filter(|tool| {
+            let deferred = tool.spec.get("defer_loading").and_then(Value::as_bool);
+            deferred != Some(true)
+                && (deferred == Some(false) || is_core_tool(tool) || explicit_selection)
+        })
+        .collect::<Vec<_>>();
     // The core tools must not lose their eager slots to alphabetically earlier
-    // optional declarations. Keep the same limits and explicit deferral below.
+    // optional declarations. Deferral was filtered before sorting; budgets remain.
     ordered.sort_by_cached_key(|tool| (!is_core_tool(tool), tool.key()));
     for tool in ordered {
-        let deferred = tool.spec.get("defer_loading").and_then(Value::as_bool);
-        if deferred == Some(true)
-            || !(deferred == Some(false) || is_core_tool(tool) || explicit_selection)
-        {
-            continue;
+        if eager_count == EAGER_TOOL_LIMIT {
+            break;
         }
-        let bytes = describe_tools(&[tool], false).len();
-        if eager_count < EAGER_TOOL_LIMIT && eager_bytes + bytes <= PRELOAD_MAX_BYTES {
+        // A single-tool description needs no joined copy just to count bytes.
+        let bytes = tool.description(false).len();
+        if eager_bytes + bytes <= PRELOAD_MAX_BYTES {
             loaded.insert(tool.key());
             eager_bytes += bytes;
             eager_count += 1;
@@ -123,7 +129,7 @@ pub(super) fn describe_catalog(tools: &[&ClientTool], request: &Value) -> String
          {{\"names\":[\"exact.qualified.name\"]}} (up to 8 names), or {{\"query\":\"keywords\",\"limit\":5}}. \
          Collect independent missing contracts into one names lookup instead of one lookup per tool; do not speculate about tools the current step does not need. \
          Query searches original names, descriptions, and schema text; use catalog-language keywords when names are unclear. \
-         A lookup result's reused entries reference names and earlier lookup call_id values whose full contracts remain in this conversation; use those definitions instead of looking them up again. \
+         Lookup reused entries name a contract already present: source=loaded_tool_contracts points to Loaded tool contracts; call_id points to an earlier lookup result. Use that definition without another lookup. \
          This read-only lookup runs inside Relay, never in the client or Excel, and does not satisfy required client tool choice. \
          After lookup, call the real client tool using its original identity. No lookup is needed for a text-only answer. \
          Catalog lookups may share a response with client calls; Relay consumes only the local lookups. Tool index:\n"
@@ -231,7 +237,7 @@ fn selection_reason(
         CatalogMode::Full => Reason::RequestedFull,
         CatalogMode::Compact => Reason::RequestedCompact,
         _ if tools.is_empty() => Reason::NoTools,
-        _ if tools.iter().any(|tool| tool.key() == LOOKUP_TOOL) => Reason::LookupToolPresent,
+        _ if tools.iter().any(|tool| tool.matches_key(LOOKUP_TOOL)) => Reason::LookupToolPresent,
         CatalogMode::Discovery => Reason::RequestedDiscovery,
         CatalogMode::Auto if discovery => Reason::AutomaticDiscovery,
         CatalogMode::Auto => Reason::BelowDiscoveryThreshold,

@@ -26,14 +26,16 @@ impl<S> UsageStream<S> {
                 },
             );
         }
-        if !event.success
+        if !event.success && event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED)
+        {
+            event.http_status = 499;
+        } else if !event.success
             && event.http_status < 400
             && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
         {
             event.http_status = event
                 .error_category
                 .as_deref()
-                .filter(|category| *category != error_codes::CLIENT_CANCELLED)
                 .map(upstream_failure_status)
                 .unwrap_or(StatusCode::BAD_GATEWAY)
                 .as_u16();
@@ -313,6 +315,10 @@ impl<S> UsageStream<S> {
         // rejects the response before it can reach the client.
         if let Some(usage) = terminal.usage {
             self.merge_usage_snapshot(&usage);
+        }
+        if let (Some(payload), Some(event)) = (terminal.event_payload.as_ref(), self.event.as_mut())
+        {
+            event.tool_use.observe_provider_usage(payload);
         }
         if let Some(service_tier) = terminal.applied_service_tier
             && let Some(usage_event) = self.event.as_mut()

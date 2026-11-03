@@ -17,6 +17,7 @@
 @import "./styles/pages/workspace.css";
 @import "./styles/pages/integrations.css";
 @import "./styles/pages/sources.css";
+@import "./styles/localization.css";
 
 /* Pointer focus stays quiet; keyboard focus is visible in both themes. */
 :focus {

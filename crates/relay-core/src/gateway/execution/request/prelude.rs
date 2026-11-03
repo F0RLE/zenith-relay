@@ -28,7 +28,7 @@ pub(super) use super::super::super::response::{
     proxy_error_response, proxy_json_response, proxy_response, proxy_sse_response,
     route_error_origin, upstream_body_error_response, usage_event,
 };
-pub(super) use super::super::super::streaming::{StreamExecution, bootstrap_stream};
+pub(super) use super::super::super::streaming::StreamExecution;
 pub(super) use super::super::super::turn_state::{
     CODEX_TURN_STATE_HEADER, relay_account_response_header, request_scope,
 };

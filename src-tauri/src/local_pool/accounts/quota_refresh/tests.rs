@@ -1,5 +1,7 @@
 use super::*;
 
+mod siwc_permissions;
+
 #[test]
 fn successful_refresh_only_clears_credential_owned_error_codes() {
     assert!(is_credential_refresh_error_code("invalid_grant"));
@@ -43,6 +45,7 @@ fn authorization_debug_and_refresh_cache_never_expose_prepared_secrets() {
         authorization: bearer_authorization("synthetic-unique-access").unwrap(),
         subscription_authorization: None,
         tokens: None,
+        token_revision: None,
         agent_task_id: Some("synthetic-unique-task".into()),
         provider_account_id: "synthetic-unique-provider".into(),
         proxy: None,

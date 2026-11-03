@@ -222,7 +222,7 @@ test("mixed pool groups remain readable on a narrow screen", async ({ page }, te
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await setPoolState(page, mixedStatuses);
   await expect(page.locator(".pool-routing-alert")).toHaveCount(0);
-  await expect(page.locator(".pool-current-route")).toHaveText("Следующий кандидат: Fixture 4");
+  await expect(page.locator(".pool-current-route")).toHaveText("Ожидает первого запроса");
   expect(await page.locator(".pool-member-card").evaluateAll((cards) => cards.every((card) => {
     const rect = card.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && card.scrollWidth <= card.clientWidth;
@@ -230,7 +230,7 @@ test("mixed pool groups remain readable on a narrow screen", async ({ page }, te
   await page.screenshot({ path: testInfo.outputPath("mixed-mobile.png"), animations: "disabled" });
 });
 
-test("pool uses explicit preview and rejects activity from a replaced runtime", async ({ page }) => {
+test("pool separates preview from confirmed activity and rejects replaced runtimes", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", accountCount: 1, quotaAvailable: true, usagePresent: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -253,7 +253,8 @@ test("pool uses explicit preview and rejects activity from a replaced runtime", 
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
   const summary = page.locator(".pool-controls");
-  await expect(summary).toContainText("Next candidate: Example compatible API");
+  await expect(summary).toContainText("Waiting for the first request");
+  await expect(summary).not.toContainText("Next candidate");
   const event = (runtimeId: number, revision: number, candidateId: string, count: number) => emitTauriEvent(page, "zenith-runtime-activity", {
     runtimeId, revision, candidateId, inFlight: count, activeRequestCount: count,
     activeModels: count ? [{ model: "gpt-5.4", requestCount: count }] : [],
@@ -280,7 +281,7 @@ test("pool uses explicit preview and rejects activity from a replaced runtime", 
     })) ?? [];
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
-  await expect(summary).toContainText("Next candidate: Example compatible API");
+  await expect(summary).not.toContainText("Next candidate");
   await expect(summary).toContainText("Active now: Personal Plus");
 });
 

@@ -150,6 +150,21 @@ fn strict_responses_custom_tool_item_id_error_is_detected_without_matching_funct
 }
 
 #[test]
+fn strict_tool_search_id_repair_requires_an_explicit_input_id_rejection() {
+    assert!(responses_tool_search_item_id_requires_tsc_prefix(
+        br#"{"error":{"message":"Invalid 'input[7].id': 'ts_old'. Expected an ID that begins with 'tsc_'."}}"#
+    ));
+    for body in [
+        br#"{"error":{"message":"Expected an ID that begins with 'tsc_'."}}"#.as_slice(),
+        br#"{"error":{"message":"Invalid call_id for tool_search_output"}}"#.as_slice(),
+        br#"{"error":{"message":"Invalid input[7].id: Expected an ID that begins with 'fc'."}}"#
+            .as_slice(),
+    ] {
+        assert!(!responses_tool_search_item_id_requires_tsc_prefix(body));
+    }
+}
+
+#[test]
 fn strict_responses_message_item_id_error_is_detected_without_matching_other_item_errors() {
     assert!(responses_message_item_id_requires_msg_prefix(
             br#"{"error":{"message":"Invalid 'input[151].id': 'item_abc'. Expected an ID that begins with 'msg'."}}"#,

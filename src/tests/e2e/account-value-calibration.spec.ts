@@ -15,9 +15,9 @@ test("shared calibration crosses the snapshot boundary and linked routes count o
   await expect(total).toHaveAttribute("data-relay-tooltip", /1 of 1 independent pool limits/);
   const remaining = cards.first().locator(".account-value-strip > div").nth(1);
   await remaining.focus();
-  await expect(page.getByRole("tooltip")).toContainText("Price coverage 100%");
-  await expect(page.getByRole("tooltip")).toContainText("subscriptions: 3");
-  await expect(page.getByRole("tooltip")).toContainText("Median estimate from weekly quota");
+  await expect(page.getByRole("tooltip")).toContainText("price coverage 100%");
+  await expect(page.getByRole("tooltip")).toContainText("subscriptions 3");
+  await expect(page.getByRole("tooltip")).toContainText("Approximate weekly-quota median, separate from balance");
 });
 
 test("missing calibration is an explicit unknown, not the old per-account extrapolation", async ({ page }) => {
@@ -30,7 +30,7 @@ test("missing calibration is an explicit unknown, not the old per-account extrap
   await expect(strip.locator("dd").nth(2)).toHaveText("78%");
   await expect(page.locator('[data-metric="api-remaining"] strong')).toHaveText("—");
   await strip.locator(":scope > div").nth(1).focus();
-  await expect(page.getByRole("tooltip")).toContainText("unknown, not zero");
+  await expect(page.getByRole("tooltip")).toContainText("unknown; fresh calibration is required");
 });
 
 test("mixed workloads display one observed estimate instead of a range or midpoint", async ({ page }) => {

@@ -15,6 +15,7 @@ use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, BasisPoints
 mod login;
 mod refresh;
 mod secret;
+mod siwc_identity;
 mod tokens;
 
 pub use refresh::CredentialRefresh;
@@ -126,6 +127,32 @@ impl StoredCodexCredentials {
         plan_type: Option<String>,
         account_is_fedramp: bool,
     ) -> Result<Self, CredentialError> {
+        Self::identity_record(
+            local_account_id,
+            issued_at_ms,
+            generation,
+            email,
+            provider_account_id,
+            provider_user_id,
+            organization_id,
+            plan_type,
+            account_is_fedramp,
+        )
+        .map(|credentials| credentials.with_agent_identity(agent_identity))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn identity_record(
+        local_account_id: &str,
+        issued_at_ms: u64,
+        generation: u64,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        provider_user_id: Option<String>,
+        organization_id: Option<String>,
+        plan_type: Option<String>,
+        account_is_fedramp: bool,
+    ) -> Result<Self, CredentialError> {
         validate_local_account_id(local_account_id)?;
         validate_optional(email.as_deref(), MAX_EMAIL_BYTES)?;
         validate_optional(provider_account_id.as_deref(), MAX_ID_BYTES)?;
@@ -155,7 +182,7 @@ impl StoredCodexCredentials {
             account_is_fedramp,
             proxy_url: None,
             bypass_common_proxy: false,
-            agent_identity: Some(agent_identity),
+            agent_identity: None,
             basis_points_headers: None,
         })
     }
@@ -185,6 +212,7 @@ impl StoredCodexCredentials {
                     || self.basis_points_headers.is_some()
                     || self.provider_account_id.as_deref() != Some(r.identity_key().as_str())
                     || self.provider_user_id.as_deref() != Some(r.subject.as_str())
+                    || self.access_token.is_empty() && !self.valid_siwc_identity_only(r)
             })
         {
             return Err(CredentialError::new(
@@ -278,6 +306,7 @@ impl StoredCodexCredentials {
                 )
             });
         }
+        validate_token(&self.access_token)?;
         bearer_authorization(&self.access_token)
     }
 
@@ -343,7 +372,7 @@ impl StoredCodexCredentials {
         } else {
             0
         };
-        access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
+        self.has_oauth() && access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 }
 

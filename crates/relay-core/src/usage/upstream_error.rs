@@ -206,11 +206,12 @@ fn safe_identifier(identifier_text: &str) -> Option<String> {
         .then(|| identifier_text.trim().to_string())
 }
 
-// These are fixed Relay validation paths, not user-selected tool names, keys or values.
+// Fixed API and Relay validation paths, not user-selected tool names, keys or values.
 fn safe_parameter(value: &str) -> Option<String> {
     matches!(
         value,
-        "endpoint"
+        "model"
+            | "endpoint"
             | "service_tier"
             | "previous_response_id"
             | "include"
@@ -365,6 +366,7 @@ mod tests {
     #[test]
     fn adapter_parameter_survives_storage_but_arbitrary_paths_are_redacted() {
         for parameter in [
+            "model",
             "response.json",
             "output.run_officejs.args.json.syntax",
             "output.run_officejs.args.frame.header",

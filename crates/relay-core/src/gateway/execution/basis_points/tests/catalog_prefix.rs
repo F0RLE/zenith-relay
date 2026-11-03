@@ -25,6 +25,28 @@ fn changing_root_overrides_preserves_explicit_catalog_history() {
 }
 
 #[test]
+fn empty_current_catalog_keeps_history_and_appends_a_no_tools_guard() {
+    for mode in ["compact", "discovery", "full", "auto"] {
+        let request = json!({"model":"synthetic","relay_bps_tool_catalog":mode,"tools":[],
+            "input":[{"type":"additional_tools","tools":[tool("historical",1)]},
+                {"role":"user","content":"Synthetic continuation"}]});
+        let prepared = prepare_request(&request).unwrap();
+        assert!(prompt_text(&prepared).contains("historical"));
+        let input = prepared["input"].as_array().unwrap();
+        let guard = input.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(guard.contains("No client tools are permitted this turn"));
+        let mut forced = request;
+        forced["tool_choice"] = json!({"type":"function","name":"historical"});
+        assert_eq!(
+            prepare_request(&forced).unwrap_err().parameter(),
+            Some("tool_choice")
+        );
+    }
+}
+
+#[test]
 fn appended_declarations_keep_their_history_position_and_current_schema_wins() {
     for mode in ["compact", "discovery", "full", "auto"] {
         for declaration in ["additional_tools", "tool_search_output"] {

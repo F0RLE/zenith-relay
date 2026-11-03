@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 
 mod payload;
 mod server_timing;
+mod stream;
 pub use payload::{
     FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
 };
 pub use server_timing::CodexServerTiming;
+pub use stream::StreamResponseDiagnostics;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,7 +42,7 @@ pub struct TransportDiagnostics {
     pub fallback_reason: Option<TransportFallbackReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<TransportResponseFormat>,
-    /// Negotiated upstream response version, never inferred from client ingress.
+    /// Observed upstream response version, independent of client ingress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +53,8 @@ pub struct TransportDiagnostics {
     /// First HTTP response headers since the executor's dispatch clock started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_response: Option<StreamResponseDiagnostics>,
     /// Selected-attempt preparation duration before the dispatch clock starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_preparation_ms: Option<u64>,
@@ -130,6 +134,7 @@ impl ExecutorRoute {
                 handshake_ms: None,
                 connection_reused: None,
                 response_headers_ms: None,
+                stream_response: None,
                 request_preparation_ms: None,
                 request_preparation: None,
                 request_payload: None,
@@ -185,6 +190,7 @@ impl ExecutorRoute {
                 handshake_ms,
                 connection_reused: Some(false),
                 response_headers_ms: None,
+                stream_response: None,
                 request_preparation_ms: None,
                 request_preparation: None,
                 request_payload: None,

@@ -7,7 +7,7 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-/// Read a bounded regular file through one handle without following a leaf link.
+/// Bounded, no-follow read of a regular file through one validated handle.
 /// The caller still owns authorization of the containing directory and pathname.
 pub(crate) fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
     // Keep invalid-node errors stable and refuse special nodes before opening.

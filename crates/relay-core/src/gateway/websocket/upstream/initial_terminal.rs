@@ -113,6 +113,7 @@ fn continue_after_item_prefix_repair(
             &mut ResponsesItemPrefixRepairs {
                 function_ids: &mut repairs.function_item_id,
                 custom_tool_ids: &mut repairs.custom_tool_item_id,
+                tool_search_ids: &mut repairs.tool_search_item_id,
                 message_ids: &mut repairs.message_item_id,
             },
             tried,

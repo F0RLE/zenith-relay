@@ -1,3 +1,4 @@
+use super::super::response::translate_response_value;
 use super::*;
 
 fn response(outer: Value) -> Value {
@@ -86,4 +87,51 @@ fn legacy_identity_aliases_keep_tool_choice_schema_and_custom_payload_authoritat
     .unwrap();
     assert_eq!(translated["output"][0]["type"], "custom_tool_call");
     assert_eq!(translated["output"][0]["input"], raw);
+}
+
+#[test]
+fn replayed_call_ids_cannot_bypass_history_after_normalization() {
+    let original = format!("call_{}", "synthetic".repeat(16));
+    let fitted = super::super::history::fit_item_id(&original);
+    assert_ne!(original, fitted);
+    for (historical, generated) in [(&original, &fitted), (&fitted, &original)] {
+        for kind in [
+            "function_call",
+            "custom_tool_call",
+            "function_call_output",
+            "custom_tool_call_output",
+        ] {
+            let history = json!({"type":kind,"call_id":historical});
+            for input in [history.clone(), json!([history])] {
+                let mut request = request_with_tool();
+                request["input"] = input;
+                let mut reply = response(
+                    json!({"references":["exec_command"],"code":"{\"cmd\":\"synthetic\"}"}),
+                );
+                reply["output"][0]["call_id"] = json!(generated);
+                let error = translate_response_value(reply.clone(), &request).unwrap_err();
+                assert_eq!(error.parameter(), Some("output.run_officejs.call_id"));
+                reply["output"][0]["call_id"] = json!("call_synthetic_fresh");
+                assert!(translate_response_value(reply, &request).is_ok());
+            }
+        }
+    }
+}
+
+#[test]
+fn replayed_call_ids_cannot_collide_after_parallel_normalization() {
+    let original = format!("call_{}", "synthetic".repeat(16));
+    let fitted = super::super::history::fit_item_id(&original);
+    for ids in [[&original, &fitted], [&fitted, &original]] {
+        let mut reply =
+            response(json!({"references":["exec_command"],"code":"{\"cmd\":\"synthetic\"}"}));
+        let mut other = reply["output"][0].clone();
+        reply["output"][0]["call_id"] = json!(ids[0]);
+        other["call_id"] = json!(ids[1]);
+        reply["output"].as_array_mut().unwrap().push(other);
+        let error = translate_response_value(reply.clone(), &request_with_tool()).unwrap_err();
+        assert_eq!(error.parameter(), Some("output.run_officejs.call_id"));
+        reply["output"][1]["call_id"] = json!("call_synthetic_fresh");
+        assert!(translate_response_value(reply, &request_with_tool()).is_ok());
+    }
 }

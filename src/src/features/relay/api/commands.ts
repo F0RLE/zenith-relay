@@ -1,5 +1,6 @@
 import { Channel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { NativeMessages } from "../../../i18n/presentation";
 import type {
   TrashedAccountSummary,
   AccountExportInput,
@@ -34,6 +35,7 @@ import type {
   ProfileActivation,
   ProxyPoolImportResult,
   ProxyCheckResult,
+  SourceConnectionDiagnostics,
   ProxySpeedTestResult,
   ProxyPoolSummary,
   RelayStorageInfo,
@@ -88,6 +90,7 @@ const readLocalUsagePage = createUsagePageReader((query) => {
 });
 
 export const relayCommands = {
+  setUiLanguage: (language: string, messages: NativeMessages) => invoke<void>("set_ui_language", { language, messages }),
   localNetworkAccess: () => invoke<LocalNetworkAccess>("get_local_network_access"),
   setLocalNetworkAccess: (enabled: boolean, expectedEnabled: boolean) => invoke<LocalNetworkAccess>("update_local_network_access", { enabled, expectedEnabled }),
   launchApplication: (application: LaunchApplication) => invoke<void>("launch_application", { application }),
@@ -115,6 +118,7 @@ export const relayCommands = {
   setSourceEnabled: (sourceId: string, enabled: boolean) => invoke("set_local_source_enabled", { sourceId, enabled }),
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
+  checkSourceConnection: (sourceId: string) => invoke<SourceConnectionDiagnostics>("check_local_source_connection", { sourceId }),
   refreshSourceData: (sourceId: string) => invoke("refresh_local_source_data", { sourceId }),
   localSourceStats: (sourceId: string, force = false) => invoke<SourceStats>("get_local_source_stats", { sourceId, force }),
 
@@ -130,6 +134,7 @@ export const relayCommands = {
   updateAccount: (accountUpdate: Record<string, unknown>) => invoke("update_local_account", { input: accountUpdate }),
   setAccountEnabled: (accountId: string, enabled: boolean) => invoke("set_local_account_enabled", { accountId, enabled }),
   selectAccountRoute: (accountId: string, connectionId: string, attach = false) => invoke<void>("select_local_account_route", { accountId, connectionId, attach }),
+  accountRouteCandidates: (accountId: string, clientKind: OAuthClientKind) => invoke<string[]>("local_account_route_candidates", { accountId, clientKind }),
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
   accountTrash: () => invoke<TrashedAccountSummary[]>("list_local_account_trash"),

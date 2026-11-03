@@ -3,7 +3,11 @@
 use super::{AdapterError, AdapterResult};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[cfg(test)]
 #[path = "replay/performance_tests.rs"]
@@ -338,6 +342,67 @@ pub(crate) fn repair_custom_tool_item_ids(request_body: &mut Value) -> bool {
         input_item.insert("id".to_string(), Value::String(normalized));
         true
     })
+}
+
+/// Repair legacy client-executed search item IDs only after a strict rejection.
+/// Item references follow the mapping; tool-result call IDs and opaque provider
+/// state never do. Reserve every existing ID before generating replacements.
+pub(crate) fn repair_tool_search_item_ids(request_body: &mut Value) -> bool {
+    let Some(items) = request_body.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut occupied = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut mapping = BTreeMap::<String, String>::new();
+    for item in items.iter_mut() {
+        if item["type"] != "tool_search_call" {
+            continue;
+        }
+        let Some(original) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && !id.starts_with("tsc_"))
+        else {
+            continue;
+        };
+        let replacement = if let Some(existing) = mapping.get(original) {
+            existing.clone()
+        } else {
+            let short = original.strip_prefix("ts_").unwrap_or(original);
+            let base = if short.len() <= 96
+                && short
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                format!("tsc_{short}")
+            } else {
+                format!("tsc_{}", hex::encode(Sha256::digest(original.as_bytes())))
+            };
+            let mut candidate = base.clone();
+            let mut suffix = 0_u64;
+            while !occupied.insert(candidate.clone()) {
+                suffix += 1;
+                candidate = format!("{base}_{suffix}");
+            }
+            mapping.insert(original.to_owned(), candidate.clone());
+            candidate
+        };
+        item["id"] = replacement.into();
+    }
+    for item in items {
+        if item["type"] == "item_reference"
+            && let Some(replacement) = item
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| mapping.get(id))
+        {
+            item["id"] = replacement.clone().into();
+        }
+    }
+    !mapping.is_empty()
 }
 
 /// Drops only foreign `item_` identifiers from message inputs after a strict

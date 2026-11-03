@@ -110,9 +110,16 @@ fn cache_affinity_diagnostics_follow_the_projected_owner_and_keep_legacy_rows_re
     );
     let mut encoded = serde_json::to_value(&selected.diagnostics).unwrap();
     assert!(!encoded.to_string().contains("cache:private"));
+    let latency = selected.diagnostics.route_latency.as_ref().unwrap();
+    assert_eq!(latency.as_of_ms, 100);
+    assert_eq!(latency.sample_count, 0);
+    assert_eq!(latency.unknown_count, 0);
+    assert_eq!(encoded["routeLatency"]["state"], "unknown");
     encoded.as_object_mut().unwrap().remove("cacheAffinity");
+    encoded.as_object_mut().unwrap().remove("routeLatency");
     let legacy: crate::RoutingDiagnostics = serde_json::from_value(encoded).unwrap();
     assert!(legacy.cache_affinity.is_none());
+    assert!(legacy.route_latency.is_none());
 }
 
 #[test]

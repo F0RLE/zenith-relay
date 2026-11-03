@@ -35,8 +35,8 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
         let document =
             parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
         let auth_path = profile_dir.join(AUTH_FILE);
-        let auth_bytes = read_optional_bytes(&auth_path)?;
-        binding.active = account_managed_config_matches(&document)
+        let auth_bytes = snapshot_credentials::read_profile_auth(profile_dir)?;
+        binding.active = snapshot::account_connection_matches(&document)
             && account_auth_matches_snapshot(&auth_bytes, &auth_path, &backup.managed_access_hash)?;
     }
     if let Some(backup) = local_backup(codex_home, backup_root)? {
@@ -46,7 +46,7 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
         let document =
             parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
         let auth_path = profile_dir.join(AUTH_FILE);
-        let auth_bytes = read_optional_bytes(&auth_path)?;
+        let auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
         let active = managed_config_matches(&document, &backup)
             && managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?;
         bindings.push(ProfileBinding {
@@ -158,7 +158,7 @@ pub fn sync_local_gateway_binding(
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
     let config_bytes = read_optional_bytes(&config_path)?;
-    let auth_bytes = read_optional_bytes(&auth_path)?;
+    let auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let document = parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
     let auth_matches_previous = managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?;
     let auth_matches_next =
@@ -225,7 +225,7 @@ pub(crate) fn refresh_managed_model_catalog(
     let config_path = profile_dir.join(CONFIG_FILE);
     let auth_path = profile_dir.join(AUTH_FILE);
     let config_bytes = read_optional_bytes(&config_path)?;
-    let auth_bytes = read_optional_bytes(&auth_path)?;
+    let auth_bytes = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let document = parse_config(snapshot_text(&config_bytes, &config_path)?.unwrap_or_default())?;
     if !managed_config_matches(&document, &backup)
         || !managed_auth_matches_snapshot(&auth_bytes, &auth_path, &backup)?

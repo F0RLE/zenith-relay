@@ -142,7 +142,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
       {signIn.dialogs}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
-      {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
+      {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog key={proxyAccount.id} account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
       {dialog === "proxyImport" ? <ProxyImportDialog diagnostics={proxyChecks} onImported={() => setProxyRevision((revision) => revision + 1)} onClose={() => setDialog(null)} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}

@@ -164,13 +164,25 @@ impl UsageEvent {
         // Responses echoes the applied cache policy outside `usage`, including
         // response.created/completed SSE envelopes. Do not infer it from the
         // request preference, transport, or model name.
-        for response in std::iter::successors(Some(payload), |item| item.get("response")).take(3) {
-            if let Some(ttl) = response
-                .pointer("/prompt_cache_options/ttl")
-                .and_then(serde_json::Value::as_str)
-                .and_then(super::normalize_reported_cache_ttls)
+        let observed_cache_writes = self.tool_use.provider_usage.as_ref().is_some_and(|usage| {
+            usage
+                .cache_write_tokens_by_ttl
+                .values()
+                .any(|count| *count > 0)
+        });
+        // Per-prefix writes can override the echoed default. Later frames may
+        // repeat that default without repeating usage; retain the measured TTLs.
+        if !observed_cache_writes {
+            for response in
+                std::iter::successors(Some(payload), |item| item.get("response")).take(3)
             {
-                self.cache_write_ttl = Some(ttl);
+                if let Some(ttl) = response
+                    .pointer("/prompt_cache_options/ttl")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(super::normalize_reported_cache_ttls)
+                {
+                    self.cache_write_ttl = Some(ttl);
+                }
             }
         }
         if let Some(cache) = self

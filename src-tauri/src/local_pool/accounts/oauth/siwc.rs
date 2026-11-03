@@ -7,6 +7,16 @@ pub(super) use zenith_relay_core::providers::chatgpt::valid_siwc_client_id as va
 pub const RESOURCE: &str = "https://api.openai.com/v1";
 pub const ISSUER: &str = "https://auth.openai.com";
 
+mod jwks;
+mod rotation;
+pub use rotation::PendingSiwcRefresh;
+mod timing;
+mod tokens;
+
+pub(super) fn valid_login_hint(email: &str) -> bool {
+    !email.is_empty() && email.len() <= 320 && !email.chars().any(char::is_control)
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct SiwcPending {
@@ -16,6 +26,8 @@ pub(super) struct SiwcPending {
     pub nonce: String,
     #[serde(default)]
     pub consent: bool,
+    #[serde(default)]
+    pub login_hint: Option<String>,
 }
 
 impl super::client::CodexOAuthClient {
@@ -101,7 +113,21 @@ impl super::client::CodexOAuthClient {
             subject: registration.map(|r| r.subject.clone()),
             nonce: String::new(),
             consent: registration.is_some_and(|r| !r.plan_use_enabled()),
+            login_hint: None,
         });
+        Ok(self)
+    }
+
+    pub fn with_siwc_login_hint(mut self, email: Option<&str>) -> Result<Self, OAuthError> {
+        let pending = self
+            .siwc
+            .as_mut()
+            .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
+        if pending.subject.is_some() {
+            pending.login_hint = email
+                .filter(|email| valid_login_hint(email))
+                .map(str::to_owned);
+        }
         Ok(self)
     }
 
@@ -112,49 +138,21 @@ impl super::client::CodexOAuthClient {
         nonce: Option<&str>,
         now_ms: u64,
     ) -> Result<super::OAuthTokenSet, OAuthError> {
+        let tokens = tokens::parse(body, &mut registration, nonce.is_none(), now_ms)?;
+        self.verify_siwc_tokens(tokens, registration, nonce, now_ms)
+            .await
+    }
+
+    async fn verify_siwc_tokens(
+        &self,
+        mut tokens: super::OAuthTokenSet,
+        mut registration: SiwcRegistration,
+        nonce: Option<&str>,
+        now_ms: u64,
+    ) -> Result<super::OAuthTokenSet, OAuthError> {
         let invalid = || OAuthError::new(OAuthErrorCode::InvalidResponse, false);
-        #[derive(Deserialize)]
-        struct Response {
-            token_type: String,
-            scope: Option<String>,
-            expires_in: u64,
-            earliest_refresh_at: Option<u64>,
-        }
-        let response: Response = serde_json::from_slice(body).map_err(|_| invalid())?;
-        if !response.token_type.eq_ignore_ascii_case("Bearer") || response.expires_in == 0 {
-            return Err(invalid());
-        }
-        let mut tokens = super::parse::parse_token_response(body, now_ms)?;
-        if tokens.refresh_token().is_none() {
-            return Err(invalid());
-        }
-        if let Some(scope) = response.scope {
-            registration.scopes = scope.split_whitespace().map(str::to_string).collect();
-        } else if nonce.is_some() {
-            return Err(invalid());
-        }
-        registration.earliest_refresh_at_ms = response
-            .earliest_refresh_at
-            .map(|seconds| seconds.saturating_mul(1_000));
         if let Some(id_token) = tokens.id_token() {
-            let (response, permit) =
-                zenith_relay_core::scheduler::refresh::http::management_http_gate()
-                    .send(
-                        &self.http,
-                        self.http.get(format!("{ISSUER}/.well-known/jwks.json")),
-                        zenith_relay_core::scheduler::refresh::http::HttpClass::Auth,
-                    )
-                    .await
-                    .map_err(|_| OAuthError::new(OAuthErrorCode::Transport, true))?;
-            if !response.status().is_success() {
-                return Err(invalid());
-            }
-            let bytes = super::super::collect_limited(response, super::MAX_TOKEN_RESPONSE_BYTES)
-                .await
-                .map_err(|_| invalid())?;
-            drop(permit);
-            let jwks: jsonwebtoken::jwk::JwkSet =
-                serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let jwks = jwks::for_token(&self.http, id_token).await?;
             let claims = verify_id_token(id_token, &jwks, &registration.client_id, nonce, now_ms)?;
             if !registration.subject.is_empty() && registration.subject != claims.sub {
                 return Err(invalid());
@@ -183,7 +181,7 @@ impl super::client::CodexOAuthClient {
         registration: &SiwcRegistration,
         refresh_token: &str,
         now_ms: u64,
-    ) -> Result<super::OAuthTokenSet, zenith_relay_core::accounts::TokenRefreshFailure> {
+    ) -> Result<PendingSiwcRefresh, zenith_relay_core::accounts::TokenRefreshFailure> {
         use zenith_relay_core::accounts::{
             TokenRefreshFailure as Failure, TokenRefreshFailureKind as Kind,
         };
@@ -243,9 +241,36 @@ impl super::client::CodexOAuthClient {
             };
             return Err(Failure::new(kind, &code));
         }
-        self.validate_siwc_tokens(&bytes, registration.clone(), None, now_ms)
+        let mut registration = registration.clone();
+        let tokens =
+            tokens::parse(&bytes, &mut registration, true, now_ms).map_err(|_| invalid())?;
+        PendingSiwcRefresh::new(tokens, registration, now_ms).map_err(|_| invalid())
+    }
+
+    pub async fn verify_pending_siwc_refresh(
+        &self,
+        pending: PendingSiwcRefresh,
+        now_ms: u64,
+    ) -> Result<super::OAuthTokenSet, zenith_relay_core::accounts::TokenRefreshFailure> {
+        use zenith_relay_core::accounts::{
+            TokenRefreshFailure as Failure, TokenRefreshFailureKind as Kind,
+        };
+        let invalid = || {
+            Failure::new(
+                Kind::RotationRecoveryRequired,
+                "siwc_rotation_identity_invalid",
+            )
+        };
+        let (tokens, registration) = pending.into_tokens().map_err(|_| invalid())?;
+        self.verify_siwc_tokens(tokens, registration, None, now_ms)
             .await
-            .map_err(|_| invalid())
+            .map_err(|error| {
+                if error.code == OAuthErrorCode::Transport {
+                    Failure::new(Kind::Transient, "siwc_identity_verification_unavailable")
+                } else {
+                    invalid()
+                }
+            })
     }
 }
 
@@ -311,3 +336,6 @@ fn verify_id_token(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod login_tests;

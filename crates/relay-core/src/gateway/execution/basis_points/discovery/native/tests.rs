@@ -20,6 +20,19 @@ fn prepare(request: &Value, budget: usize) -> (Value, Option<DiscoverySession>) 
     .unwrap()
 }
 
+fn native_wire_tool_count(body: &Value) -> usize {
+    // SIWC moves native definitions into additional_tools. Inspect its wire
+    // declarations, not the BPS client's explicit-root authorization policy.
+    declared_tools(body.get("tools")).unwrap().len()
+        + body["input"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["type"] == "additional_tools")
+            .map(|item| declared_tools(item.get("tools")).unwrap().len())
+            .sum::<usize>()
+}
+
 fn lookup_response(round: usize, arguments: Value) -> Value {
     json!({"id":format!("resp_{round}"),"status":"completed","output":[{
         "type":"function_call","id":format!("fc_{round}"),"call_id":format!("call_{round}"),
@@ -50,11 +63,55 @@ fn native_catalog_never_changes_forced_or_restricted_tool_choice() {
 }
 
 #[test]
+fn native_catalog_declines_historical_helper_name_collisions() {
+    for item in [
+        json!({"type":"additional_tools","role":"developer","tools":[{
+            "type":"function","name":NATIVE_LOOKUP,"parameters":{"type":"object"}
+        }]}),
+        json!({"type":"additional_tools","role":"developer","tools":[{
+            "type":"custom","name":NATIVE_LOOKUP,"format":{"type":"text"}
+        }]}),
+        json!({"type":"function_call","name":NATIVE_LOOKUP,"call_id":"synthetic-old-call","arguments":"{}"}),
+        json!({"type":"custom_tool_call","name":NATIVE_LOOKUP,"call_id":"synthetic-old-call","input":"Synthetic client operation"}),
+    ] {
+        let mut request = request();
+        request["input"].as_array_mut().unwrap().insert(0, item);
+        assert!(!eligible(&request));
+        let mut native = request.clone();
+        crate::providers::chatgpt::prepare_siwc_request(&mut native).unwrap();
+        let (body, session) = prepare(&request, 8);
+        assert!(session.is_none());
+        assert_eq!(body, native);
+    }
+}
+
+#[test]
+fn native_catalog_does_not_confuse_namespaced_calls_or_text_with_the_helper() {
+    let mut request = request();
+    request["input"].as_array_mut().unwrap().extend([
+        json!({"role":"user","content":"Mention relay_catalog in an explanation"}),
+        json!({"type":"additional_tools","role":"developer","tools":[{
+            "type":"namespace","name":"synthetic_client","tools":[{
+                "type":"function","name":NATIVE_LOOKUP,"parameters":{"type":"object"}
+            }]
+        }]}),
+        json!({"type":"function_call","name":NATIVE_LOOKUP,"namespace":"synthetic_client", "call_id":"synthetic-namespaced","arguments":"{}"}),
+    ]);
+    assert!(eligible(&request));
+    request["tools"].as_array_mut().unwrap().push(json!({
+        "type":"namespace","name":"synthetic_client","tools":[{
+            "type":"function","name":NATIVE_LOOKUP,"parameters":{"type":"object"}
+        }]
+    }));
+    assert!(eligible(&request));
+}
+
+#[test]
 fn native_catalog_falls_back_without_budget_and_keeps_warmup_out_of_discovery() {
     let request = request();
     let (body, session) = prepare(&request, 1);
     assert!(session.is_none());
-    assert_eq!(client_tools(&body).unwrap().len(), 30);
+    assert_eq!(native_wire_tool_count(&body), 30);
     assert!(!body.to_string().contains(NATIVE_LOOKUP));
     let mut warmup = request;
     warmup["generate"] = json!(false);
@@ -62,7 +119,7 @@ fn native_catalog_falls_back_without_budget_and_keeps_warmup_out_of_discovery() 
     assert!(session.is_none());
     assert_eq!(body["prompt_cache_options"]["prewarm"], true);
     assert!(body.get("generate").is_none());
-    assert_eq!(client_tools(&body).unwrap().len(), 1);
+    assert_eq!(native_wire_tool_count(&body), 1);
 }
 
 #[test]

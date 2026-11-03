@@ -1,6 +1,6 @@
 use crate::usage::{
     CacheContextSection, CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind,
-    LeadingContextAlignment,
+    CachePolicyDiagnostics, LeadingContextAlignment,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -15,6 +15,7 @@ pub(super) type Fingerprint = [u8; 32];
 // Deliberately neither Debug nor Serialize: fingerprints never leave RAM.
 pub(crate) struct RequestFingerprint {
     pub(super) sections: Vec<(CacheContextSection, Fingerprint)>,
+    pub(super) policy: CachePolicyDiagnostics,
     input: Vec<InputFingerprint>,
     input_bytes: u64,
     continuation: bool,
@@ -98,6 +99,7 @@ impl RequestFingerprint {
         }
         Some(Self {
             sections,
+            policy: super::policy::observe(request),
             input,
             input_bytes,
             continuation: request

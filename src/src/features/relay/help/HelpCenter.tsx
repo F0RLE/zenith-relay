@@ -1,27 +1,25 @@
 import { RotateCcw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { localeDefinition } from "../../../i18n/registry";
 import ReactMarkdown from "react-markdown";
 import { remarkGfmReadOnly } from "../components/remarkGfmReadOnly";
-import enGuide from "../../../../../docs/help/en/README.md?url";
-import ruGuide from "../../../../../docs/help/ru/README.md?url";
 import { Button, Dialog, PageHeader } from "../components/Ui";
 import { useRelayState } from "../state/RelayStateProvider";
 import { HelpContents } from "./HelpContents";
 import { HelpErrorReference } from "./HelpErrorReference";
 import { helpMarkdownComponents } from "./HelpMarkdown";
 
-const guides = {
-  en: enGuide,
-  ru: ruGuide,
-} satisfies Record<"en" | "ru", string>;
 type HelpTopic = "sign-in" | "pool-rotation";
+function helpLanguage(language: string): string {
+  return localeDefinition(language).helpLocale;
+}
 const guidePreviews = new Map<string, string>();
 
 export function HelpCenter() {
   const { t, i18n } = useTranslation();
   const { resetOnboarding } = useRelayState();
-  const language = i18n.resolvedLanguage?.startsWith("ru") ? "ru" : "en";
+  const language = helpLanguage(i18n.language);
 
   return <section className="relay-page help-page">
     <PageHeader title={t("common.help")} actions={<Button icon={<RotateCcw aria-hidden />} onClick={resetOnboarding}>{t("helpCenter.quickSetup")}</Button>} />
@@ -31,7 +29,7 @@ export function HelpCenter() {
 
 export function HelpTopicDialog({ topic, onClose }: { topic: HelpTopic; onClose: () => void }) {
   const { t, i18n } = useTranslation();
-  const language = i18n.resolvedLanguage?.startsWith("ru") ? "ru" : "en";
+  const language = helpLanguage(i18n.language);
   return <Dialog
     title={t(topic === "sign-in" ? "accounts.signInHelp" : "pool.routingSettingsHelp")}
     onClose={onClose}
@@ -43,7 +41,7 @@ export function HelpTopicDialog({ topic, onClose }: { topic: HelpTopic; onClose:
   </Dialog>;
 }
 
-function HelpGuide({ language, topic }: { language: keyof typeof guides; topic?: HelpTopic }) {
+function HelpGuide({ language, topic }: { language: string; topic?: HelpTopic }) {
   const { t } = useTranslation();
   const cacheKey = `${language}:${topic ?? "guide"}`;
   const [markdown, setMarkdown] = useState<string | null>(() => guidePreviews.get(cacheKey) ?? null);
@@ -52,7 +50,7 @@ function HelpGuide({ language, topic }: { language: keyof typeof guides; topic?:
   useEffect(() => {
     const abort = new AbortController();
     setFailed(false);
-    void fetch(guides[language], { signal: abort.signal }).then(async (response) => {
+    void import(`../../../../../docs/help/${language}/README.md?url`).then(module => fetch(module.default, { signal: abort.signal })).then(async (response) => {
       if (!response.ok) throw new Error("Help asset unavailable");
       const text = await response.text();
       if (!text.includes("<!-- relay:error-reference -->")) throw new Error("Invalid Help asset");

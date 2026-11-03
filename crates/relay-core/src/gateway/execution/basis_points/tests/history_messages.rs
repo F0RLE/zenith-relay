@@ -57,13 +57,10 @@ fn translating_large_tool_results_reuses_the_owned_output_buffer() {
     let original = output["output"].as_str().unwrap();
     let pointer = original.as_ptr();
     let length = original.len();
-    let translated = translate_input_items(
-        vec![
-            json!({"type":"function_call","name":"run_officejs", "call_id":"call_buffer_reuse","arguments":"{}"}),
-            output,
-        ],
-        &[],
-    )
+    let translated = translate_input_items(vec![
+        json!({"type":"function_call","name":"run_officejs", "call_id":"call_buffer_reuse","arguments":"{}"}),
+        output,
+    ])
     .unwrap();
     let result = &translated[1];
     assert_eq!(result["type"], "function_call_output");
@@ -209,9 +206,14 @@ fn attribution_is_preserved_as_context_without_changing_authority_or_arguments()
 fn tool_images_keep_result_order_call_association_and_logical_turn() {
     for kind in ["function", "custom_tool"] {
         let mut request = request_with_tool();
+        let call = if kind == "custom_tool" {
+            json!({"type":"custom_tool_call","name":"exec_command","call_id":"call_1","input":"inspect"})
+        } else {
+            json!({"type":"function_call","name":"exec_command","call_id":"call_1","arguments":"{\"cmd\":\"inspect\"}"})
+        };
         request["input"] = json!([
             {"role":"user","content":"Inspect"},
-            {"type":"function_call","name":"exec_command","call_id":"call_1","arguments":"{\"cmd\":\"inspect\"}"},
+            call,
             {"type":format!("{kind}_call_output"),"call_id":"call_1","output":[
                 {"type":"input_text","text":"Before"},
                 {"type":"input_image","file_id":"file-synthetic-a"},

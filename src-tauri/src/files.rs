@@ -14,13 +14,16 @@ pub(crate) use tests::fail_next_atomic_write;
 
 /// Replace a caller-authorized file using exclusive, owner-private staging.
 pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    atomic_write_bytes(path, content.as_bytes())
+}
+
+pub(crate) fn atomic_write_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
-        .ok_or_else(|| format!("Некорректный путь: {}", path.display()))?;
+        .ok_or_else(|| format!("Invalid path: {}", path.display()))?;
     fs::create_dir_all(parent)
-        .map_err(|err| format!("Не удалось создать {}: {err}", parent.display()))?;
-    // Each writer owns its staging file; never truncate a predictable sibling
-    // (or the destination itself when its extension already is .tmp).
+        .map_err(|err| format!("Could not create {}: {err}", parent.display()))?;
+    // Reserve a private staging file for each writer, including .tmp destinations.
     let temporary_path = parent.join(format!(".relay-write-{}.tmp", uuid::Uuid::new_v4()));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -32,21 +35,21 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     // An open failure must not remove a file that this writer did not create.
     let mut file = options
         .open(&temporary_path)
-        .map_err(|err| format!("Не удалось записать {}: {err}", temporary_path.display()))?;
+        .map_err(|err| format!("Could not write {}: {err}", temporary_path.display()))?;
     let written = (|| {
         #[cfg(test)]
         tests::check_injected_write_failure(path)?;
-        file.write_all(content.as_bytes())?;
+        file.write_all(content)?;
         file.sync_all()
     })();
     drop(file);
     written.map_err(|err| {
         let _ = fs::remove_file(&temporary_path);
-        format!("Не удалось записать {}: {err}", temporary_path.display())
+        format!("Could not write {}: {err}", temporary_path.display())
     })?;
     fs::rename(&temporary_path, path).map_err(|err| {
         let _ = fs::remove_file(&temporary_path);
-        format!("Не удалось заменить {}: {err}", path.display())
+        format!("Could not replace {}: {err}", path.display())
     })
 }
 

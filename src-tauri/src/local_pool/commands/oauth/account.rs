@@ -9,7 +9,8 @@ use crate::local_pool::{
 };
 
 use zenith_relay_core::{
-    accounts::apply_model_discovery_failure, providers::chatgpt::ModelDiscoveryFailure,
+    accounts::apply_model_discovery_failure,
+    providers::chatgpt::{ModelDiscoveryFailure, OAuthClientKind},
     quota::SubscriptionStatus,
 };
 
@@ -43,6 +44,7 @@ pub(super) fn find_existing_account<'a>(
 pub(super) fn preserve_existing_settings(
     account_to_update: &mut LocalAccountRecord,
     existing_account: &LocalAccountRecord,
+    client_kind: OAuthClientKind,
 ) {
     account_to_update.account.id = existing_account.account.id.clone();
     account_to_update.account.label = existing_account.account.label.clone();
@@ -58,11 +60,12 @@ pub(super) fn preserve_existing_settings(
     account_to_update.purchase_cost_micro_usd = existing_account.purchase_cost_micro_usd;
     account_to_update.recovery = existing_account.recovery.clone();
     let fresh_models = std::mem::take(&mut account_to_update.models);
-    // Some([]) is not a live catalog and must not hide models already shown.
+    // An empty SIWC result is authoritative for the newly selected grant.
+    // Native clients retain their last-good-catalog behavior.
     let fresh_discovered_models = account_to_update
         .discovered_models
         .take()
-        .filter(|models| !models.is_empty());
+        .filter(|models| client_kind == OAuthClientKind::Siwc || !models.is_empty());
     account_to_update.models = existing_account.models.clone();
     account_to_update.discovered_models = fresh_discovered_models.or_else(|| {
         if fresh_models.is_empty() {

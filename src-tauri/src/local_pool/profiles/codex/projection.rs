@@ -12,7 +12,10 @@ pub(super) fn update_auth_with_rollback(
     let update = (|| {
         let updated = merge_auth(snapshot_text(auth_snapshot, auth_path)?, Some(credential))?
             .ok_or_else(|| LocalPoolError::invalid_state("updated credential is missing"))?;
-        replace_if_unchanged(auth_path, auth_snapshot, &updated)
+        let home = auth_path.parent().ok_or_else(|| {
+            LocalPoolError::invalid_state("Profile authorization path has no parent")
+        })?;
+        snapshot_credentials::update_auth(home, auth_snapshot, Some(&updated))
     })();
     update
         .map(|()| true)
@@ -143,4 +146,4 @@ mod auth;
 mod restore;
 
 pub(super) use auth::merge_auth;
-pub(super) use restore::{restore, restore_from_backup};
+pub(super) use restore::restore_from_backup;

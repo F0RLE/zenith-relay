@@ -147,6 +147,33 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
     Ok(Some(keyring_secret))
 }
 
+/// Diagnostic reads must not initialize keys, migrate entries, or recover files.
+pub(crate) fn load_read_only(vault_root: &Path, secret_ref: &str) -> Result<Option<String>> {
+    validate_secret_ref(secret_ref)?;
+    let read_named = |user: &str| {
+        crate::key_storage::load_named_secret_read_only(user)
+            .map_err(|error| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error))
+    };
+    if Vault::has_persisted_data(vault_root) {
+        let encoded = read_named(VAULT_KEY_USER)?.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "existing vault master key is missing",
+            )
+        })?;
+        if let Some(secret) =
+            Vault::read_secret(vault_root, decode_vault_key(&encoded)?, secret_ref)
+                .map_err(vault_error)?
+        {
+            return Ok(Some(secret));
+        }
+    }
+    if let Some(secret) = read_named(&keyring_user(secret_ref)?)? {
+        return Ok(Some(secret));
+    }
+    read_named(&legacy_keyring_user(secret_ref)?)
+}
+
 /// Presence check for snapshots. A vault hit does not clone the secret.
 /// Keyring leftovers stay visible, while [`load`] remains the migration path.
 pub fn contains(secret_ref: &str) -> Result<bool> {

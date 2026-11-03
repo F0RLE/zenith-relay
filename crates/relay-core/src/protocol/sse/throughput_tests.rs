@@ -2,6 +2,60 @@ use super::{consume_frames, fragmentation_tests::scalar_line_end, line_end, take
 use std::{hint::black_box, time::Instant};
 
 #[test]
+#[ignore = "manual buffered SSE frame scan comparison, excluding I/O and validation"]
+fn measure_buffered_response_frame_scan() {
+    fn scan(input: &[u8], chunk_size: usize, resume: bool) -> (Vec<u8>, usize) {
+        let mut bytes = Vec::new();
+        let mut inspected = 0;
+        for chunk in input.chunks(chunk_size) {
+            let mut from = if resume {
+                bytes.len().saturating_sub(inspected).saturating_sub(1)
+            } else {
+                0
+            };
+            bytes.extend_from_slice(chunk);
+            while let Some(end) = super::event_end_from(&bytes[inspected..], from) {
+                inspected += end;
+                from = 0;
+            }
+        }
+        (bytes, inspected)
+    }
+
+    for payload_bytes in [64 * 1024, 1024 * 1024] {
+        let input = format!(
+            "data: first\n\ndata: {}\r\n\r\ndata: done\n\n",
+            "x".repeat(payload_bytes)
+        )
+        .into_bytes();
+        for chunk_bytes in [1024, 16 * 1024] {
+            let mut samples = [Vec::new(), Vec::new()];
+            for trial in 0..7 {
+                for variant in [trial % 2, 1 - trial % 2] {
+                    let started = Instant::now();
+                    let (bytes, inspected) = scan(black_box(&input), chunk_bytes, variant == 1);
+                    samples[variant].push(started.elapsed().as_nanos());
+                    assert_eq!(bytes, input);
+                    assert_eq!(inspected, input.len());
+                }
+            }
+            for (variant, mut samples) in samples.into_iter().enumerate() {
+                samples.sort_unstable();
+                let variant = if variant == 0 {
+                    "full_prefix"
+                } else {
+                    "resumed"
+                };
+                eprintln!(
+                    "buffered SSE scan variant={variant} payload={payload_bytes} chunk={chunk_bytes} trials=7 median_ns={} min_ns={} max_ns={}",
+                    samples[3], samples[0], samples[6]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "manual synthetic scalar versus vectorized SSE line scan measurement"]
 fn measure_line_ending_search() {
     for payload_bytes in [0, 16, 240, 64 * 1024, 1024 * 1024] {

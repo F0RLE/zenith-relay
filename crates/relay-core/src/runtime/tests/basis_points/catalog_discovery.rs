@@ -3,6 +3,7 @@ use super::*;
 mod batch;
 mod identity;
 mod images;
+mod lifecycle;
 mod lookup_recovery;
 mod streaming;
 mod text_only;
@@ -175,11 +176,12 @@ async fn catalog_discovery_uses_one_budget_and_preserves_client_tool_roundtrip()
                     );
                 }
             }
-            if stream {
-                assert!(events[1].ttft_ms.is_some());
-            } else {
-                // Buffered discovery does not fabricate token timestamps.
-                assert_eq!(events[1].ttft_ms, None);
+            for event in events.iter() {
+                let first = event.ttft_ms.unwrap_or_else(|| {
+                    panic!("missing upstream timing: stream={stream}, batched={batched}, debug={debug}, attempt={}", event.attempt)
+                });
+                assert!(first <= event.latency_ms);
+                assert_eq!(event.generation_ms, Some(event.latency_ms - first));
             }
             let catalog = events[1].tool_use.basis_points_catalog.as_ref();
             assert_eq!(catalog.is_some(), debug);
@@ -563,8 +565,8 @@ async fn catalog_continuation_rejects_replaced_incarnation_before_dispatch() {
         .unwrap();
     let budget = SharedRequestBudget::for_incoming_request(3);
     let result = runtime
-        .send_catalog_continuation(
-            &route,
+        .send_account_request_with_owner(
+            &route.candidate_id,
             reqwest::Client::new()
                 .post(server.responses_url.clone())
                 .json(&json!({"model":"gpt-test"})),

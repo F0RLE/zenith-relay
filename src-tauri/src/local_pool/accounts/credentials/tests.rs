@@ -5,6 +5,8 @@ use std::{collections::HashMap, sync::Mutex};
 use zenith_relay_core::accounts::TokenSet;
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 
+mod siwc_revocation;
+
 const ACCESS: &str = "stored-access-secret";
 const REFRESH: &str = "stored-refresh-secret";
 const ID_TOKEN: &str = "stored-id-secret";

@@ -56,6 +56,7 @@ pub mod request_timezone;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
+mod strict_json;
 #[cfg(test)]
 mod test_support;
 mod time;
@@ -146,17 +147,18 @@ pub use scheduler::{
     Selection, SelectionReason, SelectionRequest, account_candidate_health, resolve_pool_routing,
 };
 pub use sources::{
-    CacheWriteTtl, CapabilityOrigin, CapabilityStatus, LocalGatewayKey,
-    MAX_SOURCE_RECOVERY_DELAY_SECONDS, ModelEndpointCapability, ModelTokenLimits, ProtocolFeature,
-    ProviderSource, SourceBalanceKind, SourceCatalogEvidence, SourceCatalogRecord, SourceConnector,
+    CacheWriteTtl, CapabilityOrigin, CapabilityStatus, ConnectionProbeObservation,
+    ConnectionProbeStatus, LocalGatewayKey, MAX_SOURCE_RECOVERY_DELAY_SECONDS,
+    ModelEndpointCapability, ModelTokenLimits, ProtocolFeature, ProviderSource, SourceBalanceKind,
+    SourceCatalogEvidence, SourceCatalogRecord, SourceConnectionDiagnostics, SourceConnector,
     SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProtocolConfig, SourceProtocolResolution, SourceProviderStats,
     SourceRead, SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,
     SourceTransportIdentity, SourceTransportRecord, WireApi, apply_source_priorities,
-    cache_write_model_ids, discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
-    discover_source_with_protocol_config_with_scope, endpoint_url_protocol,
-    fetch_source_provider_stats, is_http_endpoint, is_loopback_url,
+    cache_write_model_ids, check_source_connection, discover_source_models,
+    discover_source_models_and_protocol_bindings, discover_source_models_for_protocol_bindings,
+    discover_source_with_protocol_config, discover_source_with_protocol_config_with_scope,
+    endpoint_url_protocol, fetch_source_provider_stats, is_http_endpoint, is_loopback_url,
     normalize_source_protocol_bindings, probe_source_generation,
     probe_source_generation_with_scope, read_source_models, read_source_models_with_scope,
     read_source_provider_stats, read_source_provider_stats_with_proxy,
@@ -173,11 +175,12 @@ pub use transport::collect_limited;
 pub use usage::{
     ApiEquivalentSummary, ApiEquivalentUsage, ApiModelPriceOverride, ApiModelPriceSources,
     CandidatePriceQuery, CatalogPriceResolver, ErrorOrigin, ObservedServiceTier, ObservedUsageSums,
-    SourceModelPriceOverrides, TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics,
-    UsageCallback, UsageEvent, UsageTransport, UsageValue, estimate_api_equivalent_with_catalog,
-    estimate_api_equivalent_with_token_price, estimate_candidate_api_equivalent_with_catalog,
-    normalize_model_price_overrides, normalize_observed_service_tier, normalize_reasoning_effort,
-    resolve_candidate_price, sql_like_contains_pattern,
+    ProviderUsageDetails, SourceModelPriceOverrides, TerminalOutputKind, ToolChoiceMode,
+    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageTransport, UsageValue,
+    estimate_api_equivalent_with_catalog, estimate_api_equivalent_with_token_price,
+    estimate_candidate_api_equivalent_with_catalog, normalize_model_price_overrides,
+    normalize_observed_service_tier, normalize_reasoning_effort, resolve_candidate_price,
+    sql_like_contains_pattern,
 };
 
 /// Drops optional text that is empty or only whitespace.

@@ -48,7 +48,8 @@ for (const required of [false, true]) {
 
     await clear.click();
     const confirmation = page.getByRole("dialog", { name: "Confirm action" });
-    await expect(confirmation).toContainText("direct access is blocked");
+    await expect(confirmation).toContainText("Inherited routes go direct if allowed; otherwise they become unavailable.");
+    await expect(confirmation).toContainText("Stored proxies and explicit assignments stay.");
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(confirmation).toHaveCount(0);
     expect((await proxyState(page)).runtime.gateway.commonProxyConfigured).toBe(true);
@@ -150,7 +151,8 @@ test("the common proxy control and confirmation fit the compact Russian layout",
   await page.screenshot({ path: testInfo.outputPath("common-proxy-ru-compact.png") });
   await clear.click();
   const confirmation = page.getByRole("dialog");
-  await expect(confirmation).toContainText("если он разрешён");
+  await expect(confirmation).toContainText("станут прямыми, если это разрешено, иначе — недоступными");
+  await expect(confirmation).toContainText("Список прокси и явные привязки сохранятся.");
   await expect(confirmation.getByRole("button", { name: "Сбросить общий прокси", exact: true })).toBeInViewport();
   await confirmation.getByRole("button", { name: "Отмена", exact: true }).click();
   expect((await proxyState(page)).runtime.gateway.commonProxyConfigured).toBe(true);

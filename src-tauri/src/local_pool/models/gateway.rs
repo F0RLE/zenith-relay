@@ -58,7 +58,7 @@ pub struct GatewaySettings {
     pub chatgpt_retry_until_available: bool,
     #[serde(default = "default_block_degraded_routes_enabled")]
     pub block_degraded_routes_enabled: bool,
-    /// Explicit local opt-in; never adds saved accounts to the pool.
+    /// Explicit local opt-in; pool membership is configured separately.
     #[serde(default)]
     pub codex_text_models_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -65,6 +65,8 @@ pub enum BasisPointsCatalogSelectionReason {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolUseDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<super::ProviderUsageDetails>,
     pub client_tool_count: u16,
     /// Post-policy catalog before transport encoding, not native upstream tools.
     pub forwarded_tool_count: u16,
@@ -111,6 +113,12 @@ pub struct ToolUseDiagnostics {
 }
 
 impl ToolUseDiagnostics {
+    pub(crate) fn observe_provider_usage(&mut self, payload: &Value) {
+        let mut observed = self.provider_usage.take().unwrap_or_default();
+        observed.observe_payload(payload);
+        self.provider_usage = (!observed.is_empty()).then_some(observed);
+    }
+
     pub(crate) fn capture_upstream_context(&mut self, request: &Value) {
         // Paired context measurements are opted into when the request is admitted.
         if self.client_context.is_some() {
@@ -142,6 +150,7 @@ impl ToolUseDiagnostics {
     }
 
     pub fn observe_stream_payload(&mut self, event_payload: &Value) {
+        self.observe_provider_usage(event_payload);
         if let Some(response_payload) = event_payload.get("response") {
             self.set_terminal_response(response_payload);
             return;
@@ -160,6 +169,7 @@ impl ToolUseDiagnostics {
     }
 
     pub fn set_terminal_response(&mut self, response_payload: &Value) {
+        self.observe_provider_usage(response_payload);
         let response_observation = output_observation(response_payload);
         let terminal_output_is_empty = response_observation.inspected
             && response_observation.tool_call_count == 0
@@ -190,7 +200,10 @@ impl ToolUseDiagnostics {
 
     /// Old records without tools or context evidence stay sparse.
     pub fn has_evidence(&self) -> bool {
-        self.client_tool_count > 0
+        self.provider_usage
+            .as_ref()
+            .is_some_and(|usage| !usage.is_empty())
+            || self.client_tool_count > 0
             || self.client_context.is_some()
             || self.upstream_context.is_some()
             || self.forwarded_tool_count > 0

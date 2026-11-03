@@ -94,6 +94,12 @@ struct FastDeltaBody<'a> {
     status: Option<IgnoredAny>,
     #[serde(default)]
     model: Option<IgnoredAny>,
+    #[serde(default, rename = "modelVersion")]
+    model_version: Option<IgnoredAny>,
+    #[serde(default)]
+    prompt_cache_options: Option<IgnoredAny>,
+    #[serde(default)]
+    prompt_cache_diagnostics: Option<IgnoredAny>,
 }
 
 impl FastDeltaBody<'_> {
@@ -112,6 +118,9 @@ impl FastDeltaBody<'_> {
             || self.response_item.is_some()
             || self.status.is_some()
             || self.model.is_some()
+            || self.model_version.is_some()
+            || self.prompt_cache_options.is_some()
+            || self.prompt_cache_diagnostics.is_some()
     }
 }
 
@@ -224,6 +233,25 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn metadata_bearing_deltas_keep_the_full_observer() {
+        for (field, value) in [
+            ("modelVersion", serde_json::json!("synthetic-model")),
+            ("prompt_cache_options", serde_json::json!({"ttl":"12h"})),
+            (
+                "prompt_cache_diagnostics",
+                serde_json::json!({"status":"unavailable"}),
+            ),
+        ] {
+            let mut payload = serde_json::json!({"type":"response.output_text.delta","delta":"x"});
+            payload[field] = value;
+            assert!(
+                fast_response_delta_json(&serde_json::to_vec(&payload).unwrap()).is_none(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

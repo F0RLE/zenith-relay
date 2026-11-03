@@ -448,7 +448,7 @@ async fn late_401_cannot_expire_a_reinstalled_login_with_identical_tokens() {
         !authority
             .invalidate_access_revision_and_persist(
                 "account",
-                &rejected.dispatch_revision,
+                rejected.dispatch_revision(),
                 10,
                 &persistence,
             )

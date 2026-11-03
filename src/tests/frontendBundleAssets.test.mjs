@@ -4,6 +4,26 @@ import { fileURLToPath } from "node:url";
 import { startupAssets } from "../../scripts/check/frontend-bundle-assets.mjs";
 import { staticModuleGraph, startupChunks } from "../build/startupChunks.ts";
 import { minifyStartup } from "../build/minifyStartup.mjs";
+import viteConfig from "../vite.config.ts";
+
+test("Markdown descriptions share their reader without absorbing Help or application pages", () => {
+  const group = viteConfig.build.rolldownOptions.output.codeSplitting.groups.find(group => group.name === "markdown");
+  for (const path of [
+    "node_modules/react-markdown/lib/index.js",
+    "src/features/relay/components/MarkdownDescription.tsx",
+    "src/features/relay/components/remarkGfmReadOnly.ts",
+  ]) {
+    expect(group.test.test(`/app/${path}`)).toBe(true);
+    expect(group.test.test(`C:/app/${path}`.replaceAll("/", "\\"))).toBe(true);
+  }
+  for (const path of [
+    "src/features/relay/help/HelpCenter.tsx",
+    "src/features/relay/pages/connections/ImportDialog.tsx",
+    "src/main.tsx",
+    "src/i18n/locales/en.ts",
+    "node_modules/react-dom/client.js",
+  ]) expect(group.test.test(`/app/${path}`)).toBe(false);
+});
 
 test("shared value helpers join the workspace without pulling lazy pages or the native loader", () => {
   const root = "/app";

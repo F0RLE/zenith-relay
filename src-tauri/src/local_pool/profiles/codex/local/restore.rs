@@ -37,7 +37,7 @@ fn restore_local_profile_locked(
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
     let mut original_config_bytes = read_stable_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_stable_optional_bytes(&auth_path)?;
+    let original_auth_bytes = snapshot_credentials::read_profile_auth(codex_home)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
     validate_config_shape(&document)?;
@@ -121,12 +121,11 @@ fn restore_local_profile_locked(
     )?;
 
     if auth_matches_managed {
-        let auth_result = match restored.auth.as_deref() {
-            Some(previous_auth) => {
-                replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
-            }
-            None => remove_if_unchanged(&auth_path, &original_auth_bytes),
-        };
+        let auth_result = snapshot_credentials::update_auth(
+            codex_home,
+            &original_auth_bytes,
+            restored.auth.as_deref(),
+        );
         if let Err(error) = auth_result {
             let restored_config_bytes = restored
                 .config

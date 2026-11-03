@@ -374,7 +374,17 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             .unwrap_or_else(|| upstream_failure_status(category));
         canonical_upstream_status(status, category)
     });
-    let cooldown_hint = rate_limit_body_hint_value(&event_json, SystemTime::now());
+    let mut cooldown_hint = rate_limit_body_hint_value(&event_json, SystemTime::now());
+    if cooldown_hint.siwc_usage_limit
+        && std::str::from_utf8(&sse_payload)
+            .ok()
+            .and_then(|body| crate::strict_json::validate(body).ok())
+            .is_none()
+    {
+        // Value already collapsed duplicate keys. Keep the failure diagnostics,
+        // but only an unambiguous original envelope may authorize SIWC replay.
+        cooldown_hint.siwc_usage_limit = false;
+    }
     let preserved_error = preserved_stream_error(&event_json);
     let has_output_delta = has_output_delta(&event_json, event_type);
     let semantic_output = has_semantic_output(&event_json, event_type);

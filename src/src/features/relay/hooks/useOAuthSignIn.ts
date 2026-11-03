@@ -3,7 +3,6 @@ import { relayCommands } from "../api/commands";
 import { forgetAccountLoginDraft, mergeAccountLoginDraft, takeAccountLoginDraft } from "../accountLoginDraft";
 import type { OAuthClientKind, OAuthCompletion, OAuthFlow, OAuthFlowEvent } from "../api/types";
 import { useRelayState } from "../state/RelayStateProvider";
-import { captureOperationResult } from "../state/relayOperationModel";
 import { applyOAuthFlowEvent } from "../oauthFlowEvent";
 
 export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>) {
@@ -35,12 +34,14 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
   const finish = useCallback(async (loginId: string) => {
     if (!mountedRef.current || completingRef.current || flowRef.current?.loginId !== loginId) return false;
     const lifecycle = lifecycleRef.current;
+    let saved = false;
     completingRef.current = true;
     try {
-      const captured = await captureOperationResult(
-        (work) => perform("oauth-complete", work, "feedback.accountAdded", { backgroundRefresh: true }),
+      await perform(
+        "oauth-complete",
         async () => {
           const completed = await relayCommands.completeOAuth(loginId);
+          saved = true;
           const draft = takeAccountLoginDraft(loginId);
           const accountId = completed.account.id;
           if (draft && accountId && (draft.email || draft.phone || draft.password || draft.totpSecret)) {
@@ -59,30 +60,24 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
               // The account is already stored. Notes remain editable on the card.
             }
           }
-          return completed;
+          // Link a route before the snapshot can filter or unmount its original card.
+          await onCompleteRef.current?.(completed);
         },
+        "feedback.accountAdded", { backgroundRefresh: true },
       );
-      // The command may finish while a newer UI operation replaces its
-      // feedback. Its returned account still proves that sign-in completed.
-      if (captured.value && mountedRef.current && lifecycleRef.current === lifecycle) {
-        flowRef.current = null;
-        setFlow(null);
-        await onCompleteRef.current?.(captured.value);
-      }
-      return Boolean(captured.value);
+      return saved;
     } catch {
-      // A callback or late renderer failure must not leave the sign-in lock
-      // held or become an unhandled promise from the native event listener.
-      return false;
+      // A post-save failure cannot undo the completed login or consume it again.
+      return saved;
     } finally {
       completingRef.current = false;
       const activeFlow = flowRef.current;
       if (mountedRef.current && lifecycleRef.current === lifecycle && activeFlow?.loginId === loginId) {
-        // Success clears the flow. Every failure path must release the saving
-        // surface too, including an unexpected error from the operation wrapper.
-        const failedFlow = { ...activeFlow, status: "failed" as const };
-        flowRef.current = failedFlow;
-        setFlow(failedFlow);
+        // A saved login closes even when linking fails; its error remains visible.
+        // Only a failed save leaves the sign-in flow open for recovery.
+        const nextFlow = saved ? null : { ...activeFlow, status: "failed" as const };
+        flowRef.current = nextFlow;
+        setFlow(nextFlow);
       }
     }
   }, [perform]);
@@ -118,33 +113,33 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
       // The old flow remains blocked until the replacement is ready.
       setFlow({ ...previous, clientKind: requestedClientKind });
     }
-    let captured: { ok: boolean; value: OAuthFlow | undefined } = { ok: false, value: undefined };
+    let started: OAuthFlow | undefined;
     try {
-      captured = await captureOperationResult(
-        (work) => perform("oauth-start", work, undefined, { backgroundRefresh: true }),
+      await perform(
+        "oauth-start",
         async () => {
           await ensureListener();
-          if (!isCurrent()) return undefined;
+          if (!isCurrent()) return;
           if (previous) {
             await relayCommands.cancelOAuth(previous.loginId);
             previousCancelled = true;
             flowRef.current = null;
             forgetAccountLoginDraft(previous.loginId);
           }
-          if (!isCurrent()) return undefined;
-          const started = await relayCommands.startOAuth(openBrowser, accountId, proxyId, clientKind, automaticLogin, notesAccountId);
-          return automaticLogin ? { ...started, automaticLogin: started.automaticLogin ?? true } : started;
+          if (!isCurrent()) return;
+          const issued = await relayCommands.startOAuth(openBrowser, accountId, proxyId, clientKind, automaticLogin, notesAccountId);
+          started = automaticLogin ? { ...issued, automaticLogin: issued.automaticLogin ?? true } : issued;
         },
+        undefined, { backgroundRefresh: true },
       );
     } catch {
-      captured = { ok: false, value: undefined };
+      // Retain an issued attempt even if renderer feedback fails afterwards.
     } finally {
       startingRef.current = false;
       if (mountedRef.current) setStarting(false);
     }
     const earlyEvents = earlyEventsRef.current;
     earlyEventsRef.current = new Map();
-    const started = captured.value;
     if (!started) {
       if (previous && previousCancelled && isCurrent()) {
         // The previous flow has already been cancelled, so do not present it

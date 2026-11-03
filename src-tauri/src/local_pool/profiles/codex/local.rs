@@ -54,7 +54,7 @@ pub(super) fn prepare_existing_local_binding_locked(
 /// replacement credential must instead stop before touching that login.
 pub(super) fn ensure_no_newer_login(profile_dir: &Path, backup: &ProfileBackup) -> Result<()> {
     let auth_path = profile_dir.join(AUTH_FILE);
-    let auth_bytes = read_optional_bytes(&auth_path)?;
+    let auth_bytes = snapshot_credentials::read_profile_auth(profile_dir)?;
     if !managed_auth_matches_snapshot(&auth_bytes, &auth_path, backup)?
         && !previous_auth_matches_snapshot(&auth_bytes, backup)
     {

@@ -1,7 +1,7 @@
 //! Compact prompt presentation; argument validation always uses the original schema.
 use super::catalog::ClientTool;
 use crate::protocol::AdapterError;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 mod validation;
 pub(super) use validation::{cache_memory_diagnostics, release_expired_cache_entries, validator};
@@ -74,9 +74,11 @@ pub(super) fn validation_error(
 
 pub(super) fn prompt_schema(schema: &Value) -> String {
     let original = schema.to_string();
-    compact_schema(schema, 0)
-        .filter(|compact| compact.len() < original.len())
-        .unwrap_or(original)
+    compact_prompt_schema(schema, original.len()).unwrap_or(original)
+}
+
+pub(super) fn compact_prompt_schema(schema: &Value, original_bytes: usize) -> Option<String> {
+    compact_schema(schema, 0).filter(|compact| compact.len() < original_bytes)
 }
 
 fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
@@ -134,28 +136,10 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
                 Some(value) => Some(value.as_array()?),
                 None => None,
             };
-            let mut names = properties
-                .map(|properties| properties.keys().collect::<Vec<_>>())
-                .unwrap_or_default();
-            names.sort();
-            if required.is_some_and(|required| {
-                required.iter().any(|name| {
-                    name.as_str()
-                        .is_none_or(|name| !properties.is_some_and(|p| p.contains_key(name)))
-                })
-            }) {
-                return None;
-            }
-            let mut fields = names
+            let mut fields = required_properties(properties, required.map(Vec::as_slice))?
                 .into_iter()
-                .map(|name| {
-                    let optional = if required
-                        .is_some_and(|required| required.iter().any(|v| v.as_str() == Some(name)))
-                    {
-                        ""
-                    } else {
-                        "?"
-                    };
+                .map(|(name, is_required)| {
+                    let optional = if is_required { "" } else { "?" };
                     format!(
                         "{}{optional}:{}",
                         Value::String(name.clone()),
@@ -201,12 +185,37 @@ fn compact_schema(schema: &Value, depth: usize) -> Option<String> {
     Some(rendered)
 }
 
+fn required_properties<'a>(
+    properties: Option<&'a Map<String, Value>>,
+    required: Option<&[Value]>,
+) -> Option<Vec<(&'a String, bool)>> {
+    let mut names = properties
+        .map(|properties| {
+            properties
+                .keys()
+                .map(|name| (name, false))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort_unstable();
+    // Mark once instead of scanning every required name for each property.
+    for name in required.into_iter().flatten() {
+        let name = name.as_str()?;
+        let position = names
+            .binary_search_by(|(property, _)| property.as_str().cmp(name))
+            .ok()?;
+        names[position].1 = true;
+    }
+    Some(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     mod benchmark;
+    mod required;
 
     #[test]
     fn schema_diagnostics_separate_compilation_and_arguments_without_private_data() {

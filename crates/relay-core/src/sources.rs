@@ -1,7 +1,12 @@
 mod capabilities;
 mod connector;
 mod discovery;
+mod network;
 mod observations;
+pub use network::{
+    ConnectionProbeObservation, ConnectionProbeStatus, SourceConnectionDiagnostics,
+    check_source_connection,
+};
 mod probe;
 mod services;
 pub use observations::SourceRead;

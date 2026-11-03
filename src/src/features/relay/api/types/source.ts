@@ -3,6 +3,20 @@ import type { ApiEquivalentSummary, ApiModelPriceOverride, ResolvedModelPrice } 
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions";
 
+export type ConnectionProbeObservation = {
+  status: "responded" | "timeout" | "unavailable";
+  elapsedMs: number;
+  httpStatus: number | null;
+  httpVersion: string | null;
+  websocketUpgraded: boolean | null;
+};
+
+export type SourceConnectionDiagnostics = {
+  wireApi: SourceWireApi;
+  http: ConnectionProbeObservation;
+  websocket: ConnectionProbeObservation | null;
+};
+
 export type SourceAdapter = "native" | "responses_to_messages" | "responses_to_gemini"
   | "responses_to_chat_completions" | "chat_completions_to_responses" | "chat_completions_to_messages"
   | "chat_completions_to_gemini" | "messages_to_responses" | "messages_to_chat_completions"

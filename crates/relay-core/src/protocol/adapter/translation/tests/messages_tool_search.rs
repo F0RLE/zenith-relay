@@ -30,6 +30,15 @@ fn prepare_discovery(
     request: &Value,
     stream: bool,
 ) -> crate::PreparedAdapterRequest {
+    try_prepare_discovery(upstream, request, stream)
+        .unwrap_or_else(|error| panic!("Messages -> {upstream:?}: {error}"))
+}
+
+pub(super) fn try_prepare_discovery(
+    upstream: WireApi,
+    request: &Value,
+    stream: bool,
+) -> Result<crate::PreparedAdapterRequest, crate::AdapterError> {
     // Isolate portable discovery from opaque-reasoning ownership: the fixture
     // has no provider reasoning state and does not claim one exists.
     SourceAdapter::between(WireApi::Messages, upstream)
@@ -51,7 +60,6 @@ fn prepare_discovery(
                 ..Default::default()
             },
         )
-        .unwrap_or_else(|error| panic!("Messages -> {upstream:?}: {error}"))
 }
 
 #[test]
@@ -212,6 +220,43 @@ fn messages_tool_search_does_not_repair_an_orphan_result() {
                 response_id_seed: "tool-search-test",
             });
         assert!(error.is_err(), "{upstream:?}");
+    }
+}
+
+#[test]
+fn inline_tools_json_and_sse_complete_call_result_and_followup_cycle() {
+    for upstream in [WireApi::Responses, WireApi::ChatCompletions] {
+        for stream in [false, true] {
+            let mut request = super::messages_inline_tools::fixture();
+            let arguments = json!({"value":"synthetic"});
+            let reply = tool_reply(upstream, "new_call", "new", &arguments);
+            let translated = client_reply(
+                upstream,
+                &request,
+                stream,
+                &reply,
+                reply_stream(upstream, &reply),
+            );
+            assert_eq!(translated["content"][0]["id"], "new_call");
+            assert_eq!(translated["content"][0]["name"], "new");
+            assert_eq!(translated["content"][0]["input"], arguments);
+            request["messages"].as_array_mut().unwrap().extend([
+                json!({"role":"assistant","content":translated["content"]}),
+                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"new_call","content":"synthetic result"}]}),
+            ]);
+            let decoded = decode::request(WireApi::Messages, &request).unwrap();
+            assert_eq!(
+                decoded
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["later", "new"]
+            );
+            let reply = client_reply(upstream, &request, stream, &output(upstream), sse(upstream));
+            assert_eq!(reply["stop_reason"], "end_turn");
+            assert_eq!(reply["content"][0]["text"], "Hi");
+        }
     }
 }
 

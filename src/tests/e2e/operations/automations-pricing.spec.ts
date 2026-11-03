@@ -120,7 +120,8 @@ for (const mode of ["local"] as const) {
     await expect(dialog.getByRole("button", { name: "Тип автоматизации: Сбросить недельную квоту", exact: true })).toBeVisible();
     await dialog.getByRole("button", { name: "Сохранить", exact: true }).click();
     const saved = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { name?: string } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
-    expect(saved?.args.input?.name).toBe("Сбросить недельную квоту");
+    expect(saved?.args.input?.name).toBe("Reset weekly quota");
+    await expect(page.locator(".automation-card header strong")).toHaveText("Сбросить недельную квоту");
   });
 }
 

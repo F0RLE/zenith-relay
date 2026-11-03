@@ -58,7 +58,7 @@ fn read_managed_account_token_update(
     }
     let profile_dir = canonical_profile_dir(profile_dir)?;
     let auth_path = profile_dir.join(AUTH_FILE);
-    let snapshot = read_optional_bytes(&auth_path)?;
+    let snapshot = snapshot_credentials::read_profile_auth(&profile_dir)?;
     let Some(content) = snapshot_text(&snapshot, &auth_path)? else {
         return Ok(None);
     };

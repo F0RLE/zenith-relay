@@ -111,6 +111,13 @@ pub fn new_account_record(
             .agent_identity()
             .map(|agent| agent.private_key())
             .or_else(|| credentials.refresh_token())
+            .or_else(|| {
+                if credentials.has_oauth() {
+                    None
+                } else {
+                    credentials.id_token()
+                }
+            })
             .unwrap_or_else(|| credentials.access_token())
             .as_bytes(),
     );
@@ -128,7 +135,10 @@ pub fn new_account_record(
         .identity
         .clone()
         .unwrap_or_else(|| "ChatGPT account".to_string());
-    let auth_state = if credentials.is_agent_identity() || credentials.refresh_token().is_some() {
+    let auth_state = if credentials.is_agent_identity()
+        || credentials.refresh_token().is_some()
+        || credentials.is_siwc_identity_only()
+    {
         AccountAuthState::Active
     } else {
         AccountAuthState::DegradedAccessOnly

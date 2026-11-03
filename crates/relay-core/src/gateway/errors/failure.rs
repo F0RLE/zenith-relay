@@ -16,7 +16,7 @@ pub(crate) use response::{
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     responses_tool_call_is_missing_output, responses_tool_call_is_missing_output_message,
     responses_tool_call_links_rejected, responses_tool_call_links_rejected_value,
-    zenith_gateway_invalid_request_value,
+    responses_tool_search_item_id_requires_tsc_prefix, zenith_gateway_invalid_request_value,
 };
 
 #[cfg(test)]

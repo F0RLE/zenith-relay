@@ -34,6 +34,9 @@ impl UpstreamUsage {
 
     pub(super) fn reset_generation(&mut self) {
         self.finished = false;
+        if let Some((_, timing)) = &mut self.timing {
+            *timing = super::super::response::BufferedResponseTiming::default();
+        }
         self.pending.clear();
         self.usage_snapshot = None;
         self.event.input_tokens = None;
@@ -52,13 +55,16 @@ impl UpstreamUsage {
             }
         }
         self.event.tool_use.upstream_tool_call_count = None;
+        self.event.tool_use.provider_usage = None;
     }
 
     pub(super) fn finish_json_generation(&mut self, bytes: &[u8]) {
         if let Ok(payload) = serde_json::from_slice::<Value>(bytes) {
             self.event.observe_response_metadata(&payload);
+            self.event.tool_use.observe_provider_usage(&payload);
             self.event.tool_use.observe_upstream_response(&payload);
-            if let Some(usage) = payload.get("usage") {
+            self.event.applied_service_tier = response_service_tier(&payload);
+            if let Some(usage) = find_usage(&payload) {
                 apply_usage(&mut self.event, usage);
             }
         }
@@ -132,12 +138,22 @@ impl UpstreamUsage {
         if self.finished {
             return;
         }
-        if self.timing.is_none() && super::fast_delta::fast_response_delta(frame).is_some() {
+        if let Some(delta) = super::fast_delta::fast_response_delta(frame) {
+            if delta.nonempty_text
+                && let Some((started, timing)) = &mut self.timing
+            {
+                timing.observe_first_output(started.elapsed().as_millis() as u64);
+            }
             return;
         }
+        self.observe_full_frame(frame);
+    }
+
+    fn observe_full_frame(&mut self, frame: &[u8]) {
         let parsed = parse_sse_event(frame);
         if let Some(payload) = parsed.event_payload.as_ref() {
             self.event.observe_response_metadata(payload);
+            self.event.tool_use.observe_provider_usage(payload);
         }
         if parsed.outcome.is_some() {
             // Gemini can report final candidate status before a separate usage chunk.
@@ -176,6 +192,10 @@ impl UpstreamUsage {
     }
 
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
+        event
+            .tool_use
+            .provider_usage
+            .clone_from(&self.event.tool_use.provider_usage);
         if let (Some(source), Some(target)) = (self.event.routing.as_ref(), event.routing.as_mut())
         {
             target
@@ -191,6 +211,10 @@ impl UpstreamUsage {
             }
         }
         if let Some((_, timing)) = &self.timing {
+            // This recorder owns the current upstream generation. Client output
+            // may belong to an earlier lookup, even if this generation is empty.
+            event.ttft_ms = None;
+            event.generation_ms = None;
             timing.apply(event);
             event.tool_use.upstream_tool_call_count = self.event.tool_use.upstream_tool_call_count;
         }
@@ -228,6 +252,190 @@ fn skip_aligned_response_deltas(bytes: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod benchmark;
+
+    #[test]
+    fn timed_fast_path_ignores_empty_output_and_keeps_cache_metadata() {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        let mut capture = UpstreamUsage::new(event.clone(), None)
+            .with_timing(Instant::now() - Duration::from_millis(100));
+        assert!(
+            capture.observe(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n")
+        );
+        capture.apply_to(&mut event);
+        assert_eq!(event.ttft_ms, None);
+        assert!(capture.observe(
+            b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"x\"}\n\n"
+        ));
+        capture.apply_to(&mut event);
+        let first = event.ttft_ms.expect("nonempty reasoning output");
+        assert!(first >= 100);
+        assert!(capture.observe(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"y\",\"prompt_cache_options\":{\"ttl\":\"12h\"}}\n\n"));
+        capture.apply_to(&mut event);
+        assert_eq!(event.cache_write_ttl.as_deref(), Some("12h"));
+        assert_eq!(event.ttft_ms, Some(first));
+    }
+
+    #[test]
+    fn json_discovery_keeps_reported_usage_and_tier_through_response_envelopes() {
+        for depth in 0..=2 {
+            let mut event = crate::gateway::test_support::test_usage_event();
+            let mut capture = UpstreamUsage::new(event.clone(), None);
+            let mut response = json!({"status":"completed","service_tier":"flex","usage":{
+                "input_tokens":20,"output_tokens":3,"total_tokens":23,
+                "input_tokens_details":{"cached_tokens":5,"cache_write_tokens":7,
+                    "cache_write_tokens_details":{"ttl_12h_tokens":7}},
+                "output_tokens_details":{"reasoning_tokens":2}
+            }});
+            for _ in 0..depth {
+                response = json!({"response":response});
+            }
+            capture.finish_json_generation(&serde_json::to_vec(&response).unwrap());
+            capture.apply_to(&mut event);
+            assert_eq!(event.input_tokens, Some(20), "depth={depth}");
+            assert_eq!(event.output_tokens, Some(3));
+            assert_eq!(event.total_tokens, Some(23));
+            assert_eq!(event.cached_input_tokens, Some(5));
+            assert_eq!(event.cache_write_input_tokens, Some(7));
+            assert_eq!(event.cache_write_ttl.as_deref(), Some("12h"));
+            assert_eq!(event.reasoning_tokens, Some(2));
+            assert_eq!(event.applied_service_tier.as_deref(), Some("flex"));
+            assert_eq!(
+                event
+                    .tool_use
+                    .provider_usage
+                    .as_ref()
+                    .unwrap()
+                    .cache_write_tokens_by_ttl
+                    .get("12h"),
+                Some(&7)
+            );
+            capture.reset_generation();
+            capture.finish_json_generation(br#"{"status":"completed"}"#);
+            capture.apply_to(&mut event);
+            assert_eq!(event.input_tokens, None);
+            assert_eq!(event.applied_service_tier, None);
+            assert!(event.tool_use.provider_usage.is_none());
+        }
+    }
+
+    #[test]
+    fn structured_usage_survives_fragmented_stream_conversion_and_resets() {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        event.wire_api = WireApi::Messages;
+        let mut capture = UpstreamUsage::new(event.clone(), None);
+        let frames = [
+            json!({"type":"message_start","message":{"usage":{
+                "server_tool_use":{"web_search_requests":0},
+                "cache_creation":{"ephemeral_5m_input_tokens":12}}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{
+                "server_tool_use":{"web_search_requests":2}}}),
+            json!({"type":"message_stop"}),
+        ];
+        for payload in frames {
+            for chunk in format!("data: {payload}\n\n").as_bytes().chunks(3) {
+                assert!(capture.observe(chunk));
+            }
+        }
+        capture.apply_to(&mut event);
+        let details = event.tool_use.provider_usage.as_ref().unwrap();
+        assert_eq!(details.server_tool_calls.get("web_search"), Some(&2));
+        assert_eq!(details.cache_write_tokens_by_ttl.get("5m"), Some(&12));
+        assert!(event.tool_use.has_evidence());
+        capture.reset_generation();
+        capture
+            .finish_json_generation(br#"{"usage":{"server_tool_use":{"web_fetch_requests":0}}}"#);
+        capture.apply_to(&mut event);
+        let details = event.tool_use.provider_usage.as_ref().unwrap();
+        assert_eq!(details.server_tool_calls.get("web_fetch"), Some(&0));
+        assert!(!details.server_tool_calls.contains_key("web_search"));
+        assert!(details.cache_write_tokens_by_ttl.is_empty());
+        capture.reset_generation();
+        capture.apply_to(&mut event);
+        assert!(event.tool_use.provider_usage.is_none());
+    }
+
+    #[test]
+    fn cache_write_lifetimes_survive_later_metadata_without_usage() {
+        for (short, long, ttl) in [(0, 7, Some("12h")), (3, 7, Some("30m, 12h")), (0, 0, None)] {
+            for outcome in ["in_progress", "completed", "incomplete", "failed"] {
+                let mut event = crate::gateway::test_support::test_usage_event();
+                let mut capture = UpstreamUsage::new(event.clone(), None);
+                let usage = json!({"type":"response.in_progress","response":{"usage":{
+                    "input_tokens":20,
+                    "input_tokens_details":{"cache_write_tokens":short + long,
+                        "cache_write_tokens_details":{"ttl_30m_tokens":short,"ttl_12h_tokens":long}}
+                }}});
+                assert!(capture.observe(format!("data: {usage}\n\n").as_bytes()));
+                capture.apply_to(&mut event);
+                assert_eq!(event.cache_write_ttl.as_deref(), ttl);
+
+                let metadata = json!({"type":format!("response.{outcome}"),"response":{
+                    "status":outcome,"prompt_cache_options":{"ttl":"30m"}
+                }});
+                assert!(capture.observe(format!("data: {metadata}\n\n").as_bytes()));
+                capture.apply_to(&mut event);
+                assert_eq!(
+                    event.cache_write_ttl.as_deref(),
+                    ttl.or(Some("30m")),
+                    "{outcome}"
+                );
+                assert_eq!(event.input_tokens, Some(20));
+                assert_eq!(event.cache_write_input_tokens, Some(short + long));
+                let details = event.tool_use.provider_usage.as_ref().unwrap();
+                assert_eq!(details.cache_write_tokens_by_ttl.get("12h"), Some(&long));
+                assert_eq!(details.cache_write_tokens_by_ttl.get("30m"), Some(&short));
+
+                capture.reset_generation();
+                assert!(capture.observe(format!("data: {metadata}\n\n").as_bytes()));
+                capture.apply_to(&mut event);
+                assert_eq!(event.cache_write_ttl.as_deref(), Some("30m"));
+                assert_eq!(event.cache_write_input_tokens, None);
+                assert!(event.tool_use.provider_usage.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_stream_cache_writes_override_echoed_defaults() {
+        for usage_on_terminal in [false, true] {
+            let usage = json!({"input_tokens_details":{
+                "cache_write_tokens_details":{"ttl_12h_tokens":7}
+            }});
+            let mut partial = json!({"type":"response.in_progress","response":{
+                "status":"in_progress"
+            }});
+            let mut terminal = json!({"type":"response.completed","response":{
+                "status":"completed","output":[],"prompt_cache_options":{"ttl":"30m"}
+            }});
+            if usage_on_terminal {
+                terminal["response"]["usage"] = usage;
+            } else {
+                partial["response"]["usage"] = usage;
+            }
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let input = [partial, terminal].map(|payload| {
+                Ok::<_, std::convert::Infallible>(Bytes::from(format!("data: {payload}\n\n")))
+            });
+            let mut stream = UsageStream::new(
+                stream::iter(input),
+                Arc::new(move |event| captured.lock().unwrap().push(event)),
+                crate::gateway::test_support::test_usage_event(),
+                Instant::now(),
+                Arc::new(|_, _, _| {}),
+            );
+            while let Some(chunk) = stream.next().await {
+                assert!(chunk.is_ok());
+            }
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert!(events[0].success);
+            assert_eq!(events[0].cache_write_ttl.as_deref(), Some("12h"));
+            assert_eq!(events[0].cache_write_input_tokens, None);
+        }
+    }
 
     #[test]
     fn raw_model_declarations_survive_conversion_and_reset_between_generations() {
@@ -418,6 +626,77 @@ mod tests {
         capture.apply_to(&mut event);
         assert_eq!(event.tool_use.upstream_tool_call_count, Some(0));
         assert_eq!(event.tool_use.tool_calls_ready_ms, None);
+    }
+
+    #[test]
+    fn discovery_generations_do_not_inherit_first_output_or_completion_timing() {
+        let started = Instant::now() - Duration::from_millis(100);
+        let mut capture =
+            UpstreamUsage::new(crate::gateway::test_support::test_usage_event(), None)
+                .with_timing(started);
+        capture.observe(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n");
+        let mut first = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut first);
+        assert!(first.ttft_ms.is_some_and(|first| first >= 100));
+
+        capture.reset_generation();
+        capture.finish_json_generation(br#"{"status":"completed","output":[]}"#);
+        let mut second = crate::gateway::test_support::test_usage_event();
+        capture.apply_to(&mut second);
+        assert_eq!(
+            second.ttft_ms, None,
+            "a later snapshot has no first-token evidence"
+        );
+        assert_eq!(second.generation_ms, None);
+
+        capture.reset_generation();
+        capture.observe(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        );
+        let mut partial = crate::gateway::test_support::test_usage_event();
+        partial.latency_ms = 500;
+        capture.apply_to(&mut partial);
+        assert_eq!(
+            partial.latency_ms, 500,
+            "a prior terminal must not finish this attempt"
+        );
+        let first = partial.ttft_ms.expect("current generation's output");
+        assert!(first >= 100);
+        assert_eq!(partial.generation_ms, Some(500_u64.saturating_sub(first)));
+    }
+
+    #[test]
+    fn unobserved_followup_does_not_inherit_discovery_output_timing() {
+        let started = Instant::now() - Duration::from_millis(100);
+        let mut event = crate::gateway::test_support::test_usage_event();
+        let mut capture = UpstreamUsage::new(event.clone(), None).with_timing(started);
+        assert!(capture.observe(b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"));
+        capture.apply_to(&mut event);
+        assert!(event.ttft_ms.is_some());
+
+        capture.reset_generation();
+        assert!(capture.observe(
+            b"data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+        ));
+        event.latency_ms = 500;
+        capture.apply_to(&mut event);
+        assert_eq!(event.ttft_ms, None);
+        assert_eq!(event.generation_ms, None);
+        assert_eq!(event.latency_ms, 500);
+    }
+
+    #[test]
+    fn capture_without_raw_timing_preserves_normalized_output_timing() {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        event.ttft_ms = Some(100);
+        event.generation_ms = Some(400);
+        event.latency_ms = 500;
+        let mut capture = UpstreamUsage::new(event.clone(), None);
+        capture.reset_generation();
+        capture.apply_to(&mut event);
+        assert_eq!(event.ttft_ms, Some(100));
+        assert_eq!(event.generation_ms, Some(400));
+        assert_eq!(event.latency_ms, 500);
     }
 
     #[test]

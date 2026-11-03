@@ -29,6 +29,10 @@ pub(super) struct SnapshotPayload {
     pub(super) version: u32,
     pub(super) config: Option<String>,
     pub(super) auth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) managed_model_catalog: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) managed_binding: Option<codex::ManagedBindingSnapshot>,
 }
 
 pub(super) fn load_payload(
@@ -45,7 +49,7 @@ pub(super) fn load_payload(
         })?;
     let snapshot_payload: SnapshotPayload =
         serde_json::from_str(&content).map_err(io::invalid_data)?;
-    if snapshot_payload.version != PAYLOAD_VERSION {
+    if !matches!(snapshot_payload.version, 1 | PAYLOAD_VERSION) {
         return Err(LocalPoolError::new(
             ErrorCode::UnsupportedSchema,
             "ChatGPT snapshot payload uses an unsupported version",
@@ -55,6 +59,9 @@ pub(super) fn load_payload(
         config: snapshot_payload.config.clone(),
         auth: snapshot_payload.auth.clone(),
     })?;
+    if let Some(catalog) = &snapshot_payload.managed_model_catalog {
+        codex::validate_snapshot_catalog(catalog)?;
+    }
     Ok(snapshot_payload)
 }
 

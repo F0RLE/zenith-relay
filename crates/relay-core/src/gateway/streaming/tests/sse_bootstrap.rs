@@ -38,6 +38,119 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
 }
 
 #[tokio::test]
+async fn bootstrap_preserves_a_json_refusal_instead_of_hiding_it_as_incomplete() {
+    let (upstream, server) = response_from_sse_event(
+        json!({"error": {
+            "code": "subscription_sharing_user_not_eligible",
+            "type": "permission_error",
+            "message": "Synthetic plan permission denied",
+            "param": "model"
+        }})
+        .to_string(),
+    )
+    .await;
+    let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+    server.await.unwrap();
+    assert_eq!(failure.failure.status, StatusCode::FORBIDDEN);
+    let error = failure.upstream_error.unwrap();
+    assert_eq!(error.http_status, Some(200));
+    assert_eq!(
+        error.code.as_deref(),
+        Some("subscription_sharing_user_not_eligible")
+    );
+    assert_eq!(error.parameter.as_deref(), Some("model"));
+    assert_eq!(failure.preserved.unwrap().status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bootstrap_eof_diagnostics_never_persist_unframed_provider_content() {
+    for body in [
+        "",
+        "<html>synthetic-private-content</html>",
+        "data: synthetic-private-content",
+    ] {
+        let (upstream, server) = response_from_sse_event(body.into()).await;
+        let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+        server.await.unwrap();
+        assert_eq!(failure.failure.category, error_codes::STREAM_INCOMPLETE);
+        let details = failure.upstream_error.unwrap();
+        assert_eq!(details.error_type.as_deref(), Some("relay_stream_eof"));
+        assert!(
+            details
+                .message
+                .as_ref()
+                .unwrap()
+                .contains("content_type=sse")
+        );
+        assert!(
+            !serde_json::to_string(&details)
+                .unwrap()
+                .contains("synthetic-private")
+        );
+    }
+}
+
+#[tokio::test]
+async fn observed_bootstrap_keeps_body_json_and_output_boundaries_distinct() {
+    for (body, parsed, output, success) in [
+        (": heartbeat\n\n", false, false, false),
+        ("data: invalid\n\n", false, false, false),
+        (
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\"}}\n\n",
+            true,
+            false,
+            false,
+        ),
+        (
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+            true,
+            true,
+            true,
+        ),
+        (
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\"}}}\n\n",
+            true,
+            false,
+            false,
+        ),
+    ] {
+        let (upstream, server) = response_from_sse_event(body.into()).await;
+        let mut transport: crate::usage::TransportDiagnostics = serde_json::from_value(json!({
+            "upstream":"http", "mode":"native"
+        }))
+        .unwrap();
+        let started = Instant::now() - std::time::Duration::from_millis(10);
+        let result = super::super::bootstrap::bootstrap_observed_stream(
+            upstream,
+            None,
+            false,
+            4096,
+            false,
+            Some(
+                super::super::bootstrap::StreamBootstrapObservation::Transport {
+                    started,
+                    transport: &mut transport,
+                },
+            ),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(result.is_ok(), success, "{body}");
+        let timing = transport.stream_response.unwrap();
+        assert!(timing.decoded_body_first_ms.is_some());
+        assert_eq!(timing.sse_json_first_ms.is_some(), parsed, "{body}");
+        assert_eq!(timing.upstream_output_first_ms.is_some(), output, "{body}");
+        if let Some(json) = timing.sse_json_first_ms {
+            assert!(json >= timing.decoded_body_first_ms.unwrap());
+        }
+        if let Some(output) = timing.upstream_output_first_ms {
+            assert!(output >= timing.sse_json_first_ms.unwrap());
+        }
+        assert!(transport.client_first_output_ms.is_none());
+    }
+}
+
+#[tokio::test]
 async fn only_an_explicit_prewarm_accepts_an_empty_successful_terminal() {
     for prewarm in [false, true] {
         for (terminal_type, response, valid) in [
@@ -452,9 +565,17 @@ async fn buffered_basis_points_rejects_created_without_waiting_for_the_body() {
     let upstream = reqwest::get(format!("http://{address}/stream"))
         .await
         .unwrap();
+    let mut timing = crate::gateway::response::BufferedResponseTiming::default();
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        crate::gateway::response::collect_upstream_response(upstream, true, Some("gpt-6-astra")),
+        crate::gateway::response::collect_upstream_response(
+            upstream,
+            true,
+            Some("gpt-6-astra"),
+            false,
+            Instant::now(),
+            &mut timing,
+        ),
     )
     .await;
     let _ = release.send(());

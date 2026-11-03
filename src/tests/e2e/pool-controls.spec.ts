@@ -5,7 +5,7 @@ async function expectPanelFits(page: Page) {
   const panel = page.locator(".pool-controls");
   expect(await panel.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
-    const selectors = ".pool-priority-label, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-next-route, .pool-active-models, .pool-summary > div";
+    const selectors = ".pool-priority-label, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-active-models, .pool-summary > div";
     return Array.from(element.querySelectorAll<HTMLElement>(selectors)).flatMap((item) => {
       const rect = item.getBoundingClientRect();
       const fits = rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
@@ -33,7 +33,8 @@ for (const theme of ["light", "dark"] as const) {
       const panel = page.getByRole("group", { name: "Распределение запросов" });
       await expect(panel.getByRole("heading", { name: "Распределение запросов" })).toBeVisible();
       await expect(panel.locator(".pool-current-route")).toContainText("Работает сейчас: Personal Plus");
-      await expect(panel.locator(".pool-next-route")).toContainText("Следующий кандидат");
+      await expect(panel).not.toContainText("Следующий кандидат");
+      await expect(page.locator(".pool-next-route, .pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
       await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
       await expect(panel.locator(".pool-summary > div")).toHaveCount(5);
       await expect(panel.locator('[data-tone="error"] strong')).toHaveText("1");
@@ -114,7 +115,9 @@ test("pool controls keep idle routes distinct from active requests", async ({ pa
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const panel = page.getByRole("group", { name: "Request distribution" });
   await expect(panel.locator(".pool-current-route")).toHaveAttribute("data-active", "false");
-  await expect(panel.locator(".pool-current-route")).toContainText("Next candidate");
+  await expect(panel.locator(".pool-current-route")).toContainText("Last request: Personal Plus");
+  await expect(panel).not.toContainText("Next candidate");
+  await expect(page.locator(".pool-next-route, .pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
   await expect(panel.locator(".pool-active-models")).toBeHidden();
 });
 

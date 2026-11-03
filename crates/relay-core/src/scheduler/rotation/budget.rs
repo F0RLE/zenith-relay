@@ -13,7 +13,8 @@ pub(crate) use shared::SharedRequestBudget;
 mod regression;
 #[cfg(test)]
 mod tests;
-pub(crate) use waiting::{AdmissionStopReason, QueueWaitBudget};
+pub use waiting::{AdmissionStopReason, RequestWaitDiagnostics, WaitSummary};
+pub(crate) use waiting::{QueueWaitBudget, RequestWaitKind};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RequestId(pub u64);

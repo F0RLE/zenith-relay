@@ -299,8 +299,8 @@ impl PricingSourceSummary {
     }
 }
 
-/// Catalog metadata attached to usage and runtime projections. It describes
-/// the quote source and freshness, not a provider debit or customer charge.
+/// Display metadata for the quote's source and freshness.
+/// Provider expense and customer charges are accounted for separately.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PricingMetadata {

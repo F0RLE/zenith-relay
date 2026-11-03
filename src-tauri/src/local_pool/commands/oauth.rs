@@ -114,6 +114,9 @@ pub async fn start_codex_oauth(
         let host_id = siwc_host_id()?;
         oauth = oauth
             .with_siwc_registration(host_id, registration)
+            .and_then(|oauth| {
+                oauth.with_siwc_login_hint(credentials.as_ref().and_then(|c| c.email()))
+            })
             .map_err(oauth_error)?;
     }
     let flow = state.oauth_flow();

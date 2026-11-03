@@ -35,16 +35,16 @@ pub(super) fn split_secret(secret_text: &str) -> Vec<String> {
 
 pub(super) fn encode_manifest(manifest: &SecretManifest) -> Result<String, String> {
     let json = serde_json::to_string(manifest)
-        .map_err(|_| "Не удалось подготовить манифест защищённого секрета".to_string())?;
+        .map_err(|_| "Could not prepare the protected-secret manifest".to_string())?;
     Ok(format!("{MANIFEST_PREFIX}{json}"))
 }
 
 pub(super) fn decode_manifest(encoded_manifest: &str) -> Result<SecretManifest, String> {
     let json = encoded_manifest
         .strip_prefix(MANIFEST_PREFIX)
-        .ok_or_else(|| "Некорректный манифест защищённого секрета".to_string())?;
-    let manifest: SecretManifest = serde_json::from_str(json)
-        .map_err(|_| "Некорректный манифест защищённого секрета".to_string())?;
+        .ok_or_else(|| "Invalid protected-secret manifest".to_string())?;
+    let manifest: SecretManifest =
+        serde_json::from_str(json).map_err(|_| "Invalid protected-secret manifest".to_string())?;
     let valid_generation = manifest.generation.len() == 32
         && manifest
             .generation
@@ -58,7 +58,7 @@ pub(super) fn decode_manifest(encoded_manifest: &str) -> Result<SecretManifest, 
         || !valid_generation
         || !valid_hash
     {
-        return Err("Некорректный манифест защищённого секрета".to_string());
+        return Err("Invalid protected-secret manifest".to_string());
     }
     Ok(manifest)
 }

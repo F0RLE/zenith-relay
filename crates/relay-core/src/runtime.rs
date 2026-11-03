@@ -53,6 +53,7 @@ mod codex_metadata;
 mod config;
 mod control;
 mod http3;
+mod http_recovery;
 mod images;
 mod models;
 mod routing_cookies;
@@ -117,6 +118,7 @@ pub struct GatewayRuntime {
     tool_policy: RwLock<crate::ToolPolicy>,
     clients: RuntimeHttpClients,
     http3: http3::Http3Transport,
+    http_recovery: http_recovery::HttpRecovery,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     /// Per-source HTTP clients for sources that configure a proxy. Sources
@@ -364,6 +366,7 @@ struct RuntimeHttpClients {
     http: reqwest::Client,
     websocket: reqwest::Client,
     direct: bool,
+    proxy: Option<ProxyConfig>,
 }
 
 impl RuntimeHttpClients {
@@ -372,6 +375,7 @@ impl RuntimeHttpClients {
             http: runtime_client(proxy)?,
             websocket: runtime_websocket_client(proxy)?,
             direct: proxy.is_none(),
+            proxy: proxy.cloned(),
         })
     }
 }
@@ -387,22 +391,6 @@ impl GatewayRuntime {
             provider_source.protocol_bindings(),
         )
         .await
-    }
-
-    /// Returns a non-secret fingerprint for the OAuth credential currently
-    /// installed in an account slot. Basis Points attachment IDs belong to a
-    /// credential session, so they must not survive an access-token rotation.
-    pub(crate) async fn basis_points_credential_fingerprint(
-        &self,
-        candidate_id: &str,
-    ) -> Option<[u8; 32]> {
-        let account = self.chatgpt_accounts.get(candidate_id)?;
-        let tokens = account.token_authority.tokens(candidate_id).await?;
-        let mut digest = Sha256::new();
-        digest.update(b"zenith-relay-basis-points-attachment-v1");
-        digest.update(tokens.generation().to_be_bytes());
-        digest.update(tokens.access_token().as_bytes());
-        Some(digest.finalize().into())
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {

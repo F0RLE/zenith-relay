@@ -34,12 +34,24 @@ fn request(client: WireApi, stream: bool) -> (&'static str, Value) {
 
 #[tokio::test]
 async fn non_strict_schema_roundtrips_json_and_sse_without_a_private_option_or_retries() {
+    structured_output_roundtrips_json_and_sse(false).await;
+}
+
+#[tokio::test]
+async fn default_json_object_roundtrips_json_and_sse_without_a_private_option_or_retries() {
+    structured_output_roundtrips_json_and_sse(true).await;
+}
+
+async fn structured_output_roundtrips_json_and_sse(json_object: bool) {
     for client in [WireApi::Responses, WireApi::ChatCompletions] {
         for stream in [false, true] {
             for upstream_stream in [false, true] {
                 for (text, completed, valid) in [
                     ("{\"approved\":false}", true, true),
-                    ("{\"approved\":\"yes\"}", true, false),
+                    ("{\"approved\":\"yes\"}", true, json_object),
+                    ("{}", true, json_object),
+                    ("[]", true, false),
+                    ("{} {}", true, false),
                     ("allow", true, false),
                     ("{\"approved\":false}", false, false),
                 ] {
@@ -55,7 +67,15 @@ async fn non_strict_schema_roundtrips_json_and_sse_without_a_private_option_or_r
                         .store(true, Ordering::SeqCst);
                     let runtime = Arc::new(runtime(&server).await);
                     let (base, task) = super::recovery::gateway(runtime).await;
-                    let (path, request) = request(client, stream);
+                    let (path, mut request) = request(client, stream);
+                    if json_object {
+                        match client {
+                            WireApi::Responses => {
+                                request["text"]["format"] = json!({"type":"json_object"});
+                            }
+                            _ => request["response_format"] = json!({"type":"json_object"}),
+                        }
+                    }
                     let response = super::retry_admission::bounded_client()
                         .post(format!("{base}{path}"))
                         .bearer_auth("local-secret")
@@ -75,8 +95,25 @@ async fn non_strict_schema_roundtrips_json_and_sse_without_a_private_option_or_r
                             };
                             assert_eq!(answer, text);
                         } else {
-                            assert!(body.contains("approved"), "{body}");
-                            assert!(body.contains("false"), "{body}");
+                            let answer: String = body
+                                .lines()
+                                .filter_map(|line| line.strip_prefix("data: "))
+                                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+                                .filter_map(|event| match client {
+                                    WireApi::Responses
+                                        if event["type"] == "response.output_text.delta" =>
+                                    {
+                                        event["delta"].as_str().map(str::to_owned)
+                                    }
+                                    WireApi::ChatCompletions => {
+                                        event["choices"][0]["delta"]["content"]
+                                            .as_str()
+                                            .map(str::to_owned)
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            assert_eq!(answer, text, "{body}");
                         }
                     } else {
                         assert!(!status.is_success(), "unvalidated output escaped: {body}");
@@ -100,8 +137,17 @@ async fn non_strict_schema_roundtrips_json_and_sse_without_a_private_option_or_r
 }
 
 #[tokio::test]
-async fn non_strict_schema_withholds_stream_headers_until_terminal_validation() {
-    for (valid, discovery) in [(false, false), (true, false), (false, true), (true, true)] {
+async fn locally_validated_formats_withhold_stream_headers_until_terminal_validation() {
+    for (valid, discovery, json_object) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+    ] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
         *crate::poison::mutex(&server.state.generation_body) = reply(
             if valid {
@@ -120,6 +166,9 @@ async fn non_strict_schema_withholds_stream_headers_until_terminal_validation() 
         let runtime = Arc::new(runtime(&server).await);
         let (base, task) = super::recovery::gateway(runtime).await;
         let (path, mut request) = request(WireApi::Responses, true);
+        if json_object {
+            request["text"]["format"] = json!({"type":"json_object"});
+        }
         if discovery {
             request["relay_bps_tool_catalog"] = json!("discovery");
             request["tools"] = json!([{"type":"function","name":"inspect",
@@ -149,6 +198,15 @@ async fn non_strict_schema_withholds_stream_headers_until_terminal_validation() 
 
 #[tokio::test]
 async fn non_strict_schema_preserves_a_tool_result_and_validates_the_next_answer() {
+    structured_tool_roundtrip(format()).await;
+}
+
+#[tokio::test]
+async fn default_json_object_preserves_a_tool_result_and_validates_the_next_answer() {
+    structured_tool_roundtrip(json!({"type":"json_object"})).await;
+}
+
+async fn structured_tool_roundtrip(output_format: Value) {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     crate::poison::mutex(&server.state.generation_replies).extend([
         (
@@ -164,6 +222,7 @@ async fn non_strict_schema_preserves_a_tool_result_and_validates_the_next_answer
     let runtime = Arc::new(runtime(&server).await);
     let (base, task) = super::recovery::gateway(runtime).await;
     let (path, mut request) = request(WireApi::Responses, false);
+    request["text"]["format"] = output_format;
     request["tools"] = json!([{"type":"function","name":"inspect",
         "parameters":{"type":"object","properties":{"path":{"type":"string"}},
             "required":["path"],"additionalProperties":false}}]);

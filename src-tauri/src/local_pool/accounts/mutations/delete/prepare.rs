@@ -171,7 +171,8 @@ async fn prepare_account_removal(
         }
     };
     if delete_credentials {
-        let revocation = revoke_siwc_before_delete(state, prepared.old_credential.as_ref()).await;
+        let revocation =
+            revoke_siwc_before_delete(state, credentials, prepared.old_credential.as_ref()).await;
         match revocation {
             Ok(revoked) => prepared.provider_revoked = revoked,
             Err(error) => {
@@ -194,6 +195,7 @@ async fn prepare_account_removal(
 
 async fn revoke_siwc_before_delete(
     state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
     secret: Option<&StoredCodexCredentials>,
 ) -> LocalResult<bool> {
     let Some(secret) = secret else {
@@ -202,18 +204,17 @@ async fn revoke_siwc_before_delete(
     let Some(registration) = secret.siwc_registration() else {
         return Ok(false);
     };
-    // An unactivated import does not own the source host's authorization grant.
-    if registration.requires_reauthentication {
+    let Some(token) = credentials
+        .siwc_revocation_token(secret)
+        .map_err(credential_local_error)?
+    else {
         return Ok(false);
-    }
+    };
     let proxy =
         super::super::super::proxy::effective_proxy_config(state.store()?.gateway(), secret)?;
     let client = super::super::super::oauth::CodexOAuthClient::new_with_proxy(proxy.as_ref())
         .map_err(LocalPoolError::invalid_state)?;
-    let token = secret.refresh_token().ok_or_else(|| {
-        LocalPoolError::invalid_state("SIWC revocation requires the saved refresh token")
-    })?;
-    client.revoke_siwc(registration, token).await.map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "SIWC revocation could not be confirmed; connection retained. Retry when OpenAI is reachable."))?;
+    client.revoke_siwc(registration, &token).await.map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "SIWC revocation could not be confirmed; connection retained. Retry when OpenAI is reachable."))?;
     Ok(true)
 }
 

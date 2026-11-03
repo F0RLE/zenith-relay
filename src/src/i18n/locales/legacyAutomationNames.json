@@ -1,0 +1,4 @@
+{
+  "en": { "defaultName": "Start quota countdown", "weeklyDefaultName": "Reset weekly quota" },
+  "ru": { "defaultName": "Запустить отсчёт квоты", "weeklyDefaultName": "Сбросить недельную квоту" }
+}

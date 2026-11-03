@@ -31,6 +31,8 @@ export type ProxyPoolImportResult = {
 };
 
 export type ProxyCheckResult = {
+  /** Probe offsets exclude queue; total includes optional location checks. */
+  timing?: { queueMs: number; totalMs: number; responseHeadersMs?: number | null; responseCompleteMs?: number | null } | null;
   ipv4?: string | null;
   ipv6?: string | null;
   secondaryCheckError?: string | null;

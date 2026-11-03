@@ -1,5 +1,7 @@
 import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
+import { en } from "../../../src/i18n/locales/en";
+import { ru } from "../../../src/i18n/locales/ru";
 
 const mainBundle = /\/assets\/main-[^/]+\.js$/;
 
@@ -10,6 +12,8 @@ for (const appearance of [
   test(`loader paints before React in ${appearance.locale}/${appearance.theme}`, async ({ page }) => {
     await installTauriMock(page, { ...appearance, populated: true });
     await page.addInitScript((locale) => localStorage.setItem("relay.language", locale), appearance.locale);
+    await page.addInitScript(({ locale, copy }) => localStorage.setItem("relay.startupCopy", JSON.stringify({ locale, direction: "ltr", copy })),
+      { locale: appearance.locale, copy: appearance.locale === "ru" ? ru.startup : en.startup });
     await page.setViewportSize({ width: appearance.width, height: appearance.height });
     let release!: () => void;
     const waiting = new Promise<void>((resolve) => { release = resolve; });
@@ -33,6 +37,28 @@ for (const appearance of [
     await expect(page.locator(".relay-shell")).toBeVisible();
   });
 }
+
+test("startup reuses the resolved dictionary for an automatic regional locale", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", populated: true });
+  await page.addInitScript((copy) => {
+    Object.defineProperty(navigator, "language", { configurable: true, value: "ru-RU" });
+    localStorage.removeItem("relay.language");
+    localStorage.setItem("relay.startupCopy", JSON.stringify({ locale: "ru", direction: "ltr", copy }));
+  }, ru.startup);
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(mainBundle, async (route) => { await waiting; await route.continue(); });
+  try {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#splash-message")).toHaveText(ru.startup.interface);
+    expect(await page.evaluate(() => localStorage.getItem("relay.language"))).toBeNull();
+  } finally {
+    release();
+  }
+  await expect(page.locator("#splash-screen")).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute("lang", "ru");
+  await expect(page.locator(".relay-shell")).toBeVisible();
+});
 
 test("slow runtime loading does not block navigation, settings or help", async ({ page }) => {
   await page.clock.install();
@@ -148,6 +174,7 @@ test("secondary pages load only on navigation intent, not idle readiness", async
   await expect(page.locator("#splash-screen")).toHaveCount(0);
   const secondaryPage = /\/(?:ConnectionsPage|ImportDialog|PoolPage|IntegrationsPage|UsagePage|ProfilesPage|SettingsPage|HelpCenter)-/;
   expect(requested.filter((url) => secondaryPage.test(url))).toEqual([]);
+  expect(requested.some((url) => /\/markdown-/.test(url))).toBe(false);
   await page.getByRole("button", { name: "Pool", exact: true }).focus();
   await expect.poll(() => requested.some((url) => /\/PoolPage-/.test(url))).toBe(true);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -156,6 +183,7 @@ test("secondary pages load only on navigation intent, not idle readiness", async
   await page.clock.fastForward(10_000);
   expect(requested.some((url) => /\/UsagePage-/.test(url))).toBe(false);
   expect(requested.some((url) => /\/ImportDialog-/.test(url))).toBe(false);
+  expect(requested.some((url) => /\/markdown-/.test(url))).toBe(false);
   await page.getByRole("button", { name: "Usage", exact: true }).focus();
   await expect.poll(() => requested.some((url) => /\/UsagePage-/.test(url))).toBe(true);
   const commands = await page.evaluate(() => (window as unknown as {
@@ -163,6 +191,9 @@ test("secondary pages load only on navigation intent, not idle readiness", async
   }).__TAURI_TEST_INVOKES__);
   expect(commands.some(({ command }) => command === "get_local_proxy_pool")).toBe(false);
   expect(commands.some(({ command, args }) => command === "get_local_usage_page" && args.input?.range !== "custom")).toBe(false);
+  await page.getByRole("button", { name: "Help", exact: true }).click();
+  await expect(page.locator('.relay-shell[data-page="help"]')).toBeVisible();
+  await expect.poll(() => requested.filter((url) => /\/markdown-/.test(url)).length).toBe(1);
 });
 
 test("first-run setup becomes usable after startup", async ({ page }) => {

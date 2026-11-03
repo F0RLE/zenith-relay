@@ -23,6 +23,70 @@ async fn read_prefix(response: &mut reqwest::Response, text: &str) -> String {
 }
 
 #[tokio::test]
+async fn discovery_response_budget_stops_at_the_first_terminal() {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    for (oversized, model_guard) in [(false, false), (true, false), (false, true), (true, true)] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(true, Ordering::SeqCst);
+        let mut reply = final_response();
+        reply["output"] = json!([visible_message("Ready")]);
+        let created = json!({"type":"response.created","response":{
+            "id":"resp_synthetic_final","status":"in_progress","model":"gpt-test",
+            "usage":{"input_tokens":120,"output_tokens":5,"total_tokens":125}}});
+        let delta = json!({"type":"response.output_text.delta","output_index":0,
+            "item_id":"msg_visible","content_index":0,"delta":"Ready"});
+        let terminal = json!({"type":"response.completed","response":reply});
+        let terminal = format!("data: {terminal}\n\n");
+        let mut wire = format!("data: {created}\n\ndata: {delta}\n\n:").into_bytes();
+        let target = if oversized {
+            LIMIT + 1
+        } else {
+            LIMIT - terminal.len() - 2
+        };
+        wire.resize(target, b'x');
+        wire.extend_from_slice(b"\n\n");
+        wire.extend_from_slice(terminal.as_bytes());
+        // Excess bytes share the terminal's transport chunk but are not part
+        // of this response. They must never become another executable call.
+        wire.extend_from_slice(b"data: ignored after terminal\n\n");
+        crate::poison::mutex(&server.state.stream_prefixes).push_back(wire);
+        *crate::poison::mutex(&server.state.generation_body) =
+            tool_response("lookup", "call_forbidden_tail", json!({"path":"synthetic"}));
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.set_block_degraded_routes_enabled(model_guard);
+        runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&catalog_request(true))
+            .send()
+            .await
+            .unwrap();
+        let body = response.text().await.unwrap();
+        assert_eq!(
+            body.contains("event: response.completed"),
+            !oversized,
+            "{body}"
+        );
+        assert_eq!(body.contains("stream.response_size"), oversized, "{body}");
+        assert!(!body.contains("call_forbidden_tail"));
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
+        let events = crate::poison::mutex(&events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].success, !oversized);
+        assert_eq!(events[0].input_tokens, Some(120));
+        assert_eq!(events[0].output_tokens, Some(5));
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn discovery_rejects_conflicting_or_unfinished_parallel_tool_identity() {
     for mode in ["single", "batch", "catalog"] {
         for invalid in ["changed", "orphan", "delta"] {
@@ -165,7 +229,14 @@ async fn discovery_streams_text_before_completion_with_and_without_a_lookup() {
         assert_eq!(events.len(), expected);
         let final_event = events.last().unwrap();
         assert!(final_event.success, "{final_event:?}");
-        assert!(final_event.ttft_ms.is_some());
+        // A JSON continuation has no token-arrival evidence of its own; the
+        // preceding streamed lookup retains its separate first-output timing.
+        assert_eq!(final_event.ttft_ms.is_some(), !json_fallback);
+        assert_eq!(final_event.generation_ms.is_some(), !json_fallback);
+        if lookup {
+            assert!(events[0].ttft_ms.is_some());
+            assert!(events[0].generation_ms.is_some());
+        }
         assert_eq!(final_event.attempt as usize, expected);
         if !reported {
             assert_eq!(final_event.input_tokens, None);

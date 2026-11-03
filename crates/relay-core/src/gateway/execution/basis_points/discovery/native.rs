@@ -16,6 +16,7 @@ pub(in crate::gateway::execution) fn eligible(request: &Value) -> bool {
     if request
         .get("tool_choice")
         .is_some_and(|choice| choice != "auto")
+        || history_uses_lookup_name(request)
     {
         return false;
     }
@@ -28,7 +29,28 @@ pub(in crate::gateway::execution) fn eligible(request: &Value) -> bool {
             .map(|tool| tool.serialized_spec.len())
             .sum::<usize>()
             >= 24 * 1024
-        && !tools.iter().any(|tool| tool.name == NATIVE_LOOKUP)
+        && !tools
+            .iter()
+            .any(|tool| tool.namespace.is_none() && tool.name == NATIVE_LOOKUP)
+}
+
+fn history_uses_lookup_name(request: &Value) -> bool {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|item| match item["type"].as_str() {
+            Some("additional_tools") => {
+                item["tools"].as_array().into_iter().flatten().any(|tool| {
+                    matches!(tool["type"].as_str(), Some("function" | "custom"))
+                        && tool["name"] == NATIVE_LOOKUP
+                })
+            }
+            Some("function_call" | "custom_tool_call") => {
+                item["name"] == NATIVE_LOOKUP && item.get("namespace").is_none_or(Value::is_null)
+            }
+            _ => false,
+        })
 }
 
 fn tool_spec(tool: &ClientTool) -> Value {
@@ -78,7 +100,10 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
     budget: &crate::scheduler::rotation::SharedRequestBudget,
     tool_use: &mut ToolUseDiagnostics,
 ) -> Result<(Value, Option<DiscoverySession>), AdapterError> {
-    if budget.with_budget(|budget| budget.remaining()) < 2 {
+    // Client history is not evidence that our private helper owns this name.
+    // Keep native forwarding rather than shadowing a past client declaration
+    // or treating its next invocation as an internal catalog operation.
+    if history_uses_lookup_name(original) || budget.with_budget(|budget| budget.remaining()) < 2 {
         return Ok((upstream.clone(), None));
     }
     let tools = client_tools(original)?;
@@ -141,7 +166,7 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
                 call_ids.insert(id.to_string());
             }
             if !loaded.contains(&name)
-                && let Some(tool) = tools.iter().find(|tool| tool.key() == name)
+                && let Some(tool) = tools.iter().find(|tool| tool.matches_key(&name))
             {
                 input.push(additional(declarations(vec![tool], &settings)));
                 historical.insert(name.clone(), tool.serialized_spec.to_string());
@@ -293,7 +318,7 @@ pub(super) fn advance(
         let tool = session
             .tools
             .iter()
-            .find(|tool| tool.key() == name && session.loaded.contains(&name))
+            .find(|tool| tool.matches_key(&name) && session.loaded.contains(&name))
             .ok_or_else(|| invalid_tool_output("output.tool.name"))?;
         if item["name"].as_str() != Some(tool.name.as_str())
             || item.get("namespace").and_then(Value::as_str) != tool.namespace.as_deref()

@@ -1,20 +1,19 @@
 use crate::local_pool::accounts::{oauth::OAuthClientKind, oauth_flow::OAuthFlowStart};
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::local_pool::state::DesktopState;
-use crate::platform::ui_text;
-use sha2::{Digest, Sha256};
-#[cfg(not(target_os = "macos"))]
-use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use tauri::{
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, webview::NewWindowResponse,
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, utils::config::WindowConfig,
+    webview::NewWindowResponse,
 };
 use url::Url;
 
 pub(super) mod automatic_login;
+#[cfg(target_os = "windows")]
+mod private_profile;
 mod proxy;
 
 use proxy::{ProxyBridge, webview_proxy};
@@ -42,17 +41,13 @@ pub(super) async fn open_sign_in_window(
     proxy_url: Option<&str>,
     automatic_login: Option<automatic_login::LoginNotes>,
 ) -> Result<(), LocalPoolError> {
-    let profile = sign_in_profile(
-        start.client_kind,
-        start
-            .target_account_id
-            .as_deref()
-            .or(start.notes_account_id.as_deref()),
-    );
+    static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _opening = OPENING.lock().await;
     let (webview_proxy, bridge) = webview_proxy(proxy_url).await?;
     let generation = begin_sign_in_session();
-    if let Some(window) = app.get_webview_window(SIGN_IN_WINDOW) {
-        let _ = window.destroy();
+    if let Err(error) = destroy_previous_sign_in_window(app).await {
+        release_sign_in_session(generation);
+        return Err(error);
     }
     if let Some(bridge) = bridge {
         if !store_sign_in_bridge(generation, bridge) {
@@ -65,7 +60,6 @@ pub(super) async fn open_sign_in_window(
         app,
         authorization_url,
         start,
-        &profile,
         webview_proxy,
         automatic_login.is_some(),
     ) {
@@ -83,6 +77,10 @@ pub(super) async fn open_sign_in_window(
             release_sign_in_session(generation);
         }
     });
+    if !session_is_current(generation) {
+        let _ = window.destroy();
+        return Err(window_open_error());
+    }
     if let Some(notes) = automatic_login {
         let active = Arc::new(AtomicBool::new(true));
         {
@@ -101,6 +99,22 @@ pub(super) async fn open_sign_in_window(
         let _ = window.set_focus();
     }
     Ok(())
+}
+
+async fn destroy_previous_sign_in_window(app: &AppHandle) -> Result<(), LocalPoolError> {
+    let Some(window) = app.get_webview_window(SIGN_IN_WINDOW) else {
+        return Ok(());
+    };
+    window.destroy().map_err(|_| window_open_error())?;
+    // destroy() queues work on the UI thread. Do not race the old label while
+    // creating its replacement or silently continue after a failed teardown.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.get_webview_window(SIGN_IN_WINDOW).is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| window_open_error())
 }
 
 pub(crate) fn close_sign_in_window(app: &AppHandle) {
@@ -180,14 +194,24 @@ fn build_sign_in_window(
     app: &AppHandle,
     authorization_url: &str,
     start: &OAuthFlowStart,
-    profile: &str,
     webview_proxy: Option<Url>,
     automatic_login: bool,
 ) -> Result<tauri::WebviewWindow, LocalPoolError> {
+    #[cfg(target_os = "windows")]
+    if !tauri::webview_version().is_ok_and(|version| supports_private_sign_in(&version)) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "Update Microsoft Edge WebView2 Runtime to open a private sign-in window.",
+        ));
+    }
     let authorization_url = Url::parse(authorization_url).map_err(|_| window_open_error())?;
     let mut builder =
-        WebviewWindowBuilder::new(app, SIGN_IN_WINDOW, WebviewUrl::External(authorization_url))
-            .title(ui_text("Sign in", "Вход"))
+        WebviewWindowBuilder::from_config(app, &sign_in_window_config(authorization_url))
+            .map_err(|_| window_prepare_error())?
+            .title(crate::platform::localization::text(
+                |copy| &copy.sign_in,
+                "Sign in",
+            ))
             .inner_size(520.0, 780.0)
             .center()
             .resizable(true)
@@ -215,35 +239,47 @@ fn build_sign_in_window(
     if let Some(proxy) = webview_proxy {
         builder = builder.proxy_url(proxy);
     }
-    builder = apply_sign_in_profile(builder, app, profile)?;
-    builder.build().map_err(|_| window_open_error())
+    #[cfg(target_os = "windows")]
+    let profile = {
+        let cache = app
+            .path()
+            .app_cache_dir()
+            .map_err(|_| window_prepare_error())?;
+        let profile =
+            private_profile::PrivateProfile::create(&cache).map_err(|_| window_prepare_error())?;
+        // WebView2 shares an InPrivate profile when its data directory matches.
+        // A unique directory also isolates us from any open Hosted preview.
+        builder = builder.data_directory(profile.path().to_path_buf());
+        profile
+    };
+    let window = builder.build().map_err(|_| window_open_error())?;
+    #[cfg(target_os = "windows")]
+    profile.attach(&window);
+    Ok(window)
 }
 
-fn apply_sign_in_profile<'a>(
-    builder: WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
-    app: &AppHandle,
-    profile: &str,
-) -> Result<WebviewWindowBuilder<'a, tauri::Wry, AppHandle>, LocalPoolError> {
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        Ok(builder.data_store_identifier(profile_store_id(profile)))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(builder.data_directory(sign_in_profile_directory(app, profile)?))
+fn sign_in_window_config(authorization_url: Url) -> WindowConfig {
+    // Only browser state is ephemeral. OAuth state/PKCE and saved credentials
+    // remain owned by the existing flow and credential authorities.
+    WindowConfig {
+        label: SIGN_IN_WINDOW.into(),
+        url: WebviewUrl::External(authorization_url),
+        incognito: true,
+        ..Default::default()
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn sign_in_profile_directory(app: &AppHandle, profile: &str) -> Result<PathBuf, LocalPoolError> {
-    let root = crate::platform::relay_dir(app).map_err(|_| window_prepare_error())?;
-    let directory = crate::storage_paths::StoragePaths::from_root(root)
-        .cache_root()
-        .join("sign-in")
-        .join(profile);
-    crate::platform::ensure_real_directory(&directory).map_err(|_| window_prepare_error())?;
-    Ok(directory)
+#[cfg(any(test, target_os = "windows"))]
+fn supports_private_sign_in(version: &str) -> bool {
+    let Ok(parts) = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    // Older WebView2 silently ignores the private-mode option.
+    parts.len() == 4 && parts.as_slice() >= [101, 0, 1210, 39].as_slice()
 }
 
 fn captures_callback_url(client_kind: OAuthClientKind, redirect: &Url, url: &Url) -> bool {
@@ -253,43 +289,6 @@ fn captures_callback_url(client_kind: OAuthClientKind, redirect: &Url, url: &Url
         OAuthClientKind::ExcelBps | OAuthClientKind::Siwc
     ) && url.origin() == redirect.origin()
         && url.path() == redirect.path()
-}
-
-fn sign_in_profile(client_kind: OAuthClientKind, account_id: Option<&str>) -> String {
-    let profile = account_profile(account_id);
-    match client_kind {
-        OAuthClientKind::Codex => profile,
-        OAuthClientKind::Siwc => format!("siwc-{profile}"),
-        OAuthClientKind::ExcelBps => format!("excel-bps-{profile}"),
-    }
-}
-
-fn account_profile(account_id: Option<&str>) -> String {
-    let Some(account_id) = account_id
-        .map(str::trim)
-        .filter(|account_id_text| !account_id_text.is_empty())
-    else {
-        return "new".to_string();
-    };
-    if (1..=80).contains(&account_id.len())
-        && account_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return account_id.to_string();
-    }
-    format!(
-        "account_{}",
-        hex::encode(Sha256::digest(account_id.as_bytes()))
-    )
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn profile_store_id(profile: &str) -> [u8; 16] {
-    let digest = Sha256::digest(profile.as_bytes());
-    let mut identifier = [0_u8; 16];
-    identifier.copy_from_slice(&digest[..16]);
-    identifier
 }
 
 pub(super) fn window_prepare_error() -> LocalPoolError {
@@ -320,39 +319,39 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_profile_names_do_not_escape_the_profile_directory() {
-        assert_eq!(account_profile(None), "new");
-        assert_eq!(account_profile(Some(" account_abc ")), "account_abc");
-        let escaped = account_profile(Some("../secret"));
-        assert!(!escaped.contains('/'));
-        assert!(!escaped.contains('\\'));
-        assert!(!escaped.contains("secret"));
-        assert_ne!(
-            profile_store_id("account_one"),
-            profile_store_id("account_two")
-        );
+    fn every_sign_in_requests_private_mode_without_a_saved_data_store() {
+        for path in [
+            "/authorize?client=codex",
+            "/authorize?client=bps",
+            "/authorize?client=siwc",
+        ] {
+            let url = Url::parse(&format!("https://auth.openai.com{path}")).unwrap();
+            for _ in 0..2 {
+                let config = sign_in_window_config(url.clone());
+                assert!(config.incognito);
+                assert!(config.data_directory.is_none());
+                assert!(config.data_store_identifier.is_none());
+                assert_eq!(config.label, SIGN_IN_WINDOW);
+                assert_eq!(config.url, WebviewUrl::External(url.clone()));
+            }
+        }
     }
 
     #[test]
-    fn siwc_webview_profiles_are_separate_without_moving_existing_client_profiles() {
-        for (kind, prefix) in [
-            (OAuthClientKind::Codex, ""),
-            (OAuthClientKind::Siwc, "siwc-"),
-            (OAuthClientKind::ExcelBps, "excel-bps-"),
+    fn old_or_unknown_webview_runtimes_cannot_fall_back_to_persistent_sign_in() {
+        for version in [
+            "100.0.1200.0",
+            "101.0.1210.38",
+            "",
+            "unknown",
+            "101.0.1210",
+            "101.0.1210.39.1",
         ] {
-            assert_eq!(sign_in_profile(kind, None), format!("{prefix}new"));
-            assert_eq!(
-                sign_in_profile(kind, Some("account_one")),
-                format!("{prefix}account_one")
-            );
+            assert!(!supports_private_sign_in(version), "{version}");
         }
-        assert_ne!(
-            profile_store_id(&sign_in_profile(OAuthClientKind::Siwc, Some("account_one"))),
-            profile_store_id(&sign_in_profile(
-                OAuthClientKind::Codex,
-                Some("account_one")
-            ))
-        );
+        for version in ["101.0.1210.39", "101.0.1210.40", "142.0.3595.94"] {
+            assert!(supports_private_sign_in(version), "{version}");
+        }
     }
 
     #[test]

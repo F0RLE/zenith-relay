@@ -27,7 +27,7 @@ pub use contracts::{
 };
 pub(crate) use contracts::{
     remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
-    repair_custom_tool_item_ids,
+    repair_custom_tool_item_ids, repair_tool_search_item_ids,
 };
 pub(crate) use gemini::{candidate_incomplete_reason, gemini_incomplete, prompt_blocked};
 pub use messages::{

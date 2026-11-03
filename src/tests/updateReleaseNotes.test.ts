@@ -67,8 +67,8 @@ describe("update release notes", () => {
     }
   });
 
-  test("keeps Unreleased translations aligned by topic, entries, and references", () => {
-    const section = releaseSection("Unreleased");
+  test("keeps 1.1.5 translations aligned by topic, entries, and references", () => {
+    const section = releaseSection("1.1.5");
     const english = localizeReleaseNotes(section, "en");
     const russian = localizeReleaseNotes(section, "ru");
     expect(english).toContain("### Fixed");
@@ -79,6 +79,16 @@ describe("update release notes", () => {
       expect(english).toContain(feature);
       expect(russian).toContain(feature);
     }
+  });
+
+  test("keeps the next cycle separate from the single dated 1.1.5 release", () => {
+    const section = releaseSection("Unreleased");
+    const english = localizeReleaseNotes(section, "en");
+    const russian = localizeReleaseNotes(section, "ru");
+    expect(releaseNotesLayout(russian)).toEqual(releaseNotesLayout(english));
+    expect(releaseNotesLinks(russian)).toEqual(releaseNotesLinks(english));
+    expect([...changelog.matchAll(/^## \[1\.1\.5\]/gm)]).toHaveLength(1);
+    expect(releaseSection("1.1.5")).toMatch(/^## \[1\.1\.5\] - \d{4}-\d{2}-\d{2}\r?\n/);
   });
 
   test("keeps the Excel client-header change in both 1.1.5 translations", () => {

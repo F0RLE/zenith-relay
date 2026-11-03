@@ -40,7 +40,8 @@ use types::{
 };
 pub use types::{RepairPreview, RepairResult, RollbackResult, TargetProvider};
 
-pub fn preview(
+#[cfg(test)]
+fn preview(
     state_root: &Path,
     profile_roots: &[PathBuf],
     target_provider: TargetProvider,
@@ -55,18 +56,35 @@ pub fn preview(
     )
 }
 
+#[cfg(test)]
 fn preview_with_rewrite_budget(
     state_root: &Path,
     profile_roots: &[PathBuf],
     target_provider: TargetProvider,
     codex_running: bool,
+    remaining_rewrite_bytes: u64,
+) -> Result<RepairPreview, String> {
+    preview_for_provider(
+        state_root,
+        profile_roots,
+        target_provider.as_str(),
+        codex_running,
+        remaining_rewrite_bytes,
+    )
+}
+
+fn preview_for_provider(
+    state_root: &Path,
+    profile_roots: &[PathBuf],
+    target: &str,
+    codex_running: bool,
     mut remaining_rewrite_bytes: u64,
 ) -> Result<RepairPreview, String> {
+    validate_target_provider(target)?;
     if profile_roots.is_empty() || profile_roots.len() > MAX_PROFILES {
         return Err("repair must select between 1 and 8 profiles".to_string());
     }
     let roots = scan::canonical_profile_roots(profile_roots)?;
-    let target = target_provider.as_str();
     let mut rollout_files = Vec::new();
     let mut history_rollouts = Vec::new();
     let mut databases = Vec::new();
@@ -225,14 +243,31 @@ pub fn synchronize(
     profile_root: &Path,
     target_provider: TargetProvider,
 ) -> Result<Option<RepairResult>, String> {
+    synchronize_provider(
+        state_root,
+        backup_root,
+        profile_root,
+        target_provider.as_str(),
+    )
+}
+
+/// Explicit connection recovery can target a user-defined provider captured in
+/// its snapshot. The manual command keeps its existing typed target choices.
+pub(super) fn synchronize_provider(
+    state_root: &Path,
+    backup_root: &Path,
+    profile_root: &Path,
+    target_provider: &str,
+) -> Result<Option<RepairResult>, String> {
     if !profile_root.is_dir() {
         return Ok(None);
     }
-    let preview = preview(
+    let preview = preview_for_provider(
         state_root,
         &[profile_root.to_path_buf()],
         target_provider,
         false,
+        MAX_TOTAL_REWRITE_BYTES,
     )?;
     if preview.rollout_record_count == 0 && preview.sqlite_row_count == 0 {
         let _ = fs::remove_file(snapshot::snapshot_path(state_root, &preview.session_id)?);

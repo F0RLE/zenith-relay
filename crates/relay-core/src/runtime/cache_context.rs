@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 mod fingerprint;
+mod policy;
 mod store;
 use store::{CompletedRequest, StoreState};
 
@@ -272,6 +273,8 @@ fn diagnostics(
             .zip(client)
             .map(|(upstream, client)| upstream.relay_history(client))
             .unwrap_or_default(),
+        client_policy: client.map(|client| client.policy.clone()),
+        upstream_policy: upstream.map(|upstream| upstream.policy.clone()),
         candidate_changed: None,
         previous_completed_age_ms: previous.map(|old| now_ms.saturating_sub(old.completed_at_ms)),
         provider: None,

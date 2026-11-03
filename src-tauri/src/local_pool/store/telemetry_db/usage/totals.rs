@@ -207,7 +207,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
     if let Some(workload) = query.workload {
         // Existing records retain explicit task markers in error_category,
         // including successful background requests. Unknown/unmarked records
-        // stay in conversation: model names and prompt contents are not evidence.
+        // stay in conversation.
         // The same predicate scopes logical outcomes AND every physical send.
         clauses.push(
             "CASE WHEN error_category IN ('codex_memory_extraction', 'codex_memory_consolidation', \

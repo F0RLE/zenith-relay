@@ -27,6 +27,7 @@ use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
 mod rotation_persistence;
+mod siwc_recovery;
 
 #[derive(Default)]
 struct MemorySecrets {

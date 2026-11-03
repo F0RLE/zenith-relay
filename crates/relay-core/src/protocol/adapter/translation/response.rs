@@ -331,7 +331,7 @@ pub(super) fn encode(
                 let target = client_tools.get(name);
                 let client_name = target.map_or(name.as_str(), |target| target.name.as_str());
                 let mut item = if target.is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch) {
-                    json!({"type":"tool_search_call","id":format!("ts_{}_{index}",response.id),"call_id":id,
+                    json!({"type":"tool_search_call","id":format!("tsc_{}_{index}",response.id),"call_id":id,
                         "execution":"client","arguments":serde_json::from_str::<Value>(arguments).map_err(|_| AdapterError::upstream_response_invalid())?,"status":"completed"})
                 } else if target.is_some_and(|target| target.kind == ResponsesToolKind::Custom) {
                     json!({

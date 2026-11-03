@@ -42,6 +42,7 @@ fn usage_survives_database_reopen() {
             ),
             attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
             request_timing: None,
+            route_latency: None,
             cache_affinity: None,
             cache_context: Some(
                 serde_json::from_value(serde_json::json!({
@@ -77,6 +78,10 @@ fn usage_survives_database_reopen() {
         http_status: 200,
         error_category: None,
         tool_use: ToolUseDiagnostics {
+            provider_usage: Some(serde_json::from_value(serde_json::json!({
+                "serverToolCalls":{"web_search":0,"code_execution":2},
+                "cacheWriteTokensByTtl":{"5m":1}
+            })).unwrap()),
             client_tool_count: 73,
             forwarded_tool_count: 73,
             tool_choice: ToolChoiceMode::Auto,

@@ -36,8 +36,8 @@ pub(super) fn handle_collected_image(
         let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
-        if (retryable_route_failure(route, status, failure.category, false) || capability_failure)
-            && !route_forbids_fallback(route, status, failure.category)
+        if (retryable_route_failure(route, status, &failure, false) || capability_failure)
+            && !route_forbids_fallback(route, status, &failure)
         {
             let failure_state = if capability_failure {
                 settle_image_capability_failure(

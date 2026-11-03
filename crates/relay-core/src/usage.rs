@@ -4,6 +4,7 @@ mod context_size;
 mod event;
 mod image;
 mod reasoning;
+mod structured;
 mod tools;
 mod transport;
 mod upstream_error;
@@ -24,23 +25,26 @@ pub use api_equivalent::{
     normalize_model_price_overrides, resolve_candidate_price,
 };
 pub use cache_context::{
-    CacheContextBaseline, CacheContextDiagnostics, CacheContextScope, CacheContextSection,
-    CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind, LeadingContextAlignment,
-    ProviderCacheDiagnostics, ProviderCacheMissReason,
+    CacheBreakpointDiagnostics, CacheContextBaseline, CacheContextDiagnostics, CacheContextScope,
+    CacheContextSection, CacheHistoryComparison, CacheHistoryDiagnostics, CacheInputKind,
+    CacheKeyPresence, CachePolicyDiagnostics, CachePolicyMode, CachePolicyTtl, CachePrewarm,
+    LeadingContextAlignment, ProviderCacheDiagnostics, ProviderCacheMissReason,
 };
 pub use context_size::{ConversationSizeBreakdown, RequestContextSize};
 pub use event::{ErrorOrigin, UsageEvent, UsageTransport};
 pub use image::ImageUsage;
 pub(crate) use reasoning::ReasoningEffortDiagnostics;
 pub use reasoning::normalize_reasoning_effort;
+pub use structured::ProviderUsageDetails;
+pub(crate) use structured::reported_cache_write_buckets;
 pub use tools::{
     BasisPointsCatalogDiagnostics, BasisPointsCatalogSelectionReason, TerminalOutputKind,
     ToolChoiceMode, ToolUseDiagnostics,
 };
 pub use transport::{
     CodexServerTiming, FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics,
-    RequestPayloadMode, RequestPreparationDiagnostics, TransportDiagnostics,
-    TransportFallbackReason, TransportMode, TransportResponseFormat,
+    RequestPayloadMode, RequestPreparationDiagnostics, StreamResponseDiagnostics,
+    TransportDiagnostics, TransportFallbackReason, TransportMode, TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

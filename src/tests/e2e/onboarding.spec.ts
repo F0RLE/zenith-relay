@@ -360,6 +360,40 @@ test("quick setup can switch to Russian without untranslated keys", async ({ pag
 });
 
 for (const theme of ["light", "dark"] as const) {
+  test(`welcome ambient background does not create scrollbars ${theme}`, async ({ page }) => {
+    await installTauriMock(page, { onboarding: false, locale: "ru", theme, populated: true });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Zenith Relay" })).toBeVisible();
+    await expect(page.locator("#splash-screen")).toHaveCount(0);
+    const shell = page.locator(".setup-shell-intro");
+    for (const viewport of [{ width: 1840, height: 864 }, { width: 1160, height: 760 }, { width: 840, height: 560 }]) {
+      await page.setViewportSize(viewport);
+      for (const reducedMotion of ["reduce", "no-preference"] as const) {
+        await page.emulateMedia({ reducedMotion });
+        for (const time of [0, 16_000, 32_000]) {
+          await shell.evaluate((element, currentTime) => {
+            for (const animation of element.getAnimations()) {
+              animation.pause();
+              animation.currentTime = currentTime;
+            }
+          }, time);
+          await expect.poll(() => shell.evaluate((element) =>
+            element.scrollWidth <= element.clientWidth + 1 && element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+          expect(await page.locator(".intro-hero, .intro-actions button, .setup-header-intro").evaluateAll((elements) => elements.every((element) => {
+            const box = element.getBoundingClientRect();
+            return box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight;
+          }))).toBe(true);
+        }
+      }
+      await page.screenshot({ path: `output/playwright/onboarding-scroll-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    }
+    // Keep real content scrollable instead of hiding overflow to conceal the bug.
+    await shell.evaluate((element) => { element.style.height = "240px"; });
+    expect(await shell.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await shell.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    expect(await shell.evaluate((element) => element.scrollTop > 0)).toBe(true);
+  });
+
   for (const viewport of [{ width: 1160, height: 760 }, { width: 840, height: 560 }, { width: 390, height: 844 }] as const) {
     test(`onboarding layout ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await installTauriMock(page, { onboarding: false, locale: "ru", theme, populated: true });

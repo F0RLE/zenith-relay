@@ -1,4 +1,5 @@
 use super::*;
+use crate::error_codes;
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -18,6 +19,9 @@ use std::sync::{
 };
 use url::Url;
 
+mod authorization_probe;
+mod partial;
+mod probe;
 mod transport;
 
 async fn check_client(router: Router) -> (CodexSubscriptionClient, tokio::task::JoinHandle<()>) {
@@ -52,6 +56,51 @@ fn account_check_prefers_the_requested_record_and_reads_entitlement() {
     assert_eq!(metadata.account_id.as_deref(), Some("account-target"));
     assert_eq!(metadata.plan_type.as_deref(), Some("business"));
     assert_eq!(metadata.active_until_ms, Some(1_788_998_400_000));
+}
+
+#[test]
+fn subscription_metadata_rejects_an_absent_requested_account() {
+    for payload in [
+        json!({"accounts": [{"account": {"id": "other", "plan_type": "pro"}}]}),
+        json!({"account_ordering": ["other"], "accounts": {
+            "other": {"account": {"id": "other", "plan_type": "pro"}}
+        }}),
+    ] {
+        let failure = parse_accounts_check(&payload, "account-target").unwrap_err();
+        assert_eq!(failure.code, error_codes::SUBSCRIPTION_ACCOUNT_MISSING);
+        assert!(!failure.retryable);
+    }
+}
+
+#[test]
+fn subscription_metadata_accepts_only_response_backed_aliases_and_keeps_ordering() {
+    let payload = json!({"account_ordering": ["first"], "accounts": {
+        "first": {"account": {"id": "other", "plan_type": "pro"}},
+        "account-alias": {"account": {"id": "account-canonical", "plan_type": "plus"}}
+    }});
+    for requested in ["account-alias", "account-canonical", " ACCOUNT-CANONICAL "] {
+        let metadata = parse_accounts_check(&payload, requested).unwrap();
+        assert_eq!(metadata.account_id.as_deref(), Some("account-canonical"));
+        assert_eq!(metadata.plan_type.as_deref(), Some("plus"));
+    }
+    assert_eq!(
+        parse_accounts_check(&payload, "")
+            .unwrap()
+            .account_id
+            .as_deref(),
+        Some("other")
+    );
+}
+
+#[test]
+fn subscription_metadata_prefers_a_canonical_id_over_a_conflicting_map_key() {
+    let payload = json!({"account_ordering": ["account-target"], "accounts": {
+        "account-target": {"account": {"id": "other", "plan_type": "pro"}},
+        "second": {"account": {"id": "account-target", "plan_type": "plus"}}
+    }});
+    let metadata = parse_accounts_check(&payload, "account-target").unwrap();
+    assert_eq!(metadata.account_id.as_deref(), Some("account-target"));
+    assert_eq!(metadata.plan_type.as_deref(), Some("plus"));
 }
 
 #[test]
@@ -292,10 +341,10 @@ async fn account_check(headers: HeaderMap, request: Request) -> impl IntoRespons
     assert!(headers.get("originator").is_none());
     assert!(headers.get("version").is_none());
     Json(json!({
-        "accounts": [{
+        "accounts": {"account-hint": {
             "account": {"id": "account-canonical"},
             "entitlement": {"subscription_plan": "plus"}
-        }]
+        }}
     }))
 }
 

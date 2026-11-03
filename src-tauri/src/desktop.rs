@@ -7,13 +7,25 @@ use crate::{
 };
 
 mod commands;
+mod instance_command;
 
 use commands::*;
+use instance_command::InstanceCommand;
 pub fn run() {
     let started = Instant::now();
-    let start_in_tray = env::args().any(|arg| arg == "--tray");
+    let args: Vec<String> = env::args().collect();
+    let start_in_tray = args.iter().any(|arg| arg == "--tray");
+    let command = InstanceCommand::parse(&args);
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let command = InstanceCommand::parse(&args);
+            if command != InstanceCommand::OpenWindow {
+                if command.targets(std::process::id()) {
+                    app.state::<AppState>().request_exit();
+                    app.exit(0);
+                }
+                return;
+            }
             let shown_at = Instant::now();
             crate::tray::show_main_window(app);
             if let Some(desktop_state) = app.try_state::<local_pool::DesktopState>() {
@@ -29,7 +41,21 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
-        .setup(move |app| setup_desktop(app, started, start_in_tray))
+        .setup(move |app| {
+            // A shutdown helper with no existing primary exits without opening
+            // storage, starting a gateway or replacing the diagnostic session.
+            if command != InstanceCommand::OpenWindow {
+                app.state::<AppState>().request_exit();
+                app.handle()
+                    .exit(if command == InstanceCommand::InvalidShutdown {
+                        2
+                    } else {
+                        0
+                    });
+                return Ok(());
+            }
+            setup_desktop(app, started, start_in_tray)
+        })
         .on_window_event(on_main_window_event)
         .invoke_handler(desktop_commands())
         .build(tauri::generate_context!())
@@ -67,6 +93,7 @@ fn setup_desktop(
     };
     crate::diagnostics::initialize(&relay_root);
     crate::launcher::settings::initialize(&relay_root);
+    platform::localization::initialize(&relay_root);
     let initialized_state = match local_pool::initialize(&app_handle) {
         Ok(initialized_state) => initialized_state,
         Err(error) => {
@@ -151,6 +178,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
     tauri::generate_handler![
         get_platform,
         get_system_locale,
+        set_ui_language,
         crate::launcher::launch_application,
         crate::launcher::hosted_preview::open_hosted_preview,
         crate::launcher::settings::get_application_launch_path,
@@ -168,6 +196,7 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::connections::edit::delete_local_source,
         local_pool::commands::connections::edit::rotate_local_source_key,
         local_pool::commands::connections::inspect::test_local_source,
+        local_pool::commands::connections::inspect::check_local_source_connection,
         local_pool::commands::connections::inspect::refresh_local_source_data,
         local_pool::commands::connections::inspect::get_local_source_stats,
         local_pool::accounts::import_orchestrator::start_local_account_import,

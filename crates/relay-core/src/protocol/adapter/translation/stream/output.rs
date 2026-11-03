@@ -257,7 +257,7 @@ impl TranslationStream {
                         let mut item = if target
                             .is_some_and(|target| target.kind == ResponsesToolKind::ToolSearch)
                         {
-                            json!({"type":"tool_search_call","id":format!("ts_{}_{output_index}",self.decoded_response.id),"call_id":id,"execution":"client","arguments":{},"status":"in_progress"})
+                            json!({"type":"tool_search_call","id":format!("tsc_{}_{output_index}",self.decoded_response.id),"call_id":id,"execution":"client","arguments":{},"status":"in_progress"})
                         } else if target
                             .is_some_and(|target| target.kind == ResponsesToolKind::Custom)
                         {

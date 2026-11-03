@@ -1,11 +1,64 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+import { openGatewayApi } from "./operations/helpers";
 
 type HeldSnapshotWindow = {
   __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
   __HELD_SNAPSHOT_READY__?: boolean;
   __RELEASE_SNAPSHOT__?: () => void;
 };
+
+for (const dirty of [false, true]) {
+  test(`gateway snapshot changes refresh only a clean port field, dirty=${dirty}`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false });
+    await page.goto("/");
+    await openGatewayApi(page);
+    const port = page.locator("#gateway-api-port");
+    await expect(port).toHaveValue("14998");
+    if (dirty) await port.fill("18001");
+    await page.evaluate(async () => {
+      await (window as unknown as HeldSnapshotWindow).__TAURI_INTERNALS__.invoke("update_local_gateway_port", { port: 18002 });
+    });
+    // Access intentionally skips unsolicited full snapshots. A normal action
+    // refreshes settings without navigating away from the unsaved port field.
+    await page.getByRole("button", { name: /^Start/ }).click();
+    await expect(page.locator(".gateway-api-address")).toHaveText("http://127.0.0.1:18002/v1");
+    await expect(port).toHaveValue(dirty ? "18001" : "18002");
+    if (dirty) {
+      await port.press("Enter");
+      await expect(page.locator(".gateway-api-address")).toHaveText("http://127.0.0.1:18001/v1");
+      await expect(port).toHaveValue("18001");
+    }
+  });
+}
+
+test("source name, address and price drafts survive a background source refresh", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources", exact: true }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "Edit source", exact: true });
+  await editor.getByLabel("Name", { exact: true }).fill("Unsaved source name");
+  await editor.getByLabel("API address", { exact: true }).fill("https://draft.invalid/v1");
+  await editor.getByRole("tab", { name: "Pricing", exact: true }).click();
+  await editor.locator("details > summary").first().click();
+  const price = editor.getByRole("textbox", { name: "Input token price for gpt-5.4", exact: true });
+  await price.fill("4.25");
+  await page.evaluate(async () => {
+    const invoke = (window as unknown as HeldSnapshotWindow).__TAURI_INTERNALS__.invoke;
+    const runtime = await invoke("get_local_runtime_state") as { sources: Array<{ id: string; [key: string]: unknown }> };
+    const source = runtime.sources[0]!;
+    await invoke("update_local_source", { input: { ...source, sourceId: source.id,
+      name: "Externally updated source", baseUrl: "https://external.invalid/v1", modelPriceOverrides: {} } });
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await expect(editor.getByText("https://external.invalid/v1", { exact: true })).toBeVisible();
+  await expect(price).toHaveValue("4.25");
+  await editor.getByRole("tab", { name: "General", exact: true }).click();
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Unsaved source name");
+  await expect(editor.getByLabel("API address", { exact: true })).toHaveValue("https://draft.invalid/v1");
+});
 
 async function holdNextSnapshot(page: Page) {
   await page.evaluate((command) => {

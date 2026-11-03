@@ -611,7 +611,7 @@ fn chat_bridge_keeps_apply_patch_as_a_custom_tool_call() {
 }
 #[test]
 fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
-    let request = json!({
+    let mut request = json!({
         "model": "grok",
         "input": [
             {"type": "additional_tools", "tools": [{
@@ -638,6 +638,11 @@ fn chat_bridge_flattens_selected_codex_namespace_and_restores_it_on_output() {
         ],
         "tool_choice": {"type": "function", "namespace": "mcp__synthetic", "name": "lookup"}
     });
+    let current_namespace = request["input"][0]["tools"][0].clone();
+    request["tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(current_namespace);
     let prepared = prepare(
         WireApi::Responses,
         WireApi::ChatCompletions,

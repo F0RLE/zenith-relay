@@ -156,6 +156,7 @@ fn repair_account_body(
         &mut ResponsesItemPrefixRepairs {
             function_ids: &mut account_failure_input.repairs.function_item_id,
             custom_tool_ids: &mut account_failure_input.repairs.custom_tool_item_id,
+            tool_search_ids: &mut account_failure_input.repairs.tool_search_item_id,
             message_ids: &mut account_failure_input.repairs.message_item_id,
         },
         tried,
@@ -384,9 +385,8 @@ fn settle_account_failure(
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
     if not_sent
-        && ((classified.cache_write_rejected
-            && !route_forbids_fallback(route, status, failure.category))
-            || retryable_route_failure(route, status, failure.category, has_previous_response_id))
+        && ((classified.cache_write_rejected && !route_forbids_fallback(route, status, &failure))
+            || retryable_route_failure(route, status, &failure, has_previous_response_id))
     {
         if response_affinity_hit && !*requires_affinity_owner {
             *response_affinity_key = None;

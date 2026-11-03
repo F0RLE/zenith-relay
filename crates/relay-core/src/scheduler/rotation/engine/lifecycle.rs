@@ -325,13 +325,11 @@ impl RotationEngine {
         // of possibly accepted work.
         if health_counted {
             self.observe_health(&lease.candidate_id, &lease.route_key, health, now_ms);
-            if health == HealthObservation::Success
-                && let Some(latency_ms) = first_output_latency_ms
-            {
+            if health == HealthObservation::Success {
                 self.observe_first_output_latency(
                     &lease.candidate_id,
                     &lease.route_key,
-                    latency_ms,
+                    first_output_latency_ms,
                     now_ms,
                 );
             }

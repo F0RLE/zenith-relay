@@ -1,6 +1,58 @@
 use super::*;
 
 #[tokio::test]
+async fn siwc_historical_catalog_collision_keeps_native_forwarding() {
+    for stream in [false, true] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let native = AccessServer::start(json!([]), false).await;
+        siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        *crate::poison::mutex(&siwc.state.generation_body) = answer();
+        let (base, task) = recovery::gateway(runtime(&siwc, &native).await).await;
+        let mut payload = request(stream);
+        let historical = json!({"type":"additional_tools","role":"developer","tools":[{
+            "type":"function","name":"relay_catalog","description":"Synthetic client-owned function",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}}}
+        }]});
+        payload["input"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, historical.clone());
+        let reply = retry_admission::bounded_client()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        let status = reply.status();
+        let text = reply.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            terminal(&text, stream)["output"][0]["content"][0]["text"],
+            "Synthetic ready"
+        );
+        let bodies = crate::poison::mutex(&siwc.state.generation_bodies);
+        assert_eq!(bodies.len(), 1);
+        let sent = &bodies[0];
+        assert_eq!(sent["input"][0], historical);
+        assert!(!sent.to_string().contains("Relay local tool catalog."));
+        assert_eq!(sent["reasoning"], payload["reasoning"]);
+        assert_eq!(
+            sent["prompt_cache_options"],
+            payload["prompt_cache_options"]
+        );
+        assert_eq!(
+            crate::tool_policy::catalog_stats_with_sizes(sent, false).count,
+            35
+        );
+        assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(siwc.state.attachment_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn siwc_native_catalog_cancellation_does_not_start_another_generation() {
     let siwc = AccessServer::start(json!([]), false).await;
     let native = AccessServer::start(json!([]), false).await;
@@ -79,8 +131,8 @@ async fn siwc_native_catalog_continuation_rejects_replaced_authorization() {
         .unwrap();
     let budget = SharedRequestBudget::for_incoming_request(3);
     let result = runtime
-        .send_catalog_continuation(
-            &route,
+        .send_account_request_with_owner(
+            &route.candidate_id,
             reqwest::Client::new()
                 .post(siwc.responses_url.clone())
                 .json(&json!({"model":"gpt-test"})),

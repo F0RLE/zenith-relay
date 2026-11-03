@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { relayCommands } from "../features/relay/api/commands";
 import { redactFeedbackText } from "../features/relay/state/feedback";
 import { revealStartupShell } from "../platform/startup";
+import i18next from "i18next";
 
 type Props = { children: ReactNode };
 type State = { hasError: boolean };
@@ -31,11 +32,11 @@ export class RelayErrorBoundary extends Component<Props, State> {
 
   public override render() {
     if (!this.state.hasError) return this.props.children;
-    const russian = document.documentElement.lang.startsWith("ru");
+    const text = (key: string, fallback: string) => i18next.isInitialized ? String(i18next.t(`startup.${key}`, { defaultValue: fallback })) : fallback;
     return <section className="relay-render-error" role="alert">
-      <h1>{russian ? "Relay не смог отобразить этот экран" : "Relay could not render this screen"}</h1>
-      <p>{russian ? "Ошибка записана в папку диагностики. Перезагрузите приложение и повторите действие." : "The error was saved in diagnostics. Reload the app and try the action again."}</p>
-      <button type="button" onClick={() => window.location.reload()}>{russian ? "Перезагрузить" : "Reload"}</button>
+      <h1>{text("renderError", "Relay could not render this screen")}</h1>
+      <p>{text("renderRecovery", "The error was saved in diagnostics. Reload the app and try the action again.")}</p>
+      <button type="button" onClick={() => window.location.reload()}>{text("reload", "Reload")}</button>
     </section>;
   }
 }

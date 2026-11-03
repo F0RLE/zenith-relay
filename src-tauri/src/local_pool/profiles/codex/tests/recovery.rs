@@ -962,20 +962,16 @@ fn failed_backup_secret_cleanup_rolls_restore_back() {
         &secrets,
     )
     .unwrap();
+    let managed_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+    let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
+    let managed_backup = fs::read(backup_path(&backups)).unwrap();
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let managed_catalog = read_optional_bytes(&catalog_path).unwrap();
     assert!(restore_with(&home, &backups, &secrets).is_err());
-    assert_eq!(
-        fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
-        "model_provider = \"openai\"\n"
-    );
-    assert!(
-        fs::read_to_string(home.join(AUTH_FILE))
-            .unwrap()
-            .contains("old")
-    );
-    let pending: Value =
-        serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
-    assert_eq!(pending["restorePending"], true);
-    assert!(!managed_model_catalog_path(&backups).unwrap().exists());
+    assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
+    assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
+    assert_eq!(fs::read(backup_path(&backups)).unwrap(), managed_backup);
+    assert_eq!(read_optional_bytes(&catalog_path).unwrap(), managed_catalog);
     assert!(secrets.load(BACKUP_SECRET_REF).unwrap().is_some());
     fs::remove_dir_all(root).unwrap();
 }
@@ -1003,7 +999,10 @@ fn changed_backup_during_restore_rolls_profile_back() {
 
     let error = restore_with(&home, &backups, &secrets).unwrap_err();
 
-    assert!(matches!(error.code, ErrorCode::ProfileRestoreBlocked));
+    // The transaction refuses to roll back an undo record owned by a newer
+    // writer, and reports that recovery is needed without overwriting it.
+    assert_eq!(error.code, ErrorCode::RecoveryRequired);
+    assert!(error.message.contains("profile rollback failed"));
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
     assert_eq!(fs::read(backup_path(&backups)).unwrap(), external_backup);

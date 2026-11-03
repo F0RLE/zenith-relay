@@ -207,7 +207,7 @@ fn windows_store_codex_matches_only_the_desktop_root() {
     assert!(!is_codex_process_identity(
         "codex.exe",
         Some(Path::new(
-            r"C:\Users\FORLE\AppData\Local\OpenAI\Codex\bin\codex.exe"
+            r"C:\Users\synthetic-user\AppData\Local\OpenAI\Codex\bin\codex.exe"
         )),
         &["app-server"]
     ));
@@ -225,7 +225,9 @@ fn windows_store_codex_matches_only_the_desktop_root() {
 fn windows_relay_is_never_classified_as_codex() {
     assert!(!is_codex_process_identity(
         "Zenith Relay.exe",
-        Some(Path::new(r"C:\Users\FORLE\Desktop\Zenith Relay.exe")),
+        Some(Path::new(
+            r"C:\Users\synthetic-user\Desktop\Zenith Relay.exe"
+        )),
         &[""]
     ));
 }

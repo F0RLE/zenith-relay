@@ -119,6 +119,7 @@ pub async fn create_codex_profile_snapshot(
     state: State<'_, DesktopState>,
 ) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
     let _mutation = state.setup_guard().await;
+    codex::validate_snapshot_capture_mode(&default_codex_home())?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let snapshot_create_result =
         snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
@@ -137,6 +138,7 @@ pub async fn restore_full_codex_profile_snapshot(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
+        (&state.transient_root(), &state.history_repair_backup_root()),
     )
     .map_err(Into::into);
     restart_codex_after_restore(stopped, snapshot_restore_result, launch_codex_with_profile)

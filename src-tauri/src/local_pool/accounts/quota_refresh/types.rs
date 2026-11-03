@@ -1,4 +1,5 @@
 use super::*;
+use zenith_relay_core::accounts::TokenDispatchRevision;
 
 pub(in crate::local_pool::accounts) use zenith_relay_core::accounts::TOKEN_REFRESH_SKEW_MS;
 
@@ -111,6 +112,7 @@ pub struct AccountQuotaRefreshResponse {
 pub(crate) struct PreparedAccountCredentials {
     pub(in crate::local_pool::accounts) oauth_client_kind:
         zenith_relay_core::providers::chatgpt::OAuthClientKind,
+    pub(in crate::local_pool::accounts) token_revision: TokenDispatchRevision,
     pub(in crate::local_pool::accounts) tokens: TokenSet,
     pub(in crate::local_pool::accounts) provider_account_id: String,
     pub(in crate::local_pool::accounts) proxy: Option<ProxyConfig>,
@@ -123,6 +125,7 @@ pub(in crate::local_pool) struct PreparedAccountAuthorization {
     pub(in crate::local_pool::accounts) authorization: HeaderValue,
     pub(in crate::local_pool::accounts) subscription_authorization: Option<HeaderValue>,
     pub(in crate::local_pool::accounts) tokens: Option<TokenSet>,
+    pub(in crate::local_pool::accounts) token_revision: Option<TokenDispatchRevision>,
     pub(in crate::local_pool::accounts) agent_task_id: Option<String>,
     pub(in crate::local_pool::accounts) provider_account_id: String,
     pub(in crate::local_pool::accounts) proxy: Option<ProxyConfig>,
@@ -154,6 +157,7 @@ impl PreparedAccountAuthorization {
             oauth_client_kind: credentials.oauth_client_kind,
             subscription_authorization: Some(authorization.clone()),
             authorization,
+            token_revision: Some(credentials.token_revision),
             tokens: Some(credentials.tokens),
             agent_task_id: None,
             provider_account_id: credentials.provider_account_id,

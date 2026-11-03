@@ -83,9 +83,8 @@ pub fn reduce_account_usage(
     let failure_category = observation
         .error_category
         .filter(|category| *category != error_codes::UPSTREAM_STATUS);
-    // A quota rejection asks for a fresh window read. It is not an account
-    // outage: the windows themselves decide rotation, and a stale copy of this
-    // code must not keep a recoverable account looking broken.
+    // Quota windows own rotation. Refresh them after rejection and clear stale
+    // quota-health warnings for recoverable accounts.
     if failure_category == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED) {
         let owns_quota_error =
             state.last_error_code.as_deref() == Some(error_codes::UPSTREAM_QUOTA_EXHAUSTED);

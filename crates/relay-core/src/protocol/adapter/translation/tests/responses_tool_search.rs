@@ -1,5 +1,7 @@
 use super::*;
 
+mod catalog_authority;
+
 fn catalog() -> Value {
     json!({"input":"Find the record","parallel_tool_calls":false,"tools":[
         {"type":"tool_search","execution":"client","parameters":{"type":"object","properties":{"goal":{"type":"string"}},"required":["goal"],"additionalProperties":false}},
@@ -159,6 +161,7 @@ fn client_tool_search_completes_discovery_call_result_and_next_answer_across_jso
                 );
                 let item = &first.response_body["output"][0];
                 assert_eq!(item["type"], "tool_search_call");
+                assert!(item["id"].as_str().unwrap().starts_with("tsc_"));
                 assert_eq!(item["execution"], "client");
                 assert_eq!(item["call_id"], "call_search");
                 assert_eq!(item["arguments"], json!({"goal":"lookup"}));

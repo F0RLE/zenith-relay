@@ -278,7 +278,7 @@ test("local proxy storage confirms assigned deletion and sends one atomic batch 
   await page.getByLabel("Select all visible proxies").check();
   await page.locator(".proxy-selection-toolbar").getByRole("button", { name: "Delete", exact: true }).click();
   const confirmation = page.getByRole("dialog", { name: "Confirm action" });
-  await expect(confirmation).toContainText("1 selected proxy endpoint(s) are used by 2 account(s). Delete all 5 selected proxies and return those accounts to their inherited route?");
+  await expect(confirmation).toContainText("Delete 5 proxies? 1 serve 2 accounts, which will return to their inherited route.");
   await confirmation.getByRole("button", { name: "Detach and delete" }).click();
   await expect(page.getByText("Proxy storage is empty", { exact: true })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { accountIds?: string[]; proxyIds?: string[] } } }> }).__TAURI_TEST_INVOKES__);

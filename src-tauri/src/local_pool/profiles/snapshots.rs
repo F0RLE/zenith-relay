@@ -9,10 +9,24 @@ use uuid::Uuid;
 use zenith_relay_core::unix_time_ms as now_ms;
 
 pub(super) const SNAPSHOT_VERSION: u32 = 1;
-pub(super) const PAYLOAD_VERSION: u32 = 1;
+pub(super) const PAYLOAD_VERSION: u32 = 2;
 mod io;
 
 use io::SnapshotSecrets;
+
+struct ProfileSecrets<'a, S>(&'a S);
+
+impl<S: SnapshotSecrets> codex::SecretBackend for ProfileSecrets<'_, S> {
+    fn save(&self, reference: &str, value: &str) -> Result<()> {
+        self.0.save(reference, value)
+    }
+    fn load(&self, reference: &str) -> Result<Option<String>> {
+        self.0.load(reference)
+    }
+    fn delete(&self, reference: &str) -> Result<()> {
+        self.0.delete(reference)
+    }
+}
 
 mod record;
 use record::{
@@ -118,8 +132,19 @@ pub fn create(
     )
 }
 
-pub fn restore_full(codex_home: &Path, backup_root: &Path, snapshot_id: &str) -> Result<()> {
-    restore_full_with(codex_home, backup_root, snapshot_id, &io::OsSnapshotSecrets)
+pub fn restore_full(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot_id: &str,
+    history_roots: (&Path, &Path),
+) -> Result<()> {
+    restore_full_with(
+        codex_home,
+        backup_root,
+        snapshot_id,
+        history_roots,
+        &io::OsSnapshotSecrets,
+    )
 }
 
 pub fn delete(backup_root: &Path, snapshot_id: &str) -> Result<()> {
@@ -136,7 +161,9 @@ fn create_with(
     let snapshot_name = normalize_name(requested_name)?;
     fs::create_dir_all(codex_home).map_err(io::io_error)?;
     let profile_dir = fs::canonicalize(codex_home).map_err(io::io_error)?;
-    let snapshot = codex::snapshot_user_profile(&profile_dir, backup_root)?;
+    let captured =
+        codex::capture_user_profile_snapshot(&profile_dir, backup_root, &ProfileSecrets(secrets))?;
+    let snapshot = captured.profile;
     validate_profile_content(&snapshot)?;
     let snapshot_id = Uuid::new_v4().to_string();
     let payload_secret_ref = io::payload_secret_ref(&snapshot_id);
@@ -146,6 +173,8 @@ fn create_with(
         version: PAYLOAD_VERSION,
         config: snapshot.config,
         auth: snapshot.auth,
+        managed_model_catalog: captured.catalog,
+        managed_binding: captured.binding,
     })
     .map_err(io::invalid_data)?;
     secrets.save(&payload_secret_ref, &snapshot_payload_json)?;
@@ -175,6 +204,7 @@ fn restore_full_with(
     codex_home: &Path,
     backup_root: &Path,
     snapshot_id: &str,
+    history_roots: (&Path, &Path),
     secrets: &impl SnapshotSecrets,
 ) -> Result<()> {
     let path = io::metadata_path(backup_root, snapshot_id)?;
@@ -198,7 +228,40 @@ fn restore_full_with(
         config: snapshot_payload.config,
         auth: snapshot_payload.auth,
     };
-    codex::restore_full_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
+    if snapshot_payload.version == 1 {
+        codex::validate_legacy_snapshot_auth(&snapshot)?;
+    }
+    let provider = codex::snapshot_history_provider(&snapshot)?;
+    let repair_error = |message| LocalPoolError::new(ErrorCode::RecoveryRequired, message);
+    let history = super::repair::synchronize_provider(
+        history_roots.0,
+        history_roots.1,
+        &profile_dir,
+        &provider,
+    )
+    .map_err(repair_error)?;
+    let result = codex::restore_full_user_profile_snapshot(
+        &profile_dir,
+        backup_root,
+        &snapshot,
+        snapshot_payload.managed_model_catalog.as_deref(),
+        snapshot_payload.managed_binding.as_ref(),
+        &ProfileSecrets(secrets),
+    );
+    if let Some(history) = history {
+        if let Err(error) = result {
+            if let Err(rollback) = super::repair::rollback(history_roots.1, &history.backup_id) {
+                return Err(LocalPoolError::new(
+                    error.code,
+                    format!("{}; history rollback failed: {rollback}", error.message),
+                ));
+            }
+            let _ = super::repair::discard(history_roots.1, &history.backup_id);
+            return Err(error);
+        }
+        let _ = super::repair::discard(history_roots.1, &history.backup_id);
+    }
+    result
 }
 
 fn delete_with(
@@ -232,6 +295,7 @@ fn delete_with(
 mod tests {
     use super::*;
     use std::{collections::HashMap, sync::Mutex};
+    mod recovery;
 
     #[derive(Default)]
     struct MemorySecrets(Mutex<HashMap<String, String>>);
@@ -256,13 +320,17 @@ mod tests {
     }
 
     #[test]
-    fn full_restore_replaces_the_profile_without_creating_an_extra_snapshot() {
+    fn authorization_restore_preserves_model_without_creating_an_extra_snapshot() {
         let root = crate::files::test_temp_root("profile-snapshot-restore");
         let profile = root.join("profile");
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
         fs::write(profile.join("config.toml"), "model = \"original-secret\"\n").unwrap();
-        fs::write(profile.join("auth.json"), "{\"token\":\"auth-secret\"}").unwrap();
+        fs::write(
+            profile.join("auth.json"),
+            "{\"OPENAI_API_KEY\":\"auth-secret\"}",
+        )
+        .unwrap();
         let secrets = MemorySecrets::default();
 
         let first = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
@@ -271,16 +339,27 @@ mod tests {
         assert!(!metadata.contains("auth-secret"));
 
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
-        fs::write(profile.join("auth.json"), "{\"token\":\"changed\"}").unwrap();
-        restore_full_with(&profile, &backups, &first.id, &secrets).unwrap();
+        fs::write(
+            profile.join("auth.json"),
+            "{\"OPENAI_API_KEY\":\"changed\"}",
+        )
+        .unwrap();
+        restore_full_with(
+            &profile,
+            &backups,
+            &first.id,
+            (&root.join("state"), &root.join("history")),
+            &secrets,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
-            "model = \"original-secret\"\n"
+            "model = \"changed\"\n"
         );
         assert_eq!(
             fs::read_to_string(profile.join("auth.json")).unwrap(),
-            "{\"token\":\"auth-secret\"}"
+            "{\"OPENAI_API_KEY\":\"auth-secret\"}"
         );
         assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 1);
 
@@ -288,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn full_restore_does_not_save_the_current_profile() {
+    fn authorization_restore_preserves_current_preferences_without_an_extra_snapshot() {
         let root = crate::files::test_temp_root("profile-snapshot-no-save");
         let profile = root.join("profile");
         let backups = root.join("backups");
@@ -298,11 +377,18 @@ mod tests {
 
         let original = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
-        restore_full_with(&profile, &backups, &original.id, &secrets).unwrap();
+        restore_full_with(
+            &profile,
+            &backups,
+            &original.id,
+            (&root.join("state"), &root.join("history")),
+            &secrets,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
-            "model = \"original\"\n"
+            "model = \"changed\"\n"
         );
         assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 1);
 
@@ -316,13 +402,24 @@ mod tests {
         let backups = root.join("backups");
         fs::create_dir_all(&profile).unwrap();
         fs::write(profile.join("config.toml"), "model = \"original\"\n").unwrap();
-        fs::write(profile.join("auth.json"), "{\"token\":\"original\"}").unwrap();
+        fs::write(
+            profile.join("auth.json"),
+            "{\"OPENAI_API_KEY\":\"original\"}",
+        )
+        .unwrap();
         let secrets = MemorySecrets::default();
 
         let snapshot = create_with(&profile, &backups, "Original", false, &secrets).unwrap();
         fs::remove_dir_all(&profile).unwrap();
 
-        restore_full_with(&profile, &backups, &snapshot.id, &secrets).unwrap();
+        restore_full_with(
+            &profile,
+            &backups,
+            &snapshot.id,
+            (&root.join("state"), &root.join("history")),
+            &secrets,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
@@ -330,7 +427,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(profile.join("auth.json")).unwrap(),
-            "{\"token\":\"original\"}"
+            "{\"OPENAI_API_KEY\":\"original\"}"
         );
 
         fs::remove_dir_all(root).unwrap();

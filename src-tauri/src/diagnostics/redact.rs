@@ -62,3 +62,17 @@ pub(super) fn truncate_text(text: &str, max_bytes: usize) -> String {
     }
     format!("{}{}", &text[..end], ellipsis)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_trace_metadata_keeps_validated_ray_ids_without_exposing_bearers() {
+        assert_eq!(safe_detail("0123456789abcdef-FRA"), "0123456789abcdef-FRA");
+        assert!(
+            !safe_detail("Bearer synthetic-private-credential")
+                .contains("synthetic-private-credential")
+        );
+    }
+}

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "../bun-playwright";
-import { installTauriMock, type MockOptions } from "./tauri-mock";
+import { emitTauriEvent, installTauriMock, type MockOptions } from "./tauri-mock";
 
 async function openConnections(page: Page) {
   await page.goto("/");
@@ -7,9 +7,130 @@ async function openConnections(page: Page) {
   await expect(page.locator("#splash-screen")).toHaveCount(0);
 }
 
+test("account proxy refresh follows clean settings without replacing a custom draft", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, proxyCount: 2 });
+  await page.clock.install();
+  await openConnections(page);
+  await page.locator(".account-card").first().locator(".account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: /^Proxy:/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Account proxy", exact: true });
+  await expect(dialog.getByRole("radiogroup")).toBeVisible();
+  await page.evaluate(async () => {
+    const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke;
+    const runtime = await invoke("get_local_runtime_state") as { accounts: Array<{ id: string }> };
+    await invoke("set_local_account_proxy", { input: { accountId: runtime.accounts[0]!.id, proxyUrl: null, bypassCommonProxy: true } });
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await page.clock.runFor(250);
+  await expect(dialog.getByRole("radio", { name: /^No proxy/ })).toBeChecked();
+  await dialog.getByRole("radio", { name: /^Add a new proxy/ }).click();
+  const address = dialog.getByLabel("HTTP(S) proxy", { exact: true });
+  await address.fill("http://draft.invalid:8080");
+  await page.evaluate(async () => {
+    const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke;
+    const runtime = await invoke("get_local_runtime_state") as { accounts: Array<{ id: string }> };
+    const pool = await invoke("get_local_proxy_pool") as { entries: Array<{ id: string }> };
+    await invoke("assign_local_stored_proxy", { input: { accountId: runtime.accounts[0]!.id, proxyId: pool.entries[0]!.id } });
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await emitTauriEvent(page, "zenith-proxy-pool-changed", null);
+  await page.clock.runFor(250);
+  await expect(dialog.getByRole("radio", { name: /^Add a new proxy/ })).toBeChecked();
+  await expect(address).toHaveValue("http://draft.invalid:8080");
+});
+
 async function commands(page: Page) {
   return page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
 }
+
+for (const draft of ["stored", "custom"] as const) {
+  test(`editing a ${draft} proxy preserves the whole draft across an external route change`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, proxyCount: 2 });
+    await page.clock.install();
+    await openConnections(page);
+    const accountId = await page.evaluate(async () => {
+      const invoke = (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke;
+      const runtime = await invoke("get_local_runtime_state") as { accounts: Array<{ id: string; label: string }> };
+      return runtime.accounts.find((account) => account.label === "Business Workspace")!.id;
+    });
+    await page.locator(".account-card").filter({ hasText: "Business Workspace" }).locator(".account-row-menu summary").click();
+    await page.getByRole("menuitem", { name: /^Proxy:/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Account proxy", exact: true });
+    await expect(dialog.getByRole("radio", { name: /^Choose from storage/ })).toBeChecked();
+    if (draft === "stored") {
+      await dialog.getByRole("button", { name: /^Choose from storage:/ }).click();
+      await page.getByRole("listbox").locator('[data-value="proxy_synthetic_2"]').click();
+    } else {
+      await dialog.getByRole("radio", { name: /^Add a new proxy/ }).click();
+      await dialog.getByLabel("HTTP(S) proxy", { exact: true }).fill("http://draft.invalid:8080");
+    }
+    await page.evaluate(async (id) => {
+      await (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args: unknown) => Promise<unknown> } })
+        .__TAURI_INTERNALS__.invoke("set_local_account_proxy", { input: { accountId: id, proxyUrl: null, bypassCommonProxy: true } });
+    }, accountId);
+    await emitTauriEvent(page, "zenith-state-changed", null);
+    await page.clock.runFor(1000);
+    await expect(dialog.getByRole("radio", { name: draft === "stored" ? /^Choose from storage/ : /^Add a new proxy/ })).toBeChecked();
+    if (draft === "stored") await expect(dialog.getByRole("button", { name: /^Choose from storage:/ })).toHaveAttribute("data-value", "proxy_synthetic_2");
+    else await expect(dialog.getByLabel("HTTP(S) proxy", { exact: true })).toHaveValue("http://draft.invalid:8080");
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const saved = (await commands(page)).findLast((call) => call.command === (draft === "stored" ? "assign_local_stored_proxy" : "set_local_account_proxy"));
+    expect(saved?.args).toEqual({ input: draft === "stored"
+      ? { accountId, proxyId: "proxy_synthetic_2" }
+      : { accountId, proxyUrl: "http://draft.invalid:8080", bypassCommonProxy: false } });
+  });
+}
+
+test("removing a draft's stored proxy never silently selects a different endpoint", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, proxyCount: 2 });
+  await page.clock.install();
+  await openConnections(page);
+  await page.locator(".account-card").first().locator(".account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: /^Proxy:/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Account proxy", exact: true });
+  await dialog.getByRole("radio", { name: /^Choose from storage/ }).click();
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  await page.evaluate(async () => {
+    await (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args: unknown) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("delete_local_stored_proxy", { proxyId: "proxy_synthetic_1" });
+  });
+  await emitTauriEvent(page, "zenith-proxy-pool-changed", null);
+  await page.clock.runFor(250);
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: /^Choose from storage:/ }).click();
+  await page.getByRole("listbox").locator('[data-value="proxy_synthetic_2"]').click();
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+});
+
+test("proxy renaming follows a clean label and preserves typing during background refresh", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, proxyCount: 2 });
+  await page.clock.install();
+  await openConnections(page);
+  await page.getByRole("tab", { name: "Proxies", exact: true }).click();
+  const row = page.locator(".proxy-storage-row").filter({ hasText: "proxy-1.example.test" });
+  await row.locator("summary").click();
+  await page.getByRole("menuitem", { name: "Rename proxy", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const input = dialog.getByRole("textbox");
+  const rename = async (label: string) => {
+    await page.evaluate(async (nextLabel) => {
+      await (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args: unknown) => Promise<unknown> } })
+        .__TAURI_INTERNALS__.invoke("rename_local_stored_proxy", { proxyId: "proxy_synthetic_1", label: nextLabel });
+    }, label);
+    await emitTauriEvent(page, "zenith-proxy-pool-changed", null);
+    await page.clock.runFor(250);
+  };
+  await rename("External label");
+  await expect(input).toHaveValue("External label");
+  await input.fill("Unsaved label");
+  await rename("Another external label");
+  await expect(row).toContainText("Another external label");
+  await expect(input).toHaveValue("Unsaved label");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(row).toContainText("Unsaved label");
+});
 
 for (const state of [
   { label: "Ready for requests", options: {} },

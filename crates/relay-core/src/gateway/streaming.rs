@@ -58,9 +58,12 @@ pub(super) use events::{
 
 mod bootstrap;
 pub(super) use bootstrap::{
-    StreamBootstrapFailure, bootstrap_basis_points_stream, bootstrap_prewarm_stream,
-    bootstrap_stream, degraded_route_stream_failure,
+    StreamBootstrapFailure, StreamBootstrapObservation, bootstrap_observed_stream,
+    degraded_route_stream_failure,
 };
+
+#[cfg(test)]
+use bootstrap::bootstrap_stream;
 
 /// Owns the work after an upstream stream has emitted client-visible output.
 /// From this point the response is committed and no fallback is legal.

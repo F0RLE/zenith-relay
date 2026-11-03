@@ -11,9 +11,8 @@ const AUTO_COMPACTION_PERCENT: u64 = 90;
 /// Fallback only when the model has no published default window.
 pub const SHORT_CONTEXT_PERCENT: u64 = 25;
 
-/// Original window evidence, never the operator's already-projected budget.
-/// An empty value means unknown, not permission to borrow an API maximum
-/// for a native account that did not publish its own card.
+/// Window evidence before operator budget projection. An empty value is unknown.
+/// Native account limits require that account's own published card.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelContextWindows {
@@ -40,8 +39,8 @@ impl ModelContextWindows {
     }
 }
 
-/// Select a client window without inventing an unpublished model maximum.
-/// A published default is usable capacity, but does not cap an explicit custom window.
+/// Select a client window from published capacity and operator policy.
+/// Only a published maximum caps an explicit custom window.
 pub fn context_window_tokens(
     selected: ModelContextPolicy,
     default_window: Option<u64>,

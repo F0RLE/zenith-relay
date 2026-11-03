@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 mod budgets;
+mod stale_recovery;
 
 struct Fixture {
     root: PathBuf,

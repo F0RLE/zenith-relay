@@ -607,6 +607,8 @@ export function initializeTauriMock(input: MockOptions) {
         switch (command) {
           case "get_system_locale": return locale;
           case "get_platform": return input.platform ?? "windows";
+          case "set_ui_language":
+          case "record_frontend_diagnostic": return null;
           case "get_local_network_access": return { enabled: networkEnabled, addresses: [{ interface: "Ethernet", baseUrl: localRuntime.gateway.baseUrl.replace("127.0.0.1", "192.168.1.10") }] };
           case "update_local_network_access": {
             if (args.expectedEnabled !== networkEnabled) throw { code: "invalid_state", message: "Network settings changed" };
@@ -795,7 +797,10 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "local_account_route_candidates": {
             const current = localRuntime.accounts.find((item) => item.id === args.accountId);
-            return localRuntime.accounts.filter((item) => !item.routeGroupId && item.id !== args.accountId && item.oauthClientKind !== current?.oauthClientKind).map((item) => item.id);
+            const candidates = localRuntime.accounts.filter((item) => !item.routeGroupId && item.id !== args.accountId && item.oauthClientKind !== current?.oauthClientKind
+              && (!args.clientKind || item.oauthClientKind === args.clientKind)).map((item) => item.id);
+            if (args.clientKind && candidates.length > 1) throw { code: "conflict", message: "Multiple saved connections match this account and sign-in method" };
+            return candidates;
           }
           case "select_local_account_route": {
             if (input.accountRouteSelectError) throw { code: "conflict", message: "Synthetic route switch rejected" };

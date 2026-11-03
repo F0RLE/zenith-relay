@@ -4,11 +4,47 @@ use super::stored::StoredCodexCredentials;
 use super::wire::validate_local_account_id;
 use std::sync::Arc;
 
+mod siwc;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRotation {
     before: String,
     after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_siwc: Option<super::super::oauth::siwc::PendingSiwcRefresh>,
+}
+
+impl TokenRotation {
+    fn replacement(
+        &self,
+        current: &StoredCodexCredentials,
+    ) -> Result<StoredCodexCredentials, CredentialError> {
+        let after = self.after.as_deref().ok_or_else(|| CredentialError::new(
+            CredentialErrorCode::RotationOutcomeUnknown,
+            "token rotation outcome is unknown; sign in again without reusing the old refresh token",
+        ))?;
+        let after =
+            StoredCodexCredentials::from_secret_json(after).map_err(|_| rotation_invalid())?;
+        if after.local_account_id() != current.local_account_id()
+            || after.generation() != current.generation().saturating_add(1)
+            || after.oauth_client_kind() != current.oauth_client_kind()
+            || after.provider_account_id() != current.provider_account_id()
+            || after.provider_user_id() != current.provider_user_id()
+            || after
+                .siwc_registration()
+                .map(|r| (&r.client_id, &r.subject, &r.host_id))
+                != current
+                    .siwc_registration()
+                    .map(|r| (&r.client_id, &r.subject, &r.host_id))
+        {
+            return Err(rotation_invalid());
+        }
+        // Restore authorization without replacing newer local settings.
+        current
+            .with_token_set(&after.to_token_set()?)?
+            .with_siwc_registration(after.siwc_registration().cloned())
+    }
 }
 
 pub struct CredentialStore<B> {
@@ -29,13 +65,22 @@ impl<B: SecretBackend> CredentialStore<B> {
         before: &StoredCodexCredentials,
         after: Option<&StoredCodexCredentials>,
     ) -> Result<(), CredentialError> {
-        let reference = rotation_secret_ref(before)?;
         let checkpoint = TokenRotation {
             before: before.to_secret_json()?,
             after: after
                 .map(StoredCodexCredentials::to_secret_json)
                 .transpose()?,
+            pending_siwc: None,
         };
+        self.write_token_rotation(before, checkpoint)
+    }
+
+    fn write_token_rotation(
+        &self,
+        before: &StoredCodexCredentials,
+        checkpoint: TokenRotation,
+    ) -> Result<(), CredentialError> {
+        let reference = rotation_secret_ref(before)?;
         let encoded = serde_json::to_string(&checkpoint).map_err(|_| rotation_invalid())?;
         self.backend
             .save(&reference, &encoded)
@@ -70,10 +115,10 @@ impl<B: SecretBackend> CredentialStore<B> {
         Ok(())
     }
 
-    pub fn recover_token_rotation(
+    fn load_token_rotation(
         &self,
         current: &StoredCodexCredentials,
-    ) -> Result<Option<StoredCodexCredentials>, CredentialError> {
+    ) -> Result<Option<TokenRotation>, CredentialError> {
         let reference = rotation_secret_ref(current)?;
         let Some(encoded) = self
             .backend
@@ -87,6 +132,9 @@ impl<B: SecretBackend> CredentialStore<B> {
         }
         let checkpoint: TokenRotation =
             serde_json::from_str(&encoded).map_err(|_| rotation_invalid())?;
+        if checkpoint.after.is_some() && checkpoint.pending_siwc.is_some() {
+            return Err(rotation_invalid());
+        }
         let before = StoredCodexCredentials::from_secret_json(&checkpoint.before)
             .map_err(|_| rotation_invalid())?;
         if current.local_account_id() != before.local_account_id() {
@@ -100,30 +148,17 @@ impl<B: SecretBackend> CredentialStore<B> {
             self.clear_token_rotation(current.local_account_id())?;
             return Ok(None);
         }
-        let after = checkpoint.after.ok_or_else(|| CredentialError::new(
-            CredentialErrorCode::RotationOutcomeUnknown,
-            "token rotation outcome is unknown; sign in again without reusing the old refresh token",
-        ))?;
-        let after =
-            StoredCodexCredentials::from_secret_json(&after).map_err(|_| rotation_invalid())?;
-        if after.local_account_id() != current.local_account_id()
-            || after.generation() != current.generation().saturating_add(1)
-            || after.oauth_client_kind() != current.oauth_client_kind()
-            || after.provider_account_id() != current.provider_account_id()
-            || after.provider_user_id() != current.provider_user_id()
-            || after
-                .siwc_registration()
-                .map(|r| (&r.client_id, &r.subject, &r.host_id))
-                != current
-                    .siwc_registration()
-                    .map(|r| (&r.client_id, &r.subject, &r.host_id))
-        {
-            return Err(rotation_invalid());
-        }
-        // Restore rotated authorization, not stale proxy or account-note settings.
-        let after = current
-            .with_token_set(&after.to_token_set()?)?
-            .with_siwc_registration(after.siwc_registration().cloned())?;
+        Ok(Some(checkpoint))
+    }
+
+    pub fn recover_token_rotation(
+        &self,
+        current: &StoredCodexCredentials,
+    ) -> Result<Option<StoredCodexCredentials>, CredentialError> {
+        let Some(checkpoint) = self.load_token_rotation(current)? else {
+            return Ok(None);
+        };
+        let after = checkpoint.replacement(current)?;
         self.save(&after)?;
         if !self
             .require(current.local_account_id())?

@@ -31,7 +31,7 @@ pub(in crate::local_pool::profiles::codex) fn attach_local_locked(
     let auth_path = codex_home.join(AUTH_FILE);
     let backup_path = backup_path(backup_root);
     let original_config_bytes = read_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_optional_bytes(&auth_path)?;
+    let original_auth_bytes = snapshot_credentials::read_profile_auth(codex_home)?;
     let original_backup_bytes = read_optional_bytes(&backup_path)?;
     let original_catalog_bytes = read_optional_bytes(&catalog_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
@@ -147,7 +147,6 @@ pub(in crate::local_pool::profiles::codex) fn attach_local_locked(
         &catalog,
         had_managed_catalog,
         codex_home,
-        &auth_path,
         &original_auth_bytes,
     )
 }
@@ -381,7 +380,6 @@ fn commit_staged_profile(
     catalog: &Option<String>,
     had_managed_catalog: bool,
     codex_home: &Path,
-    auth_path: &Path,
     original_auth_bytes: &Option<Vec<u8>>,
 ) -> Result<()> {
     let StagedLocalAttach {
@@ -494,7 +492,9 @@ fn commit_staged_profile(
             ),
         ));
     }
-    if let Err(error) = replace_if_unchanged(auth_path, original_auth_bytes, &managed_auth) {
+    if let Err(error) =
+        snapshot_credentials::update_auth(codex_home, original_auth_bytes, Some(&managed_auth))
+    {
         let config_rollback = rollback_file(config_path, &managed_config, original_config_bytes);
         let backup_rollback = merge_rollbacks(
             rollback_model_catalog_change(

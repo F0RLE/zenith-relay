@@ -82,10 +82,8 @@ pub fn routed_codex_catalog_entry(
     );
     catalog_entry.insert("support_verbosity".into(), Value::Bool(false));
     catalog_entry.insert("default_verbosity".into(), Value::Null);
-    // A generic OpenAI-compatible `/v1/models` response does not prove that the
-    // selected upstream accepts concurrent function calls.  Codex still receives
-    // and can use ordinary tools; this only keeps it from sending more than one
-    // call in a turn until a structured upstream Codex catalog proves otherwise.
+    // Default to serial tool calls. Enable parallel calls only with evidence
+    // from the selected upstream's structured Codex catalog.
     catalog_entry.insert("supports_parallel_tool_calls".into(), Value::Bool(false));
     catalog_entry.insert("supports_search_tool".into(), Value::Bool(false));
     catalog_entry.insert("web_search_tool_type".into(), Value::String("text".into()));
@@ -97,15 +95,12 @@ pub fn routed_codex_catalog_entry(
         "apply_patch_tool_type".into(),
         Value::String("freeform".into()),
     );
-    // Codex currently requires a truncation policy in every catalog entry.
-    // Keep this as a small client-side parsing default; it does not describe
-    // provider capabilities or change Relay's route selection.
+    // Codex requires this client-side parsing default in every catalog entry.
     catalog_entry.insert(
         "truncation_policy".into(),
         json!({"mode": "tokens", "limit": 10000}),
     );
-    // A template can belong to a different model. Publish only a supplied
-    // limit, never its window or a Relay-invented client history budget.
+    // Replace template limits with this model's supplied context window.
     catalog_entry.remove("context_window");
     catalog_entry.remove("max_context_window");
     if let Some(context_window) = advertised_context_window.filter(|window| *window > 0) {
@@ -135,7 +130,7 @@ pub fn normalize_codex_catalog_priorities(models: &mut [Value]) {
     }
 }
 
-/// Ultra is a Codex orchestration mode, not a provider reasoning effort. Only
+/// Ultra controls Codex orchestration, separately from provider effort. Only
 /// an exact Codex-owned model card may enable it, and both the parent (Max)
 /// and the configured subagent effort must already work through this route.
 /// Never copy transport capabilities or instructions from the reference card.

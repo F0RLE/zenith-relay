@@ -63,7 +63,7 @@ pub(super) fn settle_collected_rejection(
         && response_affinity_hit
         && *requires_affinity_owner
         && !*native_replay_attempted
-        && (retryable_route_failure(route, status, failure.category, has_previous_response_id)
+        && (retryable_route_failure(route, status, &failure, has_previous_response_id)
             || (affinity_miss && response_missing))
     {
         match replay_native_tool_continuation(
@@ -113,8 +113,8 @@ pub(super) fn settle_collected_rejection(
     }
     if failure.execution.certainty == ExecutionCertainty::NotSent
         && (affinity_miss
-            || (cache_write_rejected && !route_forbids_fallback(route, status, failure.category))
-            || retryable_route_failure(route, status, failure.category, has_previous_response_id))
+            || (cache_write_rejected && !route_forbids_fallback(route, status, &failure))
+            || retryable_route_failure(route, status, &failure, has_previous_response_id))
     {
         if affinity_miss {
             *confirmed_response_missing |= response_missing;

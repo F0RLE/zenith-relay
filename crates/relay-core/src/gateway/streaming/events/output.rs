@@ -1,8 +1,7 @@
 use serde_json::Value;
 
-/// Whether a decoded Responses event contains a compaction item. The item is
-/// opaque state that must be forwarded unchanged and does not commit a route
-/// before ordinary generation begins.
+/// Recognizes opaque Responses compaction checkpoints. Forward the item intact;
+/// route commitment begins with ordinary generation.
 pub(in crate::gateway) fn is_compaction_payload(
     event_payload: &Value,
     event_type: Option<&str>,

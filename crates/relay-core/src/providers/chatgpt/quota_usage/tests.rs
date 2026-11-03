@@ -1,6 +1,6 @@
 use super::*;
-use crate::DefaultServiceTier;
 use crate::quota::{QuotaSnapshot, SubscriptionStatus};
+use crate::{CandidateQuota, DefaultServiceTier, QUOTA_STALE_AFTER_MS};
 use axum::{
     Json, Router,
     http::{HeaderMap, StatusCode},
@@ -193,6 +193,115 @@ fn reset_credit_count_accepts_provider_variants() {
                 .quota
                 .reset_credits_available,
             expected
+        );
+    }
+}
+
+#[test]
+fn empty_limit_markers_do_not_override_available_quota() {
+    for marker in [
+        serde_json::json!(null),
+        serde_json::json!(false),
+        serde_json::json!(""),
+        serde_json::json!(" \t "),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let body = serde_json::json!({
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {"used_percent": 0, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 0, "limit_window_seconds": 604800}
+            },
+            "rate_limit_reached_type": marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, Some(true));
+        assert_eq!(data.reported_limit_reached, Some(false), "marker={marker}");
+        assert!(!data.quota.limit_reached, "marker={marker}");
+
+        let previously_exhausted = QuotaSnapshot {
+            limit_reached: true,
+            ..Default::default()
+        };
+        let (snapshot, _) = data.quota.normalize(&previously_exhausted).unwrap();
+        for window in [&snapshot.primary, &snapshot.secondary] {
+            assert_eq!(
+                window.as_ref().unwrap().available_basis_points,
+                Some(10_000)
+            );
+        }
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Available(10_000),
+            "marker={marker}"
+        );
+    }
+}
+
+#[test]
+fn populated_limit_markers_still_override_available_counters() {
+    for marker in [
+        serde_json::json!(true),
+        serde_json::json!("rate_limit_reached"),
+        serde_json::json!({"type":"rate_limit_reached"}),
+        serde_json::json!({"future_provider_limit":"synthetic"}),
+    ] {
+        let body = serde_json::json!({
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {"used_percent": 0}
+            },
+            "rate_limit_reached_type": marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 1_000).unwrap();
+        assert_eq!(data.reported_limit_reached, Some(true), "marker={marker}");
+        assert!(data.quota.limit_reached, "marker={marker}");
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Exhausted,
+            "marker={marker}"
+        );
+    }
+}
+
+#[test]
+fn empty_limit_markers_neither_clear_rejections_nor_invent_allowance() {
+    for marker in [
+        serde_json::json!(false),
+        serde_json::json!(""),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let blocked = serde_json::json!({
+            "rate_limit": {"allowed":false,"limit_reached":true},
+            "rate_limit_reached_type":marker
+        });
+        let data = parse_codex_usage(&serde_json::to_vec(&blocked).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, Some(false));
+        assert_eq!(data.reported_limit_reached, Some(true));
+        assert!(data.quota.limit_reached);
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Exhausted,
+            "marker={marker}"
+        );
+
+        let unknown = serde_json::json!({"rate_limit_reached_type":marker});
+        let data = parse_codex_usage(&serde_json::to_vec(&unknown).unwrap(), 1_000).unwrap();
+        assert_eq!(data.allowed, None);
+        assert_eq!(data.reported_limit_reached, None);
+        assert!(data.quota.primary.is_none());
+        assert!(data.quota.secondary.is_none());
+        let (snapshot, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        assert_eq!(
+            CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Unknown,
+            "marker={marker}"
         );
     }
 }

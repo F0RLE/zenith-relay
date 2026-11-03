@@ -33,33 +33,32 @@ impl GatewayRuntime {
         route: &crate::runtime::ExecutorRoute,
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
+        expected: Option<&AuthorizationIncarnation>,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
         self.send_authorized_request_with_binding(
             &route.candidate_id,
             request,
             dispatch,
             route.account_id.is_none().then(|| route.binding_key()),
-            None,
+            expected,
         )
         .await
     }
 
-    /// Continue a completed read-only catalog lookup on its exact OAuth
-    /// incarnation. No fallback, owner switch, or authorization replay occurs.
-    pub(crate) async fn send_catalog_continuation(
+    /// Send an attachment upload or read-only catalog continuation on its exact
+    /// OAuth incarnation. No fallback, owner switch, or authorization replay occurs.
+    pub(crate) async fn send_account_request_with_owner(
         &self,
-        route: &crate::runtime::ExecutorRoute,
+        candidate_id: &str,
         request: reqwest::RequestBuilder,
         dispatch: AuthorizationDispatch<'_>,
         expected: &AuthorizationIncarnation,
     ) -> std::result::Result<AuthorizedResponse, AuthorizedRequestError> {
-        if !self.is_basis_points_account(&route.candidate_id)
-            && !self.is_siwc_account(&route.candidate_id)
-        {
+        if !self.is_basis_points_account(candidate_id) && !self.is_siwc_account(candidate_id) {
             return Err(AuthorizedRequestError::NotReplayable);
         }
         self.send_authorized_request_with_binding(
-            &route.candidate_id,
+            candidate_id,
             request,
             dispatch,
             None,
@@ -464,9 +463,22 @@ impl GatewayRuntime {
         }
         // This boundary deliberately excludes authorization and body encoding.
         // reqwest does not expose upload completion: do not label this upload time.
+        let http_pool = budget.and_then(|_| {
+            self.http_recovery.select(
+                candidate_id,
+                &url,
+                &client,
+                self.request_proxy(candidate_id),
+            )
+        });
+        let client = http_pool.as_ref().map_or(client, |pool| pool.client());
+        let http1_only = http_pool.as_ref().is_some_and(|pool| pool.http1_only());
+        if http1_only {
+            *authorized_request.version_mut() = reqwest::Version::HTTP_11;
+        }
         let http3_client = self.http3.select_client(
             &mut authorized_request,
-            budget.is_some() && self.direct_http_route(candidate_id),
+            budget.is_some() && !http1_only && self.direct_http_route(candidate_id),
             candidate_id,
             &client,
         );
@@ -523,7 +535,16 @@ impl GatewayRuntime {
         if using_http3 && http3_unavailable {
             self.http3.failed(candidate_id, &url);
         }
+        if !using_http3
+            && let (Some(pool), Err(AuthorizedRequestError::Transport(error))) =
+                (&http_pool, &upstream_result)
+        {
+            pool.observe_error(error);
+        }
         let mut upstream_response = upstream_result?;
+        if !using_http3 && let Some(pool) = http_pool {
+            upstream_response = pool.observe_response(upstream_response);
+        }
         let send_to_headers_ms = send_started.map(|start| start.elapsed().as_millis() as u64);
         if let Some(cookies) = cookies {
             cookies.observe(&url, upstream_response.headers());

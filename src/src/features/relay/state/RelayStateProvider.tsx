@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { applyLanguagePresentation, synchronizeNativeLanguage } from "../../../i18n/presentation";
 import { setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands } from "../api/commands";
 import type { ProfileActivation } from "../api/types";
@@ -273,7 +274,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }), [getCachedLocalUsage, invalidateLocalUsage, loadLocalUsage, localUsagePage, localUsageQueryKey, usageRevision]);
 
   useEffect(() => {
-    document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
+    const { language, messages } = applyLanguagePresentation(i18n);
+    void synchronizeNativeLanguage(() => relayCommands.setUiLanguage(language, messages)).catch(() => undefined);
   }, [i18n.language]);
 
   return <RelayStateContexts contextValue={relayContextValue} activity={runtimeActivity} usage={usage}>{children}</RelayStateContexts>;

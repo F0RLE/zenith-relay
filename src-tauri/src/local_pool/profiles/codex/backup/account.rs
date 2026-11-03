@@ -291,7 +291,7 @@ pub(in crate::local_pool::profiles::codex) fn credential_kind_locked(
         return Ok(local_backup(codex_home, backup_root)?.map(|backup| backup.credential_kind()));
     }
     let auth_path = codex_home.join(AUTH_FILE);
-    let auth = read_optional_bytes(&auth_path)?;
+    let auth = snapshot_credentials::read_profile_auth(codex_home)?;
     let Some(content) = snapshot_text(&auth, &auth_path)? else {
         return Ok(None);
     };

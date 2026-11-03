@@ -13,6 +13,24 @@ pub(super) fn get_system_locale() -> Option<String> {
 }
 
 #[tauri::command]
+pub(super) async fn set_ui_language(
+    language: String,
+    messages: crate::platform::localization::NativeMessages,
+    app: AppHandle,
+) -> Result<(), String> {
+    // The active UI must not depend on optional preference storage succeeding.
+    crate::platform::localization::set(language.clone(), messages.clone())?;
+    crate::tray::refresh_tray(&app).await;
+    let root = crate::platform::relay_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::platform::localization::persist(&root, &language, &messages)
+    })
+    .await
+    .map_err(|_| "Could not save UI language".to_string())??;
+    Ok(())
+}
+
+#[tauri::command]
 pub(super) fn open_api_key_page(provider: String, app: AppHandle) -> Result<(), String> {
     let url = api_key_page_url(&provider).ok_or_else(|| "Unsupported API provider.".to_string())?;
     app.opener()

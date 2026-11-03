@@ -49,6 +49,10 @@ impl StoragePaths {
         self.data_root().join("preferences/application-launch.json")
     }
 
+    pub(crate) fn ui_language_file(&self) -> PathBuf {
+        self.data_root().join("preferences/ui-language.json")
+    }
+
     pub(crate) fn migration_root(&self) -> PathBuf {
         self.data_root().join("migrations")
     }

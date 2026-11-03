@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type FormEvent } from "react";
 import { Link2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { RelayMode, SourceSummary } from "../../api/types";
+import type { ConnectionProbeObservation, RelayMode, SourceConnectionDiagnostics, SourceSummary } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import { SecretField, Button, Dialog, ErrorDetailsDialog, OptionMenu, Tabs } from "../../components/Ui";
 import { SourcePriceEditor } from "../../components/SourcePriceEditor";
@@ -12,6 +12,7 @@ import { useRelayState } from "../../state/RelayStateProvider";
 import type { FeedbackError } from "../../state/feedback";
 import { selectApiProvider } from "../../components/apiProviderModel";
 import { useProxyPool } from "../../hooks/useProxyPool";
+import { sourceErrorDetails } from "./sourceError";
 
 type SourceEditTab = "main" | "prices";
 
@@ -56,6 +57,23 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
   const [priceDrafts, setPriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(source?.modelPriceOverrides ?? {}));
   const [activeTab, setActiveTab] = useState<SourceEditTab>("main");
   const [operationError, setOperationError] = useState<{ error: FeedbackError; messageKey: string } | null>(null);
+  const reportOperationError = (error: FeedbackError, messageKey: string) => setOperationError({ error, messageKey });
+  const [connectionResult, setConnectionResult] = useState<{ target: string; result: SourceConnectionDiagnostics } | null>(null);
+  const connectionTarget = source && !apiKey && baseUrl === source.baseUrl && proxyId === (source.proxyId ?? null)
+    ? JSON.stringify([source.id, source.baseUrl, source.proxyId, source.wireApi, source.protocolBindings]) : null;
+  const checkConnection = () => {
+    if (!source || !connectionTarget || busy) return;
+    const target = connectionTarget;
+    setConnectionResult(null);
+    void perform("source-network", async () => {
+      setConnectionResult({ target, result: await relayCommands.checkSourceConnection(source.id) });
+    }, undefined, { skipRefresh: true, reportError: false, onError: reportOperationError });
+  };
+  const describeConnection = (transport: string, probe: ConnectionProbeObservation) => t("sources.checkResult", {
+    transport,
+    status: sourceErrorDetails(probe.status === "responded" ? probe.httpStatus : probe.status === "timeout" ? "timeout" : "connect", t)?.summary ?? probe.httpStatus,
+    elapsed: probe.elapsedMs,
+  });
   const modelPriceOverrides = useMemo(() => parseSourcePriceDrafts(priceDrafts), [priceDrafts]);
   const sourceEditTabs = [
     { id: "main", label: t("sources.editorMainTab") },
@@ -118,7 +136,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
     }, source ? "feedback.saved" : "feedback.sourceAdded", {
       backgroundRefresh: true,
       reportError: false,
-      onError: (error, messageKey) => setOperationError({ error, messageKey }),
+      onError: reportOperationError,
     });
     if (ok) {
       onCreated?.();
@@ -129,6 +147,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
   const submitSourceForm = () => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit();
   const footer = (
     <>
+      {source && relayMode === "local" ? <Button disabled={!connectionTarget || Boolean(busy)} busy={busy === "source-network"} onClick={checkConnection}>{t("sources.check")}</Button> : null}
       <Button
         variant="primary"
         busy={busy === "source-save"}
@@ -172,6 +191,7 @@ export function SourceDialog({ source: initialSource, onClose, addToPool = false
                       <p className="form-note">{t("sources.keepKeyHint")}</p>
                     </div>
                     <SourceProxyField proxyId={proxyId} onChange={setProxyId} />
+                    {connectionResult?.target === connectionTarget ? <p className="form-note" role="status">{describeConnection("HTTP", connectionResult.result.http)}{connectionResult.result.websocket ? `; ${describeConnection("WebSocket", connectionResult.result.websocket)}` : ""}</p> : null}
                   </section>
                 </section>
               ) : null}

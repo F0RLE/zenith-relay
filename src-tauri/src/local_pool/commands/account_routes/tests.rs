@@ -18,6 +18,38 @@ fn same_route_owner(
 }
 
 #[test]
+fn saved_route_candidates_filter_by_method_and_reject_ambiguous_matches() {
+    let candidates = vec![
+        ("synthetic-codex".into(), OAuthClientKind::Codex),
+        ("synthetic-siwc".into(), OAuthClientKind::Siwc),
+    ];
+    assert_eq!(
+        filter_route_candidates(candidates.clone(), None)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        filter_route_candidates(candidates.clone(), Some(OAuthClientKind::Siwc)).unwrap(),
+        ["synthetic-siwc"]
+    );
+    assert!(
+        filter_route_candidates(candidates.clone(), Some(OAuthClientKind::ExcelBps))
+            .unwrap()
+            .is_empty()
+    );
+    let duplicated = candidates
+        .into_iter()
+        .chain([("another-siwc".into(), OAuthClientKind::Siwc)]);
+    assert_eq!(
+        filter_route_candidates(duplicated, Some(OAuthClientKind::Siwc))
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[test]
 fn route_switch_waits_for_active_requests_and_pending_dispatches_only_in_its_group() {
     for (active, pending, blocked) in [(1, 0, true), (0, 1, true), (0, 0, false)] {
         let candidate: CandidateRuntimeSnapshot = serde_json::from_value(serde_json::json!({

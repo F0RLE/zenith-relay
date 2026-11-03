@@ -343,6 +343,61 @@ fn websocket_frame_identity_keeps_root_affinity_and_child_context_separate() {
 }
 
 #[test]
+fn nested_response_envelopes_cannot_supply_a_websocket_model_or_session() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    for metadata in [
+        json!({"session_id":"foreign", "thread_id":"foreign-child"}),
+        json!(7),
+    ] {
+        let body = serde_json::to_vec(&json!({
+            "type":"response.create",
+            "response": {"model":"relay/upstream-model", "input":"synthetic", "client_metadata":metadata}
+        })).unwrap();
+        let failure = ClientRequest::parse(&runtime, &key, &HeaderMap::new(), &body)
+            .err()
+            .expect("nested-only envelopes are not the native WebSocket request contract");
+        assert_eq!(failure.message, "model must be a non-empty string");
+    }
+}
+
+#[test]
+fn websocket_frame_identity_is_resolved_per_turn_without_claiming_response_ownership() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "session-id",
+        HeaderValue::from_static("connection-fallback"),
+    );
+    let mut contexts = Vec::new();
+    for session in ["first-turn", "next-turn"] {
+        let body = serde_json::to_vec(&json!({
+            "type":"response.create", "model":"relay/upstream-model", "input":"synthetic",
+            "client_metadata":{"session_id":session, "thread_id":"child"}
+        }))
+        .unwrap();
+        let with_headers = ClientRequest::parse(&runtime, &key, &headers, &body)
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        let body_only = ClientRequest::parse(&runtime, &key, &HeaderMap::new(), &body)
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(
+            with_headers.prompt_affinity_key,
+            body_only.prompt_affinity_key
+        );
+        assert_eq!(with_headers.client_context_id, body_only.client_context_id);
+        assert!(!with_headers.requires_affinity_owner);
+        assert!(with_headers.response_affinity_key.is_none());
+        contexts.push(with_headers.client_context_id);
+    }
+    assert_ne!(contexts[0], contexts[1]);
+}
+
+#[test]
 fn client_request_resolves_the_visible_model_before_upstream_serialization() {
     let runtime = runtime();
     runtime.bind_response_affinity(Some("resp_previous"), "source", crate::unix_time_ms());

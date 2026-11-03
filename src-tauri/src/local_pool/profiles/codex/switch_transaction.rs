@@ -1,6 +1,7 @@
 //! In-process undo journal spanning detach, attach and secret cleanup.
 //! Only successful Relay writes advance the expected value used by rollback.
 use super::*;
+use snapshot_credentials::{AuthKeyring, NativeAuthKeyring};
 use std::{cell::RefCell, collections::BTreeMap};
 
 struct Change<T> {
@@ -9,9 +10,50 @@ struct Change<T> {
 }
 
 type FileChanges = BTreeMap<PathBuf, Change<Vec<u8>>>;
+type NativeAuthChanges = BTreeMap<(PathBuf, bool), Change<String>>;
 
 thread_local! {
     static FILE_CHANGES: RefCell<Option<FileChanges>> = const { RefCell::new(None) };
+    static NATIVE_AUTH_CHANGES: RefCell<Option<NativeAuthChanges>> = const { RefCell::new(None) };
+}
+
+/// The caller holds Codex's auth lock. Journal native credentials alongside
+/// files so a later attach/cleanup failure can restore the previous login.
+pub(super) fn replace_native_auth(
+    home: &Path,
+    encrypted: bool,
+    expected: &Option<String>,
+    updated: Option<&str>,
+) -> Result<()> {
+    let home = canonical_profile_dir(home)?;
+    let key = (home.clone(), encrypted);
+    if NativeAuthKeyring.load(&home, encrypted)? != *expected {
+        return Err(profile_restore_blocked());
+    }
+    NATIVE_AUTH_CHANGES.with_borrow(|journal| {
+        if journal
+            .as_ref()
+            .and_then(|journal| journal.get(&key))
+            .is_some_and(|change| &change.after != expected)
+        {
+            return Err(profile_restore_blocked());
+        }
+        Ok(())
+    })?;
+    NativeAuthKeyring.replace(&home, encrypted, updated)?;
+    NATIVE_AUTH_CHANGES.with_borrow_mut(|journal| {
+        if let Some(journal) = journal {
+            let after = updated.map(str::to_owned);
+            journal
+                .entry(key)
+                .and_modify(|change| change.after = after.clone())
+                .or_insert_with(|| Change {
+                    before: expected.clone(),
+                    after,
+                });
+        }
+    });
+    Ok(())
 }
 
 pub(super) fn check_file(path: &Path, expected: &Option<Vec<u8>>) -> Result<()> {
@@ -55,6 +97,7 @@ struct JournalGuard;
 impl Drop for JournalGuard {
     fn drop(&mut self) {
         FILE_CHANGES.with_borrow_mut(|journal| *journal = None);
+        NATIVE_AUTH_CHANGES.with_borrow_mut(|journal| *journal = None);
     }
 }
 
@@ -87,7 +130,13 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
         Ok(())
     }
 
-    fn rollback(&self, files: &FileChanges) -> Result<()> {
+    fn rollback(&self, files: &FileChanges, native_auth: &NativeAuthChanges) -> Result<()> {
+        let homes: std::collections::BTreeSet<_> =
+            native_auth.keys().map(|(home, _)| home).collect();
+        let _auth_locks = homes
+            .into_iter()
+            .map(|home| snapshot_credentials::lock(home))
+            .collect::<Result<Vec<_>>>()?;
         // Refuse the complete rollback if a newer external writer owns a file.
         for (path, change) in files {
             if read_optional_bytes(path)? != change.after {
@@ -97,6 +146,11 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
         let changes = self.changes.borrow();
         for (secret_ref, change) in changes.iter() {
             if self.backend.load(secret_ref)? != change.after {
+                return Err(profile_restore_blocked());
+            }
+        }
+        for ((home, encrypted), change) in native_auth {
+            if NativeAuthKeyring.load(home, *encrypted)? != change.after {
                 return Err(profile_restore_blocked());
             }
         }
@@ -110,6 +164,11 @@ impl<S: SecretBackend> JournalSecrets<'_, S> {
                     self.backend.save(secret_ref, previous_secret_value)?
                 }
                 None => self.backend.delete(secret_ref)?,
+            }
+        }
+        for ((home, encrypted), change) in native_auth {
+            if change.before != change.after {
+                NativeAuthKeyring.replace(home, *encrypted, change.before.as_deref())?;
             }
         }
         for (path, change) in files {
@@ -162,6 +221,7 @@ pub(super) fn run<S: SecretBackend, T>(
         );
     }
     FILE_CHANGES.with_borrow_mut(|journal| *journal = Some(files));
+    NATIVE_AUTH_CHANGES.with_borrow_mut(|journal| *journal = Some(BTreeMap::new()));
     let _guard = JournalGuard;
     let secrets = JournalSecrets {
         backend: secrets,
@@ -171,5 +231,8 @@ pub(super) fn run<S: SecretBackend, T>(
     let files = FILE_CHANGES
         .with_borrow_mut(Option::take)
         .unwrap_or_default();
-    operation_result.map_err(|error| with_rollback(error, secrets.rollback(&files)))
+    let native_auth = NATIVE_AUTH_CHANGES
+        .with_borrow_mut(Option::take)
+        .unwrap_or_default();
+    operation_result.map_err(|error| with_rollback(error, secrets.rollback(&files, &native_auth)))
 }

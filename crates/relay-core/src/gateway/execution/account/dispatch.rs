@@ -144,6 +144,7 @@ pub(super) async fn dispatch_account_attempt(
         preparation.catalog_ms = catalog_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let attachments_started = preparation_started.map(|_| Instant::now());
+    let mut attachment_owner = None;
     let request_body = if basis_points_route {
         match super::super::basis_points::attach_input_images(
             runtime,
@@ -154,7 +155,7 @@ pub(super) async fn dispatch_account_attempt(
         )
         .await
         {
-            Ok(()) => {}
+            Ok(owner) => attachment_owner = owner,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return AccountDispatch::Respond(attempt_error_response(
                     failure,
@@ -269,8 +270,8 @@ pub(super) async fn dispatch_account_attempt(
         started.elapsed().as_millis() as u64,
     );
     let upstream = runtime
-        .send_authorized_request(
-            &route.candidate_id,
+        .send_authorized_request_for_route(
+            &route,
             upstream_request.body(request_body),
             crate::runtime::AuthorizationDispatch {
                 client_version: (!basis_points_route)
@@ -286,6 +287,7 @@ pub(super) async fn dispatch_account_attempt(
                 lease: Some(lease),
                 usage_event: Some((&authorization_event, started)),
             },
+            attachment_owner.as_ref(),
         )
         .await;
     let attempt = u16::from(budget.dispatches());
@@ -330,6 +332,7 @@ pub(super) async fn dispatch_account_attempt(
         Err(error) => {
             return reject_authorized_dispatch(
                 error,
+                attachment_owner.is_some(),
                 runtime,
                 lease,
                 &route,
@@ -427,6 +430,7 @@ pub(super) async fn dispatch_account_attempt(
 #[allow(clippy::too_many_arguments)]
 fn reject_authorized_dispatch(
     error: AuthorizedRequestError,
+    attachment_owner: bool,
     runtime: &GatewayRuntime,
     lease: &CandidateLease,
     route: &ExecutorRoute,
@@ -438,10 +442,16 @@ fn reject_authorized_dispatch(
     last_failure_origin: &mut ErrorOrigin,
 ) -> AccountDispatch {
     let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
+    let attachment_changed =
+        attachment_owner && matches!(error, AuthorizedRequestError::NotReplayable);
     let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);
     let failure = AttemptFailure::authorized_request(error);
     let mut event = failed_usage(route, attempt, failure);
-    if uncertain || exhausted || route.account_transport == crate::runtime::AccountTransport::Siwc {
+    if uncertain
+        || exhausted
+        || attachment_changed
+        || route.account_transport == crate::runtime::AccountTransport::Siwc
+    {
         if uncertain {
             lease.settle_rotation_unknown(now_ms());
         }

@@ -40,6 +40,8 @@ mod pre_output_fallback;
 mod protocol_routes;
 #[path = "support/stream_safety.rs"]
 mod stream_safety;
+#[path = "support/wait_diagnostics.rs"]
+mod wait_diagnostics;
 
 #[path = "support/local_server.rs"]
 mod local_server;

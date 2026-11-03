@@ -7,6 +7,10 @@ pub struct QuotaRefreshFailure {
     pub retryable: bool,
     http_status: Option<u16>,
     retry_after_ms: Option<u64>,
+    endpoint_stage: Option<&'static str>,
+    response_format: Option<&'static str>,
+    response_mitigation: Option<&'static str>,
+    cf_ray: Option<Box<str>>,
 }
 
 impl QuotaRefreshFailure {
@@ -16,6 +20,10 @@ impl QuotaRefreshFailure {
             retryable,
             http_status: None,
             retry_after_ms: None,
+            endpoint_stage: None,
+            response_format: None,
+            response_mitigation: None,
+            cf_ray: None,
         }
     }
 
@@ -25,6 +33,56 @@ impl QuotaRefreshFailure {
 
     pub fn retry_after_ms(&self) -> Option<u64> {
         self.retry_after_ms
+    }
+
+    pub fn endpoint_stage(&self) -> Option<&'static str> {
+        self.endpoint_stage
+    }
+
+    pub fn response_format(&self) -> Option<&'static str> {
+        self.response_format
+    }
+
+    pub fn response_mitigation(&self) -> Option<&'static str> {
+        self.response_mitigation
+    }
+
+    pub fn cf_ray(&self) -> Option<&str> {
+        self.cf_ray.as_deref()
+    }
+
+    pub(crate) fn with_cf_ray(mut self, value: Option<&str>) -> Self {
+        self.cf_ray = Self::validated_cf_ray(value);
+        self
+    }
+
+    pub(crate) fn validated_cf_ray(value: Option<&str>) -> Option<Box<str>> {
+        value
+            .filter(|value| {
+                let Some((id, location)) = value.split_once('-') else {
+                    return false;
+                };
+                id.len() == 16
+                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && location.len() == 3
+                    && location.bytes().all(|byte| byte.is_ascii_uppercase())
+            })
+            .map(Into::into)
+    }
+
+    pub(crate) fn with_endpoint_stage(mut self, stage: &'static str) -> Self {
+        self.endpoint_stage = Some(stage);
+        self
+    }
+
+    pub(crate) fn with_response_format(mut self, format: &'static str) -> Self {
+        self.response_format = Some(format);
+        self
+    }
+
+    pub(crate) fn with_response_mitigation(mut self, mitigation: Option<&'static str>) -> Self {
+        self.response_mitigation = mitigation;
+        self
     }
 
     pub(crate) fn with_retry_after(mut self, delay: Option<u64>) -> Self {

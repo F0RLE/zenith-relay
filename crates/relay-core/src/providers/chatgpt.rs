@@ -46,10 +46,12 @@ pub use oauth::{
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{
     AccountCheckIdentityError, CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT,
-    CodexSubscriptionClient, CodexSubscriptionMetadata, SUBSCRIPTION_REFRESH_INTERVAL_MS,
+    CodexSubscriptionClient, CodexSubscriptionMetadata, CodexSubscriptionRead,
+    SUBSCRIPTION_REFRESH_INTERVAL_MS, SubscriptionAuthorizationProbe, SubscriptionEndpointProbe,
     account_ids_from_check_response, merge_subscription_metadata, merge_subscription_metadata_at,
     parse_account_check_subscription, parse_subscription_timestamp_ms,
-    parse_subscription_timestamp_text, resolve_account_check_account_id, subscription_refresh_due,
+    parse_subscription_timestamp_text, probe_subscription_authorization, probe_subscription_proxy,
+    resolve_account_check_account_id, subscription_refresh_due,
     unverified_chatgpt_account_id_hints,
 };
 pub use quota_usage::{

@@ -15,12 +15,30 @@ export type CacheContextDiagnostics = {
   clientHistory: CacheHistoryDiagnostics;
   upstreamHistory: CacheHistoryDiagnostics;
   relayHistory: CacheHistoryDiagnostics;
+  clientPolicy?: CachePolicyDiagnostics | null;
+  upstreamPolicy?: CachePolicyDiagnostics | null;
   candidateChanged: boolean | null;
   previousCompletedAgeMs: number | null;
   provider?: { type: "cache_hit" | "comparison_response_not_found" | "unavailable" }
     | { type: "cache_miss"; reason: "model_changed" | "prompt_cache_key_changed" | "service_tier_changed"
       | "tools_changed" | "text_format_changed" | "reasoning_effort_changed" | "verbosity_changed"
       | "context_compacted" | "input_changed"; cache_missed_tokens: number; comparison_reusable_tokens?: number } | null;
+};
+
+/** Observed controls only; omitted does not infer a model-specific default. */
+export type CachePolicyDiagnostics = {
+  mode: "omitted" | "implicit" | "explicit" | "other";
+  ttl: "omitted" | "30m" | "12h" | "other";
+  prewarm: "omitted" | "enabled" | "disabled" | "other";
+  key: "omitted" | "present" | "empty" | "other";
+  breakpoints: {
+    explicit: number;
+    ttlOverrides: number;
+    other: number;
+    /** One-based input item, not a token offset. */
+    lastInputItem: number | null;
+    complete: boolean;
+  };
 };
 
 export type CacheContextSection =
@@ -68,6 +86,19 @@ export type CacheAffinityDiagnostics = {
   loadAllowanceRequests: number;
 };
 
+export type RouteLatencyDiagnostics = {
+  state: "unknown" | "insufficient" | "ready" | "stale";
+  sampleCount: number;
+  unknownCount: number;
+  minimumSamples: number;
+  windowMs: number;
+  asOfMs: number;
+  lastObservedAtMs: number | null;
+  p50Ms: number | null;
+  p90Ms: number | null;
+  p95Ms: number | null;
+};
+
 export type RoutingDiagnostics = {
   reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
@@ -85,6 +116,12 @@ export type RoutingDiagnostics = {
     handshakeMs?: number | null;
     connectionReused?: boolean | null;
     responseHeadersMs?: number | null;
+    /** HTTP decoded body/parser offsets; not raw wire or CPU measurements. */
+    streamResponse?: {
+      decodedBodyFirstMs?: number | null;
+      sseJsonFirstMs?: number | null;
+      upstreamOutputFirstMs?: number | null;
+    } | null;
     requestPreparationMs?: number | null;
     requestPayload?: {
       mode: "full" | "continuation";
@@ -125,11 +162,23 @@ export type RoutingDiagnostics = {
   } | null;
   cacheContext?: CacheContextDiagnostics | null;
   cacheAffinity?: CacheAffinityDiagnostics | null;
+  /** Successful attempts for this candidate/route, captured before selection. */
+  routeLatency?: RouteLatencyDiagnostics | null;
   requestTiming?: {
     durationMs: number;
     ttftMs: number | null;
     /** Logical finalization only; not another send or usage observation. */
     projectionOnly: boolean;
+    /** Cumulative local waits; do not sum snapshots across attempts. */
+    waiting?: {
+      totalMs: number;
+      capacity?: { count: number; durationMs: number } | null;
+      recovery?: { count: number; durationMs: number } | null;
+      poolEvent?: { count: number; durationMs: number } | null;
+      /** Scheduler delay, not a raw provider Retry-After header. */
+      lastRecoveryDelayMs?: number | null;
+      stopReason?: "queue_full" | "wait_expired" | null;
+    } | null;
   } | null;
   attemptOutcome?: "completed" | "tool_discovery" | "retry_selection" | "retry_repair" | "retry_authorization" | "returned_failure" | "execution_uncertain" | "client_disconnected" | null;
 };
@@ -153,6 +202,11 @@ export type RequestContextSize = {
 };
 
 export type ToolUseDiagnostics = {
+  providerUsage?: {
+    serverToolCalls?: Partial<Record<"web_search" | "web_fetch" | "code_execution", number>>;
+    /** Subsets of cache-write totals, not additional tokens or charges. */
+    cacheWriteTokensByTtl?: Record<string, number>;
+  };
   clientToolCount: number;
   /** Post-policy catalog, before BPS prompt encoding or other transport changes. */
   forwardedToolCount: number;

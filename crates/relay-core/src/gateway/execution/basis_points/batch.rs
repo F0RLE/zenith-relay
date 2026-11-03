@@ -1,7 +1,8 @@
 //! Stateless fan-out/fan-in for one native BPS call. Never executes client tools.
-use super::catalog::{ClientTool, client_tool_call_name, history_tool, tool_spec};
+use super::catalog::{ClientTool, client_tool_call_name, tool_spec};
 use super::codec::{
-    json_argument_error, json_text, parse_function_arguments, parse_json_object, parse_payload_json,
+    json_argument_error, json_text, parse_function_arguments, parse_json_object,
+    parse_payload_json, transport_references,
 };
 use super::history::fit_item_id;
 use super::response::invalid_tool_output;
@@ -88,6 +89,23 @@ pub(super) fn parent_call_id(id: &str) -> Option<String> {
     Alias::decode(id).ok().flatten().map(|alias| alias.parent)
 }
 
+fn batch_reference_count(arguments: Option<&Value>) -> Option<usize> {
+    // A literal batch marker only disables this optimization. False positives
+    // retain full validation; escaped markers remain discoverable below.
+    if arguments
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("relay-tool-batch-v1"))
+    {
+        return None;
+    }
+    transport_references(arguments).ok().map(|references| {
+        references
+            .as_deref()
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    })
+}
+
 pub(super) fn expand_output(
     items: &mut Vec<Value>,
     request: &Value,
@@ -98,15 +116,7 @@ pub(super) fn expand_output(
     }
     let mut replacements = Vec::new();
     let mut expanded_len = items.len();
-    let mut native_ids = HashSet::new();
-    let history = request
-        .get("input")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item["call_id"].as_str())
-        .flat_map(|id| std::iter::once(id.to_owned()).chain(parent_call_id(id)))
-        .collect::<HashSet<_>>();
+    let mut call_ids = super::history::replay_call_ids(request).collect::<HashSet<_>>();
     for (position, item) in items.iter().enumerate() {
         if !matches!(
             item["type"].as_str(),
@@ -119,8 +129,14 @@ pub(super) fn expand_output(
             .as_str()
             .filter(|id| !id.trim().is_empty())
             .ok_or_else(|| invalid_tool_output("output.run_officejs.call_id"))?;
-        if parent.starts_with(ID_PREFIX) || history.contains(parent) || !native_ids.insert(parent) {
+        if parent.starts_with(ID_PREFIX) || !call_ids.insert(super::history::replay_call_id(parent))
+        {
             return Err(invalid_tool_output("output.run_officejs.call_id"));
+        }
+        // Single calls still pass the full terminal/schema validator later.
+        // Only skip batch inspection; uncertain probes use the original path.
+        if batch_reference_count(item.get("arguments")).is_some_and(|count| count < 2) {
+            continue;
         }
         let outer = parse_json_object(item.get("arguments"));
         let references = outer.as_ref().and_then(|v| v["references"].as_array());
@@ -280,10 +296,16 @@ fn group_batch_results(items: Vec<Value>) -> Result<(Vec<Value>, HashSet<String>
 }
 
 /// Definitions stay ordered and contiguous; complete result groups may interleave.
-pub(super) fn collapse_history(
-    items: Vec<Value>,
-    tools: &[ClientTool],
-) -> Result<Vec<Value>, AdapterError> {
+pub(super) fn collapse_history(items: Vec<Value>) -> Result<Vec<Value>, AdapterError> {
+    // Ordinary history has no batch associations to reconstruct. Keep its
+    // storage and leave single-call validation to the history translator.
+    if !items.iter().any(|item| {
+        item["call_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(ID_PREFIX))
+    }) {
+        return Ok(items);
+    }
     let invalid = || AdapterError::invalid_request().with_parameter("input.run_officejs.batch");
     let raw_ids = items
         .iter()
@@ -395,19 +417,15 @@ pub(super) fn collapse_history(
             for entry in &entries {
                 let object = entry.as_object().ok_or_else(invalid)?;
                 let name = client_tool_call_name(object);
-                let historic = history_tool(object);
-                let tool = tool_spec(tools, &name)
-                    .or(historic.as_ref())
-                    .ok_or_else(invalid)?;
-                if is_transport_tool(&name)
+                if name.is_empty()
+                    || is_transport_tool(&name)
                     || name == super::presentation::LOOKUP_TOOL
-                    || (entry["type"] == "custom_tool_call") != (tool.kind == "custom")
                 {
                     return Err(invalid());
                 }
                 references.push(json!(name));
                 // Objects avoid an extra escaping layer that could break bounded replay.
-                payloads.push(if tool.kind == "custom" {
+                payloads.push(if entry["type"] == "custom_tool_call" {
                     entry
                         .get("input")
                         .filter(|value| value.is_string())

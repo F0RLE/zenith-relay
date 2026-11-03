@@ -3,6 +3,49 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn required_choices_accept_only_typed_assistant_refusals_without_relaxing_calls() {
+    let mut request = request_with_tool();
+    request["tool_choice"] = json!("required");
+    for (role, part, accepted) in [
+        (
+            "assistant",
+            json!({"type":"refusal","refusal":"Synthetic refusal"}),
+            true,
+        ),
+        ("assistant", json!({"type":"refusal","refusal":""}), true),
+        ("assistant", json!({"type":"refusal"}), false),
+        ("assistant", json!({"type":"refusal","refusal":null}), false),
+        (
+            "user",
+            json!({"type":"refusal","refusal":"Synthetic text"}),
+            false,
+        ),
+        (
+            "assistant",
+            json!({"type":"output_text","text":"Synthetic ordinary answer"}),
+            false,
+        ),
+    ] {
+        let reply = json!({"status":"completed","output":[{
+            "type":"message","role":role,"content":[part]}]});
+        assert_eq!(
+            translate_response_value(reply.clone(), &request).is_ok(),
+            accepted
+        );
+        if accepted {
+            let mut structured = request.clone();
+            structured["text"] = json!({"format":{"type":"json_object"}});
+            assert!(translate_response_value(reply.clone(), &structured).is_ok());
+            let mut invalid_call = reply;
+            invalid_call["output"].as_array_mut().unwrap().push(json!({
+                "type":"function_call","call_id":"call_invalid","name":TRANSPORT_TOOL,
+                "arguments":json!({"references":["exec_command"],"code":"{}"}).to_string()}));
+            assert!(translate_response_value(invalid_call, &request).is_err());
+        }
+    }
+}
+
+#[test]
 fn schema_preparation_timing_preserves_wire_body_and_rejection() {
     for mode in ["compact", "full", "discovery"] {
         let mut request = request_with_tool();
@@ -1268,13 +1311,14 @@ fn current_tools_override_history_and_keep_namespaces() {
     let instructions = current_catalog_text(&prepared);
     assert!(instructions.contains("functions.exec (custom): LATEST_DEFINITION"));
     assert!(!instructions.contains("OLD_DEFINITION"));
-    assert!(instructions.contains("clock.sleep"));
+    assert!(!instructions.contains("clock.sleep"));
+    assert!(prompt_text(&prepared).contains("clock.sleep"));
     let denied = tool_response(r#"{"tool":"clock.sleep","args":{}}"#);
     assert_eq!(
         translate_response(&denied, &request)
             .unwrap_err()
             .parameter(),
-        Some("output.run_officejs.tool_choice")
+        Some("output.run_officejs.tool")
     );
     assert!(
         prepared["input"]

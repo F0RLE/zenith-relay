@@ -17,6 +17,8 @@
     "check": "tsc -b tsconfig.json --pretty false",
     "check:bundle-size": "bun ../scripts/check/check-frontend-bundle.mjs",
     "check:docs": "bun ../scripts/check/check-docs.mjs",
+    "check:locales": "bun test tests/localization.test.ts tests/i18n.test.ts",
+    "locale:template": "bun ../scripts/maintenance/locale-template.mjs",
     "check:guardrails": "bun ../scripts/check/check-agent-guardrails.mjs",
     "check:duplicates": "bun ../scripts/check/check-duplicate-code.mjs",
     "test:unit": "bun test tests --path-ignore-patterns=\"tests/e2e/**\" --path-ignore-patterns=\"tests/docs/**\"",

@@ -55,8 +55,7 @@ pub(super) fn explicit_account_disable(code: &str) -> bool {
         )
 }
 
-/// A generic HTTP 403 was previously stored as a permanent block. That code
-/// does not prove the account was disabled, so restore routing and drop it.
+/// Clear legacy permanent blocks recorded for generic HTTP 403 responses.
 pub fn clear_false_upstream_block(
     health: &mut AccountHealthState,
     last_error_code: &mut Option<String>,
@@ -205,10 +204,9 @@ pub fn apply_model_discovery_failure(
 
 /// Applies one successful model-catalog read.
 ///
-/// A blank payload is not a catalog. It must not replace models the account
-/// already reported, and it is not substituted from a cache. A nonempty read
-/// replaces the discovered list. The configured baseline is filled only while
-/// it is still empty.
+/// A nonempty read replaces the discovered list. Blank payloads preserve saved
+/// models; the current read is authoritative. Fill the configured baseline only
+/// while it is empty.
 pub fn accept_discovered_models(
     models: &mut Vec<String>,
     discovered_models: &mut Option<Vec<String>>,

@@ -8,6 +8,42 @@ async function openRules(page: Page, locale: "en" | "ru" = "en") {
   await page.getByRole("tab", { name: locale === "ru" ? "Правила моделей" : "Model Rules" }).click();
 }
 
+test("tooltip pointers follow their triggers on all four sides", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    for (const [side, style] of Object.entries({ right: "left:8px;top:240px", left: "right:8px;top:240px", bottom: "left:400px;top:8px", top: "left:400px;bottom:8px" })) {
+      const parent = document.createElement("div");
+      if (side === "left" || side === "right") parent.className = "relay-sidebar";
+      parent.style.cssText = `all:initial;position:fixed;z-index:999;width:32px;height:32px;${style}`;
+      const button = document.createElement("button");
+      button.id = `arrow-${side}`;
+      button.textContent = side;
+      button.style.cssText = "width:32px;height:32px";
+      button.setAttribute("data-relay-tooltip", "Synthetic pointer explanation");
+      parent.append(button);
+      document.body.append(parent);
+    }
+  });
+  for (const side of ["right", "left", "bottom", "top"]) {
+    const anchor = page.locator(`#arrow-${side}`);
+    await anchor.hover();
+    const hint = page.getByRole("tooltip", { name: "Synthetic pointer explanation", exact: true });
+    await expect(hint).toHaveAttribute("data-placement", side);
+    await expect(hint).toHaveCSS("opacity", "1");
+    const pointer = await hint.evaluate(element => {
+      const style = getComputedStyle(element, "::before");
+      return { width: style.width, height: style.height, after: getComputedStyle(element, "::after").content };
+    });
+    expect(pointer).toEqual({ width: "8px", height: "8px", after: "none" });
+    const rect = await hint.boundingBox();
+    expect(rect!.x).toBeGreaterThanOrEqual(8);
+    expect(rect!.y).toBeGreaterThanOrEqual(8);
+    expect(rect!.x + rect!.width).toBeLessThanOrEqual(page.viewportSize()!.width - 8);
+    expect(rect!.y + rect!.height).toBeLessThanOrEqual(page.viewportSize()!.height - 8);
+  }
+});
+
 test("model hints use one themed overlay and dismiss on Escape, click and navigation", async ({ page }) => {
   await openRules(page, "ru");
   const drag = page.locator(".model-rule-drag-handle").first();

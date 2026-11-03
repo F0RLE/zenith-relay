@@ -45,7 +45,7 @@ for (const continuation of [false, true]) {
 for (const locale of ["ru", "en"] as const) {
   for (const theme of ["light", "dark"] as const) {
     for (const width of [390, 1160]) {
-      test(`technical details group diagnostics without clipping: ${locale}, ${theme}, ${width}`, async ({ page }) => {
+      test(`technical details group diagnostics without clipping: ${locale}, ${theme}, ${width}`, async ({ page }, testInfo) => {
         await page.setViewportSize({ width, height: 900 });
         await installTauriMock(page, { mode: "local", locale, theme, populated: true, diagnosticDebug: true });
         await page.goto("/");
@@ -59,6 +59,7 @@ for (const locale of ["ru", "en"] as const) {
             transport: {
               upstream: "http", mode: "basis_points", fallbackReason: "basis_points_http", responseFormat: "sse",
               responseHeadersMs: 240, requestPreparationMs: 125,
+              streamResponse: { decodedBodyFirstMs: 300, sseJsonFirstMs: 420, upstreamOutputFirstMs: 610 },
               requestPayload: { mode: "full", fullRequestReason: "basis_points_transport",
                 jsonBytes: 59000, bodyBytes: 59000, contentEncoding: "identity", httpSendToHeadersMs: 200 },
               requestPreparation: { bodyMs: 65, schemaValidationMs: 0, catalogMs: 25, attachmentsMs: 30 },
@@ -90,10 +91,10 @@ for (const locale of ["ru", "en"] as const) {
         await expect(timings).toBeVisible();
         await expect(timings.locator(".request-preparation-total dd")).toHaveText(locale === "ru" ? "125 мс" : "125 ms");
         await expect(timings.locator(".request-timing-metrics dt")).toHaveText(locale === "ru"
-          ? ["Заголовки ответа", "Первый вывод Relay", "Ответ источника собран", "Ответ Relay готов"]
-          : ["Response headers", "First Relay output", "Upstream response collected", "Relay response ready"]);
+          ? ["Заголовки ответа", "Первые декодированные байты", "Первый JSON SSE", "Первый вывод источника", "Первый вывод Relay", "Ответ источника собран", "Ответ Relay готов"]
+          : ["Response headers", "First decoded bytes", "First SSE JSON", "First upstream output", "First Relay output", "Upstream response collected", "Relay response ready"]);
         await expect(timings.locator(".request-timing-metrics dd")).toHaveText(locale === "ru"
-          ? ["+240 мс", "+640 мс", "+7 с", "+7,2 с"] : ["+240 ms", "+640 ms", "+7 s", "+7.2 s"]);
+          ? ["+240 мс", "+300 мс", "+420 мс", "+610 мс", "+640 мс", "+7 с", "+7,2 с"] : ["+240 ms", "+300 ms", "+420 ms", "+610 ms", "+640 ms", "+7 s", "+7.2 s"]);
         await expect(timings.locator(".request-preparation-details .request-technical-fields dd")).toHaveText(
           locale === "ru" ? ["65 мс", "0 мс", "25 мс", "30 мс"] : ["65 ms", "0 ms", "25 ms", "30 ms"],
         );
@@ -110,15 +111,23 @@ for (const locale of ["ru", "en"] as const) {
             return { left, right, top };
           }));
         const rows = [...new Set(metrics.map((metric) => metric.top))];
-        expect(rows).toHaveLength(width < 620 ? 2 : 1);
+        const columns = await timings.locator(".request-timing-metrics").evaluate((element) =>
+          getComputedStyle(element).gridTemplateColumns.split(" ").length);
+        expect(columns).toBeGreaterThanOrEqual(width < 620 ? 2 : 4);
+        expect(rows).toHaveLength(Math.ceil(metrics.length / columns));
         for (const top of rows) {
           const row = metrics.filter((metric) => metric.top === top);
           expect(row[0].left).toBeCloseTo(metrics[0].left, 0);
-          expect(row.at(-1)!.right).toBeCloseTo(response!.x + response!.width, 0);
+          expect(row.at(-1)!.right).toBeLessThanOrEqual(response!.x + response!.width + 1);
+          if (row.length === columns) expect(row.at(-1)!.right).toBeCloseTo(response!.x + response!.width, 0);
         }
         await expect(technical.locator(".request-technical-grid > section:last-child")).toHaveClass(/request-identifiers-section/);
         expect(await technical.locator("section, dl, dd").evaluateAll((elements) =>
           elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
+        if (locale === "ru" && theme === "light") {
+          await timings.scrollIntoViewIfNeeded();
+          await page.screenshot({ path: testInfo.outputPath("stream-timings.png") });
+        }
         const route = await technical.locator(".request-route-section").boundingBox();
         const payload = await technical.locator(".request-payload-section").boundingBox();
         const identifiers = await technical.locator(".request-identifiers-section").boundingBox();

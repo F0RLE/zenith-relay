@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::scheduler::rotation::{
-    AdmissionStopReason, RequestId, RotationOperation, SharedRequestBudget,
+    AdmissionStopReason, RequestId, RequestWaitKind, RotationOperation, SharedRequestBudget,
 };
 use crate::{Selection, SelectionRequest};
 use std::collections::VecDeque;
@@ -87,7 +87,7 @@ pub(super) struct AdmissionQueue {
 }
 
 impl AdmissionQueue {
-    fn insert(&mut self, request: AdmissionRequest, selecting: bool) -> bool {
+    fn insert(&mut self, request: AdmissionRequest, kind: RequestWaitKind) -> bool {
         let request_id = request.budget.request_id();
         let bytes = request.retained_bytes();
         let principal = &request.key.id;
@@ -108,7 +108,7 @@ impl AdmissionQueue {
             || principal_count >= self.limits.principal_requests
             || bytes > self.limits.bytes.saturating_sub(self.retained_bytes)
             || bytes > self.limits.principal_bytes.saturating_sub(principal_bytes)
-            || !request.budget.begin_queue_wait()
+            || !request.budget.begin_queue_wait(kind)
         {
             return false;
         }
@@ -119,7 +119,7 @@ impl AdmissionQueue {
         self.waiters.push_back(Waiter {
             request,
             bytes,
-            selecting,
+            selecting: kind == RequestWaitKind::Capacity,
         });
         true
     }
@@ -210,9 +210,9 @@ impl GatewayRuntime {
         &'a self,
         queue: &mut AdmissionQueue,
         request: &AdmissionRequest,
-        selecting: bool,
+        kind: RequestWaitKind,
     ) -> Option<AdmissionGuard<'a>> {
-        if !queue.insert(request.clone(), selecting) {
+        if !queue.insert(request.clone(), kind) {
             request
                 .budget
                 .stop_admission(AdmissionStopReason::QueueFull);

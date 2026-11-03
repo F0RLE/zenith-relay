@@ -68,13 +68,19 @@ impl RotationEngine {
         &mut self,
         candidate_id: &str,
         route_key: &str,
-        first_output_latency_ms: u64,
+        first_output_latency_ms: Option<u64>,
         now_ms: u64,
     ) {
         let health = self
             .health
             .entry((candidate_id.to_owned(), route_key.to_owned()))
             .or_default();
+        health
+            .latency_window
+            .observe(first_output_latency_ms, now_ms);
+        let Some(first_output_latency_ms) = first_output_latency_ms else {
+            return;
+        };
         health.first_output_latency_ms = Some(match health.first_output_latency_ms {
             Some(previous) => {
                 let alpha = u64::from(HEALTH_EWMA_ALPHA_MILLI);
@@ -86,6 +92,20 @@ impl RotationEngine {
             None => first_output_latency_ms,
         });
         health.latency_observed_at_ms = Some(now_ms);
+    }
+
+    pub(crate) fn latency_diagnostics(
+        &self,
+        candidate_id: &str,
+        route_key: &str,
+        now_ms: u64,
+    ) -> RouteLatencyDiagnostics {
+        self.health
+            .get(&(candidate_id.to_owned(), route_key.to_owned()))
+            .map_or_else(
+                || LatencyWindow::default().snapshot(now_ms),
+                |health| health.latency_window.snapshot(now_ms),
+            )
     }
 
     pub fn circuit(&self, candidate_id: &str, route_key: &str) -> CircuitSnapshot {

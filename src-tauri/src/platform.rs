@@ -9,6 +9,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 const RELAY_DIRECTORY: &str = "Zenith Relay";
+pub mod localization;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,16 +34,6 @@ pub fn platform_name() -> &'static str {
 
 pub fn system_locale() -> Option<String> {
     sys_locale::get_locale().or_else(|| env::var("LANG").ok())
-}
-
-pub fn system_language_is_russian() -> bool {
-    system_locale()
-        .map(|locale| locale.to_lowercase().starts_with("ru"))
-        .unwrap_or(false)
-}
-
-pub fn ui_text(en: &'static str, ru: &'static str) -> &'static str {
-    if system_language_is_russian() { ru } else { en }
 }
 
 pub fn default_codex_home() -> PathBuf {

@@ -40,6 +40,9 @@ pub(super) async fn handle_downstream_message(
                 .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
         Message::Close(frame) => {
+            // Commit observed usage and release capacity before any best-effort
+            // close handshake with a peer that may have stopped reading.
+            finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
             let (code, reason) = frame
                 .map(|frame| {
                     (
@@ -48,9 +51,12 @@ pub(super) async fn handle_downstream_message(
                     )
                 })
                 .unwrap_or((UpstreamCloseCode::Normal, String::new()));
-            let _ = send_message(upstream, UpstreamMessage::Close { code, reason }).await;
-            let _ = send_message(downstream, Message::Close(None)).await;
-            finish_incomplete(runtime, state, error_codes::CLIENT_CANCELLED);
+            let _ = super::super::io::send_close_message(
+                upstream,
+                UpstreamMessage::Close { code, reason },
+            )
+            .await;
+            let _ = super::super::io::send_close_message(downstream, Message::Close(None)).await;
             return Ok(false);
         }
     }

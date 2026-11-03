@@ -1,10 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { CheckCircle2, CirclePause, Copy, KeyRound, Laptop, Link2, RefreshCw, Save } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { ActionMenu, ActionMenuItem, CopyButton, EmptyState, IconButton, copyText, useConfirm } from "../../components/Ui";
 import { sourcePort } from "../../sourceUrl";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { useRefreshSafeDraft } from "../../hooks/useRefreshSafeDraft";
 import { RouteRecoveryControl } from "./RouteRecoveryControl";
 import { NetworkAccessControl } from "./NetworkAccessControl";
 
@@ -14,8 +15,7 @@ export function GatewayApiTab({ running, endpoint, actions }: { running: boolean
   const confirm = useConfirm();
   const connectionTitle = t(mode === "local" ? "gateway.localConnection" : "gateway.connection");
   const currentPort = mode === "local" ? sourcePort(endpoint) : "";
-  const [port, setPort] = useState(currentPort);
-  useEffect(() => setPort(currentPort), [currentPort]);
+  const [port, setPort] = useRefreshSafeDraft(currentPort, mode);
 
   if (!endpoint) return <section className="gateway-tab-panel gateway-empty-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.api")}>
     <div className="integration-section-heading">

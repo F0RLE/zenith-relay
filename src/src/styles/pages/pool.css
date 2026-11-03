@@ -384,11 +384,6 @@
   color: var(--relay-accent-hover);
 }
 
-.pool-next-route {
-  flex: 0 1 50%;
-}
-
-.pool-next-route,
 .pool-active-models {
   min-width: 0;
   display: inline-flex;
@@ -401,14 +396,12 @@
   visibility: hidden;
 }
 
-.pool-next-route > svg,
 .pool-active-models > svg {
   width: 14px;
   height: 14px;
   flex: 0 0 14px;
 }
 
-.pool-next-route > span,
 .pool-active-models > span {
   min-width: 0;
   overflow: hidden;

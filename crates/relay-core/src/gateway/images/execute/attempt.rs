@@ -122,6 +122,7 @@ pub(super) async fn run_selected_attempt(
                 lease: Some(lease),
                 usage_event: Some((&authorization_event, started)),
             },
+            None,
         )
         .await;
     let attempt = u16::from(budget.dispatches());

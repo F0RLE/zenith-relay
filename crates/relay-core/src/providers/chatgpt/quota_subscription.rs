@@ -1,13 +1,19 @@
 mod client;
 mod metadata;
 mod parse;
+mod probe;
+
+pub use probe::{
+    SubscriptionAuthorizationProbe, SubscriptionEndpointProbe, probe_subscription_authorization,
+    probe_subscription_proxy,
+};
 
 pub use client::{
     CODEX_ACCOUNTS_CHECK_ENDPOINT, CODEX_SUBSCRIPTIONS_ENDPOINT, CodexSubscriptionClient,
 };
 pub use metadata::{
-    CodexSubscriptionMetadata, SUBSCRIPTION_REFRESH_INTERVAL_MS, merge_subscription_metadata,
-    merge_subscription_metadata_at, subscription_refresh_due,
+    CodexSubscriptionMetadata, CodexSubscriptionRead, SUBSCRIPTION_REFRESH_INTERVAL_MS,
+    merge_subscription_metadata, merge_subscription_metadata_at, subscription_refresh_due,
 };
 pub use parse::{
     AccountCheckIdentityError, account_ids_from_check_response,

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { CopyButton } from "../../components/Ui";
 import { CacheContextDetails } from "./CacheContextDetails";
 import { CacheAffinityDetails } from "./CacheAffinityDetails";
+import { RouteLatencyDetails } from "./RouteLatencyDetails";
 import { RequestDisclosure } from "./RequestDisclosure";
 import { RequestSection } from "./RequestSection";
 import type { UsageRow } from "./usageData";
@@ -29,6 +30,9 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   // These are dispatch-relative offsets, not durations to add to preparation.
   const responseTimings = ([
     ["responseHeadersTime", transport?.responseHeadersMs],
+    ["decodedBodyFirstTime", transport?.streamResponse?.decodedBodyFirstMs],
+    ["sseJsonFirstTime", transport?.streamResponse?.sseJsonFirstMs],
+    ["upstreamOutputFirstTime", transport?.streamResponse?.upstreamOutputFirstMs],
     ["clientFirstOutputTime", transport?.clientFirstOutputMs],
     ["upstreamResponseTime", transport?.upstreamResponseMs],
     ["clientResponseReadyTime", transport?.clientResponseReadyMs],
@@ -102,6 +106,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             ? field("usage.quotaAtSelection", `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`) : null}
           {field("usage.inFlightAtSelection", routing.inFlightBefore)}
           {field("usage.dispatchesBefore", routing.dispatchesBefore)}
+          <RouteLatencyDetails diagnostics={routing.routeLatency} />
         </dl>
       </RequestSection> : null}
       {debugEnabled && payload ? <RequestSection title={t("usage.requestSections.payload")} className="request-payload-section">
