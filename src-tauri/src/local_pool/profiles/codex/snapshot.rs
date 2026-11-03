@@ -222,12 +222,11 @@ fn copy_field(saved: &dyn toml_edit::TableLike, current: &mut dyn toml_edit::Tab
 
 pub(super) fn references_catalog(config: Option<&str>, path: &Path) -> Result<bool> {
     let config = parse_config(config.unwrap_or_default())?;
-    let path = portable_path_string(path);
     let matches = |table: &dyn toml_edit::TableLike| {
         table
             .get("model_catalog_json")
             .and_then(Item::as_str)
-            .is_some_and(|value| portable_path_value(value) == path)
+            .is_some_and(|value| matches_catalog_path(value, path))
     };
     Ok(matches(config.as_table())
         || config
@@ -239,6 +238,20 @@ pub(super) fn references_catalog(config: Option<&str>, path: &Path) -> Result<bo
                     .filter_map(|(_, profile)| profile.as_table_like())
                     .any(matches)
             }))
+}
+
+fn matches_catalog_path(configured: &str, managed: &Path) -> bool {
+    let configured = Path::new(configured);
+    if !configured.is_absolute() || configured.file_name() != managed.file_name() {
+        return false;
+    }
+    // Resolve directory aliases even when the catalog needs to be restored.
+    // Keep the leaf intact so the bounded reader still rejects linked files.
+    configured
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .zip(managed.parent())
+        .is_some_and(|(parent, expected)| parent == expected)
 }
 
 pub(in crate::local_pool::profiles) fn capture_managed_catalog(
@@ -255,7 +268,7 @@ pub(in crate::local_pool::profiles) fn capture_managed_catalog(
         .or_else(|| config.get("model_catalog_json"));
     if !selected
         .and_then(Item::as_str)
-        .is_some_and(|selected| portable_path_value(selected) == portable_path_string(&path))
+        .is_some_and(|selected| matches_catalog_path(selected, &path))
     {
         return Ok(None);
     }

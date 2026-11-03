@@ -4,6 +4,43 @@ mod credentials;
 mod managed;
 
 #[test]
+fn snapshot_catalog_resolves_directory_aliases_before_and_after_removal() {
+    let (root, _home, backups) = profile_dirs("snapshot-catalog-alias");
+    let nested = backups.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let path = managed_model_catalog_path(&backups).unwrap();
+    let alias = nested.join("..").join(MODEL_CATALOG_FILE);
+    let catalog = r#"{"models":[{"slug":"synthetic-model"}]}"#;
+    fs::write(&path, catalog).unwrap();
+    let saved = UserProfileSnapshot {
+        config: Some(format!("model_catalog_json = '{}'\n", alias.display())),
+        auth: None,
+    };
+    assert_eq!(
+        snapshot::capture_managed_catalog(&backups, &saved)
+            .unwrap()
+            .as_deref(),
+        Some(catalog)
+    );
+    fs::remove_file(&path).unwrap();
+    assert!(snapshot::references_catalog(saved.config.as_deref(), &path).unwrap());
+
+    let foreign = root.join(MODEL_CATALOG_FILE);
+    fs::write(&foreign, catalog).unwrap();
+    let external = UserProfileSnapshot {
+        config: Some(format!("model_catalog_json = '{}'\n", foreign.display())),
+        auth: None,
+    };
+    assert!(
+        snapshot::capture_managed_catalog(&backups, &external)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!snapshot::references_catalog(external.config.as_deref(), &path).unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn snapshot_captures_active_connection_instead_of_attachment_baseline() {
     let (root, home, backups) = profile_dirs("snapshot-current");
     let secrets = MemorySecrets::default();
