@@ -1,0 +1,272 @@
+@import "../../styles/brand-tokens.css";
+
+/* Hosted's operating surface inherits the public identity, not Desktop chrome. */
+.hosted-app {
+  --panel-radius: 16px;
+  --control-chevron-inset: 12px;
+  --hosted-tools-space: 256px;
+  --control-bg: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  --control-edge: color-mix(in srgb, var(--accent) 18%, var(--border));
+  --overlay-lift: 0 16px 48px light-dark(#142d2029, #00000070);
+  --pine: light-dark(#164c3c, #173f32);
+  --pine-ink: #f0f2dc;
+  --pine-secondary: #ccdec6;
+  --nav-bg: var(--pine);
+  --nav-ink: var(--pine-ink);
+  --nav-muted: var(--pine-secondary);
+  --nav-border: #ccdec633;
+  --nav-active-bg: var(--pine-ink);
+  --nav-active-ink: #164c3c;
+  --nav-hover: #f0f2dc12;
+  --nav-brand: var(--pine-ink);
+  --relay-mono: var(--font-code);
+  --relay-accent-hover: var(--accent-hover);
+  --relay-on-accent: var(--accent-ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  caret-color: var(--accent);
+}
+.hosted-app ::selection { background: var(--accent); color: var(--accent-ink); }
+.hosted-app :is(h1, h2, h3) { font-family: var(--font-display); font-weight: 550; }
+.hosted-app :is(button, input, textarea, select) { font-family: var(--font-body); }
+.hosted-app :is(code, kbd) { font-family: var(--font-code); }
+.hosted-app .relay-content { background: var(--bg); }
+.hosted-app .relay-page { padding: 0 32px 32px; }
+.hosted-app .page-heading { min-height: 88px; padding-block: 24px; margin-bottom: 8px; border-bottom: 0; }
+.hosted-app :is(.page-heading, .relay-page-header) h1 { font-size: 28px; line-height: 36px; letter-spacing: -.035em; font-weight: 550; }
+.hosted-app .relay-page-header { min-height: 88px; padding-block: 24px; align-items: center; }
+.hosted-app .hosted-tools { --hosted-tools-gap: 8px; top: 24px; right: 32px; gap: var(--hosted-tools-gap); }
+.hosted-app .page-heading > .button { min-height: 40px; padding: 9px 16px; }
+@container relay-page (max-width: 620px) {
+  .hosted-app .page-heading:has(> .button) { flex-wrap: wrap; row-gap: 16px; }
+  .hosted-app .page-heading:has(> .button) > h1 { flex-basis: 100%; }
+}
+
+/* Pine navigation keeps the public identity, with cream selection in both themes. */
+.hosted-app .relay-sidebar {
+  --relay-sidebar: var(--nav-bg); --relay-text: var(--nav-ink); --relay-muted: var(--nav-muted);
+  --text: var(--nav-ink); --secondary: var(--nav-muted); --muted: var(--nav-muted);
+  --relay-border: var(--nav-border);
+  background: var(--nav-bg); color: var(--nav-ink); border-right: 0;
+}
+.hosted-app .mode-picker { min-height: 88px; padding-block: 22px; }
+.hosted-app .sidebar-navigation { display: flex; flex: 1; min-height: 0; overflow-y: auto; }
+.hosted-app .sidebar-main-nav { display: flex; flex: 1; flex-direction: column; min-height: min-content; }
+.hosted-app .sidebar-account-nav { margin-block-start: auto; padding-block-start: 16px; }
+.hosted-app .mode-picker > .hosted-mode { width: 100%; min-height: 44px; border: 0; border-radius: 8px; background: transparent; color: var(--nav-brand); padding-inline: 12px; gap: 10px; text-align: left; transition: background-color 160ms ease; }
+@media (hover: hover) and (pointer: fine) {
+  .hosted-app .mode-picker > .hosted-mode:hover { background: var(--nav-hover); }
+}
+.hosted-app .hosted-brand-mark { width: 25px; height: 30px; stroke: currentColor; stroke-width: 1.6; flex-shrink: 0; }
+.hosted-app .hosted-mode strong { font-size: 25px; font-weight: 650; letter-spacing: -.035em; }
+.hosted-app .hosted-mode small { color: var(--nav-muted); font-size: 11px; margin-left: 8px; }
+.hosted-app .relay-sidebar nav button { min-height: 44px; border: 0; border-radius: 8px; background: transparent; color: var(--nav-muted); font-size: 12px; font-weight: 450; box-shadow: none; transition: background-color 160ms ease, color 160ms ease; }
+.hosted-app .relay-sidebar nav button.active { color: var(--nav-active-ink); background: var(--nav-active-bg); font-weight: 600; box-shadow: none; }
+.hosted-app .sidebar-nav-group, .hosted-app .sidebar-nav-utilities { gap: 6px; }
+.hosted-app .sidebar-footer { min-height: 62px; padding-block: 12px; border-top-color: var(--nav-border); }
+.hosted-app .sidebar-footer > nav { width: 100%; }
+.hosted-app .sidebar-collapsed .mode-picker { padding-inline: 8px; }
+.hosted-app .sidebar-collapsed .hosted-mode { padding: 0; }
+
+/* Flat information surfaces; elevation belongs to overlays. */
+.hosted-app :is(.hosted-card, .hosted-fieldset, .balance-panel, .payment-panel, .usage-overview, .usage-extra-filters, .metric-band, .overview-analytics, .settings-group, .hosted-resource-controls, .account-card) {
+  border-radius: var(--panel-radius); border-color: var(--border); box-shadow: none;
+}
+.hosted-app .table-shell { border-radius: 12px; border-color: var(--border); }
+.hosted-app :is(.overview-chart, .overview-token-trend, .settings-group > header, .account-card-main, .account-card-footer) { border-radius: 0; }
+.hosted-app .hosted-card { padding: 24px; }
+.hosted-app .hosted-card-list { gap: 20px; }
+.hosted-app .hosted-card > header { margin-bottom: 20px; }
+.hosted-app .hosted-card h2 { font-size: 16px; }
+.hosted-app .hosted-fieldset { border-radius: 10px; }
+
+/* Quiet shared controls: colour carries hierarchy, not floating keycap shadows. */
+.hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance) {
+  border: 1px solid var(--control-edge); border-radius: 8px;
+  background: var(--control-bg); color: var(--text); box-shadow: none;
+  min-height: 40px; font-size: 13px; font-weight: 550; line-height: 20px;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1);
+}
+.hosted-app :is(.button, .relay-button) { padding: 9px 16px; }
+.hosted-app :is(.icon-button, .relay-icon-button) { width: 40px; height: 40px; padding: 0; }
+.hosted-app .hosted-balance { padding: 8px 12px; font-size: 13px; font-variant-numeric: tabular-nums; background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.hosted-app :is(.hosted-tools, .dialog-header) .icon-button { background: transparent; border-color: transparent; color: var(--secondary); }
+.hosted-app .hosted-tools .icon-button[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+.hosted-app :is(.primary-button, .relay-button.primary) { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.hosted-app .danger-button { color: var(--error); background: transparent; border-color: transparent; }
+.hosted-app .button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.hosted-app .hosted-tools .notification-button[data-unread="true"] { color: light-dark(#986900, #f2c34f); }
+.hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance):disabled { box-shadow: none; opacity: .5; cursor: not-allowed; transform: none; }
+.hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance):not(:disabled):active { transform: translateY(1px); box-shadow: none; }
+.hosted-app .relay-sidebar :is(.relay-icon-button, .icon-button) { color: var(--nav-ink); background: transparent; border-color: var(--nav-border); box-shadow: none; }
+.hosted-app .relay-sidebar :is(a, button):focus-visible { outline-color: var(--nav-brand); }
+
+/* Tabs and filters are quiet navigation, not additional raised buttons. */
+.hosted-app .relay-tabs { gap: 4px; }
+.hosted-app .relay-tabs button { min-height: 38px; padding: 8px 14px; border: 1px solid transparent; border-radius: 8px; color: var(--secondary); background: transparent; font-size: 13px; box-shadow: none; }
+.hosted-app .relay-tabs button.active { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 550; box-shadow: none; }
+.hosted-app .segmented { padding: 4px; gap: 2px; border-radius: 10px; background: var(--subtle); }
+.hosted-app .segmented button { height: 32px; border-radius: 7px; padding-inline: 12px; font-size: 12px; }
+.hosted-app .segmented button.active { background: var(--surface); color: var(--accent); box-shadow: 0 2px 6px #102c1c12; }
+.hosted-app :is(.option-trigger, input:not([type="checkbox"]):not([type="radio"]), textarea, select) { border-radius: 8px; border-color: var(--border); background: var(--surface); color: var(--text); font-size: 13px; }
+.hosted-app :where(.option-trigger, select, input:not([type="checkbox"]):not([type="radio"])) { min-height: 40px; }
+.hosted-app .option-trigger { padding: 9px var(--control-chevron-inset); box-shadow: none; }
+.hosted-app .usage-filters { gap: 12px; margin-bottom: 20px; }
+.hosted-app .usage-filters .option-trigger { min-height: 40px; height: 40px; font-size: 12px; border-color: var(--border); background: var(--surface); }
+.hosted-app .usage-filter-trigger { flex-basis: 40px; width: 40px; height: 40px; }
+.hosted-app .usage-filter-trigger:is([aria-expanded="true"], [data-active="true"]) { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.hosted-app :is(.usage-filters, .settings-control-row, .overview-analytics-controls) .option-trigger { border-color: var(--border); background: var(--surface); }
+.hosted-app input::placeholder, .hosted-app textarea::placeholder { color: var(--muted); opacity: 1; }
+
+/* Preserve the information model and the charts' distinct semantic colours. */
+.hosted-app .metric-band { margin-top: 8px; }
+.hosted-app .metric-band > div { min-height: 76px; padding: 16px 18px; gap: 12px; }
+.hosted-app .metric-band > div > span { min-width: 0; }
+.hosted-app .metric-band strong { flex-shrink: 0; font-size: 24px; line-height: 1.2; font-weight: 550; }
+.hosted-app .overview-analytics { margin-top: 24px; }
+.hosted-app .overview-analytics-header { padding: 20px 24px; gap: 20px; }
+.hosted-app .overview-analytics-header h2 { font-size: 16px; }
+.hosted-app :is(.overview-chart, .overview-token-trend) { padding: 24px; }
+.hosted-app .overview-chart-title strong { font-size: 14px; font-weight: 550; }
+.hosted-app .usage-overview { margin-bottom: 24px; overflow: hidden; }
+.hosted-app .usage-overview .usage-metric { padding: 20px 24px; }
+.hosted-app .usage-metric-copy { align-items: start; text-align: left; gap: 8px; }
+.hosted-app .usage-metric-copy strong { font-size: 26px; line-height: 34px; font-weight: 550; letter-spacing: -.025em; }
+.hosted-app .usage-secondary-metrics .usage-metric { padding: 0; }
+.hosted-app .usage-secondary-metrics .usage-metric-copy { align-items: center; text-align: center; gap: 4px; }
+.hosted-app .request-table :is(th, td) { padding-block: 16px; }
+.hosted-app .request-table th { font-weight: 450; line-height: 1.6; }
+.hosted-app .request-table .request-link { font-family: var(--font-body); }
+.hosted-app .pagination { padding-block: 12px; gap: 12px; }
+.hosted-app .status-badge { border-radius: 6px; }
+.hosted-app .settings-group > header { padding: 18px 24px; }
+.hosted-app .settings-group > header h2 { font-size: 14px; font-weight: 550; }
+.hosted-app .settings-control-row { padding: 18px 24px; }
+.hosted-app .settings-stack { gap: 24px; }
+.hosted-app .hosted-toolbar { gap: 12px; margin-block: 24px; }
+.hosted-app .account-card-footer .relay-button { flex: 0 1 auto; border: 1px solid var(--control-edge); border-radius: 8px; background: var(--control-bg); box-shadow: none; }
+.hosted-app .hosted-resource-body { padding: 18px 12px; }
+.hosted-app .account-identity h2 { font-weight: 550; }
+.hosted-app .account-kind-icon { border-top-left-radius: 15px; }
+
+/* Balance is account information, never a marketing graphic. */
+.hosted-app .balance-panel { margin: 16px 0 24px; }
+.hosted-app .balance-panel > div { padding: 28px; gap: 24px; }
+.hosted-app .balance-panel strong { color: var(--text); font-size: 36px; line-height: 1.25; font-weight: 550; letter-spacing: -.035em; margin-top: 10px; }
+.hosted-app .payment-panel > header { padding: 22px 24px; }
+.hosted-app .payment-panel h2 { font-size: 16px; }
+.hosted-app .payment-table :is(th, td) { padding: 16px 24px; }
+
+/* Overlays share the same paper, type and controls as their originating page. */
+.hosted-app :is(.request-dialog, .notification-panel) { border: 0; border-radius: 16px; box-shadow: var(--overlay-lift); }
+.hosted-app .request-dialog::backdrop { background: light-dark(#152d2466, #00000099); }
+.hosted-app .dialog-header { min-height: 72px; padding: 16px 24px; gap: 16px; }
+.hosted-app .dialog-header h2 { font-size: 18px; line-height: 26px; font-weight: 550; letter-spacing: -.02em; text-transform: none; color: var(--text); }
+.hosted-app .request-dialog.hosted-request-details { border-radius: 16px; box-shadow: var(--overlay-lift); }
+.hosted-app .hosted-request-details .dialog-header h2 { color: var(--text); font-size: 18px; line-height: 26px; font-weight: 550; letter-spacing: -.02em; text-transform: none; }
+.hosted-app .hosted-request-details .dialog-header .icon-button { width: 40px; height: 40px; min-height: 40px; border-radius: 8px; }
+.hosted-app .dialog-body { padding: 24px; gap: 24px; font-size: 13px; }
+.hosted-app .notification-panel-header { padding: 16px 20px; }
+.hosted-app .notification-panel-header h2 { font-size: 16px; }
+.hosted-app .notification-close { width: 40px; min-height: 40px; border-radius: 8px; }
+.hosted-app .notification-entry { padding: 20px; }
+.hosted-app .notification-entry p { color: var(--secondary); }
+.hosted-app .hosted-empty { padding: 48px 0; gap: 20px; }
+.hosted-app .hosted-empty h2 { font-size: 22px; letter-spacing: -.025em; }
+.hosted-app .hosted-empty p { color: var(--secondary); line-height: 1.7; }
+.hosted-app :is(.demo-signed-out, .integration-unavailable) { font-family: var(--font-body); background: var(--bg); color: var(--text); }
+.hosted-app :is(.demo-signed-out, .integration-unavailable) h1 { font-size: 28px; letter-spacing: -.035em; }
+
+/* Focus stays within the control; forced colors retain the system indicator. */
+.relay-app.hosted-app :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible { outline: 0; outline-offset: 0; }
+.relay-app.hosted-app :is(.button, .icon-button, .key-sort):focus-visible:not(.danger-button) { background: var(--accent-soft); }
+.relay-app.hosted-app .relay-sidebar :is(a, button):focus-visible { outline-color: var(--nav-brand); }
+.relay-app.hosted-app .relay-page:focus { outline: none; }
+.hosted-app .relay-toggle:focus-visible { filter: none; }
+
+@container relay-page (width > 560px) and (width < 1000px) {
+  .hosted-app .relay-page-header.relay-workspace-header { grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding-right: 0; }
+  .hosted-app .relay-workspace-header h1 { grid-column: 1 / -1; grid-row: 1; padding-right: var(--hosted-tools-space); }
+  .hosted-app .relay-workspace-header .relay-page-navigation { grid-column: 1; grid-row: 2; }
+  .hosted-app .relay-workspace-header .relay-page-actions { grid-column: 2; grid-row: 2; align-self: start; width: auto; justify-content: flex-end; }
+}
+@media (hover: hover) and (pointer: fine) {
+  .hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance):not(:disabled):hover { background: var(--accent-soft); border-color: var(--control-border); }
+  .hosted-app .option-trigger:not(:disabled):hover { background: var(--subtle); border-color: var(--control-border); }
+  .hosted-app :is(.hosted-tools, .dialog-header) .icon-button:not(:disabled):hover { background: var(--accent-soft); border-color: transparent; }
+  .hosted-app .button[aria-pressed="true"]:not(:disabled):hover { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+  .hosted-app :is(.primary-button, .relay-button.primary):not(:disabled):hover { background: var(--accent-hover); color: var(--accent-ink); border-color: transparent; }
+  .hosted-app .danger-button:not(:disabled):hover { background: var(--error-soft); color: var(--error); border-color: var(--error); }
+  .hosted-app .relay-sidebar nav button:not(.active):hover { color: var(--nav-ink); background: var(--nav-hover); }
+  .hosted-app .relay-sidebar :is(.relay-icon-button, .icon-button):hover { color: var(--nav-ink); background: var(--nav-hover); border-color: var(--nav-muted); }
+  .hosted-app .relay-tabs button:not(.active):hover { background: var(--subtle); color: var(--text); }
+}
+@media (max-width: 1100px) {
+  .hosted-app .relay-page { padding-inline: 24px; }
+  .hosted-app .hosted-tools { right: 24px; }
+  .hosted-app .usage-overview .usage-metric { padding: 16px; }
+}
+@container relay-page (min-width: 761px) {
+  .hosted-app .usage-filters { grid-template-columns: 140px 152px repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 639px) {
+  .hosted-app .relay-page { padding: 0 16px 24px; }
+  .hosted-app .hosted-tools { position: sticky; inset: 0 auto auto; min-height: 68px; padding: 12px 16px; justify-content: flex-end; background: var(--bg); border-bottom: 1px solid var(--border); }
+  .hosted-app .hosted-tools .mobile-menu { margin-right: auto; }
+  .hosted-app .page-heading, .hosted-app .page-heading:has(.button-row), .hosted-app .page-heading:has(> button), .hosted-app .relay-workspace-header { min-height: 80px; padding: 24px 0 20px; gap: 16px; flex-wrap: wrap; }
+  .hosted-app :is(.page-heading, .relay-page-header) h1 { font-size: 24px; line-height: 32px; }
+  .hosted-app .relay-workspace-header h1, .hosted-app .usage-page .relay-workspace-header h1 { padding-right: 0; }
+  .hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance, .option-trigger), .hosted-app .usage-filters .option-trigger, .hosted-app .page-heading > .button { min-height: 44px; }
+  .hosted-app .usage-filters .option-trigger { height: 44px; }
+  .hosted-app :is(.icon-button, .relay-icon-button), .hosted-app .usage-filter-trigger { width: 44px; height: 44px; flex-basis: 44px; }
+  .hosted-app .relay-tabs button { min-height: 44px; padding-inline: 12px; }
+  .hosted-app .relay-sidebar[data-open="true"] { width: min(296px, calc(100vw - 24px)); }
+  .hosted-app .drawer-close { top: 22px; right: 12px; }
+  .hosted-app .hosted-card { padding: 20px; }
+  .hosted-app .hosted-card-list { gap: 16px; }
+  .hosted-app .metric-band > div { min-height: 68px; padding: 14px 12px; gap: 8px; }
+  .hosted-app .metric-band strong { font-size: 22px; }
+  .hosted-app .overview-analytics { margin-top: 20px; }
+  .hosted-app .overview-analytics-header { padding: 20px 16px; }
+  .hosted-app :is(.overview-chart, .overview-token-trend) { padding: 20px 12px; }
+  .hosted-app .overview-analytics-controls { flex-wrap: wrap; gap: 12px; }
+  .hosted-app .overview-analytics-controls .option-menu { flex: 1 1 100%; }
+  .hosted-app .overview-analytics-controls .segmented { width: 100%; }
+  .hosted-app .segmented button { min-height: 36px; height: auto; flex: 1; }
+  .hosted-app .usage-metric-copy strong { font-size: 22px; line-height: 28px; }
+  .hosted-app .usage-secondary-metrics .usage-metric-copy > strong { font-size: 13px; }
+  .hosted-app .usage-overview .usage-metric { padding: 16px; }
+  .hosted-app .usage-secondary-metrics .usage-metric { padding: 0; }
+  .hosted-app .settings-control-row, .hosted-app .settings-group > header { padding: 16px; }
+  .hosted-app .resource-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hosted-app .resource-summary span:last-child { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border); }
+  .hosted-app .balance-panel > div { padding: 24px 20px; }
+  .hosted-app .balance-panel strong { font-size: 32px; }
+  .hosted-app .payment-panel > header { padding: 16px 20px; }
+  .hosted-app .payment-table :is(th, td) { padding: 16px; }
+  .hosted-app .dialog-header { padding: 16px; }
+  .hosted-app .dialog-header h2 { font-size: 16px; }
+  .hosted-app .hosted-request-details .dialog-header h2 { font-size: 16px; }
+  .hosted-app .hosted-request-details .dialog-header .icon-button { width: 44px; height: 44px; min-height: 44px; }
+  .hosted-app .dialog-body { padding: 20px 16px; }
+  .hosted-app .notification-panel-header, .hosted-app .notification-entry { padding: 16px; }
+}
+@media (max-width: 360px) {
+  .hosted-app .hosted-tools { --hosted-tools-gap: 4px; padding-inline: 12px; }
+}
+@media (pointer: coarse) {
+  .hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance), .hosted-app .page-heading > .button { min-height: 44px; }
+  .hosted-app :is(.icon-button, .relay-icon-button), .hosted-app .hosted-request-details .dialog-header .icon-button { width: 44px; height: 44px; }
+  .hosted-app .segmented button, .hosted-app .relay-tabs button { min-height: 44px; height: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hosted-app *, .hosted-app *::before, .hosted-app *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
+  .hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance):not(:disabled):active { transform: none; }
+}
+@media (forced-colors: active) {
+  .hosted-app .relay-sidebar { background: Canvas; color: CanvasText; }
+  .hosted-app .relay-sidebar nav button { color: ButtonText; }
+  .hosted-app .relay-sidebar nav button.active { background: Highlight; color: HighlightText; }
+  .relay-app.hosted-app :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible, .relay-app.hosted-app .relay-sidebar :is(a, button):focus-visible { outline: 1px solid Highlight; outline-offset: 2px; }
+  .hosted-app :is(.button, .icon-button, .relay-button, .relay-icon-button, .hosted-balance, .option-trigger) { border-color: ButtonText; box-shadow: none; }
+}

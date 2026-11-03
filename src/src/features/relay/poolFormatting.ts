@@ -1,5 +1,4 @@
 import { formatMicroUsd } from "./currencyFormatting";
-import { formatNumber } from "./numberFormatting";
 
 export function formatApiEquivalent(microUsd: number, locale: string) {
   return `≈${formatMicroUsd(microUsd, locale, {
@@ -8,27 +7,17 @@ export function formatApiEquivalent(microUsd: number, locale: string) {
   })}`;
 }
 
-export function formatProviderMicroUsd(value: number, locale: string) {
-  return formatMicroUsd(value, locale, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-export function formatAccountValueMicroUsd(value: number, locale: string, approximate = false) {
-  const formatted = formatMicroUsd(value, locale, {
+export function formatAccountValueMicroUsd(accountValueMicroUsd: number, locale: string, approximate = false) {
+  const formatted = formatMicroUsd(accountValueMicroUsd, locale, {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
   return `${approximate ? "≈" : ""}${formatted}`;
 }
 
-export function formatModelPrice(microUsd: number, locale: string) {
-  return `$${formatNumber(microUsd / 1_000_000, locale, { maximumFractionDigits: 6 })}`;
-}
-
 export function formatReasoningEffort(effort: string) {
-  return effort.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const normalized = normalizeReasoningEffort(effort);
+  return normalized === "xhigh" ? "Very high" : normalized.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 export function sortReasoningEfforts(levels: string[]) {
@@ -39,9 +28,7 @@ export function sortReasoningEfforts(levels: string[]) {
       case "low": return 2;
       case "medium": return 3;
       case "high": return 4;
-      case "xhigh":
-      case "very_high":
-      case "extra_high": return 5;
+      case "xhigh": return 5;
       case "max": return 6;
       case "ultra": return 7;
       default: return 8;
@@ -55,6 +42,14 @@ export function sortReasoningEfforts(levels: string[]) {
     .map(({ level }) => level);
 }
 
-export function normalizeReasoningEffort(value: string) {
-  return value.trim().toLowerCase();
+export function normalizeReasoningEffort(effortText: string) {
+  const normalized = effortText.trim().toLowerCase();
+  switch (normalized.replace(/[- ]/g, "_")) {
+    case "x_high":
+    case "very_high":
+    case "extra_high":
+    case "veryhigh":
+    case "extrahigh": return "xhigh";
+    default: return normalized;
+  }
 }

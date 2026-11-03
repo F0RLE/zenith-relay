@@ -125,9 +125,11 @@ fn legacy_responses_call_id_repair_preserves_items_and_tool_namespaces() {
     assert_eq!(input[1]["id"], "fc_existing");
     assert_eq!(input[1]["namespace"], "functions");
     assert_eq!(input[2]["call_id"], input[1]["call_id"]);
-    assert!(input[3]["call_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("call_missing_")));
+    assert!(
+        input[3]["call_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("call_missing_"))
+    );
     assert_eq!(input[3]["namespace"], "tools");
     assert_eq!(input[4]["call_id"], input[3]["call_id"]);
     assert_eq!(input[5]["name"], "heartbeat");

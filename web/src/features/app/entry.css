@@ -1,0 +1,18 @@
+/* Entry/failure states share the web identity without loading a customer shell. */
+.hosted-entry { font-family: var(--font-body); min-height: 100svh; }
+.hosted-entry-header { display: flex; justify-content: space-between; align-items: center; gap: 24px; min-height: 88px; margin-inline: 56px; }
+.hosted-entry .hosted-entry-content { min-height: calc(100svh - 88px); width: min(100%, 680px); margin-inline: auto; padding: 64px 24px 120px; gap: 20px; justify-items: start; }
+.hosted-entry-content h1 { font-size: 48px; line-height: 1.1; font-weight: 550; letter-spacing: -.035em; color: var(--accent); }
+.hosted-entry-content p { color: var(--secondary); font-size: 16px; line-height: 1.7; max-width: 55ch; }
+.hosted-entry-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.hosted-entry.hosted-entry :is(a, button, select):not([data-pointer-focus="true"]):focus-visible { outline: 0; outline-offset: 0; text-decoration: underline; text-underline-offset: 3px; }
+.hosted-entry ::selection { color: var(--accent-ink); background: var(--accent); }
+@media (max-width: 700px) {
+  .hosted-entry-header { min-height: 76px; margin-inline: 24px; }
+  .hosted-entry .hosted-entry-content { min-height: calc(100svh - 76px); padding: 40px 24px 80px; }
+  .hosted-entry-content h1 { font-size: 36px; }
+  .hosted-entry-content p { font-size: 15px; }
+}
+@media (forced-colors: active) {
+  .hosted-entry.hosted-entry :is(a, button, select):not([data-pointer-focus="true"]):focus-visible { outline: 1px solid Highlight; outline-offset: 2px; }
+}

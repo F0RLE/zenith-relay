@@ -1,3 +1,4 @@
+use super::check::ProxyCheckResult;
 use super::{PROXY_POOL_SECRET_REF, PROXY_POOL_VERSION};
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde::{Deserialize, Serialize};
@@ -6,6 +7,20 @@ use zenith_relay_core::ProxyConfig;
 
 mod assign;
 mod persist;
+
+fn valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.trim() == label
+        && label.chars().count() <= 80
+        && !label.chars().any(char::is_control)
+}
+
+pub(crate) struct ProxyRefreshScope<'a> {
+    pub id: &'a str,
+    pub created_at_ms: u64,
+    pub url: &'a str,
+    pub last_check: Option<&'a ProxyCheckResult>,
+}
 
 #[derive(Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -18,9 +33,17 @@ pub(crate) struct ProxyPool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredProxy {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
     url: String,
     assigned_account_ids: Vec<String>,
     created_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timezone_observed_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Deserialize)]
@@ -34,23 +57,34 @@ struct PersistedProxyPool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PersistedStoredProxy {
     id: String,
+    #[serde(default)]
+    label: Option<String>,
     url: String,
     #[serde(default)]
     assigned_account_ids: Vec<String>,
     #[serde(default)]
     assigned_account_id: Option<String>,
     created_at_ms: u64,
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    timezone_observed_at_ms: Option<u64>,
+    #[serde(default)]
+    last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyPoolEntrySummary {
     pub id: String,
+    pub label: Option<String>,
     pub endpoint: String,
     pub assigned_account_ids: Vec<String>,
     pub country_code: Option<String>,
     pub region: Option<String>,
     pub created_at_ms: u64,
+    pub timezone: Option<String>,
+    pub last_check: Option<ProxyCheckResult>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -72,63 +106,209 @@ impl Default for ProxyPool {
 }
 
 impl ProxyPool {
+    pub(crate) fn refresh_scopes(&self) -> impl Iterator<Item = ProxyRefreshScope<'_>> {
+        self.entries.iter().map(|entry| ProxyRefreshScope {
+            id: &entry.id,
+            created_at_ms: entry.created_at_ms,
+            url: &entry.url,
+            last_check: entry.last_check.as_ref(),
+        })
+    }
+
+    pub(crate) fn rename(&mut self, proxy_id: &str, label: &str) -> Result<()> {
+        let label = label.trim();
+        if !label.is_empty() && !valid_label(label) {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "proxy name must contain at most 80 characters without control characters",
+            ));
+        }
+        let proxy = self
+            .entries
+            .iter_mut()
+            .find(|proxy| proxy.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        proxy.label = (!label.is_empty()).then(|| label.to_owned());
+        Ok(())
+    }
+
+    /// A deleted/replaced proxy or an older completion cannot overwrite a newer check.
+    pub(crate) fn record_check(&mut self, expected_url: &str, result: ProxyCheckResult) -> bool {
+        let Some(stored_proxy) = self.entries.iter_mut().find(|stored_proxy| {
+            stored_proxy.id == result.proxy_id && stored_proxy.url == expected_url
+        }) else {
+            return false;
+        };
+        if stored_proxy
+            .last_check
+            .as_ref()
+            .is_some_and(|previous| previous.checked_at_ms >= result.checked_at_ms)
+        {
+            return false;
+        }
+        let mut result = result;
+        result.timezone = result.timezone.take().and_then(|timezone| {
+            zenith_relay_core::normalize_timezone(Some(timezone))
+                .ok()
+                .flatten()
+        });
+        if result.error_code.is_some() || result.ip.is_none() {
+            result.timezone = None;
+        }
+        if result.error_code.is_none() && result.ip.is_some() {
+            if let Some(timezone) = &result.timezone {
+                stored_proxy.timezone = Some(timezone.clone());
+                stored_proxy.timezone_observed_at_ms = Some(result.checked_at_ms);
+            } else if matches!(
+                result.location_error_code.as_deref(),
+                Some("proxy_location_conflict" | "proxy_location_mismatch")
+            ) || stored_proxy.last_check.as_ref().and_then(|check| check.ip) != result.ip
+            {
+                // An observed exit change invalidates its old zone. A failed
+                // geolocation must not assign a guessed or stale timezone.
+                stored_proxy.timezone = None;
+                stored_proxy.timezone_observed_at_ms = None;
+            }
+        }
+        stored_proxy.last_check = Some(result);
+        true
+    }
+
     pub(crate) fn assigned_account_ids(&self, proxy_id: &str) -> Result<Vec<String>> {
         self.entries
             .iter()
-            .find(|entry| entry.id == proxy_id)
-            .map(|entry| entry.assigned_account_ids.clone())
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
+            .map(|stored_proxy| stored_proxy.assigned_account_ids.clone())
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
+    pub(crate) fn proxy_id_for_account(&self, account_id: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|stored_proxy| {
+                stored_proxy
+                    .assigned_account_ids
+                    .iter()
+                    .any(|assigned_account_id| assigned_account_id == account_id)
+            })
+            .map(|stored_proxy| stored_proxy.id.clone())
+    }
+
+    pub(crate) fn id_for_url(&self, proxy_url: &str) -> Option<String> {
+        let normalized_url = zenith_relay_core::normalize_proxy_url(proxy_url).ok()?;
+        self.entries
+            .iter()
+            .find(|stored_proxy| {
+                zenith_relay_core::normalize_proxy_url(&stored_proxy.url)
+                    .ok()
+                    .as_deref()
+                    == Some(normalized_url.as_str())
+            })
+            .map(|stored_proxy| stored_proxy.id.clone())
+    }
+
     pub(crate) fn config(&self, proxy_id: &str) -> Result<ProxyConfig> {
-        let entry = self
+        let stored_proxy = self
             .entries
             .iter()
-            .find(|entry| entry.id == proxy_id)
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
-        ProxyConfig::parse(&entry.url)
+        ProxyConfig::parse(&stored_proxy.url)
             .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "stored proxy is invalid"))
     }
 
     pub(crate) fn stored_url(&self, proxy_id: &str) -> Result<String> {
         self.entries
             .iter()
-            .find(|entry| entry.id == proxy_id)
-            .map(|entry| entry.url.clone())
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
+            .map(|stored_proxy| stored_proxy.url.clone())
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
+    }
+
+    /// Resolves the proxy URL of an API source. A source without a proxy uses
+    /// no proxy; a source whose proxy is missing or invalid is an error and
+    /// must never fall back to a direct connection.
+    pub(crate) fn source_url(&self, proxy_id: Option<&str>) -> Result<Option<String>> {
+        let Some(proxy_id) = proxy_id else {
+            return Ok(None);
+        };
+        let proxy_url = self.stored_url(proxy_id).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "source proxy is not available")
+        })?;
+        zenith_relay_core::normalize_proxy_url(&proxy_url)
+            .map(Some)
+            .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "source proxy is invalid"))
+    }
+
+    pub(crate) fn timezone_observation(
+        &self,
+        proxy_id: &str,
+    ) -> Result<Option<zenith_relay_core::request_timezone::ProxyTimezone>> {
+        self.entries
+            .iter()
+            .find(|stored_proxy| stored_proxy.id == proxy_id)
+            .map(|stored_proxy| {
+                stored_proxy
+                    .timezone
+                    .clone()
+                    .zip(stored_proxy.timezone_observed_at_ms)
+                    .map(|(timezone, observed_at_ms)| {
+                        zenith_relay_core::request_timezone::ProxyTimezone {
+                            timezone,
+                            observed_at_ms,
+                        }
+                    })
+            })
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))
     }
 
     pub(crate) fn summary(&self) -> ProxyPoolSummary {
-        let entries = self
+        let now_ms = zenith_relay_core::unix_time_ms();
+        let proxy_summaries = self
             .entries
             .iter()
-            .map(|entry| {
-                let (country_code, region) = declared_proxy_location(&entry.url);
+            .map(|stored_proxy| {
+                let (country_code, region) = declared_proxy_location(&stored_proxy.url);
                 ProxyPoolEntrySummary {
-                    id: entry.id.clone(),
-                    endpoint: proxy_endpoint(&entry.url),
-                    assigned_account_ids: entry.assigned_account_ids.clone(),
+                    id: stored_proxy.id.clone(),
+                    label: stored_proxy.label.clone(),
+                    endpoint: proxy_endpoint(&stored_proxy.url),
+                    assigned_account_ids: stored_proxy.assigned_account_ids.clone(),
                     country_code,
                     region,
-                    created_at_ms: entry.created_at_ms,
+                    created_at_ms: stored_proxy.created_at_ms,
+                    timezone: stored_proxy
+                        .timezone
+                        .as_ref()
+                        .zip(stored_proxy.timezone_observed_at_ms)
+                        .filter(|(_, at)| {
+                            now_ms.checked_sub(*at).is_some_and(|age| {
+                                age < zenith_relay_core::request_timezone::PROXY_TIMEZONE_MAX_AGE_MS
+                            })
+                        })
+                        .map(|(timezone, _)| timezone.clone()),
+                    last_check: stored_proxy.last_check.clone(),
                 }
             })
             .collect::<Vec<_>>();
-        let free = entries
+        let free = proxy_summaries
             .iter()
-            .filter(|entry| entry.assigned_account_ids.is_empty())
+            .filter(|proxy| proxy.assigned_account_ids.is_empty())
             .count();
         ProxyPoolSummary {
-            total: entries.len(),
-            assigned: entries.len() - free,
+            total: proxy_summaries.len(),
+            assigned: proxy_summaries.len() - free,
             free,
-            entries,
+            entries: proxy_summaries,
         }
     }
 }
 
-fn proxy_endpoint(value: &str) -> String {
-    let Ok(url) = Url::parse(value) else {
+#[cfg(test)]
+mod checks;
+
+fn proxy_endpoint(proxy_url: &str) -> String {
+    let Ok(url) = Url::parse(proxy_url) else {
         return "invalid".to_string();
     };
     let host = url.host_str().unwrap_or("invalid");
@@ -145,13 +325,13 @@ fn proxy_endpoint(value: &str) -> String {
     )
 }
 
-fn declared_proxy_location(value: &str) -> (Option<String>, Option<String>) {
-    let Ok(url) = Url::parse(value) else {
+fn declared_proxy_location(proxy_url: &str) -> (Option<String>, Option<String>) {
+    let Ok(url) = Url::parse(proxy_url) else {
         return (None, None);
     };
     let username = url::form_urlencoded::parse(url.username().as_bytes())
         .next()
-        .map(|(value, _)| value.into_owned())
+        .map(|(username, _)| username.into_owned())
         .unwrap_or_default();
     let country = selector_value(
         &username,
@@ -164,13 +344,13 @@ fn declared_proxy_location(value: &str) -> (Option<String>, Option<String>) {
             "-country-",
         ],
     )
-    .filter(|value| {
-        value.len() == 2
-            && value
+    .filter(|country_code| {
+        country_code.len() == 2
+            && country_code
                 .chars()
                 .all(|character| character.is_ascii_alphabetic())
     })
-    .map(|value| value.to_ascii_uppercase());
+    .map(|country_code| country_code.to_ascii_uppercase());
     let region = selector_value(
         &username,
         &[
@@ -187,11 +367,11 @@ fn declared_proxy_location(value: &str) -> (Option<String>, Option<String>) {
     (country, region)
 }
 
-fn selector_value(value: &str, markers: &[&str]) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
+fn selector_value(username: &str, markers: &[&str]) -> Option<String> {
+    let lower = username.to_ascii_lowercase();
     markers.iter().find_map(|marker| {
         let start = lower.find(marker)? + marker.len();
-        let selection = value[start..]
+        let selection = username[start..]
             .chars()
             .take_while(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '-' | '_')

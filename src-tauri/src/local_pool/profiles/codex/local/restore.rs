@@ -6,6 +6,16 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
     backup_root: &Path,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
+    let context_change = context::sync_context_overrides_locked(codex_home, backup_root, false)?;
+    restore_local_profile_locked(codex_home, backup_root, secrets)
+        .map_err(|error| with_rollback(error, context_change.rollback_locked()))
+}
+
+fn restore_local_profile_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
     let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
     // Codex can refresh auth/config immediately after its process is stopped.
@@ -27,7 +37,7 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
     let mut original_config_bytes = read_stable_optional_bytes(&config_path)?;
-    let original_auth_bytes = read_stable_optional_bytes(&auth_path)?;
+    let original_auth_bytes = snapshot_credentials::read_profile_auth(codex_home)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
     validate_config_shape(&document)?;
@@ -57,13 +67,12 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
         if let (Some(expected), Some(content)) = (
             backup.previous_auth_hash.as_deref(),
             previous_auth.as_deref(),
-        ) {
-            if bytes_hash(content.as_bytes()) != expected {
-                return Err(LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    "ChatGPT profile backup secret does not match its integrity hash",
-                ));
-            }
+        ) && bytes_hash(content.as_bytes()) != expected
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT profile backup secret does not match its integrity hash",
+            ));
         }
         if backup.previous_auth_secret_ref.is_some() && previous_auth.is_none() {
             return Err(LocalPoolError::new(
@@ -112,12 +121,11 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
     )?;
 
     if auth_matches_managed {
-        let auth_result = match restored.auth.as_deref() {
-            Some(previous_auth) => {
-                replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
-            }
-            None => remove_if_unchanged(&auth_path, &original_auth_bytes),
-        };
+        let auth_result = snapshot_credentials::update_auth(
+            codex_home,
+            &original_auth_bytes,
+            restored.auth.as_deref(),
+        );
         if let Err(error) = auth_result {
             let restored_config_bytes = restored
                 .config
@@ -155,14 +163,14 @@ pub(in crate::local_pool::profiles::codex) fn restore_local_locked(
 /// the first rename. Treat that short write window as transient rather than
 /// turning it into `profile_restore_blocked`.
 fn read_stable_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut previous = read_optional_bytes(path)?;
+    let mut previous_bytes = read_optional_bytes(path)?;
     for _ in 0..3 {
         thread::sleep(Duration::from_millis(20));
-        let current = read_optional_bytes(path)?;
-        if current == previous {
-            return Ok(current);
+        let candidate_bytes = read_optional_bytes(path)?;
+        if candidate_bytes == previous_bytes {
+            return Ok(candidate_bytes);
         }
-        previous = current;
+        previous_bytes = candidate_bytes;
     }
-    Ok(previous)
+    Ok(previous_bytes)
 }

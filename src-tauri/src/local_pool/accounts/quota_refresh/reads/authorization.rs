@@ -1,4 +1,5 @@
 use super::super::*;
+use zenith_relay_core::accounts::TokenPersistenceAdapter;
 
 pub(in crate::local_pool) async fn prepare_account_request_authorization(
     state: &DesktopState,
@@ -18,10 +19,10 @@ pub(in crate::local_pool) async fn prepare_account_request_authorization(
         .account(account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    if account.remote_location.is_some() {
+    if account.recovery.is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "account is managed by a remote server",
+            "account requires local recovery before use",
         ));
     }
     stored = match ensure_local_agent_identity_task(state, account_id, stored.clone(), None).await {
@@ -56,11 +57,13 @@ pub(in crate::local_pool) async fn prepare_account_request_authorization(
         None
     };
     Ok(PreparedAccountAuthorization {
+        oauth_client_kind: stored.oauth_client_kind(),
         authorization: stored
             .authorization(current_time_ms())
             .map_err(credential_local_error)?,
         subscription_authorization,
         tokens: None,
+        token_revision: None,
         agent_task_id: stored
             .agent_identity()
             .and_then(AgentIdentityCredential::task_id)
@@ -167,11 +170,12 @@ pub(in crate::local_pool::accounts) fn model_discovery_was_unauthorized(
 pub(in crate::local_pool::accounts) async fn recover_account_authorization(
     state: &DesktopState,
     account_id: &str,
-    failed_generation: Option<u64>,
+    rejected: &PreparedAccountAuthorization,
     now_ms: u64,
 ) -> LocalResult<PreparedAccountCredentials> {
-    let generation = failed_generation
-        .ok_or_else(|| LocalPoolError::invalid_state("rejected token generation is missing"))?;
+    let revision = rejected.token_revision.as_ref().ok_or_else(|| {
+        LocalPoolError::invalid_state("rejected token authorization revision is missing")
+    })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let persistence = CredentialPersistence::new(
         credentials,
@@ -180,12 +184,7 @@ pub(in crate::local_pool::accounts) async fn recover_account_authorization(
     );
     state
         .token_authority()
-        .invalidate_access_generation_and_persist(
-            account_id,
-            Some(generation),
-            now_ms,
-            &persistence,
-        )
+        .invalidate_access_revision_and_persist(account_id, revision, now_ms, &persistence)
         .await
         .map_err(|error| {
             LocalPoolError::new(
@@ -223,15 +222,23 @@ pub(in crate::local_pool::accounts) fn account_auth_is_access_only(
 pub(in crate::local_pool::accounts) async fn mark_access_only_reauthentication(
     state: &DesktopState,
     account_id: &str,
+    rejected_tokens: &TokenSet,
 ) -> LocalResult<()> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let current = credentials
+    let stored_credentials = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
-    persist_manual_refresh_failure(
+    if stored_credentials
+        .to_token_set()
+        .map_err(credential_local_error)?
+        != *rejected_tokens
+    {
+        return Ok(());
+    }
+    persist_authorization_failure(
         state,
         account_id,
-        &current,
+        rejected_tokens,
         ReauthReason::AccessTokenExpired,
         "access_token_expired",
     )

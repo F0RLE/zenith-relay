@@ -48,7 +48,7 @@ fn matches(rule: &str, model: &str) -> bool {
         |prefix| {
             model
                 .get(..prefix.len())
-                .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+                .is_some_and(|model_prefix| model_prefix.eq_ignore_ascii_case(prefix))
         },
     )
 }

@@ -40,11 +40,13 @@ for (const scenario of [
     await expect(updateButton).toBeVisible();
     await expect(updateButton).toHaveText(scenario.locale === "ru" ? "Доступно обновление" : "Update available");
     await expect(updateButton).not.toContainText("1.1.3");
-    expect(await page.locator(".sidebar-bottom").evaluate((element) => {
+    expect(await page.locator(".relay-sidebar").evaluate((element) => {
       const feedback = element.querySelector(".sidebar-feedback")?.getBoundingClientRect();
       const update = element.querySelector(".sidebar-update-row")?.getBoundingClientRect();
+      const utilities = element.querySelector(".sidebar-nav-utilities")?.getBoundingClientRect();
       const footer = element.querySelector(".sidebar-footer")?.getBoundingClientRect();
-      return Boolean(update && footer && update.bottom <= footer.top && (!feedback || feedback.bottom <= update.top));
+      return Boolean(update && utilities && footer && update.bottom <= utilities.top
+        && utilities.bottom <= footer.top && (!feedback || feedback.bottom <= update.top));
     })).toBe(true);
     if (scenario.locale === "ru" && scenario.theme === "dark" && scenario.viewport.width === 840) {
       const collapse = page.locator(".sidebar-footer .relay-icon-button");
@@ -182,7 +184,7 @@ for (const scenario of [
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("button", { name: "Connect", exact: true }).click();
-    await page.getByRole("dialog", { name: "What do you want to connect?" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
+    await page.getByRole("dialog", { name: "Connect an application" }).getByRole("button", { name: "ChatGPT", exact: true }).click();
 
     const shell = page.locator(".relay-shell");
     const feedback = page.locator(".global-feedback.error");
@@ -299,7 +301,7 @@ for (const theme of themes) {
       await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
-      await page.getByRole("button", { name: "API", exact: true }).click();
+      await page.getByRole("button", { name: "Доступ", exact: true }).click();
       const connectionPanel = page.locator(".gateway-api-connection-panel");
       const endpointValue = connectionPanel.locator(".gateway-api-address");
       const portControl = connectionPanel.locator(".gateway-api-port-control");
@@ -322,14 +324,18 @@ for (const theme of themes) {
       expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
       await page.screenshot({ path: `output/playwright/gateway-api-connection-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
+      await page.getByRole("tab", { name: "Приложения", exact: true }).click();
       await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
-      await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "auto");
-      await expect(setup.getByRole("checkbox", { name: "Резерв 1%" })).toBeChecked();
-      await expect(setup.getByText("Сохранять последний 1% выбранного аккаунта для прямого запуска ChatGPT.", { exact: true })).toBeVisible();
       const accountSelect = setup.getByRole("button", { name: /^Аккаунт:/ });
       const switchButton = setup.getByRole("button", { name: "Переключить" });
+      await expect(accountSelect).toHaveAttribute("data-value", "none");
+      await accountSelect.click();
+      await page.locator('[role="option"][data-value="account_synthetic"]').click();
+      await expect(accountSelect).toHaveAttribute("data-value", "account_synthetic");
+      await expect(setup.getByRole("checkbox", { name: "Резерв 1%" })).toBeChecked();
+      await expect(setup.getByText("Сохранять последний 1% выбранного аккаунта для прямого запуска ChatGPT.", { exact: true })).toBeVisible();
       const reserveToggle = setup.getByRole("checkbox", { name: "Резерв 1%" });
       const [accountBox, switchBox, reserveBox] = await Promise.all([accountSelect.boundingBox(), switchButton.boundingBox(), reserveToggle.boundingBox()]);
       expect(accountBox).not.toBeNull();
@@ -343,7 +349,9 @@ for (const theme of themes) {
         inputs.map((input) => input.getBoundingClientRect().right),
       );
       expect(Math.max(...switchEdges) - Math.min(...switchEdges)).toBeLessThanOrEqual(1);
-      expect(await page.locator(".codex-feature-control").evaluateAll((rows) => rows.every((row) => {
+      const featureToggles = page.locator(".codex-background-tasks-control, .codex-websockets-control");
+      await expect(featureToggles).toHaveCount(2);
+      expect(await featureToggles.evaluateAll((rows) => rows.every((row) => {
         const heading = row.querySelector(".codex-feature-heading")!.getBoundingClientRect();
         const control = row.querySelector(".setting-toggle")!.getBoundingClientRect();
         return row.scrollWidth <= row.clientWidth && heading.right + 12 <= control.left;
@@ -371,11 +379,19 @@ for (const theme of themes) {
     await page.setViewportSize({ width: 390, height: 844 });
     await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
     await page.goto("/");
-    await page.getByRole("button", { name: "API", exact: true }).click();
+    await page.getByRole("button", { name: "Доступ", exact: true }).click();
+    await page.getByRole("tab", { name: "Приложения", exact: true }).click();
     await page.getByRole("tab", { name: "ChatGPT", exact: true }).click();
     const panel = page.getByRole("tabpanel", { name: "ChatGPT", exact: true });
     const switches = panel.getByRole("checkbox");
-    await expect(switches).toHaveCount(3);
+    await expect(switches).toHaveCount(4);
+    await expect(panel.locator('.codex-memory-model-control')).toHaveCount(2);
+    await expect(panel.getByRole("checkbox", { name: "Резерв 1%" })).toHaveCount(0);
+    const accountSelect = panel.getByRole("button", { name: /^Аккаунт:/ });
+    await accountSelect.click();
+    await page.locator('[role="option"][data-value="account_synthetic"]').click();
+    await expect(accountSelect).toHaveAttribute("data-value", "account_synthetic");
+    await expect(switches).toHaveCount(5);
     await expect(panel.locator(".codex-background-tasks-control").getByRole("checkbox")).toHaveCount(1);
     await expect(panel.locator(".codex-websockets-control").getByRole("checkbox")).toHaveCount(1);
     const edges = await switches.evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().right));

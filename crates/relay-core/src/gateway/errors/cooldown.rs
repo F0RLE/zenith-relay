@@ -6,8 +6,8 @@ mod rate_limit;
 #[cfg(test)]
 pub(crate) use rate_limit::rate_limit_body_hint_at;
 pub(crate) use rate_limit::{
-    rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms, retry_delay_ms,
-    RateLimitBodyHint,
+    RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms,
+    retry_delay_ms,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -18,9 +18,9 @@ pub(crate) fn settle_status_failure(
     status: StatusCode,
     category: &'static str,
     headers: &reqwest::header::HeaderMap,
-    body: Option<&[u8]>,
+    response_body: Option<&[u8]>,
 ) -> FailureState {
-    let hint = body.map(rate_limit_body_hint).unwrap_or_default();
+    let hint = response_body.map(rate_limit_body_hint).unwrap_or_default();
     settle_classified_failure(runtime, lease, model, status, category, headers, hint)
 }
 
@@ -47,6 +47,16 @@ pub(crate) fn settle_attempt_failure(
     current_failure_state(runtime, lease.candidate_id(), model)
 }
 
+pub(crate) fn settle_route_failure(
+    runtime: &GatewayRuntime,
+    lease: &crate::runtime::CandidateLease,
+    route: &ExecutorRoute,
+    failure: &AttemptFailure,
+    headers: &reqwest::header::HeaderMap,
+) -> FailureState {
+    settle_attempt_failure(runtime, lease, &route.source_model, failure, headers)
+}
+
 /// Compute a provider-scoped block without mutating admission state. The
 /// caller must install it in the same critical section as lease settlement.
 pub(crate) struct CooldownInput<'a> {
@@ -60,7 +70,7 @@ pub(crate) struct CooldownInput<'a> {
     pub(crate) now: SystemTime,
 }
 
-pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownRequest<'_>> {
+pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<CooldownRequest<'_>> {
     let CooldownInput {
         runtime,
         candidate_id,
@@ -70,11 +80,36 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
         headers,
         hint,
         now: now_system,
-    } = input;
+    } = cooldown_input;
     if !failure_category_requires_cooldown(category) {
         return None;
     }
     let status = canonical_upstream_status(status, category);
+    // A relayed ChatGPT subscription reset is not the API key's own quota window.
+    let relayed_subscription = status == StatusCode::TOO_MANY_REQUESTS
+        && hint.chatgpt_subscription
+        && !runtime.is_chatgpt_account(candidate_id);
+    let (category, hint) = if relayed_subscription {
+        (
+            error_codes::UPSTREAM_RATE_LIMITED,
+            RateLimitBodyHint {
+                retry_after_ms: hint.retry_after_for_account(false),
+                global: false,
+                ..hint
+            },
+        )
+    } else {
+        (category, hint)
+    };
+    if status == StatusCode::UNAUTHORIZED
+        && category == error_codes::UPSTREAM_UNAUTHORIZED
+        && runtime.is_basis_points_account(candidate_id)
+    {
+        // The rejected bearer is expired by the token authority. A later
+        // request must be able to acquire a replacement, without a global
+        // authentication pause delaying that recovery.
+        return None;
+    }
     let now = crate::unix_time_ms_at(now_system);
     let header_retry_after_ms = retry_after_ms(headers, now_system);
     let explicit = header_retry_after_ms.is_some()
@@ -84,6 +119,11 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
     if reason == CooldownReason::Transient {
         return None;
     }
+    let basis_points_rate_limit =
+        status == StatusCode::TOO_MANY_REQUESTS && runtime.is_basis_points_account(candidate_id);
+    let basis_points_model_permission = status == StatusCode::FORBIDDEN
+        && category == error_codes::UPSTREAM_MODEL_UNAVAILABLE
+        && runtime.is_basis_points_account(candidate_id);
     let scope = if status == StatusCode::TOO_MANY_REQUESTS {
         rate_limit_scope(category, hint.global, model)
     } else if category.starts_with("upstream_model_")
@@ -110,11 +150,23 @@ pub(crate) fn failure_cooldown(input: CooldownInput<'_>) -> Option<CooldownReque
         ) {
         MAX_RATE_LIMIT_COOLDOWN_MS
     } else if status == StatusCode::TOO_MANY_REQUESTS {
-        1_000
+        if basis_points_rate_limit {
+            crate::providers::chatgpt::BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS
+        } else {
+            1_000
+        }
     } else {
         TRANSIENT_COOLDOWN_MS
     };
-    let duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    if basis_points_rate_limit {
+        // Millisecond token-bucket hints must not recycle a saturated BPS route immediately.
+        duration_ms =
+            duration_ms.max(crate::providers::chatgpt::BASIS_POINTS_RATE_LIMIT_COOLDOWN_MS);
+    }
+    if basis_points_model_permission {
+        duration_ms = duration_ms.max(30 * 60 * 1_000);
+    }
     let retry_at_ms = now.saturating_add(source_cooldown_ms(
         duration_ms,
         runtime.source_recovery_delay_ms(candidate_id),

@@ -10,15 +10,11 @@ export function formatModelPricePlaceholder(microUsd: number | null | undefined)
   return microUsd == null ? "—" : formatEditableModelPrice(microUsd);
 }
 
-export function parseEditableModelPrice(value: string) {
-  const normalized = value.trim().replace(",", ".");
+export function parseEditableModelPrice(priceText: string) {
+  const normalized = priceText.trim().replace(",", ".");
   if (!/^\d+(?:\.\d{0,6})?$/.test(normalized)) return null;
   const price = Number(normalized);
   return Number.isFinite(price) && price <= MAX_MODEL_PRICE_USD_PER_MILLION
     ? Math.round(price * MICRO_USD_PER_USD)
     : null;
-}
-
-export function parseOptionalEditableModelPrice(value: string) {
-  return value.trim() === "" ? null : parseEditableModelPrice(value) ?? undefined;
 }

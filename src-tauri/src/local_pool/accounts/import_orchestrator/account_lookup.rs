@@ -1,9 +1,9 @@
 use super::{
-    credential_item_error, credential_local_error, provider_identity_key, ImportItemError,
-    ItemResult,
+    ImportItemError, ItemResult, credential_item_error, credential_local_error,
+    provider_identity_key,
 };
 use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::{records, NativeSecretBackend};
+use crate::local_pool::accounts::{NativeSecretBackend, records};
 use crate::local_pool::error::Result as LocalResult;
 use crate::local_pool::models::LocalAccountRecord;
 use crate::local_pool::state::DesktopState;
@@ -36,6 +36,7 @@ pub(in crate::local_pool::accounts) fn existing_identity_index(
                 provider_account_id,
                 credentials.provider_user_id(),
                 credentials.email(),
+                credentials.oauth_client_kind(),
             ))
             .or_insert(account_id);
     }
@@ -48,6 +49,7 @@ pub(in crate::local_pool::accounts) fn find_existing_account(
     provider_account_id: &str,
     provider_user_id: Option<&str>,
     email: Option<&str>,
+    kind: zenith_relay_core::providers::chatgpt::OAuthClientKind,
 ) -> ItemResult<Option<LocalAccountRecord>> {
     let accounts = state
         .store()
@@ -59,7 +61,8 @@ pub(in crate::local_pool::accounts) fn find_existing_account(
         })?
         .accounts()
         .to_vec();
-    let target = records::identity_hash(provider_account_id, provider_user_id, email);
+    let target =
+        records::credential_identity_hash(kind, provider_account_id, provider_user_id, email);
     records::find_codex_account(
         &accounts,
         &target,

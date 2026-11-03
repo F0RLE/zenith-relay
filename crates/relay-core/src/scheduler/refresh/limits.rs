@@ -51,12 +51,16 @@ impl RefreshCoordinator {
         self.class_cursor = (self.class_cursor + self.class_distance(kind) + 1) % CLASS_ORDER.len();
     }
 
-    pub(super) fn capacity_available(&self, entry: &RefreshEntry, kind: RefreshKind) -> bool {
+    pub(super) fn capacity_available(
+        &self,
+        refresh_entry: &RefreshEntry,
+        kind: RefreshKind,
+    ) -> bool {
         let total = self.jobs.len();
         let origin_total = self
             .jobs
             .values()
-            .filter(|job| job.origin == entry.origin)
+            .filter(|job| job.origin == refresh_entry.origin)
             .count();
         if total >= self.limits.concurrent || origin_total >= self.limits.per_origin {
             return false;
@@ -72,20 +76,22 @@ impl RefreshCoordinator {
         let origin_ordinary = self
             .jobs
             .values()
-            .filter(|job| job.origin == entry.origin && job.key.kind != RefreshKind::Auth)
+            .filter(|job| job.origin == refresh_entry.origin && job.key.kind != RefreshKind::Auth)
             .count();
         ordinary < self.limits.concurrent - self.limits.reserved_auth
             && origin_ordinary < self.limits.per_origin - self.limits.reserved_auth
     }
 
-    pub(super) fn eligible_at(&self, entry: &RefreshEntry) -> Option<u64> {
-        entry.next_due_ms.map(|due| {
-            due.max(entry.not_before_ms).max(self.next_start_ms).max(
-                self.origin_next_start
-                    .get(&entry.origin)
-                    .copied()
-                    .unwrap_or_default(),
-            )
+    pub(super) fn eligible_at(&self, refresh_entry: &RefreshEntry) -> Option<u64> {
+        refresh_entry.next_due_ms.map(|due| {
+            due.max(refresh_entry.not_before_ms)
+                .max(self.next_start_ms)
+                .max(
+                    self.origin_next_start
+                        .get(&refresh_entry.origin)
+                        .copied()
+                        .unwrap_or_default(),
+                )
         })
     }
 }

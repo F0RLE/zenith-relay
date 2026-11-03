@@ -1,4 +1,4 @@
-use super::super::{runtime_now_ms, GatewayRuntime};
+use super::super::{GatewayRuntime, runtime_now_ms};
 use crate::{CandidateHealth, CandidateKind, CandidateScope};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
@@ -26,7 +26,7 @@ impl GatewayRuntime {
                     if let Some(account_id) = candidate
                         .account_id
                         .as_ref()
-                        .filter(|id| allowed_account_ids.contains(*id))
+                        .filter(|account_id| allowed_account_ids.contains(*account_id))
                     {
                         account_ids.insert(account_id.clone());
                     }
@@ -62,6 +62,7 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
+        self.invalidate_account_quota_reference_source(candidate_id);
         let candidate_ids = {
             let source_routes = self
                 .source_candidate_bindings
@@ -124,7 +125,7 @@ impl GatewayRuntime {
         let mut order = projection.into_runtime_order(
             &CandidateScope::default(),
             &crate::ModelRules::default(),
-            &crate::WireApi::ALL,
+            &crate::WireApi::ALL_NATIVE,
             runtime_now_ms(),
         );
         let revision = self.activity_revision.load(Ordering::Acquire);

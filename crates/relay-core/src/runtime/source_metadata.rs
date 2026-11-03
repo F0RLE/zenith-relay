@@ -1,33 +1,36 @@
 use super::{AuthenticatedKey, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
-use crate::{CandidateKind, Error, Result, WireApi};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::Ordering;
+use crate::{Error, Result, WireApi};
+use std::collections::{BTreeMap, HashSet};
 
 impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
+        let models = self.visible_models(key, &[WireApi::Responses], crate::unix_time_ms());
         let scope = key.scope_snapshot();
+        let basis_points_models = self.basis_points_model_snapshot();
         let scheduler = self.lock_scheduler();
-        let mut models = BTreeSet::new();
-        for account in self.chatgpt_accounts.values() {
-            let Some(candidate) = scheduler.candidate(&account.id) else {
-                continue;
-            };
-            let inventory = crate::poison::read(&account.model_inventory);
-            for model in &inventory.configured_models {
-                if !self.degraded_route_blocked(model)
-                    && key.model_rules.allows(model)
-                    && self.model_enabled(model)
-                    && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
-                {
-                    models.insert(match key.model_prefix.as_deref() {
-                        Some(prefix) => format!("{prefix}/{model}"),
-                        None => model.clone(),
-                    });
-                }
-            }
-        }
-        models.into_iter().collect()
+        // Filter the shared ordered catalog instead of rebuilding it from
+        // account/model BTreeMaps, which would replace catalog order with
+        // alphabetical order. Keep the account-only inventory boundary.
+        models
+            .into_iter()
+            .filter(|display_id| {
+                let Some(model) = self.resolve_model(key, display_id) else {
+                    return false;
+                };
+                self.chatgpt_accounts.values().any(|account| {
+                    let inventory = crate::poison::read(&account.model_inventory);
+                    inventory
+                        .configured_models
+                        .iter()
+                        .any(|configured| configured.eq_ignore_ascii_case(&model))
+                        && basis_points_models.model_available(&account.id, &model)
+                        && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                            candidate.is_catalog_visible(&model, &[WireApi::Responses], &scope)
+                        })
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn codex_model_chatgpt_account_ids_for_resolved(
@@ -69,7 +72,7 @@ impl GatewayRuntime {
         self.chatgpt_accounts
             .values()
             .filter(|account| {
-                !account.basis_points_enabled.load(Ordering::Relaxed)
+                account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
                     && crate::poison::read(&account.model_inventory)
                         .configured_models
                         .iter()
@@ -80,68 +83,6 @@ impl GatewayRuntime {
             })
             .map(|account| account.id.clone())
             .collect()
-    }
-
-    /// Responses Lite is a whole-request transport contract, not a property
-    /// of an individual fallback candidate. Automatic Lite is safe only when
-    /// every configured route in this key scope is an official Codex account
-    /// with confirmed Lite support for this exact model. Otherwise an attempt
-    /// could switch tools or reasoning context between Lite and full Responses.
-    ///
-    /// This deliberately checks configured routes rather than current health,
-    /// so a temporary cooldown cannot silently change the request contract.
-    pub(crate) fn codex_model_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        self.codex_model_configured_responses_routes_all_support_lite(key, model, false)
-    }
-
-    /// Equivalent to [`Self::codex_model_responses_routes_all_support_lite`]
-    /// for account-only endpoints. Generic API routes are intentionally
-    /// excluded because those endpoints never select them.
-    pub(crate) fn codex_model_account_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-    ) -> bool {
-        self.codex_model_configured_responses_routes_all_support_lite(key, model, true)
-    }
-
-    fn codex_model_configured_responses_routes_all_support_lite(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        account_only: bool,
-    ) -> bool {
-        let Some(model) = self.resolve_model(key, model) else {
-            return false;
-        };
-        let scope = key.scope_snapshot();
-        // Do not hold the scheduler lock while inspecting catalog metadata.
-        // Metadata can refresh independently, and a conservative false result
-        // is preferable to blocking route selection.
-        let configured = {
-            let scheduler = self.lock_scheduler();
-            scheduler
-                .candidates()
-                .filter(|candidate| {
-                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
-                        && (!account_only || candidate.kind == CandidateKind::OAuthAccount)
-                })
-                .map(|candidate| (candidate.id.clone(), candidate.kind))
-                .collect::<Vec<_>>()
-        };
-        if configured.is_empty() {
-            return false;
-        }
-        let model = crate::model_id_key(&model);
-        let lite_models = crate::poison::mutex(&self.codex_responses_lite_models);
-        configured.into_iter().all(|(candidate_id, kind)| {
-            kind == CandidateKind::OAuthAccount
-                && lite_models.contains(&(candidate_id, model.clone()))
-        })
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
@@ -172,8 +113,30 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn model_reasoning_policy_levels(&self, model: &str) -> Option<Vec<String>> {
-        let configured = crate::poison::mutex(&self.model_reasoning_allowed_levels);
+        let configured = crate::poison::mutex(&self.model_state.reasoning_allowed_levels);
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
+    }
+
+    /// Most restrictive known limits among this key's routes. This projection
+    /// is for a shared API picker, never an owning account's native model card.
+    pub(crate) fn client_token_limits(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        client: WireApi,
+    ) -> crate::ModelTokenLimits {
+        let mut limits = crate::ModelTokenLimits::default();
+        for route in self.configured_executor_routes(key, model, &[client], false) {
+            let capabilities = self
+                .model_capabilities(&route.source_model)
+                .for_route(route.route_capability.as_ref());
+            let minimum =
+                |left: Option<u64>, right: Option<u64>| left.into_iter().chain(right).min();
+            limits.context = minimum(limits.context, capabilities.context_limit);
+            limits.input = minimum(limits.input, capabilities.input_limit);
+            limits.output = minimum(limits.output, capabilities.output_limit);
+        }
+        limits
     }
 
     pub(crate) fn client_reasoning_levels(
@@ -182,16 +145,25 @@ impl GatewayRuntime {
         model: &str,
         client: WireApi,
     ) -> Vec<String> {
-        let fallback = self.model_capabilities(model).reasoning_effort_levels;
         let mut levels = Vec::new();
         for route in self.configured_executor_routes(key, model, &[client], false) {
+            let capabilities = self
+                .model_capabilities(&route.source_model)
+                .for_route(route.route_capability.as_ref());
+            let fallback = &capabilities.reasoning_effort_levels;
             levels.extend(
                 fallback
                     .iter()
                     .filter(|level| {
-                        route
-                            .adapter
-                            .supports_reasoning_effort(route.reasoning_mode, level)
+                        self.basis_points_reasoning_available(
+                            &route.candidate_id,
+                            &route.source_model,
+                            level,
+                        ) && route.adapter.supports_reasoning_effort_for_model(
+                            route.reasoning_mode,
+                            level,
+                            &capabilities,
+                        )
                     })
                     .cloned(),
             );
@@ -205,7 +177,7 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let allowed_levels = normalize_model_reasoning_allowed_levels(allowed_levels)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *crate::poison::mutex(&self.model_reasoning_allowed_levels) = allowed_levels;
+        *crate::poison::mutex(&self.model_state.reasoning_allowed_levels) = allowed_levels;
         Ok(())
     }
 }

@@ -32,12 +32,14 @@ async fn hybrid_agent_import_preserves_oauth_for_subscription_metadata() {
     .await
     .unwrap();
 
-    assert!(material
-        .authorization(1_700_000_000_000)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .starts_with("AgentAssertion "));
+    assert!(
+        material
+            .authorization(1_700_000_000_000)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion ")
+    );
     assert_eq!(
         material
             .subscription_authorization()
@@ -64,11 +66,7 @@ fn large_import_preview_defers_quota_network_calls() {
 }
 #[test]
 fn selected_import_files_are_read_and_combined_only_in_rust() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-files-{}",
-        Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::files::test_temp_root("zenith-relay-import-files");
     let paths = (1..=3)
         .map(|index| {
             let path = root.join(format!("account-{index}.json"));
@@ -94,31 +92,31 @@ fn selected_import_files_are_read_and_combined_only_in_rust() {
 }
 #[test]
 fn dropped_import_accepts_txt_tokens_and_rejects_other_extensions() {
-    let txt_path = std::env::temp_dir().join(format!(
-        "zenith-relay-import-{}.txt",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("import-dropped-files");
+    let metadata = std::fs::symlink_metadata(&root).unwrap();
+    assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+    let txt_path = root.join("account.txt");
+    assert!(!txt_path.exists());
     std::fs::write(&txt_path, "at-synthetic-token").unwrap();
     assert_eq!(
         read_import_documents(vec![txt_path.clone()]).unwrap(),
         ["at-synthetic-token"]
     );
-    std::fs::remove_file(txt_path).unwrap();
-
-    let unsupported_path = std::env::temp_dir().join(format!(
-        "zenith-relay-import-{}.md",
-        Uuid::new_v4().simple()
-    ));
+    let unsupported_path = root.join("account.md");
+    assert!(!unsupported_path.exists());
     std::fs::write(&unsupported_path, "at-synthetic-token").unwrap();
     assert!(read_import_documents(vec![unsupported_path.clone()]).is_err());
-    std::fs::remove_file(unsupported_path).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]
 async fn batch_confirm_persists_every_selected_account_and_credential() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-batch-import-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-batch-import");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server_for_accounts(&[
@@ -137,6 +135,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
                     "refresh_token": format!("synthetic-refresh-{index}"),
                     "chatgpt_account_id": format!("synthetic-provider-{index}"),
                     "email": format!("member-{index}@example.test"),
+                    "expires_at": "2026-10-19T14:17:45Z",
                     "subscription_expires_at": format!("2026-08-0{index}T00:00:00Z")
                 }
             })
@@ -174,10 +173,12 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     .unwrap();
 
     assert_eq!(response.results.len(), 3);
-    assert!(response
-        .results
-        .iter()
-        .all(|result| result.status == ImportItemStatus::Succeeded));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded)
+    );
     let accounts = state.store().unwrap().accounts().to_vec();
     assert_eq!(accounts.len(), 3);
     assert_eq!(
@@ -192,20 +193,25 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     let mut provider_ids = HashSet::new();
     for account in &accounts {
         let credentials = credential_store.require(&account.account.id).unwrap();
+        assert_eq!(credentials.expires_at_ms(), Some(1_792_419_465_000));
         provider_ids.insert(credentials.provider_account_id().unwrap().to_string());
         credential_store.delete(&account.account.id).unwrap();
     }
     assert_eq!(provider_ids.len(), 3);
-    assert!(accounts
-        .iter()
-        .all(|account| account.account.subscription.active_until_ms.is_some()));
-    assert!(accounts.iter().all(|account| account.account.in_pool));
-    assert!(state
-        .store()
-        .unwrap()
-        .accounts()
-        .iter()
-        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
+    assert!(
+        accounts
+            .iter()
+            .all(|account| account.account.subscription.active_until_ms.is_some())
+    );
+    assert!(accounts.iter().all(|account| !account.account.in_pool));
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .accounts()
+            .iter()
+            .any(|record| record.account.is_automatic_quota_monitoring_eligible())
+    );
 
     account_check_server.abort();
     drop(state);
@@ -213,10 +219,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
 }
 #[tokio::test]
 async fn access_only_reimport_preserves_existing_refresh_token() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-refresh-preserve-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-refresh-preserve");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server("provider-preserve").await;
@@ -251,6 +254,13 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
         .account
         .id
         .clone();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let direct_credentials = credential_store
+        .require(&account_id)
+        .unwrap()
+        .with_proxy_route(None, true)
+        .unwrap();
+    credential_store.save(&direct_credentials).unwrap();
 
     let second = sessions
         .start(
@@ -276,10 +286,10 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
     .unwrap();
 
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
-    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let credentials = credential_store.require(&account_id).unwrap();
     assert_eq!(credentials.access_token(), "access-replacement");
     assert_eq!(credentials.refresh_token(), Some("refresh-original"));
+    assert!(credentials.bypass_common_proxy());
     assert_eq!(
         state
             .store()
@@ -297,10 +307,7 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
 }
 #[tokio::test]
 async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-import-retry-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-import-retry");
     let mut state = DesktopState::open(root.clone()).unwrap();
     let (account_check_endpoint, account_check_server) =
         spawn_import_account_check_server("provider-retry").await;
@@ -334,12 +341,14 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
     assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
     let account = response.results[0].account.as_ref().unwrap();
     assert!(account.models.is_empty());
-    assert!(state
-        .store()
-        .unwrap()
-        .accounts()
-        .iter()
-        .any(|record| record.account.is_automatic_quota_monitoring_eligible()));
+    assert!(
+        state
+            .store()
+            .unwrap()
+            .accounts()
+            .iter()
+            .any(|record| record.account.is_automatic_quota_monitoring_eligible())
+    );
     assert!(sessions.resume(&session_id, &[]).is_err());
     account_check_server.abort();
     CredentialStore::from_backend(NativeSecretBackend)
@@ -350,10 +359,7 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
 }
 #[tokio::test]
 async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-cockpit-source-import-{}",
-        Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root("zenith-relay-cockpit-source-import");
     let state = DesktopState::open(root.clone()).unwrap();
     let content = r#"[
             {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-one","api_base_url":"https://one.example.test/v1","api_provider_name":"One API"},
@@ -384,10 +390,12 @@ async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
     .unwrap();
 
     assert_eq!(response.results.len(), 2);
-    assert!(response
-        .results
-        .iter()
-        .all(|result| result.status == ImportItemStatus::Succeeded));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded)
+    );
     let sources = state.store().unwrap().sources().to_vec();
     assert_eq!(sources.len(), 2);
     assert!(sources.iter().all(|source| source.in_pool));
@@ -423,18 +431,19 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         api_key: item.secrets().api_key().unwrap().to_string(),
         wire_api,
         models: vec!["gpt-test".into()],
+        proxy_url: None,
     };
     runtime.validate().unwrap();
-    let source = imported_source_record(
-        &item,
-        runtime,
-        "source:source_test".into(),
-        None,
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        None,
-    );
+    let source = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: "source:source_test".into(),
+        existing: None,
+        protocol_config: Default::default(),
+        protocol_bindings: Default::default(),
+        detected_model_prices: Default::default(),
+        tested_at: None,
+    });
     let serialized = serde_json::to_string(&ImportItemResult::source_success(
         item.item_id,
         source.clone(),
@@ -465,6 +474,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: "source:source_existing".into(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::ChatCompletions,
         protocol_config: Default::default(),
@@ -494,6 +504,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         api_key: "sk-private".into(),
         wire_api,
         models: vec!["new-model".into()],
+        proxy_url: None,
     };
     let discovered_bindings = vec![SourceProtocolBinding {
         wire_api: WireApi::ChatCompletions,
@@ -502,16 +513,16 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         cache_write_ttl: Default::default(),
         model_ids: vec!["new-model".into()],
     }];
-    let updated = imported_source_record(
-        &item,
-        runtime,
-        existing.secret_ref.clone(),
-        Some(&existing),
-        existing.protocol_config.clone(),
-        discovered_bindings.clone(),
-        existing.detected_model_prices.clone(),
-        None,
-    );
+    let updated = imported_source_record(ImportedSourceRecordInput {
+        import_item: &item,
+        runtime_source: runtime,
+        secret_ref: existing.secret_ref.clone(),
+        existing: Some(&existing),
+        protocol_config: existing.protocol_config.clone(),
+        protocol_bindings: discovered_bindings.clone(),
+        detected_model_prices: existing.detected_model_prices.clone(),
+        tested_at: None,
+    });
 
     assert_eq!(updated.id, existing.id);
     assert_eq!(updated.name, existing.name);
@@ -529,7 +540,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
 #[tokio::test]
 async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
     let id = Uuid::new_v4().simple().to_string();
-    let root = std::env::temp_dir().join(format!("zenith-relay-source-import-invalid-{id}"));
+    let root = crate::files::test_temp_root("zenith-relay-source-import-invalid");
     let secret_ref = format!("source:import-invalid-{id}");
     let state = DesktopState::open(root.clone()).unwrap();
     secret_store::save(&secret_ref, "sk-import-test").unwrap();
@@ -542,6 +553,7 @@ async fn source_import_rebuilds_legacy_protocol_routes_automatically() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: secret_ref.clone(),
         pricing_provider: None,
+        proxy_id: None,
         official_provider_family: None,
         wire_api: WireApi::Responses,
         protocol_config: Default::default(),
@@ -598,7 +610,9 @@ fn missing_import_secret_requires_recovery() {
         session_id: None,
         import_code: None,
     });
-    assert!(serde_json::to_string(&error)
-        .unwrap()
-        .contains("recovery_required"));
+    assert!(
+        serde_json::to_string(&error)
+            .unwrap()
+            .contains("recovery_required")
+    );
 }

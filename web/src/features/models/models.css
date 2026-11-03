@@ -1,0 +1,89 @@
+.hosted-app .models-page { min-width: 0; }
+.hosted-app .models-page > .page-heading { justify-content: flex-start; flex-wrap: wrap; gap: 16px 24px; padding-inline-end: var(--hosted-tools-space); }
+.hosted-app .catalog-price { min-width: 0; font-variant-numeric: tabular-nums; }
+.hosted-app .catalog-cache-rates { display: grid; gap: 10px; }
+.hosted-app .catalog-cache-label { display: block; margin-bottom: 4px; color: var(--secondary); font-size: 11px; }
+.hosted-app .catalog-price-main { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.hosted-app .catalog-price-main > strong { color: var(--text); font-size: 14px; font-weight: 550; line-height: 1.4; overflow-wrap: anywhere; }
+.hosted-app .catalog-saving { flex-shrink: 0; padding: 2px 5px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 16px; font-weight: 550; white-space: nowrap; }
+.hosted-app .catalog-official { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; color: var(--secondary); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.hosted-app .catalog-official > span { min-width: 0; }
+.hosted-app .catalog-official s { text-decoration-thickness: 1px; overflow-wrap: anywhere; }
+.hosted-app .catalog-price[data-missing] .catalog-price-main > strong { color: var(--secondary); }
+.hosted-app .catalog-model-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+.hosted-app .catalog-choice { min-width: 0; max-width: 100%; }
+.hosted-app .catalog-row .option-menu { max-width: 100%; }
+.hosted-app .catalog-row .catalog-choice-trigger { width: auto; max-width: 100%; min-height: 30px; padding: 5px 8px; border-color: transparent; background: var(--subtle); color: var(--secondary); font-size: 11px; }
+.hosted-app .catalog-row .catalog-choice-trigger:is(:hover, [aria-expanded="true"]) { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+.hosted-app .catalog-choice-buttons { display: inline-flex; align-items: stretch; max-width: 100%; gap: 2px; padding: 3px; border-radius: 9px; background: var(--subtle); }
+.hosted-app .catalog-choice-buttons button { min-width: 0; min-height: 28px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--secondary); font: inherit; font-size: 11px; line-height: 18px; font-weight: 500; overflow-wrap: anywhere; cursor: pointer; transition: background-color 140ms ease, color 140ms ease; }
+.hosted-app .catalog-choice-buttons button:is(:hover, [aria-pressed="true"]) { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .catalog-choice-buttons button:focus-visible { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .catalog-context-value { min-width: 0; }
+.hosted-app .catalog-static-choice { color: var(--secondary); font-size: 11px; overflow-wrap: anywhere; }
+.hosted-app .catalog-table { table-layout: fixed; width: 100%; }
+.hosted-app .catalog-action-col { width: 64px; }
+.hosted-app .catalog-table:has(.copy-fallback) .catalog-action-col { width: 220px; }
+.hosted-app .catalog-table th, .hosted-app .catalog-table td { padding: 20px 12px; text-align: start; vertical-align: middle; border-bottom: 1px solid var(--border); }
+.hosted-app .catalog-table thead th { padding-block: 13px; background: var(--subtle); color: var(--secondary); font-size: 11px; font-weight: 500; }
+.hosted-app .catalog-table tbody th { background: transparent; }
+.hosted-app .catalog-table :is(th, td):first-child { padding-inline-start: 20px; }
+.hosted-app .catalog-table :is(th, td):last-child { padding-inline-end: 12px; }
+.hosted-app .catalog-table tbody tr:last-child > :is(th, td) { border-bottom: 0; }
+.hosted-app .catalog-model-name { display: block; color: var(--text); font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+.hosted-app .catalog-model-id { display: block; margin-top: 5px; color: var(--secondary); font-size: 11px; font-weight: 400; overflow-wrap: anywhere; }
+.hosted-app .catalog-protocols { display: block; color: var(--secondary); font-size: 11px; font-weight: 400; overflow-wrap: anywhere; }
+.hosted-app .catalog-context { font-size: 12px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.hosted-app .catalog-table td.catalog-actions { text-align: center; }
+.hosted-app .catalog-actions .copy-control { justify-content: center; }
+.hosted-app .catalog-cell-label { display: none; }
+.hosted-app .catalog-empty td { padding: 48px 20px; text-align: center; }
+.hosted-app .catalog-empty p { color: var(--secondary); font-size: 13px; }
+.hosted-app .catalog-table .catalog-company > th { padding: 16px 20px; border-block: 1px solid var(--border); background: var(--subtle); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
+@container relay-page (min-width: 1101px) {
+  .hosted-app .catalog-table th, .hosted-app .catalog-table td { text-align: center; }
+  .hosted-app .catalog-table :is(th, td):first-child { padding-inline: 8px; }
+  .hosted-app .catalog-row > :is(th, td) { height: 104px; }
+  .hosted-app .catalog-model-heading, .hosted-app .catalog-price-main, .hosted-app .catalog-official { justify-content: center; }
+  .hosted-app .catalog-model-heading { column-gap: 4px; }
+  .hosted-app .catalog-table .catalog-rate-cell { vertical-align: top; }
+  .hosted-app .catalog-price-main { align-items: center; min-height: 22px; }
+  .hosted-app .catalog-context-value { display: flex; justify-content: center; margin-inline: -8px; }
+  .hosted-app .catalog-context .catalog-choice-buttons button { padding-inline: 5px; }
+}
+@container relay-page (max-width: 1100px) {
+  .hosted-app .catalog-table, .hosted-app .catalog-table tbody { display: block; }
+  .hosted-app .catalog-table colgroup { display: none; }
+  .hosted-app .catalog-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .hosted-app .catalog-table tr.catalog-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px 16px; position: relative; padding: 20px; border-bottom: 1px solid var(--border); }
+  .hosted-app .catalog-table tr.catalog-row:last-child { border-bottom: 0; }
+  .hosted-app .catalog-table tbody th, .hosted-app .catalog-table tbody td { display: block; min-width: 0; padding: 0; border: 0; }
+  .hosted-app .catalog-table .catalog-row > :is(th, td):first-child { padding-inline-start: 0; }
+  .hosted-app .catalog-table tbody th { grid-column: 1 / -1; padding-inline-end: 52px; }
+  .hosted-app .catalog-table .catalog-company { display: block; }
+  .hosted-app .catalog-table .catalog-company > th { padding: 16px 20px; }
+  .hosted-app .catalog-cell-label { display: block; margin-bottom: 7px; color: var(--secondary); font-size: 11px; }
+  .hosted-app .catalog-table .catalog-protocol-cell { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .hosted-app .catalog-protocol-cell .catalog-cell-label { margin: 0; }
+  .hosted-app .catalog-table .catalog-context { grid-column: 1 / -1; }
+  .hosted-app .catalog-table .catalog-actions { position: absolute; inset-block-start: 12px; inset-inline-end: 12px; max-width: calc(100% - 40px); }
+  .hosted-app .catalog-table .catalog-actions:has(.copy-fallback) { position: static; grid-column: 1 / -1; max-width: 100%; }
+  .hosted-app .catalog-table tr.catalog-empty { display: block; }
+  .hosted-app .catalog-table tr.catalog-empty td { padding: 40px 20px; }
+}
+@container relay-page (max-width: 820px) {
+  .hosted-app .models-page > .page-heading { padding-inline-end: 0; }
+  .hosted-app .models-page > .page-heading h1 { flex-basis: 100%; padding-inline-end: var(--hosted-tools-space); }
+}
+@container relay-page (max-width: 440px) {
+  .hosted-app .catalog-table tr.catalog-row { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 16px; gap: 20px 16px; }
+}
+@media (max-width: 639px) {
+  .hosted-app .models-page > .page-heading h1 { padding-inline-end: 0; }
+}
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .catalog-row .catalog-choice-trigger, .hosted-app .catalog-choice-buttons button { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hosted-app .catalog-choice-buttons button { transition: none; }
+}

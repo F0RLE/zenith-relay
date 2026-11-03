@@ -1,39 +1,42 @@
 mod adapters;
+mod catalog_refresh;
 mod catalog_warning;
 mod coordination;
 mod paths;
 mod snapshot;
+mod subscription;
 
 pub(crate) use adapters::DesktopOAuthEvents;
 use coordination::wake_coordinator;
 pub(crate) use paths::migrate_storage_layout;
-#[cfg(test)]
-use snapshot::{account_secret_available, SecretLookup};
 pub(crate) use snapshot::{AccountCredentialFacts, LocalRuntimeInputs, SnapshotInputs};
+#[cfg(test)]
+use snapshot::{SecretLookup, account_secret_available};
 
 use super::{
     accounts::{
-        import_session::ImportSessionStore, oauth_flow::OAuthFlowManager, NativeSecretBackend,
+        NativeSecretBackend, import_session::ImportSessionStore, oauth_flow::OAuthFlowManager,
     },
     error::{ErrorCode, LocalPoolError, Result},
     host::GatewayManager,
     profiles::repair,
-    store::{telemetry_db::TelemetryDb, LocalPoolStore},
+    store::{LocalPoolStore, telemetry_db::TelemetryDb},
 };
 use crate::storage_paths::StoragePaths;
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, atomic::AtomicU64},
 };
-use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, watch};
 use url::Url;
 use zenith_relay_core::{
+    RuntimeContinuationStores,
     accounts::TokenAuthority,
     automations::WakeCoordinator,
     model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
     pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
-    scheduler::refresh::{service::RefreshService, RefreshLimits},
+    scheduler::refresh::{RefreshLimits, service::RefreshService},
 };
 
 pub(super) use zenith_relay_core::unix_time_ms as now_ms;
@@ -66,6 +69,7 @@ pub struct DesktopStateOwner {
     model_metadata: Arc<ModelMetadataCatalogLoader>,
     store: Arc<Mutex<LocalPoolStore>>,
     token_authority: Arc<TokenAuthority>,
+    pub(in crate::local_pool) continuation_state: RuntimeContinuationStores,
     pub(super) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
     pub(super) refresh_started: std::sync::atomic::AtomicBool,
     wake: Arc<Mutex<WakeCoordinator>>,
@@ -73,18 +77,35 @@ pub struct DesktopStateOwner {
     oauth_flow: OAuthFlowManager<NativeSecretBackend, DesktopOAuthEvents>,
     pub(super) oauth_events: DesktopOAuthEvents,
     failed_usage_writes: Arc<AtomicU64>,
+    usage_writer: std::sync::OnceLock<zenith_relay_core::UsageCallback>,
     failed_affinity_writes: Arc<AtomicU64>,
     catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
-    subscription_refresh_lock: AsyncMutex<()>,
+    subscription_refresh_lock: AsyncMutex<subscription::SubscriptionRefreshState>,
     setup_lock: tokio::sync::Mutex<()>,
+    runtime_snapshot_slots: Arc<Semaphore>,
     account_check_url: Url,
     credential_cache: Mutex<snapshot::CredentialCache>,
 }
 
 impl DesktopState {
+    pub(crate) fn continuation_memory_diagnostics(
+        &self,
+    ) -> Vec<zenith_relay_core::gateway::CacheMemoryDiagnostics> {
+        self.continuation_state.memory_diagnostics()
+    }
+
+    #[cfg(test)]
     pub fn open(root: PathBuf) -> Result<Self> {
+        Self::open_with_continuation_state(root, RuntimeContinuationStores::default())
+    }
+
+    pub(super) fn open_with_continuation_state(
+        root: PathBuf,
+        continuation_state: RuntimeContinuationStores,
+    ) -> Result<Self> {
         let paths = StoragePaths::from_root(&root);
         let transient_root = paths.cache_root();
         let history_repair_root = paths.history_repair_backup_root();
@@ -120,6 +141,21 @@ impl DesktopState {
                 }
             });
         let mut store = LocalPoolStore::open(root.clone())?;
+        let mut accounts = store.accounts().to_vec();
+        let mut membership_changed = false;
+        for account in &mut accounts {
+            if account.account.in_pool
+                && super::accounts::records::can_account_join_pool(account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                account.account.in_pool = false;
+                account.image_pool_enabled = false;
+                membership_changed = true;
+            }
+        }
+        if membership_changed {
+            store.replace_accounts_and_keys(accounts, store.keys().to_vec())?;
+        }
         let telemetry = store.database();
         let pricing = Arc::new(
             PricingCatalogLoader::open(paths.pricing_catalog_file())
@@ -161,6 +197,7 @@ impl DesktopState {
                 model_metadata,
                 store: Arc::new(Mutex::new(store)),
                 token_authority,
+                continuation_state,
                 refresh: RefreshService::with_cache_policy(
                     RefreshLimits::default(),
                     super::refresh::cache_observation,
@@ -172,12 +209,15 @@ impl DesktopState {
                 oauth_flow,
                 oauth_events,
                 failed_usage_writes,
+                usage_writer: std::sync::OnceLock::new(),
                 failed_affinity_writes,
                 catalog_refresh_error,
+                client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
-                subscription_refresh_lock: AsyncMutex::new(()),
+                subscription_refresh_lock: AsyncMutex::new(Default::default()),
                 setup_lock: tokio::sync::Mutex::new(()),
+                runtime_snapshot_slots: Arc::new(Semaphore::new(1)),
                 account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
                     .expect("the built-in account-check endpoint must be valid"),
                 credential_cache: Mutex::new(snapshot::CredentialCache::default()),
@@ -231,16 +271,26 @@ impl DesktopState {
         duration_ms: f64,
         context: Option<&str>,
     ) {
-        let telemetry = self.telemetry.clone();
-        let name = name.to_string();
-        let context = context.map(str::to_owned);
-        tauri::async_runtime::spawn_blocking(move || {
-            let _ = telemetry.record_performance(&name, duration_ms, context.as_deref());
-        });
+        tauri::async_runtime::spawn_blocking(performance_sample_job(
+            &self.telemetry,
+            name,
+            duration_ms,
+            context,
+        ));
     }
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.setup_lock.lock().await
+    }
+
+    pub(crate) async fn runtime_snapshot_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.runtime_snapshot_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                LocalPoolError::new(ErrorCode::Io, "Runtime snapshot worker is unavailable")
+            })
     }
 
     pub(crate) fn account_check_url(&self) -> &Url {
@@ -301,7 +351,9 @@ impl DesktopState {
         Ok(removed)
     }
 
-    pub(crate) async fn subscription_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn subscription_refresh_guard(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, subscription::SubscriptionRefreshState> {
         self.subscription_refresh_lock.lock().await
     }
 
@@ -341,6 +393,24 @@ impl DesktopState {
                 return;
             }
         }
+    }
+}
+
+fn performance_sample_job(
+    telemetry: &Arc<TelemetryDb>,
+    name: &str,
+    duration_ms: f64,
+    context: Option<&str>,
+) -> impl FnOnce() + Send + 'static {
+    // Optional queued metrics must not extend the storage owner's lifetime.
+    let telemetry = Arc::downgrade(telemetry);
+    let operation_name = name.to_owned();
+    let context = context.map(str::to_owned);
+    move || {
+        let Some(telemetry) = telemetry.upgrade() else {
+            return;
+        };
+        let _ = telemetry.record_performance(&operation_name, duration_ms, context.as_deref());
     }
 }
 

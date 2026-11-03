@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { buildAccountValueProjection, estimateRemainingApiEquivalent, formatAccountPayback } from "../src/features/relay/accountEconomics";
+import { buildAccountValueProjection, estimateRemainingApiEquivalent, formatAccountPayback, formatRemainingApiEquivalent } from "../src/features/relay/accountEconomics";
+import type { QuotaWindowUsage } from "../src/features/relay/api/types";
+import { calibratedWeek } from "./accountEconomics.fixture";
 
 describe("account value projection", () => {
   test("keeps the same display projection for Connections and Usage", () => {
@@ -36,47 +38,78 @@ describe("account value projection", () => {
     expect(buildAccountValueProjection(usage, undefined, undefined, 0)).toMatchObject({ purchaseCostMicroUsd: 0, remainingApiEquivalent: null, payback: null });
   });
 
+  const now = Date.now();
   const quota = {
     primary: null,
     secondary: {
       kind: "secondary" as const,
       availableBasisPoints: 5_800,
       explicitlyFull: false,
-      resetAtMs: 20_000,
-      windowStartMs: 1_000,
+      resetAtMs: now + 6 * 86_400_000,
+      windowStartMs: now - 86_400_000,
       windowMinutes: 10_080,
-      observedAtMs: 10_000,
+      observedAtMs: now,
     },
   };
-  const evidence = {
-    kind: "secondary" as const,
-    windowStartMs: 1_000,
-    observedAtMs: 10_000,
-    windowMinutes: 10_080,
-    apiEquivalent: { microUsd: 5_210_000, pricedTokens: 90, unpricedTokens: 10 },
-  };
+  const evidence = calibratedWeek(now);
 
-  test("estimates the remaining long-window value from aligned Relay usage", () => {
-    expect(estimateRemainingApiEquivalent(quota, evidence)).toEqual({
-      microUsd: 7_194_762,
+  test("applies the shared median to the remaining weekly fraction", () => {
+    expect(estimateRemainingApiEquivalent(quota, evidence)).toMatchObject({
+      microUsd: 5_800_000,
+      lowMicroUsd: 4_640_000, highMicroUsd: 6_960_000,
       approximate: true,
       windowKind: "secondary",
       windowMinutes: 10_080,
     });
   });
 
-  test("withholds the estimate below five percent observed usage", () => {
-    expect(estimateRemainingApiEquivalent({
-      ...quota,
-      secondary: { ...quota.secondary, availableBasisPoints: 9_600 },
-    }, evidence)).toBeNull();
+  test("comparable accounts have equal forecasts regardless of lifetime usage", () => {
+    const first = buildAccountValueProjection({ microUsd: 1_000_000, unpricedTokens: 0 }, quota, evidence, 1_000_000);
+    const second = buildAccountValueProjection({ microUsd: 90_000_000, unpricedTokens: 0 }, quota, { ...evidence, ledgerKey: "other" }, 1_000_000);
+    expect(first.remainingApiEquivalent).toEqual(second.remainingApiEquivalent);
+    expect(first.payback).toBe(1);
+    expect(second.payback).toBe(90);
   });
 
-  test("withholds the estimate below eighty percent price coverage", () => {
-    expect(estimateRemainingApiEquivalent(quota, {
-      ...evidence,
-      apiEquivalent: { ...evidence.apiEquivalent, pricedTokens: 79, unpricedTokens: 21 },
-    })).toBeNull();
+  test("different workloads show the observed median, not the range or its midpoint", () => {
+    const multiple = { ...evidence, calibration: { ...evidence.calibration,
+      profileCount: 2, workload: "", cacheBand: null, outputBand: null, medianMicroUsd: 8_500_000,
+    } };
+    const value = estimateRemainingApiEquivalent(quota, multiple, now);
+    expect(value).toMatchObject({ microUsd: 4_930_000, lowMicroUsd: 4_640_000, highMicroUsd: 6_960_000 });
+    expect(formatRemainingApiEquivalent(value, "en-US")).toBe("≈$4.93");
+    expect(formatRemainingApiEquivalent(value, "ru-RU")).toMatch(/^≈4,93\s\$$/);
+    expect(estimateRemainingApiEquivalent(quota, { ...multiple, calibration: {
+      ...multiple.calibration, medianMicroUsd: null,
+    } }, now)).toBeNull();
+  });
+
+  test("a five-hour reset does not change the weekly remaining value", () => {
+    const primary = { ...quota.secondary, kind: "primary" as const,
+      windowMinutes: 300, availableBasisPoints: 0, resetAtMs: now };
+    const before = estimateRemainingApiEquivalent({ ...quota, primary }, evidence, now);
+    const after = estimateRemainingApiEquivalent({ ...quota, primary: { ...primary,
+      windowStartMs: now, resetAtMs: now + 5 * 60 * 60 * 1_000,
+      availableBasisPoints: 10_000, explicitlyFull: true,
+    } }, evidence, now);
+    expect(after).toEqual(before);
+    expect(after?.microUsd).toBe(5_800_000);
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence,
+      availableBasisPoints: 4_800,
+    }, now)?.microUsd).toBe(4_800_000);
+  });
+
+  test("cards accept the existing eighty-percent pricing threshold without inventing missing prices", () => {
+    const partial = { ...evidence, calibration: { ...evidence.calibration, pricingCoverageBasisPoints: 8_000 } };
+    expect(estimateRemainingApiEquivalent(quota, partial, now)?.microUsd).toBe(5_800_000);
+    expect(estimateRemainingApiEquivalent(quota, { ...partial, calibration: {
+      ...partial.calibration, pricingCoverageBasisPoints: 7_999,
+    } }, now)).toBeNull();
+  });
+
+  test("a fresh or unused account can use an established shared calibration", () => {
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence, availableBasisPoints: 10_000 })?.microUsd).toBe(10_000_000);
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence, availableBasisPoints: 0 })?.microUsd).toBe(0);
   });
 
   test("does not substitute a monthly window for the weekly estimate", () => {
@@ -87,9 +120,20 @@ describe("account value projection", () => {
     }, { ...evidence, windowMinutes: monthlyMinutes })).toBeNull();
   });
 
-  test("withholds evidence from a different observation or quota cycle", () => {
+  test("rejects malformed and stale native window evidence", () => {
     expect(estimateRemainingApiEquivalent(quota, { ...evidence, observedAtMs: 9_999 })).toBeNull();
-    expect(estimateRemainingApiEquivalent(quota, { ...evidence, windowStartMs: 999 })).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence, windowStartMs: now + 1 })).toBeNull();
+    for (const availableBasisPoints of [-1, 10_001, Number.NaN, 100.5]) {
+      expect(estimateRemainingApiEquivalent(quota, { ...evidence, availableBasisPoints })).toBeNull();
+    }
+  });
+
+  test("expires forecasts at reset or after 72 hours and rejects future evidence", () => {
+    expect(estimateRemainingApiEquivalent(quota, evidence, now + 3 * 86_400_000)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, evidence, now - 1)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, { ...evidence, resetAtMs: now }, now)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, evidence, evidence.calibration.validUntilMs)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, evidence, now + 60_000)).not.toBeNull();
   });
 
   test("uses a provider-reported direct balance without extrapolation", () => {
@@ -102,5 +146,31 @@ describe("account value projection", () => {
       windowKind: null,
       windowMinutes: null,
     });
+  });
+
+  test("linked SIWC application ceilings cannot replace the shared subscription evidence", () => {
+    expect(estimateRemainingApiEquivalent({ ...quota, secondary: { ...quota.secondary, availableBasisPoints: 100, windowMinutes: 300 } }, evidence)?.microUsd).toBe(5_800_000);
+  });
+
+  test("does not fall back to legacy per-account usage when calibration is missing", () => {
+    const legacy = { kind: "secondary", windowStartMs: evidence.windowStartMs, observedAtMs: now, windowMinutes: 10_080,
+      apiEquivalent: { microUsd: 5_210_000, pricedTokens: 90, unpricedTokens: 10 },
+      recentConsumedBasisPoints: 1_000, recentApiEquivalent: { microUsd: 500_000, pricedTokens: 100, unpricedTokens: 0 } };
+    expect(estimateRemainingApiEquivalent(quota, legacy as unknown as QuotaWindowUsage)).toBeNull();
+    expect(estimateRemainingApiEquivalent(quota, undefined)).toBeNull();
+  });
+
+  test("rejects empty, invalid, future or expired calibration", () => {
+    for (const patch of [{ accountCount: 0 }, { medianMicroUsd: Number.NaN }, { lowMicroUsd: 12_000_001 },
+      { highMicroUsd: 1 }, { profileId: "" }, { observedAtMs: now + 1 }, { validUntilMs: now }]) {
+      expect(estimateRemainingApiEquivalent(quota, { ...evidence, calibration: { ...evidence.calibration, ...patch } }, now)).toBeNull();
+    }
+  });
+
+  test("scales integer microUSD without losing precision in the intermediate product", () => {
+    const cost = Number.MAX_SAFE_INTEGER;
+    const value = estimateRemainingApiEquivalent(quota, { ...evidence, availableBasisPoints: 9_999,
+      calibration: { ...evidence.calibration, lowMicroUsd: cost, medianMicroUsd: cost, highMicroUsd: cost } });
+    expect(value?.microUsd).toBe(Number((BigInt(cost) * 9_999n + 5_000n) / 10_000n));
   });
 });

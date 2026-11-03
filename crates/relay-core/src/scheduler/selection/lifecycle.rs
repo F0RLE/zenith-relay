@@ -43,6 +43,7 @@ impl PoolScheduler {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn settle_rotation(
         &mut self,
         reservation_id: ReservationId,
@@ -50,14 +51,29 @@ impl PoolScheduler {
         budget: &RotationRequestBudget,
         now_ms: u64,
     ) -> Result<RotationSettlement, RotationSettlementError> {
+        self.settle_rotation_with_latency(reservation_id, observation, budget, now_ms, None)
+    }
+
+    pub(crate) fn settle_rotation_with_latency(
+        &mut self,
+        reservation_id: ReservationId,
+        observation: RotationAttemptObservation,
+        budget: &RotationRequestBudget,
+        now_ms: u64,
+        first_output_latency_ms: Option<u64>,
+    ) -> Result<RotationSettlement, RotationSettlementError> {
         let lease = self
             .rotation_leases
             .get(&reservation_id)
             .cloned()
             .ok_or(RotationSettlementError::UnknownLease)?;
-        let settlement = self
-            .rotation
-            .settle(lease.lease_id, observation, budget, now_ms)?;
+        let settlement = self.rotation.settle_with_latency(
+            lease.lease_id,
+            observation,
+            budget,
+            now_ms,
+            first_output_latency_ms,
+        )?;
         self.rotation_leases.remove(&reservation_id);
         Ok(settlement)
     }

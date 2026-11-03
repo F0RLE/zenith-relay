@@ -9,7 +9,7 @@ function nodeText(node: { value?: string; children?: unknown[] }): string {
 export function remarkErrorReference({ query, empty, results }: SearchOptions) {
   return (tree: Root) => {
     const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-    const output: RootContent[] = [];
+    const rootContent: RootContent[] = [];
     let matches = 0;
     let reachedGroups = false;
     for (let index = 0; index < tree.children.length; index++) {
@@ -17,7 +17,7 @@ export function remarkErrorReference({ query, empty, results }: SearchOptions) {
       const table = tree.children[index + 1];
       if (!heading) continue;
       if (heading.type !== "heading" || heading.depth !== 3 || table?.type !== "table" || !table.children[0]) {
-        if (!terms.length || reachedGroups) output.push(heading);
+        if (!terms.length || reachedGroups) rootContent.push(heading);
         continue;
       }
       index++;
@@ -28,7 +28,7 @@ export function remarkErrorReference({ query, empty, results }: SearchOptions) {
       });
       matches += rows.length;
       if (!rows.length) continue;
-      output.push({
+      rootContent.push({
         type: "blockquote",
         data: { hName: "details", hProperties: { className: ["help-error-group"], open: terms.length > 0 } },
         children: [
@@ -41,9 +41,9 @@ export function remarkErrorReference({ query, empty, results }: SearchOptions) {
       });
     }
     if (terms.length) {
-      output.unshift({ type: "paragraph", data: { hName: "div", hProperties: { role: "status", className: ["help-error-results"] } },
+      rootContent.unshift({ type: "paragraph", data: { hName: "div", hProperties: { role: "status", className: ["help-error-results"] } },
         children: [{ type: "text", value: matches ? results(matches) : empty }] });
     }
-    tree.children = output;
+    tree.children = rootContent;
   };
 }

@@ -1,11 +1,11 @@
-use std::env;
 use std::fs;
 
-use super::persist::{
-    clear_last_stages, ensure_layout, persist_last_stage_at, read_debug_marker, read_latest_stage,
-};
+use super::persist::{clear_last_stages, ensure_layout, read_debug_marker, read_latest_stage};
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(super) fn test_root(label: &str) -> PathBuf {
+    crate::files::test_temp_root(&format!("diagnostics-{label}"))
+}
 
 #[test]
 fn identifiers_are_stable_but_not_reversible() {
@@ -102,13 +102,7 @@ fn truncation_respects_utf8_byte_limits() {
 
 #[test]
 fn layout_uses_separate_error_crash_and_operation_directories() {
-    let root = env::temp_dir().join(format!(
-        "zenith-relay-diagnostics-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
+    let root = test_root("layout");
     ensure_layout(&root);
     assert!(root.join("logs/errors").is_dir());
     assert!(root.join("logs/crashes").is_dir());
@@ -119,13 +113,7 @@ fn layout_uses_separate_error_crash_and_operation_directories() {
 
 #[test]
 fn debug_marker_is_disabled_by_default_and_enabled_by_presence() {
-    let root = env::temp_dir().join(format!(
-        "zenith-relay-debug-marker-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
+    let root = test_root("debug-marker");
     assert!(ensure_layout(&root));
     assert!(!read_debug_marker(&root).expect("default marker state"));
     fs::write(root.join(LOGS_DIRECTORY).join(DEBUG_MARKER_FILE), b"").expect("marker");
@@ -135,13 +123,7 @@ fn debug_marker_is_disabled_by_default_and_enabled_by_presence() {
 
 #[test]
 fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
-    let root = env::temp_dir().join(format!(
-        "zenith-relay-stage-marker-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
+    let root = test_root("stage-marker");
     assert!(ensure_layout(&root));
     let value = Breadcrumb {
         timestamp: "2026-09-15T12:34:56.000Z".to_string(),
@@ -149,7 +131,7 @@ fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
         stage: "runtime_sync_started".to_string(),
         details: BTreeMap::from([("account".to_string(), "id_synthetic".to_string())]),
     };
-    persist_last_stage_at(&root, &value);
+    persist::Writers::default().stage.write(&root, &value);
     let loaded = read_latest_stage(&root).expect("stage marker");
     assert_eq!(loaded.operation, value.operation);
     assert_eq!(loaded.stage, value.stage);

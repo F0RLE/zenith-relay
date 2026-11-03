@@ -32,4 +32,4 @@ body:
     id: tried
     attributes:
       label: What you tried
-      description: Include relevant steps or safe diagnostics. Do not include secrets, tokens, prompts, or response bodies.
+      description: Include relevant steps and redacted diagnostics; keep tokens, prompts and response bodies private.

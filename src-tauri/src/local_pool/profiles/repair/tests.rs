@@ -4,12 +4,10 @@ use super::*;
 
 mod catalog_transfer;
 mod history_sync;
+mod snapshots;
 
 fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "zenith-relay-repair-{name}-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let root = crate::files::test_temp_root(&format!("repair-{name}"));
     let state = root.join("state");
     let backups = root.join("backups");
     let profile = root.join("profile");
@@ -40,6 +38,42 @@ fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)
         .unwrap();
     drop(connection);
     (root, state, backups, profile, rollout, database)
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn rollout_enumeration_rejects_an_external_session_directory() {
+    let root = crate::files::test_temp_root("repair-external-session");
+    let profile = root.join("profile");
+    let outside = root.join("outside");
+    fs::create_dir(&profile).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let sessions = profile.join("sessions");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &sessions).unwrap();
+    #[cfg(windows)]
+    junction::create(&outside, &sessions).unwrap();
+
+    let profile = fs::canonicalize(profile).unwrap();
+    let mut seen = HashSet::new();
+    let mut collection = RolloutCollection::default();
+    let mut remaining = MAX_TOTAL_REWRITE_BYTES;
+    let result = collect_rollouts(
+        &sessions,
+        &profile,
+        "openai",
+        0,
+        &mut seen,
+        &mut collection,
+        &mut remaining,
+    );
+    assert!(result.is_err());
+    assert!(seen.is_empty());
+    assert!(collection.history.is_empty());
+    assert!(collection.rewrites.is_empty());
+    #[cfg(windows)]
+    junction::delete(&sessions).unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn rollout_provider_from_file(path: &Path) -> String {

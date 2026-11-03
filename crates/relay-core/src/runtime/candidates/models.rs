@@ -1,9 +1,6 @@
-use super::super::{
-    images::select_image_main_model_with_catalog, normalized_set, AccountModelInventory,
-    GatewayRuntime, IMAGE_API_MODEL,
-};
-use crate::error_codes;
+use super::super::{AccountModelInventory, GatewayRuntime, IMAGE_API_MODEL, normalized_set};
 use crate::CandidateKind;
+use crate::error_codes;
 use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
@@ -17,13 +14,19 @@ impl GatewayRuntime {
             return false;
         };
         let configured_models = normalized_set(models.iter());
-        let image_main_model = select_image_main_model_with_catalog(
-            &configured_models,
-            self.image_base_model.as_deref(),
-            self.image_pricing_catalog.as_deref(),
-        );
-        let mut candidate_models = configured_models.clone();
-        let mut published_models = models.to_vec();
+        let image_main_model = (account.oauth_client_kind
+            == crate::providers::chatgpt::OAuthClientKind::Codex)
+            .then(|| IMAGE_API_MODEL.to_owned());
+        let mut candidate_models = if account.images_only {
+            Default::default()
+        } else {
+            configured_models.clone()
+        };
+        let mut published_models = if account.images_only {
+            Vec::new()
+        } else {
+            models.to_vec()
+        };
         if image_main_model.is_some() {
             candidate_models.insert(IMAGE_API_MODEL.to_string());
             published_models.push(IMAGE_API_MODEL.to_string());
@@ -45,25 +48,24 @@ impl GatewayRuntime {
         // scheduler lock until all three views name the same inventory.
         let mut inventory = crate::poison::write(&account.model_inventory);
         let changed = inventory.configured_models != configured_models;
-        let image_bridge_changed = inventory.image_main_model != image_main_model;
+        let image_bridge_changed = changed || inventory.image_main_model != image_main_model;
         *inventory = AccountModelInventory {
             configured_models,
             image_main_model,
         };
         drop(inventory);
         if image_bridge_changed {
-            // A virtual image route retains its public model id even when its
-            // underlying Responses model changes. Revoke pending old leases.
+            // Inventory changes revoke pending leases, including image sends.
+            // The native image model itself never changes with a text model.
             account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);
         }
-        crate::poison::mutex(&self.registry).replace(account_id, published_models.iter());
+        crate::poison::mutex(&self.model_state.registry)
+            .replace(account_id, published_models.iter());
         scheduler.upsert(candidate);
         if changed {
-            // Transport cards and Lite support describe the old inventory.
+            // Transport cards describe the old inventory.
             // A removed and later reintroduced slug needs fresh evidence.
             crate::poison::mutex(&self.model_metadata.codex_manifests).remove(account_id);
-            crate::poison::mutex(&self.codex_responses_lite_models)
-                .retain(|(id, _)| id != account_id);
         }
         drop(scheduler);
         self.candidate_availability.notify_waiters();

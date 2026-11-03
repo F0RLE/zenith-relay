@@ -93,16 +93,22 @@ fn stale_oauth_quota_stays_probeable_unless_it_protects_the_chatgpt_reserve() {
         now_ms,
     };
 
-    assert!(scheduler
-        .select(request(100 + QUOTA_STALE_AFTER_MS))
-        .is_some());
-    assert!(scheduler
-        .select(request(101 + QUOTA_STALE_AFTER_MS))
-        .is_some());
+    assert!(
+        scheduler
+            .select(request(100 + QUOTA_STALE_AFTER_MS))
+            .is_some()
+    );
+    assert!(
+        scheduler
+            .select(request(101 + QUOTA_STALE_AFTER_MS))
+            .is_some()
+    );
     assert!(scheduler.set_protected_candidate(Some("account"), 100));
-    assert!(scheduler
-        .select(request(101 + QUOTA_STALE_AFTER_MS))
-        .is_none());
+    assert!(
+        scheduler
+            .select(request(101 + QUOTA_STALE_AFTER_MS))
+            .is_none()
+    );
 }
 #[test]
 fn hard_filters_reject_every_ineligible_candidate_state() {
@@ -187,17 +193,19 @@ fn hard_filters_reject_every_ineligible_candidate_state() {
         },
         ..CandidateScope::default()
     };
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &scope,
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 100,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 100,
+            })
+            .is_none()
+    );
 }
 #[test]
 fn cooldown_expires_and_success_clears_it_and_updates_last_used_timestamp() {
@@ -222,25 +230,29 @@ fn cooldown_expires_and_success_clears_it_and_updates_last_used_timestamp() {
         Some(&101)
     );
     assert!(scheduler.record_success("candidate", "GPT-5", 102));
-    assert!(scheduler
-        .candidate("candidate")
-        .unwrap()
-        .cooldowns
-        .is_empty());
+    assert!(
+        scheduler
+            .candidate("candidate")
+            .unwrap()
+            .cooldowns
+            .is_empty()
+    );
     assert!(select(&mut scheduler, &HashSet::new()).is_some());
 
     scheduler.set_cooldown("candidate", "gpt-5", 101);
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 101,
-        })
-        .is_some());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 101,
+            })
+            .is_some()
+    );
 
     assert!(scheduler.record_success("candidate", "gpt-5", 102));
 }
@@ -349,17 +361,19 @@ fn account_scope_allows_oauth_ready_candidate_shape() {
         ..CandidateScope::default()
     };
 
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &scope,
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 0,
-        })
-        .is_some());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 0,
+            })
+            .is_some()
+    );
 }
 #[test]
 fn oauth_candidates_honor_runtime_cooldowns_and_allow_stale_quota() {
@@ -375,17 +389,19 @@ fn oauth_candidates_honor_runtime_cooldowns_and_allow_stale_quota() {
     let snapshot = scheduler.runtime_order(100).remove(0);
     assert!(!snapshot.available);
     assert_eq!(snapshot.next_retry_at_ms, Some(20_000));
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 20_001,
-        })
-        .is_some());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 20_001,
+            })
+            .is_some()
+    );
 }
 #[test]
 fn translated_protocols_share_the_same_scheduler() {
@@ -394,17 +410,19 @@ fn translated_protocols_share_the_same_scheduler() {
     candidate.protocol = WireApi::ChatCompletions;
     scheduler.upsert(candidate);
 
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 0,
-        })
-        .is_some());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 0,
+            })
+            .is_some()
+    );
 }
 #[test]
 fn explicit_empty_scope_selects_no_candidates() {
@@ -415,17 +433,19 @@ fn explicit_empty_scope_selects_no_candidates() {
         ..CandidateScope::default()
     };
 
-    assert!(scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses],
-            scope: &scope,
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: None,
-            now_ms: 0,
-        })
-        .is_none());
+    assert!(
+        scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 0,
+            })
+            .is_none()
+    );
 }
 #[test]
 fn protected_account_keeps_its_quota_reserve() {
@@ -455,6 +475,20 @@ fn protected_account_keeps_its_quota_reserve() {
         scheduler.routing_quota_factor(scheduler.candidate("protected").unwrap()),
         100
     );
+}
+
+#[test]
+fn protected_reserve_requires_a_dated_nonfuture_quota_observation() {
+    for observed_at_ms in [None, Some(101), Some(1)] {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_quota_stale_after_ms(10);
+        let mut account = oauth_candidate("protected");
+        account.quota = CandidateQuota::Available(5_000);
+        account.quota_updated_at_ms = observed_at_ms;
+        scheduler.upsert(account);
+        assert!(scheduler.set_protected_candidate(Some("protected"), 100));
+        assert!(!scheduler.quota_reserve_allows(scheduler.candidate("protected").unwrap(), 100));
+    }
 }
 #[test]
 fn protected_account_with_provider_credits_and_remaining_window_is_routable() {

@@ -6,7 +6,11 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         candidate_id: "source".into(),
         kind: CandidateKind::ApiSource,
         available: true,
+        quota_wait: false,
+        capacity_wait: false,
         next_for_new_request: false,
+        selection_rank: None,
+        resource_headroom: None,
         activity_revision: 0,
         runtime_id: 0,
         in_flight: 0,
@@ -19,11 +23,97 @@ fn runtime_snapshot_keeps_the_management_wire_shape() {
         dispatches: 0,
     };
 
-    let value = serde_json::to_value(snapshot).unwrap();
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value["quotaWait"], false);
     assert_eq!(value["activeRequestCount"], 0);
     assert_eq!(value["activeModels"], serde_json::json!([]));
     assert_eq!(value["modelRetries"], serde_json::json!([]));
     assert!(value.get("active_request_count").is_none());
+    assert!(value.get("resourceHeadroom").is_none());
+    value.as_object_mut().unwrap().remove("quotaWait");
+    value.as_object_mut().unwrap().remove("capacityWait");
+    let restored: CandidateRuntimeSnapshot = serde_json::from_value(value).unwrap();
+    assert!(!restored.quota_wait);
+    assert!(!restored.capacity_wait);
+    assert!(restored.resource_headroom.is_none());
+    assert!(restored.selection_rank.is_none());
+}
+
+#[test]
+fn runtime_quota_wait_preserves_the_cause_without_inventing_missing_counters() {
+    let mut scheduler = PoolScheduler::new();
+    let mut member = candidate("member");
+    member.quota = CandidateQuota::Unknown;
+    scheduler.upsert(member);
+    assert!(!scheduler.runtime_order(100)[0].quota_wait);
+    for reason in [
+        CooldownReason::Mandatory,
+        CooldownReason::Transient,
+        CooldownReason::RateLimit,
+    ] {
+        let mut paused = scheduler.clone();
+        assert_eq!(
+            paused.set_cooldown_with_reason("member", "*", 200, reason),
+            reason != CooldownReason::Transient
+        );
+        let waiting = paused.runtime_order(100).remove(0);
+        assert_eq!(waiting.quota_wait, reason == CooldownReason::RateLimit);
+        let recovered = paused.runtime_order(200).remove(0);
+        assert!(recovered.available);
+        assert!(!recovered.quota_wait);
+    }
+    let member = scheduler.candidates.get_mut("member").unwrap();
+    member.quota = CandidateQuota::Exhausted;
+    member.quota_updated_at_ms = Some(200);
+    let exhausted = scheduler.runtime_order(200).remove(0);
+    assert!(!exhausted.available);
+    assert!(exhausted.quota_wait);
+}
+
+#[test]
+fn runtime_headroom_uses_independent_admission_freshness_clocks() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.set_quota_stale_after_ms(10);
+    let mut member = candidate("member");
+    member.quota = CandidateQuota::Available(9_000);
+    member.quota_updated_at_ms = Some(100);
+    member.provider_credits_micro_units = Some(2_000_000);
+    member.provider_credits_observed_at_ms = Some(1);
+    scheduler.upsert(member);
+    let fresh = scheduler
+        .runtime_order(100)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(fresh.quota_remaining_basis_points, Some(9_000));
+    assert_eq!(fresh.provider_credits_micro_units, None);
+    assert!(!fresh.provider_credits_unlimited);
+    let member = scheduler.candidates.get_mut("member").unwrap();
+    member.provider_credits_observed_at_ms = Some(111);
+    let credit_only = scheduler
+        .runtime_order(111)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(credit_only.quota_remaining_basis_points, None);
+    assert_eq!(credit_only.provider_credits_micro_units, Some(2_000_000));
+    let member = scheduler.candidates.get_mut("member").unwrap();
+    member.provider_credits_unlimited = true;
+    let unlimited = scheduler
+        .runtime_order(111)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(unlimited.provider_credits_micro_units, None);
+    assert!(unlimited.provider_credits_unlimited);
+    let stale = scheduler
+        .runtime_order(122)
+        .remove(0)
+        .resource_headroom
+        .unwrap();
+    assert_eq!(stale.quota_remaining_basis_points, None);
+    assert_eq!(stale.provider_credits_micro_units, None);
+    assert!(!stale.provider_credits_unlimited);
 }
 #[test]
 fn runtime_order_uses_scheduler_preference_and_exposes_live_state() {

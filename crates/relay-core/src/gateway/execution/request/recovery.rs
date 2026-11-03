@@ -1,13 +1,43 @@
 use super::prelude::*;
 
+pub(in crate::gateway::execution) fn mark_adapter_failure(
+    mut event: UsageEvent,
+    error: &AdapterError,
+) -> UsageEvent {
+    if error.is_upstream_failure() && event.upstream_error.is_none() {
+        let message = error
+            .parameter()
+            .map(|parameter| format!("{error} (parameter: {parameter})"))
+            .unwrap_or_else(|| error.to_string());
+        // Only fixed labels and numeric parse coordinates enter this diagnostic.
+        event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+            Some(event.http_status),
+            &serde_json::json!({"error": {
+                "code": error.code(), "type": "relay_adapter", "message": message,
+                "param": error.parameter()
+            }}),
+        ));
+    }
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    event.error_category = Some(error.code().to_string());
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
+    event
+}
+
+#[cfg(test)]
+mod tests;
+
 pub(in crate::gateway::execution) fn should_wait_for_candidate_availability(
     enabled: bool,
     last_failure: &Option<AttemptFailure>,
-    has_adapter_error: bool,
+    has_preparation_error: bool,
     has_previous_response_id: bool,
 ) -> bool {
     enabled
-        && !has_adapter_error
+        && !has_preparation_error
         && last_failure.as_ref().is_none_or(|failure| {
             crate::gateway::errors::retryable_recovery_wait(
                 failure.status,
@@ -46,8 +76,8 @@ pub(in crate::gateway::execution) fn recover_stale_tool_history(
     true
 }
 
-pub(super) fn request_has_previous_response_id(wire_api: WireApi, request: &Value) -> bool {
-    wire_api == WireApi::Responses && previous_response_id(request).is_some()
+pub(super) fn request_has_previous_response_id(client_wire_api: WireApi, request: &Value) -> bool {
+    client_wire_api == WireApi::Responses && previous_response_id(request).is_some()
 }
 
 /// Applies the one permitted repair for a strict upstream rejection, then
@@ -56,7 +86,7 @@ pub(super) fn request_has_previous_response_id(wire_api: WireApi, request: &Valu
 /// stream bootstrap failure, so both paths share this mutation.
 pub(super) struct LegacyCallIdRepair<'a> {
     pub(super) request: &'a mut Value,
-    pub(super) wire_api: WireApi,
+    pub(super) client_wire_api: WireApi,
     pub(super) adapter_is_passthrough: bool,
     pub(super) upstream_rejected_tool_links: bool,
     pub(super) repair_attempted: &'a mut bool,
@@ -69,7 +99,7 @@ pub(super) struct LegacyCallIdRepair<'a> {
 pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_>) -> bool {
     let LegacyCallIdRepair {
         request,
-        wire_api,
+        client_wire_api,
         adapter_is_passthrough,
         upstream_rejected_tool_links,
         repair_attempted,
@@ -78,7 +108,7 @@ pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_
         has_unpaired_tool_output,
         requires_affinity_owner,
     } = repair;
-    if wire_api != WireApi::Responses
+    if client_wire_api != WireApi::Responses
         || !adapter_is_passthrough
         || *repair_attempted
         || !upstream_rejected_tool_links
@@ -91,7 +121,7 @@ pub(super) fn try_repair_legacy_responses_call_ids(repair: LegacyCallIdRepair<'_
     tried.remove(candidate_id);
     *has_unpaired_tool_output = !unpaired_tool_output_ids(request).is_empty();
     *requires_affinity_owner =
-        request_has_previous_response_id(wire_api, request) || *has_unpaired_tool_output;
+        request_has_previous_response_id(client_wire_api, request) || *has_unpaired_tool_output;
     true
 }
 
@@ -147,7 +177,7 @@ pub(super) fn replay_native_affinity_continuation(
     *request = match replay.replay_request(request, model, stream) {
         Ok(request) => request,
         Err(error) if error.code() == error_codes::ADAPTER_CONTINUATION_MISMATCH => {
-            return Ok(false)
+            return Ok(false);
         }
         Err(error) => return Err(error),
     };
@@ -155,13 +185,17 @@ pub(super) fn replay_native_affinity_continuation(
     Ok(true)
 }
 
-pub(in crate::gateway::execution) fn adapter_error_response(error: AdapterError) -> Response<Body> {
-    adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay)
+pub(in crate::gateway::execution) fn adapter_error_response(
+    error: AdapterError,
+    request_id: Option<&str>,
+) -> Response<Body> {
+    adapter_error_response_for_origin(error, crate::ErrorOrigin::Relay, request_id)
 }
 
 pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     error: AdapterError,
     origin: crate::ErrorOrigin,
+    request_id: Option<&str>,
 ) -> Response<Body> {
     let status = if error.is_upstream_failure() {
         StatusCode::BAD_GATEWAY
@@ -170,14 +204,36 @@ pub(in crate::gateway::execution) fn adapter_error_response_for_origin(
     };
     let message = error
         .parameter()
-        .map(|parameter| format!("{} (parameter: {parameter})", error.message()));
-    super::super::super::errors::api_error_with_parameter(
+        .map(|parameter| format!("{error} (parameter: {parameter})"))
+        .unwrap_or_else(|| error.to_string());
+    // Request-shape and capability failures are produced before an upstream
+    // response exists. They are Relay errors even when the selected route is
+    // an API source; only adapter failures derived from an upstream response
+    // retain the route's provider/account origin.
+    let origin = if error.is_upstream_failure() {
+        origin
+    } else {
+        crate::ErrorOrigin::Relay
+    };
+    let mut response = super::super::super::errors::api_error_with_parameter(
         status,
-        message.as_deref().unwrap_or(error.message()),
+        &message,
         error.code(),
         error.code(),
         origin,
-        None,
+        request_id,
         error.parameter(),
-    )
+    );
+    if error.is_upstream_failure() {
+        // Inference already ran; an HTTP retry would start another generation.
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+    } else {
+        // The internal HTTP-to-WebSocket bridge must retain this local error
+        // contract, not reclassify its JSON as a provider's HTTP 400. A typed
+        // extension cannot be forged by an upstream error body or header.
+        response.extensions_mut().insert(error);
+    }
+    response
 }

@@ -63,16 +63,25 @@ pub(super) async fn handle_upstream_item<E>(
                 .await;
             }
         } else if active_request {
-            let _ = downstream
-                .send(Message::Close(Some(CloseFrame {
+            let _ = send_message(
+                downstream,
+                Message::Close(Some(CloseFrame {
                     code: close_code::ERROR,
                     reason: "upstream stream ended after output".into(),
-                })))
-                .await;
+                })),
+            )
+            .await;
         }
         return false;
     };
     if let Some(request) = repairable_terminal_request(runtime, state, &message) {
+        if let Some(routing) = state
+            .in_flight
+            .as_mut()
+            .and_then(|attempt| attempt.event.routing.as_mut())
+        {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetryRepair);
+        }
         if let Some(lease) = state.lease.as_ref() {
             // Close the repair before `finish_terminal`. That
             // function settles a real failure, and a missing
@@ -101,6 +110,13 @@ pub(super) async fn handle_upstream_item<E>(
         return false;
     }
     if let Some(request) = retryable_terminal_request(runtime, state, &message) {
+        if let Some(routing) = state
+            .in_flight
+            .as_mut()
+            .and_then(|attempt| attempt.event.routing.as_mut())
+        {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+        }
         let handoff = state.retry_handoff();
         let terminal = match &message {
             UpstreamMessage::Text(text) => inspect_upstream_event(text.as_bytes(), state),

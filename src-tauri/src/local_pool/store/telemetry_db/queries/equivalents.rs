@@ -47,12 +47,13 @@ impl TelemetryDb {
                     && cached.pricing_revision == pricing_revision
             })
         {
-            return Ok(cached.value.clone());
+            return Ok(cached.equivalents.clone());
         }
         let connection = self.lock_connection()?;
         let mut statement = connection
             .prepare(
                 "SELECT candidate_kind, candidate_id, model,
+                    price_class, context_band,
                     input_tokens, cached_input_tokens, cache_write_input_tokens,
                     cache_write_5m_tokens, cache_write_1h_tokens, unknown_cache_write_tokens,
                     output_tokens, total_tokens, input_samples,
@@ -62,35 +63,41 @@ impl TelemetryDb {
             .map_err(db_error)?;
         let rows = statement
             .query_map([], |row| {
-                let model = row.get::<_, Option<String>>(2)?;
+                let model_id = row.get::<_, Option<String>>(2)?;
                 let kind = row.get::<_, String>(0)?;
-                let id = row.get::<_, String>(1)?;
+                let candidate_id = row.get::<_, String>(1)?;
+                let price_class: String = row.get(3)?;
+                let context_band: String = row.get(4)?;
                 Ok((
                     kind.clone(),
-                    id.clone(),
+                    candidate_id.clone(),
                     resolver.estimate(
                         &kind,
-                        &id,
-                        model.as_deref(),
+                        &candidate_id,
+                        model_id.as_deref(),
                         zenith_relay_core::ApiEquivalentUsage::from_observed_sums(
                             zenith_relay_core::ObservedUsageSums::from_rollup_aggregate(
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                                 |column| row.get(CANDIDATE_ROLLUP_TOKEN_OFFSET + column),
                             )?,
-                        ),
+                        )
+                        .with_aggregate_rates(&price_class, &context_band),
                     ),
                 ))
             })
             .map_err(db_error)?;
         let mut equivalents = UsageEquivalents::default();
         for row in rows {
-            let (kind, id, estimate) = row.map_err(db_error)?;
-            let values = if kind == "account" {
+            let (kind, candidate_id, estimate) = row.map_err(db_error)?;
+            let equivalents_by_candidate = if kind == "account" {
                 &mut equivalents.accounts
             } else {
                 &mut equivalents.sources
             };
-            values.entry(id).or_default().merge(estimate);
+            equivalents_by_candidate
+                .entry(candidate_id)
+                .or_default()
+                .merge(estimate);
         }
         drop(statement);
         drop(connection);
@@ -101,7 +108,7 @@ impl TelemetryDb {
                 .replace(CachedUsageEquivalents {
                     usage_revision,
                     pricing_revision,
-                    value: equivalents.clone(),
+                    equivalents: equivalents.clone(),
                 });
         }
         Ok(equivalents)

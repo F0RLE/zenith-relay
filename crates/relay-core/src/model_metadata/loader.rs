@@ -1,14 +1,14 @@
 use super::{
-    enrich_reasoning_metadata_with_models_dev_details, payload_hash, validate_payload,
-    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataCatalogHandle,
     LITELLM_MODELS_SOURCE_URL, MODELS_DEV_DETAILS_SOURCE_URL, MODELS_DEV_SOURCE_URL,
-    OPENROUTER_MODELS_SOURCE_URL,
+    MetadataSourceStatus, ModelMetadataCatalog, ModelMetadataCatalogHandle,
+    OPENROUTER_MODELS_SOURCE_URL, enrich_reasoning_metadata_with_models_dev_details,
+    metadata_payload_hash, validate_metadata_payload,
 };
 use crate::{
     catalog_io::{self, CatalogIoError},
     pricing::{CatalogRefreshDeadline, CatalogRefreshOutcome, CatalogStatus},
 };
-use reqwest::{header, Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -19,7 +19,8 @@ mod cache;
 mod source;
 
 use source::{
-    build_catalog, catalog_from_payload, merge_payloads, CacheBundle, SourceEnvelope, SourceState,
+    PreparedCatalog, SourceEnvelope, SourceState, catalog_from_payload, merge_payloads,
+    refresh_catalog_status,
 };
 
 const REFRESH_INTERVAL_MS: u64 = 60 * 60 * 1_000;
@@ -84,14 +85,14 @@ impl ModelMetadataCatalogLoader {
         let max_age_ms = max_age_ms.max(1);
         let now = crate::unix_time_ms();
         let (states, parsed) = cache::read_states(&path, now, max_age_ms);
-        let payload = merge_payloads(&parsed);
-        // Validation already parsed these sources. Reuse that work once, then
-        // release the trees before constructing the long-lived catalog.
-        drop(parsed);
+        // Consume the already-validated trees instead of retaining all sources
+        // alongside the merged records. The immutable raw envelopes stay intact.
+        let merged_catalog_payload =
+            merge_payloads(parsed, source::stale_sources(&states, now, max_age_ms));
         let catalog = catalog_from_payload(
             &states,
-            &payload,
-            payload_hash(&payload).ok(),
+            &merged_catalog_payload,
+            metadata_payload_hash(&merged_catalog_payload).ok(),
             now,
             max_age_ms,
         );
@@ -114,6 +115,19 @@ impl ModelMetadataCatalogLoader {
     }
     pub fn snapshot(&self) -> Arc<ModelMetadataCatalog> {
         self.handle.snapshot()
+    }
+
+    /// Source JSON bytes only: parsed model allocations are deliberately not guessed.
+    pub fn source_memory_diagnostics(&self) -> Option<(usize, usize)> {
+        let states = self.state.try_read().ok()?;
+        Some((
+            self.snapshot().entries.len(),
+            states
+                .iter()
+                .filter_map(|state| state.envelope.as_ref())
+                .map(|envelope| envelope.payload.get().len())
+                .sum(),
+        ))
     }
     pub fn catalog_handle(&self) -> ModelMetadataCatalogHandle {
         self.handle.clone()
@@ -161,106 +175,150 @@ impl ModelMetadataCatalogLoader {
     pub async fn refresh(&self, force: bool) -> Result<CatalogRefreshOutcome, ModelMetadataError> {
         let _guard = self.refresh_lock.lock().await;
         let now = crate::unix_time_ms();
-        let previous = self
+        let cached_states = self
             .state
             .read()
             .expect("metadata state lock poisoned")
             .clone();
-        let due = previous
+        let due = cached_states
             .each_ref()
             .map(|s| force || s.deadline(now, self.max_age_ms).at_ms <= now);
-        if !due.iter().any(|v| *v) {
+        if !due.iter().any(|source_is_due| *source_is_due) {
             return Ok(CatalogRefreshOutcome::Skipped);
         }
         {
             let mut states = self.state.write().expect("metadata state lock poisoned");
-            for (i, state) in states.iter_mut().enumerate().filter(|(i, _)| due[*i]) {
-                let _ = i;
-                state.status = CatalogStatus::Updating;
+            for (source_index, source_state) in states.iter_mut().enumerate() {
+                if due[source_index] {
+                    source_state.status = CatalogStatus::Updating;
+                }
             }
         }
-        let results = futures_util::future::join_all((0..4).map(|i| {
-            let source_state = previous[i].clone();
+        let results = futures_util::future::join_all((0..4).map(|source_index| {
+            let source_state = cached_states[source_index].clone();
             async move {
-                if due[i] {
-                    Some(self.fetch_source(i, source_state.envelope).await)
+                if due[source_index] {
+                    Some(self.fetch_source(source_index, source_state.envelope).await)
                 } else {
                     None
                 }
             }
         }))
         .await;
-        let mut next = previous.clone();
+        let mut updated_states = cached_states.clone();
         let mut first_error = None;
         let mut successes = 0;
-        for (i, result) in results.into_iter().enumerate() {
-            match result {
+        for (source_index, source_load_result) in results.into_iter().enumerate() {
+            match source_load_result {
                 Some(Ok(envelope)) => {
-                    next[i].accept(envelope);
+                    updated_states[source_index].accept(envelope);
                     successes += 1;
                 }
                 Some(Err(error)) => {
                     first_error.get_or_insert(error);
-                    next[i].fail(error, crate::unix_time_ms());
+                    updated_states[source_index].fail(error, crate::unix_time_ms());
                 }
                 None => {}
             }
         }
-        let bundle = match CacheBundle::new(&next) {
-            Ok(bundle) => bundle,
-            Err(error) => {
-                // Do not leave sources stuck in Updating if building the
-                // merged cache bundle fails before the write path is reached.
-                // This is rare (the current JSON value is already validated),
-                // but the state machine must recover from every fallible step.
-                let mut failed = previous;
-                let failure_at = crate::unix_time_ms();
+        let previous = self.snapshot();
+        let stale = source::stale_sources(&updated_states, now, self.max_age_ms);
+        let freshness_unchanged = SOURCES.iter().enumerate().all(|(index, source)| {
+            previous
+                .sources
+                .get(*source)
+                .is_some_and(|status| status.stale == stale[index])
+        });
+        let unchanged = previous.revision.is_some()
+            && freshness_unchanged
+            && cached_states
+                .iter()
+                .zip(&updated_states)
+                .all(|(before, after)| {
+                    before.envelope.as_ref().map(|value| &value.revision)
+                        == after.envelope.as_ref().map(|value| &value.revision)
+                });
+        if unchanged {
+            let revision = previous.revision.clone().expect("checked catalog revision");
+            if let Err(error) = cache::write_states(&self.path, &updated_states, &revision) {
+                let mut failed = cached_states;
                 for (i, state) in failed.iter_mut().enumerate() {
                     if due[i] {
-                        state.fail(error, failure_at);
+                        state.fail(error, now);
+                    }
+                }
+                self.publish(failed, None);
+                return Err(error);
+            }
+            // Refresh timestamps and health, not immutable model/index trees.
+            self.publish(updated_states, None);
+            if successes == 0
+                && let Some(error) = first_error
+            {
+                return Err(error);
+            }
+            return Ok(CatalogRefreshOutcome::NotModified { revision });
+        }
+        let prepared = match PreparedCatalog::new(&updated_states, now, self.max_age_ms) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Do not leave sources stuck in Updating if building the
+                // merged catalog fails before the write path is reached.
+                // This is rare (the current JSON value is already validated),
+                // but the state machine must recover from every fallible step.
+                let mut failed = cached_states.clone();
+                let failure_at = crate::unix_time_ms();
+                for (source_index, source_state) in failed.iter_mut().enumerate() {
+                    if due[source_index] {
+                        source_state.fail(error, failure_at);
                     }
                 }
                 self.publish(failed, None);
                 return Err(error);
             }
         };
-        if let Err(error) = catalog_io::write_json_if_changed(&self.path, &bundle, MAX_CACHE_BYTES)
-        {
-            let error = map_io_error(error, true);
-            next = previous;
-            for (i, state) in next.iter_mut().enumerate() {
-                if due[i] {
-                    state.fail(error, now);
+        if let Err(error) = cache::write_states(&self.path, &updated_states, &prepared.revision) {
+            updated_states = cached_states;
+            for (source_index, source_state) in updated_states.iter_mut().enumerate() {
+                if due[source_index] {
+                    source_state.fail(error, now);
                 }
             }
-            self.publish(next, None);
+            self.publish(updated_states, None);
             return Err(error);
         }
-        let old_revision = self.snapshot().revision.clone();
-        let revision = bundle.merged_revision.clone();
-        self.publish(next, Some(&bundle));
-        if successes == 0 {
-            if let Some(error) = first_error {
-                return Err(error);
-            }
+        let previous_revision = self.snapshot().revision.clone();
+        let revision = prepared.revision.clone();
+        self.publish(
+            updated_states,
+            (previous_revision.as_ref() != Some(&revision)).then_some(&prepared),
+        );
+        if successes == 0
+            && let Some(error) = first_error
+        {
+            return Err(error);
         }
-        Ok(if old_revision.as_ref() == Some(&revision) {
+        Ok(if previous_revision.as_ref() == Some(&revision) {
             CatalogRefreshOutcome::NotModified { revision }
         } else {
             CatalogRefreshOutcome::Updated { revision }
         })
     }
-    fn publish(&self, states: [SourceState; 4], prepared: Option<&CacheBundle>) {
+    fn publish(&self, states: [SourceState; 4], prepared: Option<&PreparedCatalog>) {
         let now = crate::unix_time_ms();
         let catalog = match prepared {
-            Some(bundle) => catalog_from_payload(
+            Some(prepared) => catalog_from_payload(
                 &states,
-                &bundle.merged_payload,
-                Some(bundle.merged_revision.clone()),
+                &prepared.payload,
+                Some(prepared.revision.clone()),
                 now,
                 self.max_age_ms,
             ),
-            None => build_catalog(&states, now, self.max_age_ms),
+            None => {
+                let mut catalog = (*self.snapshot()).clone();
+                refresh_catalog_status(&mut catalog, &states, now, self.max_age_ms);
+                catalog
+            }
         };
         self.handle.replace(catalog);
         *self.state.write().expect("metadata state lock poisoned") = states;
@@ -269,28 +327,29 @@ impl ModelMetadataCatalogLoader {
     async fn fetch_source(
         &self,
         index: usize,
-        current: Option<SourceEnvelope>,
+        cached_envelope: Option<SourceEnvelope>,
     ) -> Result<SourceEnvelope, ModelMetadataError> {
-        let mut request = self.client.get(&self.urls[index]);
-        if let Some(e) = &current {
-            if let Some(v) = &e.etag {
-                request = request.header(header::IF_NONE_MATCH, v);
+        let mut metadata_request = self.client.get(&self.urls[index]);
+        if let Some(current_envelope) = &cached_envelope {
+            if let Some(etag) = &current_envelope.etag {
+                metadata_request = metadata_request.header(header::IF_NONE_MATCH, etag);
             }
-            if let Some(v) = &e.last_modified {
-                request = request.header(header::IF_MODIFIED_SINCE, v);
+            if let Some(last_modified) = &current_envelope.last_modified {
+                metadata_request =
+                    metadata_request.header(header::IF_MODIFIED_SINCE, last_modified);
             }
         }
         let (response, permit) = crate::scheduler::refresh::http::management_http_gate()
             .send(
                 &self.client,
-                request,
+                metadata_request,
                 crate::scheduler::refresh::http::HttpClass::Ordinary,
             )
             .await
             .map_err(|_| ModelMetadataError::Network)?;
         let headers = response.headers().clone();
         let mut envelope = if response.status() == StatusCode::NOT_MODIFIED {
-            let mut envelope = current.ok_or(ModelMetadataError::InvalidCache)?;
+            let mut envelope = cached_envelope.ok_or(ModelMetadataError::InvalidCache)?;
             envelope.fetched_at_ms = crate::unix_time_ms();
             envelope.stale = false;
             envelope
@@ -300,10 +359,10 @@ impl ModelMetadataCatalogLoader {
             } else {
                 MAX_AUXILIARY_RESPONSE_BYTES
             };
-            let payload = catalog_io::response_json(response, limit)
+            let source_payload = catalog_io::response_json(response, limit)
                 .await
-                .map_err(|e| map_io_error(e, false))?;
-            SourceEnvelope::new(index, payload, crate::unix_time_ms())?
+                .map_err(|io_error| map_io_error(io_error, false))?;
+            SourceEnvelope::new(index, source_payload, crate::unix_time_ms())?
         } else {
             return Err(ModelMetadataError::HttpStatus(response.status().as_u16()));
         };
@@ -313,13 +372,13 @@ impl ModelMetadataCatalogLoader {
     }
 }
 fn loaded_state(
-    result: Result<SourceEnvelope, ModelMetadataError>,
+    source_load_result: Result<SourceEnvelope, ModelMetadataError>,
     now: u64,
     age: u64,
 ) -> SourceState {
-    match result {
-        Ok(e) => SourceState::new(Some(e), None, now, age),
-        Err(e) => SourceState::new(None, Some(e), now, age),
+    match source_load_result {
+        Ok(source_envelope) => SourceState::new(Some(source_envelope), None, now, age),
+        Err(source_error) => SourceState::new(None, Some(source_error), now, age),
     }
 }
 fn map_io_error(error: CatalogIoError, cache: bool) -> ModelMetadataError {

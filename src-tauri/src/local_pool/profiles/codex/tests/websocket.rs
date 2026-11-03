@@ -109,18 +109,22 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
     .unwrap();
 
     set_local_gateway_websockets_with_backend(&home, &backups, false, None, &secrets).unwrap();
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("supports_websockets = false"));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("supports_websockets = false")
+    );
     let backup_file = backup_path(&backups);
     let backup: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], false);
 
     set_local_gateway_websockets_with_backend(&home, &backups, true, None, &secrets).unwrap();
-    assert!(fs::read_to_string(home.join(CONFIG_FILE))
-        .unwrap()
-        .contains("supports_websockets = true"));
+    assert!(
+        fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("supports_websockets = true")
+    );
     let backup: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], true);
@@ -168,9 +172,11 @@ fn ready_api_websocket_setting_and_restore_use_its_managed_provider_id() {
     restore_with(&home, &backups, &secrets).unwrap();
     let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
     assert_eq!(restored["model_provider"].as_str(), Some("custom"));
-    assert!(restored["model_providers"]
-        .get(READY_API_PROVIDER_ID)
-        .is_none());
+    assert!(
+        restored["model_providers"]
+            .get(READY_API_PROVIDER_ID)
+            .is_none()
+    );
     assert_eq!(
         restored["model_providers"]["custom"]["name"].as_str(),
         Some("Custom")

@@ -1,8 +1,8 @@
 use crate::local_pool::{
     accounts::{
+        NativeSecretBackend,
         credentials::CredentialStore,
         proxy::{COMMON_PROXY_SECRET_REF, PROXY_POOL_SECRET_REF},
-        NativeSecretBackend,
     },
     commands::profiles::restore_managed_profiles_before_reset,
     error::{CommandError, ErrorCode, LocalPoolError},
@@ -15,12 +15,43 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use zenith_relay_core::{DefaultServiceTier, ErrorOrigin, ObservedServiceTier};
 
+#[tauri::command]
+pub async fn recover_local_account(
+    account_id: String,
+    confirm_external_owner_stopped: bool,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    state
+        .store()?
+        .recover_account_locally(&account_id, confirm_external_owner_stopped)?;
+    Ok(())
+}
+
 mod export;
 pub(crate) use export::write_account_export;
-use export::{invalid_export_row, support_bundle, write_export};
+use export::{invalid_export_row, write_export};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
+
+#[tauri::command]
+pub async fn export_request_diagnostics(
+    request_id: String,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
+    if request_id.trim().is_empty() || export::invalid_text(&request_id) {
+        return Err(LocalPoolError::invalid_state("Invalid request identifier").into());
+    }
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let document = state.telemetry.request_diagnostics(&request_id)?;
+        write_export("relay-request-diagnostics", &document, &app)
+    })
+    .await
+    .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Diagnostic export was interrupted"))?
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +62,7 @@ pub enum RelayFolder {
     CrashLogs,
     OperationLogs,
     ProfileBackups,
+    ClaudeDesktopBackups,
     #[serde(rename = "opencode_backups")]
     OpenCodeBackups,
 }
@@ -46,6 +78,7 @@ pub struct UsageExportRow {
     #[serde(default)]
     pub(super) effective_reasoning_effort: Option<String>,
     pub(super) connection: String,
+    pub(super) transport: zenith_relay_core::UsageTransport,
     pub(super) latency_ms: u64,
     pub(super) ttft_ms: Option<u64>,
     pub(super) input_tokens: Option<u64>,
@@ -63,52 +96,6 @@ pub struct UsageExportRow {
     pub(super) error_origin: Option<ErrorOrigin>,
     pub(super) service_tier: Option<DefaultServiceTier>,
     pub(super) applied_service_tier: Option<ObservedServiceTier>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SupportBundle {
-    pub(super) generated_at: String,
-    pub(super) app_version: &'static str,
-    pub(super) platform: &'static str,
-    pub(super) mode: SupportMode,
-    pub(super) schema_version: Option<u32>,
-    pub(super) gateway_running: bool,
-    pub(super) source_count: usize,
-    pub(super) account_count: usize,
-    pub(super) key_count: usize,
-    pub(super) automation_count: usize,
-    pub(super) usage_count: usize,
-    pub(super) warning_count: usize,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportMode {
-    Local,
-    Remote,
-    Zenith,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SupportContext {
-    pub(super) mode: SupportMode,
-    pub(super) schema_version: Option<u32>,
-    pub(super) gateway_running: bool,
-    pub(super) source_count: usize,
-    pub(super) account_count: usize,
-    pub(super) key_count: usize,
-    pub(super) automation_count: usize,
-    pub(super) usage_count: usize,
-    pub(super) warning_count: usize,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SupportBundlePreview {
-    bundle: SupportBundle,
-    excluded: [&'static str; 5],
 }
 
 #[derive(Serialize)]
@@ -133,29 +120,39 @@ pub fn get_relay_storage_info(state: State<'_, DesktopState>) -> RelayStorageInf
 }
 
 #[tauri::command]
-pub fn open_relay_folder(
+pub async fn open_relay_folder(
     folder: RelayFolder,
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
-    let path = match folder {
-        RelayFolder::Data => state.data_root(),
-        RelayFolder::Logs => state.logs_root(),
-        RelayFolder::ErrorLogs => state.error_logs_root(),
-        RelayFolder::CrashLogs => state.crash_logs_root(),
-        RelayFolder::OperationLogs => state.operation_logs_root(),
-        RelayFolder::ProfileBackups => state.profile_backup_root(),
-        RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
-    };
-    fs::create_dir_all(&path).map_err(io_error)?;
-    app.opener()
-        .open_path(path.to_string_lossy(), None::<&str>)
-        .map_err(|error| io_error(error.to_string()))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if matches!(folder, RelayFolder::Logs | RelayFolder::OperationLogs) {
+            crate::diagnostics::memory::record_snapshot(&state, "logs_opened");
+        }
+        let folder_path = match folder {
+            RelayFolder::Data => state.data_root(),
+            RelayFolder::Logs => state.logs_root(),
+            RelayFolder::ErrorLogs => state.error_logs_root(),
+            RelayFolder::CrashLogs => state.crash_logs_root(),
+            RelayFolder::OperationLogs => state.operation_logs_root(),
+            RelayFolder::ProfileBackups => state.profile_backup_root(),
+            RelayFolder::ClaudeDesktopBackups => state.claude_desktop_backup_root(),
+            RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
+        };
+        fs::create_dir_all(&folder_path).map_err(io_error)?;
+        app.opener()
+            .open_path(folder_path.to_string_lossy(), None::<&str>)
+            .map_err(|error| io_error(error.to_string()))
+    })
+    .await
+    .map_err(|_| io_error("Opening the folder was interrupted"))?
 }
 
 #[tauri::command]
 pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
+    crate::local_pool::profiles::claude_desktop::restore_connection(&state)?;
     restore_managed_profiles_before_reset(&state).await?;
     state.gateway.stop().await;
     let (source_refs, account_ids, key_refs) = {
@@ -170,6 +167,12 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
                 .accounts()
                 .iter()
                 .map(|account| account.account.id.clone())
+                .chain(
+                    store
+                        .account_trash()
+                        .iter()
+                        .map(|entry| entry.record.account.id.clone()),
+                )
                 .collect::<Vec<_>>(),
             store
                 .keys()
@@ -215,29 +218,6 @@ pub fn export_usage(
     write_export("usage", &rows, &app)
 }
 
-#[tauri::command]
-pub fn export_support_bundle(
-    context: SupportContext,
-    app: AppHandle,
-) -> Result<Option<String>, CommandError> {
-    let bundle = support_bundle(context);
-    write_export("support", &bundle, &app)
-}
-
-#[tauri::command]
-pub fn preview_support_bundle(context: SupportContext) -> SupportBundlePreview {
-    SupportBundlePreview {
-        bundle: support_bundle(context),
-        excluded: [
-            "secrets",
-            "prompts",
-            "responses",
-            "raw_identities",
-            "raw_headers",
-        ],
-    }
-}
-
 fn remove_transient_dir(path: impl AsRef<Path>, failed: &mut bool) {
     let path = path.as_ref();
     if path.exists() {
@@ -257,6 +237,8 @@ mod tests {
     fn relay_folder_serializes_open_code_backup_directory_name() {
         let folder: RelayFolder = serde_json::from_str("\"opencode_backups\"").unwrap();
         assert!(matches!(folder, RelayFolder::OpenCodeBackups));
+        let folder: RelayFolder = serde_json::from_str("\"claude_desktop_backups\"").unwrap();
+        assert!(matches!(folder, RelayFolder::ClaudeDesktopBackups));
     }
 
     #[test]
@@ -288,6 +270,7 @@ mod tests {
             requested_reasoning_effort: Some("max".into()),
             effective_reasoning_effort: Some("low".into()),
             connection: "account".into(),
+            transport: zenith_relay_core::UsageTransport::Http,
             latency_ms: 1,
             ttft_ms: Some(1),
             input_tokens: Some(1),
@@ -312,29 +295,5 @@ mod tests {
         row.connection = "account".into();
         row.effective_reasoning_effort = Some("untrusted".into());
         assert!(invalid_export_row(&row));
-    }
-
-    #[test]
-    fn support_preview_contains_only_redacted_aggregate_fields() {
-        let preview = preview_support_bundle(SupportContext {
-            mode: SupportMode::Local,
-            schema_version: Some(4),
-            gateway_running: true,
-            source_count: 1,
-            account_count: 2,
-            key_count: 1,
-            automation_count: 1,
-            usage_count: 5,
-            warning_count: 0,
-        });
-        let encoded = serde_json::to_string(&preview).unwrap();
-        assert!(encoded.contains("raw_identities"));
-        for secret in [
-            "synthetic-access-token",
-            "private prompt",
-            "generated response",
-        ] {
-            assert!(!encoded.contains(secret));
-        }
     }
 }

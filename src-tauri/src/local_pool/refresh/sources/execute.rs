@@ -1,16 +1,17 @@
 use super::{DesktopState, RefreshRead, RefreshReadResult};
 use crate::local_pool::{
-    commands::{
-        connections::ensure_not_gateway_self_source, core_error, fence_runtime_candidates,
-        profiles::refresh_active_client_catalogs, record_catalog_refresh_result,
+    commands::connections::ensure_not_gateway_self_source,
+    error::{ErrorCode, LocalPoolError, Result},
+    runtime::{
+        core_error, fence_runtime_candidates, queue_active_client_catalog_refresh,
         sync_records_or_rollback,
     },
-    error::{ErrorCode, LocalPoolError, Result},
-    store::{secret_store, SourceRefreshFence},
+    store::{SourceRefreshFence, secret_store},
 };
 use zenith_relay_core::{
+    ProviderSource,
     scheduler::refresh::{RefreshKind, SourceStatsObservation},
-    source_catalog_changed, ProviderSource,
+    source_catalog_changed,
 };
 
 pub(super) async fn execute(
@@ -19,7 +20,7 @@ pub(super) async fn execute(
     kind: RefreshKind,
     manual: bool,
 ) -> RefreshReadResult {
-    let (before, source) = {
+    let (before, provider_source) = {
         let _mutation = state.setup_guard().await;
         let store = state.store()?;
         store.ensure_source_refresh_current(fence)?;
@@ -42,33 +43,34 @@ pub(super) async fn execute(
         ensure_not_gateway_self_source(state, &before.base_url)?;
         let api_key = secret_store::load(&before.secret_ref)?
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-        let source = ProviderSource {
+        let provider_source = ProviderSource {
             id: before.id.clone(),
             name: before.name.clone(),
             base_url: before.base_url.clone(),
             api_key,
             wire_api: before.wire_api,
             models: before.models.clone(),
+            proxy_url: crate::local_pool::commands::connections::source_proxy_url(&before)?,
         };
-        (before, source)
+        (before, provider_source)
     };
     update_activity(state, fence).await?;
     match kind {
         RefreshKind::Models => {
-            let read = zenith_relay_core::read_source_models_with_scope(
-                &source,
+            let source_read = zenith_relay_core::read_source_models_with_scope(
+                &provider_source,
                 &before.protocol_bindings,
                 &before.protocol_config,
                 source_http_scope(state, fence),
             )
             .await;
-            if let Some(delay) = read.retry_after_ms {
+            if let Some(delay) = source_read.retry_after_ms {
                 state
                     .refresh
                     .respect_retry_after(&fence.identity(), kind, delay);
             }
             let _mutation = state.setup_guard().await;
-            validate(state, fence, &source)?;
+            validate(state, fence, &provider_source)?;
             update_activity(state, fence).await?;
             let (old_sources, old_keys) = {
                 let store = state.store()?;
@@ -78,7 +80,7 @@ pub(super) async fn execute(
             // pending lease on the old executor must not dispatch while the
             // durable observation is being applied and its runtime replaced.
             let runtime = state.gateway.runtime().await;
-            let _dispatch_fences = if read.value.is_ok() {
+            let _dispatch_fences = if source_read.read_value.is_ok() {
                 fence_runtime_candidates(
                     runtime.as_deref(),
                     &[],
@@ -88,33 +90,35 @@ pub(super) async fn execute(
                 Vec::new()
             };
             let mut changed = false;
-            let updated = state.store()?.apply_source_refresh(fence, |record| {
-                match read.value {
-                    Ok(discovery) => {
-                        let previous = record.clone();
-                        discovery.apply_catalog(
-                            &mut record.base_url,
-                            &mut record.models,
-                            &mut record.protocol_bindings,
-                            &mut record.protocol_config,
-                            &mut record.detected_model_prices,
-                        );
-                        changed = source_catalog_changed(&previous, record);
-                        record.last_test_status = Some("ok".into());
-                        record.last_error = None;
-                        record.normalize();
-                        record
-                            .validate_protocol_bindings()
-                            .map_err(LocalPoolError::invalid_state)?;
+            let updated = state
+                .store()?
+                .apply_source_refresh(fence, |source_record| {
+                    match source_read.read_value {
+                        Ok(discovery) => {
+                            let source_before_refresh = source_record.clone();
+                            discovery.apply_catalog(
+                                &mut source_record.base_url,
+                                &mut source_record.models,
+                                &mut source_record.protocol_bindings,
+                                &mut source_record.protocol_config,
+                                &mut source_record.detected_model_prices,
+                            );
+                            changed = source_catalog_changed(&source_before_refresh, source_record);
+                            source_record.last_test_status = Some("ok".into());
+                            source_record.last_error = None;
+                            source_record.normalize();
+                            source_record
+                                .validate_protocol_bindings()
+                                .map_err(LocalPoolError::invalid_state)?;
+                        }
+                        Err(error) => {
+                            source_record.last_test_status = Some("error".into());
+                            source_record.last_error = Some(core_error(error).message);
+                        }
                     }
-                    Err(error) => {
-                        record.last_test_status = Some("error".into());
-                        record.last_error = Some(core_error(error).message);
-                    }
-                }
-                record.last_test_at = Some(chrono::Utc::now().to_rfc3339());
-                Ok(())
-            })?;
+                    source_record.last_test_at = Some(chrono::Utc::now().to_rfc3339());
+                    Ok(())
+                })?;
             if before.base_url != updated.base_url {
                 state
                     .refresh
@@ -126,37 +130,39 @@ pub(super) async fn execute(
             }
             drop(_dispatch_fences);
             if changed || manual {
-                let catalog_result = refresh_active_client_catalogs(state).await;
-                record_catalog_refresh_result(state, &catalog_result);
+                queue_active_client_catalog_refresh(state);
             }
             Ok(RefreshRead::SourceModels(Box::new(updated)))
         }
         RefreshKind::Balance => {
-            let read = zenith_relay_core::read_source_provider_stats_with_scope(
-                &source.base_url,
-                &source.api_key,
+            let stats_read = zenith_relay_core::read_source_provider_stats_with_scope_and_proxy(
+                &provider_source.base_url,
+                &provider_source.api_key,
+                provider_source.proxy_url.as_deref(),
                 source_http_scope(state, fence),
             )
             .await;
-            if let Some(delay) = read.retry_after_ms {
+            if let Some(delay) = stats_read.retry_after_ms {
                 state
                     .refresh
                     .respect_retry_after(&fence.identity(), kind, delay);
             }
             let _mutation = state.setup_guard().await;
-            validate(state, fence, &source)?;
+            validate(state, fence, &provider_source)?;
             update_activity(state, fence).await?;
-            let value = read
-                .value
+            let provider_stats = stats_read
+                .read_value
                 .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message))?;
             let cached = state.refresh.cached(&fence.identity(), kind);
-            let previous = cached.as_ref().and_then(|read| match read.as_ref() {
-                Ok(RefreshRead::SourceStats(observation)) => observation.current(&source.base_url),
+            let previous_source_stats = cached.as_ref().and_then(|read| match read.as_ref() {
+                Ok(RefreshRead::SourceStats(observation)) => {
+                    observation.current(&provider_source.base_url)
+                }
                 _ => None,
             });
             Ok(RefreshRead::SourceStats(SourceStatsObservation::new(
-                source.base_url,
-                value.observed(previous, super::super::current_time_ms()),
+                provider_source.base_url,
+                provider_stats.observed(previous_source_stats, super::super::current_time_ms()),
             )))
         }
         _ => Err(LocalPoolError::invalid_state(
@@ -169,12 +175,12 @@ fn source_http_scope(
     state: &DesktopState,
     fence: &SourceRefreshFence,
 ) -> zenith_relay_core::scheduler::refresh::http::ManagementHttpScope {
-    let state = state.clone();
-    let fence = fence.clone();
+    let desktop_state = state.clone();
+    let refresh_fence = fence.clone();
     zenith_relay_core::scheduler::refresh::http::ManagementHttpScope::checked(move || {
-        state
+        desktop_state
             .store()
-            .is_ok_and(|store| store.ensure_source_refresh_current(&fence).is_ok())
+            .is_ok_and(|store| store.ensure_source_refresh_current(&refresh_fence).is_ok())
     })
 }
 
@@ -182,10 +188,11 @@ async fn update_activity(state: &DesktopState, fence: &SourceRefreshFence) -> Re
     let activity = super::super::active_members(state).await;
     let store = state.store()?;
     store.ensure_source_refresh_current(fence)?;
-    let (current, _) = store.source_refresh_scope(&fence.source_id)?;
-    state
-        .refresh
-        .set_active(&fence.identity(), super::is_active(&current, &activity));
+    let (source_record, _) = store.source_refresh_scope(&fence.source_id)?;
+    state.refresh.set_active(
+        &fence.identity(),
+        super::is_active(&source_record, &activity),
+    );
     Ok(())
 }
 fn validate(
@@ -195,11 +202,12 @@ fn validate(
 ) -> Result<()> {
     let store = state.store()?;
     store.ensure_source_refresh_current(fence)?;
-    let record = store
+    let stored_source = store
         .source(&fence.source_id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    if record.base_url != checked.base_url
-        || secret_store::load(&record.secret_ref)?.as_deref() != Some(checked.api_key.as_str())
+    if stored_source.base_url != checked.base_url
+        || secret_store::load(&stored_source.secret_ref)?.as_deref()
+            != Some(checked.api_key.as_str())
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,

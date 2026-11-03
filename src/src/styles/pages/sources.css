@@ -1,0 +1,179 @@
+.sources-workspace {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+}
+
+.sources-sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sources-workspace > .sources-controls {
+  margin: 0;
+}
+
+.source-command-bar {
+  grid-template-areas: "context sort refresh";
+}
+
+.source-command-bar[data-selection="true"] {
+  grid-template-areas: "context actions";
+}
+
+.source-command-bar .connection-command-context {
+  grid-area: context;
+}
+
+.sources-sort-controls {
+  grid-area: sort;
+  min-width: 0;
+}
+
+.sources-sort-controls .relay-option-menu,
+.sources-sort-controls .relay-option-trigger {
+  min-width: 0;
+  max-width: 220px;
+}
+
+.sources-sort-controls .relay-option-menu {
+  width: fit-content;
+}
+
+.sources-sort-controls .relay-option-trigger {
+  width: max-content;
+}
+
+.source-command-bar > .relay-icon-button {
+  grid-area: refresh;
+  justify-self: end;
+}
+
+.sources-selection-toolbar {
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.sources-selection-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sources-controls:has(.relay-action-menu[open]) {
+  position: relative;
+  z-index: 31;
+}
+
+.sources-selection-toolbar .relay-icon-button,
+.sources-selection-toolbar .relay-action-menu > summary {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.sources-selection-toolbar .relay-icon-button:hover:not(:disabled),
+.sources-selection-toolbar .relay-action-menu > summary:hover,
+.sources-selection-toolbar .relay-action-menu[open] > summary {
+  background: var(--relay-subtle);
+}
+
+@container (max-width: 780px) {
+  .source-command-bar:not([data-selection="true"]) {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "context refresh" "sort sort";
+    gap: 10px 12px;
+  }
+}
+
+.source-card .account-identity > strong.revealed {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-card > .source-stats-panel {
+  flex: 1;
+  display: grid;
+}
+
+.source-card .pool-source-stats {
+  grid-auto-rows: 1fr;
+}
+
+.source-card > .account-card-footer {
+  margin-top: auto;
+}
+
+.source-card-host {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.source-card-host > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relay-dialog.source-add-dialog {
+  width: min(820px, 100%);
+}
+
+.source-add-dialog .api-provider-setup {
+  grid-template-columns: minmax(230px, 0.9fr) minmax(0, 1.2fr);
+  gap: 24px;
+  align-items: stretch;
+}
+
+.source-add-dialog .api-provider-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.source-add-dialog .api-provider-configuration {
+  --relay-dialog-field-background: var(--relay-surface);
+  padding: 20px;
+  border-radius: 12px;
+  background: var(--relay-subtle);
+  gap: 18px;
+}
+
+.source-add-dialog .api-provider-identity {
+  gap: 14px;
+}
+
+.source-add-dialog .api-key-link {
+  font-size: 11px;
+}
+
+.source-add-dialog .api-provider-key-field .relay-field-label-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+@media (max-width: 640px) {
+  .source-add-dialog .api-provider-setup {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .source-add-dialog .api-provider-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+}
+
+@media (max-width: 400px) {
+  .source-add-dialog .api-provider-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+}

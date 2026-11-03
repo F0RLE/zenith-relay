@@ -1,7 +1,7 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} unavailable pool inventory retains names, groups and editable reasoning`, async ({ page }) => {
     await installTauriMock(page, {
       mode, locale: "en", populated: true, sourceEnabled: false,

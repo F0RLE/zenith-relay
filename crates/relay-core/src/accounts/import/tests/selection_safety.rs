@@ -140,7 +140,7 @@ fn unsafe_source_names_and_unsupported_bundle_versions_are_rejected() {
 }
 
 fn unsigned_jwt(payload: &str) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
     format!(
         "{}.{}.signature",
@@ -171,13 +171,17 @@ fn parses_current_session_header_and_wrapped_sub2api_exports() {
     assert_eq!(session.items[0].account_id.as_deref(), Some("acct_session"));
     assert_eq!(session.preview.rows[0].plan.as_deref(), Some("plus"));
     assert_eq!(session.items[0].secrets().refresh_token(), None);
-    assert!(session.preview.rows[0]
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
-    assert!(!serde_json::to_string(&session.preview)
-        .unwrap()
-        .contains("web-session-secret"));
+    assert!(
+        session.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly)
+    );
+    assert!(
+        !serde_json::to_string(&session.preview)
+            .unwrap()
+            .contains("web-session-secret")
+    );
 
     let cpa_session = parse_import(
         r#"{
@@ -264,12 +268,16 @@ fn parses_current_session_header_and_wrapped_sub2api_exports() {
         wrapped.items[0].secrets().refresh_token(),
         Some("refresh-wrapped")
     );
-    assert!(wrapped
-        .preview
-        .warnings
-        .iter()
-        .any(|warning| warning.code == ImportWarningCode::ProxiesIgnored));
-    assert!(!serde_json::to_string(&wrapped.preview)
-        .unwrap()
-        .contains("refresh-wrapped"));
+    assert!(
+        wrapped
+            .preview
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::ProxiesIgnored)
+    );
+    assert!(
+        !serde_json::to_string(&wrapped.preview)
+            .unwrap()
+            .contains("refresh-wrapped")
+    );
 }

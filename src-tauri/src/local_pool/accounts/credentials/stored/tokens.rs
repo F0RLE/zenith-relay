@@ -3,6 +3,29 @@ use super::{CredentialRefresh, StoredCodexCredentials};
 use zenith_relay_core::accounts::{TokenRefresh, TokenSet};
 
 impl StoredCodexCredentials {
+    pub(in crate::local_pool::accounts) fn refresh_is_paused(&self, now_ms: u64) -> bool {
+        self.refresh_retry.is_some_and(|retry| {
+            let delay = 5_000_u64
+                .saturating_mul(1_u64 << retry.failures.saturating_sub(1).min(6))
+                .min(300_000);
+            // A backwards wall-clock correction must not lock an account indefinitely.
+            now_ms.saturating_add(300_000) >= retry.failed_at_ms
+                && now_ms < retry.failed_at_ms.saturating_add(delay)
+        })
+    }
+
+    pub(in crate::local_pool::accounts) fn with_refresh_failure(mut self, now_ms: u64) -> Self {
+        let failures = self
+            .refresh_retry
+            .filter(|retry| now_ms >= retry.failed_at_ms)
+            .map_or(1, |retry| retry.failures.saturating_add(1).min(7));
+        self.refresh_retry = Some(super::RefreshRetry {
+            failures,
+            failed_at_ms: now_ms,
+        });
+        self
+    }
+
     pub fn to_token_set(&self) -> Result<TokenSet, CredentialError> {
         TokenSet::new(
             self.access_token.clone(),
@@ -58,11 +81,25 @@ impl StoredCodexCredentials {
         issued_at_ms: u64,
     ) -> Result<Self, CredentialError> {
         let CredentialRefresh {
+            siwc,
             access_token,
             refresh_token,
             id_token,
             expires_at_ms,
         } = refresh;
+        if self
+            .siwc
+            .as_ref()
+            .map(|r| (&r.client_id, &r.subject, &r.host_id))
+            != siwc
+                .as_ref()
+                .map(|r| (&r.client_id, &r.subject, &r.host_id))
+        {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "SIWC refresh changed registration identity",
+            ));
+        }
         self.rebuild_with_token_material(
             access_token,
             refresh_token.or_else(|| self.refresh_token.clone()),
@@ -71,6 +108,7 @@ impl StoredCodexCredentials {
             issued_at_ms,
             self.generation.saturating_add(1),
         )
+        .and_then(|credentials| credentials.with_siwc_registration(siwc))
     }
 
     fn rebuild_with_token_material(
@@ -97,8 +135,11 @@ impl StoredCodexCredentials {
             self.plan_type.clone(),
             self.account_is_fedramp,
         )?
+        .with_oauth_client_kind(self.oauth_client_kind)
         .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
         updated.agent_identity = self.agent_identity.clone();
+        updated.siwc = self.siwc.clone();
+        updated.basis_points_headers = self.basis_points_headers.clone();
         updated.phone = self.phone.clone();
         updated.password = self.password.clone();
         updated.totp_secret = self.totp_secret.clone();

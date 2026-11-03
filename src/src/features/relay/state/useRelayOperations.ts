@@ -22,7 +22,7 @@ export function useRelayOperations() {
   const operationEpoch = useRef(0);
 
   const performOperation = useCallback((
-    id: string,
+    operationId: string,
     work: () => Promise<unknown>,
     refresh: Refresh,
     successKey?: string,
@@ -32,7 +32,7 @@ export function useRelayOperations() {
     const epoch = operationEpoch.current;
     const revision = locksInterface ? ++operationRevision.current : operationRevision.current;
     if (locksInterface) {
-      setBusy(id);
+      setBusy(operationId);
       setFeedback(null);
     }
     return runRelayOperation({
@@ -54,7 +54,7 @@ export function useRelayOperations() {
           }
           void relayCommands.recordFrontendDiagnostic({
             source: "relay-operation",
-            operation: id,
+            operation: operationId,
             code: error.code,
             message: error.message,
           }).catch(() => undefined);

@@ -53,6 +53,15 @@ const account = (overrides: Partial<AccountSummary> = {}): AccountSummary => ({
 });
 
 describe("pool member editor model", () => {
+  test("prefix and catch-all rules match the runtime, with exclusions taking precedence", () => {
+    expect(memberModelIsEnabled(["gpt-*"], [], "GPT-5.4")).toBe(true);
+    expect(memberModelIsEnabled(["*"], [], "claude-sonnet")).toBe(true);
+    expect(memberModelIsEnabled([], ["gpt-*"], "gpt-5.4")).toBe(false);
+    expect(memberModelIsEnabled(["gpt-*"], ["gpt-private*"], "gpt-private-1")).toBe(false);
+    expect(memberModelIsEnabled(["  gpt-*  "], [], "gpt-5.4")).toBe(true);
+    expect(memberModelIsEnabled(["gpt-*"], [], "claude-sonnet")).toBe(false);
+    expect(memberModelIsEnabled(["gpt.*"], [], "gptX5")).toBe(false);
+  });
   test("complete metadata groups excluded models without guessing from IDs", () => {
     const catalog = memberModelCatalog({
       models: [{ id: "older", catalogProvider: "openai" }],
@@ -61,7 +70,7 @@ describe("pool member editor model", () => {
     const groups = groupModels(["newer", "older", "unrelated", "gpt-custom-alias"], {
       metadata: (model) => catalog.get(model),
     });
-    expect(groups.map((group) => [group.provider, group.items])).toEqual([
+    expect(groups.map((group) => [group.provider, group.models])).toEqual([
       ["openai", ["newer", "older"]],
       ["anthropic", ["unrelated"]],
       ["other", ["gpt-custom-alias"]],

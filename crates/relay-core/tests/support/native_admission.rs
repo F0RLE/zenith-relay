@@ -1,32 +1,66 @@
 use super::*;
-use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 use zenith_relay_core::ProtocolFeature;
+use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 
 #[tokio::test]
-async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_extensions() {
+async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_extensions() {
     for (client, upstream_wire_api) in WireApi::ALL
         .map(|protocol| (protocol, protocol))
         .into_iter()
         .chain([(WireApi::Responses, WireApi::Messages)])
     {
-        for feature_status in [CapabilityStatus::Unsupported, CapabilityStatus::Declared] {
+        for (reasoning_status, declared_effort) in [
+            (CapabilityStatus::Unsupported, None),
+            (CapabilityStatus::Declared, Some("low")),
+            (CapabilityStatus::Declared, Some("high")),
+        ] {
             for reference_support in [false, true] {
                 let observed = Arc::new(Mutex::new(Vec::new()));
                 let captured = observed.clone();
-                let upstream = spawn(Router::new().fallback(post(move |Json(body): Json<Value>| {
-                captured.lock().unwrap().push(body);
-                async { Json(json!({
-                    "id":"resp_synthetic", "output":[], "type":"message", "role":"assistant",
-                    "model":"synthetic-model", "content":[{"type":"text","text":"synthetic response"}],
-                    "stop_reason":"end_turn", "usage":{"input_tokens":3,"output_tokens":2}
-                })) }
-            })))
-            .await;
+                let response_body = match upstream_wire_api {
+                    WireApi::GeminiInteractions => {
+                        json!({"id":"interaction_synthetic","status":"completed","outputs":[{"type":"text","text":"synthetic response"}]})
+                    }
+                    WireApi::Responses => json!({
+                        "id":"resp_synthetic",
+                        "status":"completed",
+                        "output":[],
+                        "model":"synthetic-model",
+                        "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+                    }),
+                    WireApi::ChatCompletions => json!({
+                        "id":"chatcmpl_synthetic",
+                        "object":"chat.completion",
+                        "model":"synthetic-model",
+                        "choices":[{"index":0,"message":{"role":"assistant","content":"synthetic response"},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+                    }),
+                    WireApi::Messages => json!({
+                        "id":"msg_synthetic",
+                        "type":"message",
+                        "role":"assistant",
+                        "content":[{"type":"text","text":"synthetic response"}],
+                        "stop_reason":"end_turn",
+                        "usage":{"input_tokens":3,"output_tokens":2}
+                    }),
+                    WireApi::Gemini => json!({
+                        "responseId":"gemini_synthetic",
+                        "candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"synthetic response"}]},"finishReason":"STOP"}],
+                        "usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
+                    }),
+                };
+                let upstream =
+                    spawn(Router::new().fallback(post(move |Json(body): Json<Value>| {
+                        captured.lock().unwrap().push(body);
+                        async move { Json(response_body) }
+                    })))
+                    .await;
                 let mut source = RuntimeSource::unrestricted(ProviderSource {
                     id: "synthetic-source".into(),
                     name: "Synthetic source".into(),
                     base_url: format!("{}/v1", upstream.base_url),
                     api_key: SOURCE_KEY.into(),
+                    proxy_url: None,
                     wire_api: upstream_wire_api,
                     models: vec!["synthetic-model".into()],
                 });
@@ -37,12 +71,10 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     status: CapabilityStatus::Unknown,
                     origin: CapabilityOrigin::Catalog,
                     checked_at_ms: 1,
-                    features: [(ProtocolFeature::Reasoning, feature_status)].into(),
-                    reasoning_efforts: if feature_status == CapabilityStatus::Declared {
-                        vec!["low".into()]
-                    } else {
-                        vec![]
-                    },
+                    features: [(ProtocolFeature::Reasoning, reasoning_status)].into(),
+                    reasoning_efforts: declared_effort.into_iter().map(str::to_owned).collect(),
+                    token_limits: Default::default(),
+                    service_tiers: None,
                 }];
                 let runtime = GatewayRuntime::from_pool(
                 vec![source],
@@ -70,16 +102,19 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
                     .send()
                     .await
                     .unwrap();
-                if client == upstream_wire_api {
+                let supports_request = reference_support
+                    && reasoning_status != CapabilityStatus::Unsupported
+                    && (client == WireApi::Messages || declared_effort == Some("high"));
+                if !supports_request {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{client:?}");
+                    assert!(observed.lock().unwrap().is_empty());
+                } else if client == upstream_wire_api {
                     assert_eq!(response.status(), StatusCode::OK, "{client:?}");
                     assert_eq!(
                         observed.lock().unwrap()[0][field],
                         body[field],
                         "{client:?}"
                     );
-                } else if !reference_support {
-                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-                    assert!(observed.lock().unwrap().is_empty());
                 } else {
                     assert_eq!(response.status(), StatusCode::OK);
                     assert_eq!(observed.lock().unwrap().len(), 1);
@@ -91,6 +126,11 @@ async fn reasoning_uses_reference_capabilities_while_native_requests_preserve_ex
 
 fn native_request(protocol: WireApi) -> (&'static str, Value, &'static str) {
     match protocol {
+        WireApi::GeminiInteractions => (
+            "/v1beta/interactions",
+            json!({"model":"synthetic-model","input":"synthetic input","generation_config":{"thinking_level":"high"}}),
+            "generation_config",
+        ),
         WireApi::Responses => (
             "/v1/responses",
             json!({"model":"synthetic-model", "input":"synthetic input",

@@ -1,6 +1,6 @@
 use super::*;
-use crate::error_codes;
 use crate::ErrorOrigin;
+use crate::error_codes;
 
 pub(super) async fn send_gateway_error(
     downstream: &mut WebSocket,
@@ -9,19 +9,24 @@ pub(super) async fn send_gateway_error(
     stream_id: Option<&str>,
 ) {
     let event = gateway_error_event(failure, request_id, stream_id);
-    let _ = downstream
-        .send(Message::Text(event.to_string().into()))
-        .await;
-    let _ = downstream
-        .send(Message::Close(Some(CloseFrame {
+    if send_message(downstream, Message::Text(event.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = send_message(
+        downstream,
+        Message::Close(Some(CloseFrame {
             code: if failure.status.is_client_error() {
                 close_code::POLICY
             } else {
                 close_code::ERROR
             },
             reason: "request failed".into(),
-        })))
-        .await;
+        })),
+    )
+    .await;
 }
 
 pub(super) fn gateway_error_event(
@@ -29,7 +34,22 @@ pub(super) fn gateway_error_event(
     request_id: Option<&str>,
     stream_id: Option<&str>,
 ) -> Value {
-    let code = super::super::errors::api_error_code(failure.category);
+    // Responses clients recognize this code and can resend their complete
+    // history after reconnecting. Keep the Relay category in diagnostics and
+    // never turn an ownership mismatch into permission to reset a conversation.
+    let local_history_missing = failure.origin == ErrorOrigin::Relay
+        && failure.category == error_codes::ADAPTER_CONTINUATION_MISSING;
+    let code = super::super::errors::api_error_code(if local_history_missing {
+        error_codes::UPSTREAM_PREVIOUS_RESPONSE_NOT_FOUND
+    } else {
+        failure.category
+    });
+    let origin = failure.origin.for_category(failure.category);
+    let message = failure
+        .upstream_error
+        .as_ref()
+        .and_then(|details| details.message.as_deref())
+        .unwrap_or(failure.message);
     let mut event = json!({
         "type": "error",
         "status": failure.status.as_u16(),
@@ -39,10 +59,10 @@ pub(super) fn gateway_error_event(
                 code,
             ),
             "code": code,
-            "message": failure.upstream_error.as_ref().and_then(|details| details.message.as_deref()).unwrap_or(failure.message),
-            "param": null,
+            "message": origin.prefix_message(message),
+            "param": local_history_missing.then_some("previous_response_id"),
             "zenith_relay": {
-                "origin": failure.origin.for_category(failure.category).as_str(),
+                "origin": origin.as_str(),
                 "category": failure.category,
                 "request_id": request_id,
             },
@@ -65,6 +85,22 @@ pub(super) struct GatewayFailure {
 }
 
 impl GatewayFailure {
+    pub(super) fn blocked_memory(kind: &str) -> Option<Self> {
+        let category = match kind {
+            "memory_extraction" => error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_EXTRACTION,
+            "memory_consolidation" => error_codes::CODEX_BACKGROUND_BLOCKED_MEMORY_CONSOLIDATION,
+            _ => return None,
+        };
+        Some(Self {
+            upstream_error: None,
+            status: StatusCode::FORBIDDEN,
+            category,
+            message: "This memory stage is disabled in Relay",
+            retry_at_ms: None,
+            origin: ErrorOrigin::Relay,
+        })
+    }
+
     pub(super) fn admission(reason: crate::scheduler::rotation::AdmissionStopReason) -> Self {
         let (category, message) = super::super::errors::admission_failure(reason);
         Self {
@@ -82,6 +118,15 @@ impl GatewayFailure {
         details: Option<crate::usage::UpstreamErrorDetails>,
     ) -> Self {
         self.upstream_error = details.map(Box::new);
+        self
+    }
+
+    pub(super) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_at = crate::transport::retry_after_ms(headers, std::time::SystemTime::now())
+                .map(|delay| now_ms().saturating_add(delay));
+            self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
+        }
         self
     }
 
@@ -106,12 +151,33 @@ impl GatewayFailure {
         }
     }
 
+    pub(super) fn unsupported_service_tier() -> Self {
+        Self {
+            category: error_codes::ADAPTER_PARAMETER_UNSUPPORTED,
+            ..Self::invalid_request("service_tier is not supported by the configured routes")
+        }
+    }
+
+    pub(super) fn adapter(error: crate::AdapterError) -> Self {
+        Self {
+            status: if error.is_upstream_failure() {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            category: error.code(),
+            message: error.message(),
+            retry_at_ms: None,
+            upstream_error: None,
+            origin: ErrorOrigin::Relay,
+        }
+    }
+
     pub(super) fn invalid_stream_id() -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             category: error_codes::INVALID_STREAM_ID,
-            message:
-                "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
+            message: "stream_id must be 1-256 ASCII letters, digits, underscores, hyphens or periods",
             retry_at_ms: None,
             upstream_error: None,
             origin: ErrorOrigin::Relay,
@@ -173,6 +239,14 @@ impl GatewayFailure {
         }
     }
 
+    pub(super) fn websocket_slow_handshake(origin: ErrorOrigin) -> Self {
+        Self {
+            category: error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE,
+            message: "optional WebSocket handshake exceeded its budget; using HTTP streaming",
+            ..Self::websocket_http_fallback(origin)
+        }
+    }
+
     pub(super) fn prepare(error: ExecutorPrepareError, origin: ErrorOrigin) -> Self {
         let failure = super::super::errors::AttemptFailure::prepare(error);
         Self {
@@ -220,15 +294,25 @@ impl GatewayFailure {
 
     pub(super) fn upstream_status(
         status: StatusCode,
-        body: Option<&[u8]>,
+        upstream_error_body: Option<&[u8]>,
         origin: ErrorOrigin,
     ) -> Self {
-        let classification = super::super::errors::classify_upstream_error(status, body);
-        Self::classified(status, classification.category, origin).with_upstream_error(
-            body.map(|body| {
-                crate::usage::UpstreamErrorDetails::from_body(Some(status.as_u16()), body)
-            }),
-        )
+        let classification =
+            super::super::errors::classify_upstream_error(status, upstream_error_body);
+        let mut failure = Self::classified(status, classification.category, origin)
+            .with_upstream_error(upstream_error_body.map(|error_body| {
+                crate::usage::UpstreamErrorDetails::from_response_body(
+                    Some(status.as_u16()),
+                    error_body,
+                )
+            }));
+        if failure.status == StatusCode::TOO_MANY_REQUESTS {
+            failure.retry_at_ms = upstream_error_body
+                .map(rate_limit_body_hint)
+                .and_then(|hint| hint.retry_after_for_account(origin == ErrorOrigin::Account))
+                .map(|delay| now_ms().saturating_add(delay));
+        }
+        failure
     }
 
     pub(super) fn classified(

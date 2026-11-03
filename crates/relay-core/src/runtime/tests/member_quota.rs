@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
+fn cooldowns_share_one_upstream_across_client_bindings() {
     use crate::scheduler::CooldownReason;
     let mut configured = RuntimeSource::unrestricted(source("multi", "synthetic", &["test"]));
     configured.protocol_config.capabilities = vec![
@@ -13,6 +13,8 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
+            service_tiers: None,
         },
         ModelEndpointCapability {
             model_id: "test".into(),
@@ -22,6 +24,8 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
+            service_tiers: None,
         },
     ];
     let runtime = GatewayRuntime::from_pool(
@@ -31,33 +35,22 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    let route_upstreams = runtime
-        .source_candidate_bindings
+    assert_eq!(runtime.source_candidate_bindings.len(), 1);
+    let binding = &runtime.source_candidate_bindings["multi"];
+    assert_eq!(binding.routes.len(), WireApi::ALL.len() * 2);
+    let protocols = binding
+        .routes
         .iter()
-        .filter(|(_, binding)| binding.source_id == "multi")
-        .map(|(id, binding)| {
-            (
-                id.clone(),
-                binding.adapter.upstream_protocol(binding.wire_api),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(route_upstreams.len(), WireApi::ALL.len());
-    let seed_upstream = route_upstreams
-        .iter()
-        .find(|(id, _)| id == "multi")
-        .map(|(_, upstream)| *upstream)
-        .unwrap();
-    assert!(route_upstreams
-        .iter()
-        .any(|(id, upstream)| id != "multi" && *upstream == seed_upstream));
-    assert!(route_upstreams
-        .iter()
-        .any(|(_, upstream)| *upstream != seed_upstream));
-    for (reason, scope, shared) in [
-        (CooldownReason::Mandatory, "test", false),
-        (CooldownReason::RateLimit, "test", true),
-        (CooldownReason::Mandatory, "*", true),
+        .map(|route| route.adapter.upstream_protocol(route.wire_api).wire_api())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        protocols,
+        BTreeSet::from([WireApi::Responses, WireApi::Messages])
+    );
+    for (reason, scope) in [
+        (CooldownReason::Mandatory, "test"),
+        (CooldownReason::RateLimit, "test"),
+        (CooldownReason::Mandatory, "*"),
     ] {
         assert!(runtime.set_cooldown_with_reason_for_model_at(
             "multi",
@@ -69,15 +62,14 @@ fn cooldowns_follow_upstream_scope_and_shared_member_resources() {
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
-        for (id, upstream) in &route_upstreams {
-            let cooled = scheduler
-                .candidate(id)
+        assert!(
+            scheduler
+                .candidate("multi")
                 .unwrap()
                 .cooldowns
-                .contains_key(scope);
-            assert_eq!(cooled, shared || *upstream == seed_upstream, "{id}");
-            scheduler.clear_cooldown(id, scope);
-        }
+                .contains_key(scope)
+        );
+        scheduler.clear_cooldown("multi", scope);
     }
 }
 #[tokio::test]
@@ -160,10 +152,12 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
             ..Default::default()
         }
     ));
-    assert!(tokio::time::timeout(Duration::from_millis(500), waiting)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), waiting)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         runtime
             .candidate_runtime_order()
@@ -173,10 +167,12 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
         3
     );
     drop((second_lease, released_lease, expanded_lease));
-    assert!(runtime
-        .candidate_runtime_order()
-        .iter()
-        .all(|candidate| candidate.active_request_count == 0));
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.active_request_count == 0)
+    );
 }
 #[tokio::test]
 async fn recovery_probe_waits_for_its_owner_and_snapshots_match_activity_versions() {
@@ -244,6 +240,8 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         checked_at_ms: 1,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
+        service_tiers: None,
     }];
     let runtime = GatewayRuntime::from_pool(
         vec![configured],
@@ -269,7 +267,7 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         )
         .await
         .unwrap();
-    assert!(selection.candidate_id.starts_with("source-1::"));
+    assert_eq!(selection.candidate_id, "source-1");
     assert_eq!(
         runtime.active_member_keys(current_time_ms(), 0),
         BTreeSet::from(["source:source-1".into()])
@@ -281,15 +279,19 @@ async fn source_activity_reports_its_physical_member_on_admission_and_release() 
         runtime.active_member_keys(current_time_ms(), 600_000),
         BTreeSet::from(["source:source-1".into()])
     );
-    assert!(runtime
-        .active_member_keys(current_time_ms() + 600_000, 600_000)
-        .is_empty());
+    assert!(
+        runtime
+            .active_member_keys(current_time_ms() + 600_000, 600_000)
+            .is_empty()
+    );
     let events = captured.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert!(events
-        .iter()
-        .all(|event| event.candidate_id == selection.candidate_id
-            && event.member_key == "source:source-1"));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.candidate_id == selection.candidate_id
+                && event.member_key == "source:source-1")
+    );
     assert!(events[0].in_flight > 0);
     assert_eq!(events[1].in_flight, 0);
 }
@@ -361,6 +363,7 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &exhausted_headers,
         1_000,
@@ -386,6 +389,7 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &recovered_headers,
         3_000,
@@ -399,14 +403,17 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
         CandidateQuota::from_snapshot(&persisted, 3_000, QUOTA_STALE_AFTER_MS),
         CandidateQuota::Exhausted
     );
-    assert!(runtime
-        .take_passive_quota_snapshot("account-1", 3_001)
-        .is_none());
+    assert!(
+        runtime
+            .take_passive_quota_snapshot("account-1", 3_001)
+            .is_none()
+    );
 }
 #[test]
 fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     let initial = QuotaSnapshot {
         available_credits_micro_units: Some(100),
+        provider_credits_observed_at_ms: Some(1_000),
         provider_credits_available: true,
         updated_at_ms: Some(1_000),
         ..QuotaSnapshot::default()
@@ -414,6 +421,7 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     let runtime = quota_runtime(initial);
     let refreshed = QuotaSnapshot {
         available_credits_micro_units: Some(200),
+        provider_credits_observed_at_ms: Some(2_000),
         provider_credits_available: true,
         updated_at_ms: Some(2_000),
         ..QuotaSnapshot::default()
@@ -430,6 +438,7 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
+        None,
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -440,11 +449,233 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
         .expect("header merge should become persistable");
     assert_eq!(merged.available_credits_micro_units, Some(200));
     assert!(merged.provider_credits_available);
+    assert_eq!(merged.provider_credits_observed_at_ms, Some(2_000));
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler.candidate("account-1").unwrap();
+    assert_eq!(candidate.quota_updated_at_ms, Some(3_000));
+    assert_eq!(candidate.provider_credits_observed_at_ms, Some(2_000));
 }
+
+#[test]
+fn passive_windows_keep_admission_and_visible_headroom_in_sync() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    let now = current_time_ms().saturating_sub(100);
+    for (offset, (primary, secondary, reset_seconds, remaining)) in [
+        (20, 40, 600, Some(6_000)),
+        (20, 95, 600, Some(500)),
+        (100, 40, 600, None),
+        // A larger remainder cannot reopen the same exhausted provider cycle.
+        (35, 40, 600, None),
+        (35, 40, 7_200, Some(6_000)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let observed = now + u64::try_from(offset).unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-codex-primary-used-percent", primary),
+            ("x-codex-secondary-used-percent", secondary),
+            ("x-codex-primary-reset-after-seconds", reset_seconds),
+            ("x-codex-secondary-reset-after-seconds", reset_seconds),
+        ] {
+            headers.insert(name, value.to_string().parse().unwrap());
+        }
+        assert!(runtime.observe_codex_quota_headers(
+            "account-1",
+            None,
+            reqwest::StatusCode::OK,
+            &headers,
+            observed,
+        ));
+        let snapshots = runtime.candidate_runtime_order();
+        let snapshot = snapshots
+            .iter()
+            .find(|member| member.candidate_id == "account-1")
+            .unwrap();
+        let displayed = snapshot
+            .resource_headroom
+            .as_ref()
+            .and_then(|headroom| headroom.quota_remaining_basis_points);
+        assert_eq!(displayed, remaining);
+        assert_eq!(snapshot.available, remaining.is_some());
+        let selected = runtime.lock_scheduler().select(crate::SelectionRequest {
+            model: "gpt-test",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: observed,
+        });
+        assert_eq!(selected.is_some(), remaining.is_some());
+    }
+}
+
+#[test]
+fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
+    let runtime = quota_runtime(QuotaSnapshot {
+        limit_reached: true,
+        provider_credits_available: true,
+        available_credits_micro_units: Some(200_000_000),
+        provider_credits_observed_at_ms: Some(1_000),
+        updated_at_ms: Some(1_000),
+        ..Default::default()
+    });
+    let now_ms = QUOTA_STALE_AFTER_MS + 2_000;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("100"),
+    );
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        now_ms,
+    ));
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler.candidate("account-1").unwrap();
+    assert_eq!(candidate.quota, CandidateQuota::Exhausted);
+    assert_eq!(candidate.provider_credits_observed_at_ms, Some(1_000));
+    assert_eq!(candidate.provider_credits_micro_units, Some(200_000_000));
+}
+
+#[test]
+fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_them() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("75"),
+    );
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000
+    ));
+    assert!(runtime.sync_account_quota_snapshot(
+        "account-1",
+        &QuotaSnapshot {
+            available_credits_micro_units: Some(200),
+            provider_credits_available: true,
+            provider_credits_observed_at_ms: Some(2_000),
+            updated_at_ms: Some(2_000),
+            ..Default::default()
+        },
+        4_000
+    ));
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 8_000)
+        .unwrap();
+    assert_eq!(merged.updated_at_ms, Some(3_000));
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(2_500)
+    );
+    assert_eq!(merged.available_credits_micro_units, Some(200));
+    assert_eq!(merged.provider_credits_observed_at_ms, Some(2_000));
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .provider_credits_observed_at_ms,
+        Some(2_000)
+    );
+}
+#[test]
+fn newer_secondary_refresh_preserves_and_persists_live_primary_exhaustion() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "10".parse().unwrap());
+    let initial = crate::providers::chatgpt::merge_codex_quota_headers(
+        &QuotaSnapshot::default(),
+        &headers,
+        1_000,
+    )
+    .unwrap();
+    let runtime = quota_runtime(initial.clone());
+    headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000,
+    ));
+    headers.clear();
+    headers.insert("x-codex-secondary-used-percent", "40".parse().unwrap());
+    let persisted_refresh =
+        crate::providers::chatgpt::merge_codex_quota_headers(&initial, &headers, 4_000).unwrap();
+    runtime.sync_account_quota_snapshot("account-1", &persisted_refresh, 4_000);
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .candidate("account-1")
+            .unwrap()
+            .quota,
+        CandidateQuota::Exhausted
+    );
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 4_000)
+        .expect("unsaved exhaustion must keep its immediate persistence hint");
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    assert_eq!(merged.primary.as_ref().unwrap().observed_at_ms, 3_000);
+    assert_eq!(
+        merged.secondary.as_ref().unwrap().available_basis_points,
+        Some(6_000)
+    );
+    assert_eq!(merged.updated_at_ms, Some(4_000));
+    assert!(
+        runtime
+            .take_passive_quota_snapshot("account-1", 4_001)
+            .is_none()
+    );
+}
+
+#[test]
+fn same_clock_refresh_cannot_replace_dirty_passive_quota() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        None,
+        reqwest::StatusCode::OK,
+        &headers,
+        3_000,
+    ));
+    headers.insert("x-codex-primary-used-percent", "10".parse().unwrap());
+    let conflicting = crate::providers::chatgpt::merge_codex_quota_headers(
+        &QuotaSnapshot::default(),
+        &headers,
+        3_000,
+    )
+    .unwrap();
+    runtime.sync_account_quota_snapshot("account-1", &conflicting, 3_001);
+    let merged = runtime
+        .take_passive_quota_snapshot("account-1", 3_001)
+        .unwrap();
+    assert!(merged.limit_reached);
+    assert_eq!(
+        merged.primary.as_ref().unwrap().available_basis_points,
+        Some(0)
+    );
+    assert_eq!(merged.updated_at_ms, Some(3_000));
+}
+
 #[test]
 fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
     let runtime = quota_runtime(QuotaSnapshot::default());
-    runtime.apply_usage_event(
+    let _ = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -460,6 +691,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -481,6 +713,7 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         1_000,
     );
@@ -516,7 +749,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
         updated_at_ms: Some(observed_at_ms),
         ..QuotaSnapshot::default()
     });
-    runtime.apply_usage_event(
+    let persisted = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -532,6 +765,7 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -553,13 +787,12 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         observed_at_ms,
     );
 
-    let persisted = runtime
-        .take_passive_quota_snapshot("account-1", observed_at_ms)
-        .expect("reported primary exhaustion should persist immediately");
+    let persisted = persisted.expect("reported primary exhaustion should persist immediately");
     assert_eq!(
         persisted.primary.as_ref().unwrap().available_basis_points,
         Some(0)

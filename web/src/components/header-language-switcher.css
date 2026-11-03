@@ -1,0 +1,43 @@
+.hosted-app .language-roller { --language-step: calc(var(--language-control-size) + var(--hosted-tools-gap)); --language-ease: cubic-bezier(.16, 1, .3, 1); width: var(--language-control-size); height: var(--language-control-size); }
+.hosted-app .language-roller-trigger, .hosted-app .language-roller-step, .hosted-app .language-roller-list [role="option"] { display: grid; place-items: center; width: var(--language-control-size); min-width: var(--language-control-size); height: var(--language-control-size); padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text); box-shadow: none; cursor: pointer; }
+.hosted-app .language-roller-trigger { opacity: 1; visibility: visible; transition: opacity 140ms ease 80ms, visibility 0s; }
+.hosted-app .language-roller[data-open] > .language-roller-trigger { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 100ms ease, visibility 0s linear 100ms; }
+.relay-app.hosted-app .hosted-tools > [data-language-companion] { opacity: 1; visibility: visible; transform: translateX(0); transition: opacity 160ms ease 80ms, transform 220ms cubic-bezier(.16, 1, .3, 1) 60ms, visibility 0s; }
+.relay-app.hosted-app .hosted-tools[data-language-open="true"] > [data-language-companion] { opacity: 0; visibility: hidden; transform: translateX(-6px); transition: opacity 100ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), visibility 0s linear 100ms; }
+.relay-app.hosted-app .hosted-tools[data-language-open="true"] > .notification-button { transform: translateX(6px); }
+.hosted-app .language-roller-rail { position: absolute; z-index: 1; inset-block-start: 0; inset-inline-start: calc(-1 * var(--language-step)); width: calc(var(--language-control-size) * 3 + var(--hosted-tools-gap) * 2); height: var(--language-control-size); overflow: hidden; padding: 0; border: 0; border-radius: 12px; background: color-mix(in srgb, var(--accent-soft) 38%, transparent); box-shadow: none; opacity: 0; visibility: hidden; pointer-events: none; clip-path: inset(0 calc(var(--language-step)) round 8px); transition: clip-path 180ms var(--language-ease), opacity 140ms ease, visibility 0s linear 180ms; }
+.hosted-app .language-roller[data-open] .language-roller-rail { opacity: 1; visibility: visible; pointer-events: auto; clip-path: inset(0 0 round 12px); transition: clip-path 280ms var(--language-ease), opacity 140ms ease, visibility 0s; }
+.hosted-app .language-roller-step { position: absolute; inset-block-start: 0; color: var(--secondary); transition: background-color 160ms ease, color 160ms ease; }
+.hosted-app .language-roller-step[data-direction="previous"] { inset-inline-start: 0; }
+.hosted-app .language-roller-step[data-direction="next"] { inset-inline-end: 0; }
+.hosted-app .language-roller-step .relay-icon { width: 18px; height: 18px; }
+.relay-app.hosted-app .language-roller-step:focus-visible { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .language-roller-list { position: absolute; inset-block: 0; inset-inline: var(--language-step); overflow: hidden; border-radius: 8px; }
+.hosted-app .language-roller-list::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent-soft); pointer-events: none; }
+.hosted-app .language-roller-list [role="option"] { position: absolute; inset-block-start: 0; inset-inline-start: 0; transform: translateX(calc(var(--language-slot) * var(--language-step))); transition: transform 240ms var(--language-ease); }
+.hosted-app .language-roller-list [data-outside] { pointer-events: none; }
+.hosted-app .language-roller-list .language-flag { opacity: .62; transform: scale(.9); transition: opacity 160ms ease, transform 240ms var(--language-ease); }
+.hosted-app .language-roller-list [data-active="true"] .language-flag { opacity: 1; transform: scale(1); }
+.relay-app.hosted-app .language-roller-list:focus-visible { outline: none; }
+@media (hover: hover) and (pointer: fine) {
+  .hosted-app .language-roller-list [role="option"]:hover .language-flag { opacity: 1; }
+  .hosted-app .language-roller-trigger:hover, .hosted-app .language-roller-step:hover { background: var(--accent-soft); color: var(--accent); }
+}
+.hosted-app .language-roller-step:active { background: var(--accent-soft); color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .hosted-app .language-roller-rail, .hosted-app .language-roller[data-open] .language-roller-rail { clip-path: none; transition: opacity 80ms ease, visibility 0s linear 80ms; }
+  .hosted-app .language-roller[data-open] .language-roller-rail { transition-delay: 0s; }
+  .hosted-app .language-roller-list [role="option"], .hosted-app .language-roller-step { transition: none; }
+  .hosted-app .language-roller-list .language-flag, .hosted-app .language-roller-list [data-active="true"] .language-flag { transform: none; transition: opacity 80ms ease; }
+  .hosted-app .language-roller-trigger, .hosted-app .language-roller[data-open] > .language-roller-trigger,
+  .relay-app.hosted-app .hosted-tools > [data-language-companion], .relay-app.hosted-app .hosted-tools[data-language-open="true"] > [data-language-companion] { transform: none; transition: opacity 80ms ease, visibility 0s; }
+}
+@media (forced-colors: active) {
+  .hosted-app .language-roller .language-flag { forced-color-adjust: none; }
+  .hosted-app .language-roller-trigger { border-color: ButtonText; }
+  .hosted-app .language-roller-rail { background: Canvas; }
+  .hosted-app .language-roller-step { color: ButtonText; }
+  .hosted-app .language-roller-list::before { background: Canvas; }
+  .hosted-app .language-roller-list [data-active="true"] { border-color: Highlight; }
+  .relay-app.hosted-app .language-roller-list:focus-visible [data-active="true"] { outline: 1px solid Highlight; }
+}

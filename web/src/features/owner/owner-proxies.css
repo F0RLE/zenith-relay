@@ -1,0 +1,71 @@
+.hosted-app .owner-proxies { min-width: 0; }
+.hosted-app .owner-proxy-controls { margin-bottom: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.hosted-app .owner-proxy-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; border-bottom: 1px solid var(--border); }
+.hosted-app .owner-proxy-summary > div { display: flex; align-items: baseline; gap: 10px; padding: 16px 20px; }
+.hosted-app .owner-proxy-summary > div + div { border-left: 1px solid var(--border); }
+.hosted-app .owner-proxy-summary dt { order: 1; color: var(--secondary); font-size: 12px; }
+.hosted-app .owner-proxy-summary dd { margin: 0; font-weight: 600; font-size: 20px; font-variant-numeric: tabular-nums; }
+.hosted-app .owner-proxy-toolbar { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 8px 12px; }
+.hosted-app .owner-proxy-toolbar > span[role="status"] { flex: 1; font-size: 13px; }
+.hosted-app .owner-proxy-toolbar-actions { display: flex; gap: 8px; margin-left: auto; }
+.hosted-app .owner-proxy-search { display: flex; position: relative; flex: 1; align-items: center; min-width: 0; }
+.hosted-app .owner-proxy-search > svg { position: absolute; left: 12px; width: 16px; height: 16px; color: var(--secondary); pointer-events: none; }
+.hosted-app .owner-proxy-search > input { width: 100%; min-width: 0; min-height: 40px; padding-left: 36px; }
+.hosted-app .owner-proxy-list { display: grid; gap: 12px; }
+.hosted-app .owner-proxy-row { display: grid; grid-template-columns: 40px 36px minmax(140px, 1fr) minmax(220px, 1.2fr) auto; align-items: center; gap: 12px; padding: 16px 20px 16px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.hosted-app .owner-proxy-row[data-selected] { border-color: var(--accent); background: var(--accent-soft); }
+.hosted-app .owner-proxy-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 8px; background: var(--subtle); color: var(--secondary); }
+.hosted-app .owner-proxy-icon[data-state="ready"] { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .owner-proxy-icon[data-state="error"] { color: var(--error); background: var(--error-soft); }
+.hosted-app .owner-proxy-icon svg { width: 20px; height: 20px; }
+.hosted-app .owner-proxy-identity { min-width: 0; overflow-wrap: anywhere; }
+.hosted-app .owner-proxy-identity h2 { margin: 0; font-size: 14px; font-weight: 550; line-height: 1.5; }
+.hosted-app .owner-proxy-identity > span { display: block; margin-top: 4px; color: var(--secondary); font-size: 12px; line-height: 1.5; }
+.hosted-app .owner-proxy-details { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 16px; min-width: 0; color: var(--secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.hosted-app .owner-proxy-location { min-width: 0; overflow-wrap: anywhere; }
+.hosted-app .owner-proxy-account-count { display: inline-flex; align-items: center; gap: 5px; }
+.hosted-app .owner-proxy-account-count svg { width: 16px; height: 16px; }
+.hosted-app .owner-proxy-actions { display: flex; gap: 4px; justify-content: flex-end; }
+.hosted-app .owner-proxy-actions .relay-icon-button { width: 36px; min-width: 36px; min-height: 36px; padding: 0; background: transparent; border-color: transparent; }
+.hosted-app .owner-proxy-empty { display: grid; justify-items: center; gap: 16px; padding: 64px 20px; border: 1px dashed var(--border); border-radius: 12px; text-align: center; }
+.hosted-app .owner-proxy-empty > svg { width: 28px; height: 28px; color: var(--secondary); }
+.hosted-app .owner-proxy-empty h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 500; }
+.hosted-app .owner-proxy-dialog { width: min(620px, calc(100vw - 24px)); }
+.hosted-app .owner-proxy-dialog .dialog-body { padding: 24px; }
+.hosted-app .owner-proxy-form { display: grid; gap: 20px; min-width: 0; }
+.hosted-app .owner-proxy-form > label { display: grid; gap: 8px; color: var(--text); font-size: 13px; font-weight: 500; }
+.hosted-app .owner-proxy-form input:not([type="checkbox"]), .hosted-app .owner-proxy-form textarea { width: 100%; min-width: 0; padding: 10px 12px; color: var(--text); background: var(--surface); border: 1px solid var(--control-border); border-radius: 8px; font: inherit; font-size: 13px; line-height: 1.6; caret-color: var(--accent); }
+.hosted-app .owner-proxy-form textarea { resize: vertical; min-height: 168px; }
+.hosted-app .owner-proxy-form textarea.owner-proxy-secret { -webkit-text-security: disc; }
+.hosted-app .owner-proxy-form label.owner-proxy-reveal { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 400; }
+.hosted-app .owner-proxy-reveal input, .hosted-app .owner-proxy-account-grid input { width: 16px; height: 16px; flex-shrink: 0; accent-color: var(--accent); }
+.hosted-app .owner-proxy-formats { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--secondary); font-size: 11px; }
+.hosted-app .owner-proxy-form .button-row { justify-content: flex-end; flex-wrap: wrap; }
+.hosted-app .owner-proxy-context { display: flex; align-items: center; gap: 10px; min-width: 0; overflow-wrap: anywhere; color: var(--secondary); font-size: 13px; }
+.hosted-app .owner-proxy-context svg { width: 20px; height: 20px; flex-shrink: 0; }
+.hosted-app .owner-proxy-account-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.hosted-app .owner-proxy-account-toolbar > input { flex: 1; min-width: 180px; }
+.hosted-app .owner-proxy-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.hosted-app .owner-proxy-account-grid > label { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; min-width: 0; cursor: pointer; }
+.hosted-app .owner-proxy-account-grid > label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+.hosted-app .owner-proxy-account-grid strong { min-width: 0; overflow-wrap: anywhere; }
+.hosted-app .owner-proxy-assignment-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.hosted-app .owner-proxy-assignment-footer > span { color: var(--secondary); font-size: 12px; }
+@container relay-page (max-width: 1000px) {
+  .hosted-app .owner-proxy-row { grid-template-columns: 40px 36px minmax(0, 1fr) auto; }
+  .hosted-app .owner-proxy-details { grid-column: 3 / -1; grid-row: 2; }
+  .hosted-app .owner-proxy-actions { grid-column: 4; grid-row: 1; }
+}
+@container relay-page (max-width: 600px) {
+  .hosted-app .owner-proxy-row { grid-template-columns: 40px 36px minmax(0, 1fr); gap: 8px; padding: 12px 16px 12px 8px; }
+  .hosted-app .owner-proxy-details { grid-column: 2 / -1; }
+  .hosted-app .owner-proxy-actions { grid-column: 2 / -1; grid-row: 3; }
+  .hosted-app .owner-proxy-summary > div { display: grid; gap: 4px; padding: 12px; }
+}
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .owner-proxy-actions .relay-icon-button { width: 44px; height: 44px; min-height: 44px; }
+  .hosted-app .owner-proxy-search > input { min-height: 44px; }
+  .hosted-app .owner-proxy-dialog .dialog-body { padding: 20px 16px; }
+  .hosted-app .owner-proxy-account-grid { grid-template-columns: minmax(0, 1fr); }
+  .hosted-app .owner-proxy-account-grid > label { min-height: 44px; }
+}

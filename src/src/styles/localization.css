@@ -1,0 +1,19 @@
+/* Shared by Settings and first-run setup. Only the selected locale is loaded. */
+.relay-language-picker { min-inline-size: 0; }
+.settings-control-row > .relay-language-picker { inline-size: min(220px, 46%); flex: 0 0 auto; }
+.settings-control-row .relay-language-picker .field-option-menu { inline-size: 100%; }
+.relay-language-picker > small[role="alert"] { display: block; max-inline-size: 36ch; color: var(--relay-error); margin-block-start: 8px; }
+.relay-language-options { min-inline-size: min(260px, calc(100vw - 16px)); overflow: hidden; }
+.relay-language-search { inline-size: 100%; box-sizing: border-box; margin-block-end: 6px; }
+.relay-language-results { overflow-y: auto; max-block-size: 210px; overscroll-behavior: contain; }
+.relay-language-options [role="option"] { inline-size: 100%; text-align: start; }
+.relay-language-options [role="status"] { margin: 8px; }
+.relay-option-items { display: contents; }
+/* Identifiers retain their own order inside RTL sentences. */
+code, kbd, .request-id, input[type="url"], input[type="email"], input[type="password"] { direction: ltr; unicode-bidi: isolate; }
+[dir="rtl"] .relay-sidebar { border-inline-end: 1px solid var(--relay-border); border-inline-start: 0; }
+[dir="rtl"] .relay-content, [dir="rtl"] .relay-page, [dir="rtl"] .settings-control-row { text-align: start; }
+[dir="rtl"] .relay-option-trigger > span { text-align: start; }
+.relay-language-results [role="option"] > span { unicode-bidi: plaintext; }
+.setup-language-menu .relay-option-trigger { inline-size: auto; min-inline-size: 62px; max-inline-size: 120px; }
+.setup-language-menu .relay-option-trigger > span { position: static; transform: none; overflow: hidden; text-overflow: ellipsis; padding-inline-end: 10px; }

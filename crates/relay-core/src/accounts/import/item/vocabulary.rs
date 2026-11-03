@@ -1,40 +1,40 @@
-pub(in crate::accounts::import::item) fn is_oauth_mode(value: &str) -> bool {
+pub(in crate::accounts::import::item) fn is_oauth_mode(auth_mode: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        auth_mode.trim().to_ascii_lowercase().as_str(),
         "chatgpt" | "oauth" | "openai_oauth"
     )
 }
 
-pub(in crate::accounts::import::item) fn is_openai_platform(value: &str) -> bool {
+pub(in crate::accounts::import::item) fn is_openai_platform(platform_name: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        platform_name.trim().to_ascii_lowercase().as_str(),
         "openai" | "chatgpt" | "codex"
     )
 }
 
-pub(in crate::accounts::import::item) fn is_recognized_auth_mode(value: &str) -> bool {
-    is_token_mode(value) || is_api_key_mode(value)
+pub(in crate::accounts::import::item) fn is_recognized_auth_mode(auth_mode: &str) -> bool {
+    is_token_mode(auth_mode) || is_api_key_mode(auth_mode)
 }
 
-pub(in crate::accounts::import::item) fn is_agent_identity_mode(value: &str) -> bool {
+pub(in crate::accounts::import::item) fn is_agent_identity_mode(auth_mode: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        auth_mode.trim().to_ascii_lowercase().as_str(),
         "agentidentity" | "agent_identity"
     )
 }
 
-pub(in crate::accounts::import::item) fn is_api_key_mode(value: &str) -> bool {
+pub(in crate::accounts::import::item) fn is_api_key_mode(auth_mode: &str) -> bool {
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
+        auth_mode.trim().to_ascii_lowercase().as_str(),
         "apikey" | "api_key"
     )
 }
 
-pub(in crate::accounts::import::item) fn is_token_mode(value: &str) -> bool {
-    is_oauth_mode(value)
-        || is_agent_identity_mode(value)
+pub(in crate::accounts::import::item) fn is_token_mode(auth_mode: &str) -> bool {
+    is_oauth_mode(auth_mode)
+        || is_agent_identity_mode(auth_mode)
         || matches!(
-            value.trim().to_ascii_lowercase().as_str(),
+            auth_mode.trim().to_ascii_lowercase().as_str(),
             "token"
                 | "imported_token"
                 | "personal_access_token"

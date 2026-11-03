@@ -20,9 +20,9 @@ pub(in crate::accounts::import::item) fn token_identity_seed(
     user_id: Option<&str>,
     email: Option<&str>,
 ) -> Option<String> {
-    let account = account_id.map(|value| value.trim().to_ascii_lowercase());
-    let user = user_id.map(|value| value.trim().to_ascii_lowercase());
-    let email = email.map(|value| value.trim().to_ascii_lowercase());
+    let account = account_id.map(|account_id| account_id.trim().to_ascii_lowercase());
+    let user = user_id.map(|user_id| user_id.trim().to_ascii_lowercase());
+    let email = email.map(|email| email.trim().to_ascii_lowercase());
     match (account, email, user) {
         (Some(account), Some(email), _) => Some(format!("account:{account}:email:{email}")),
         (Some(account), None, Some(user)) => Some(format!("account:{account}:user:{user}")),
@@ -48,7 +48,8 @@ pub(in crate::accounts::import::item) fn imported_jwt_metadata(
     access_token: Option<&str>,
 ) -> ImportedJwtMetadata {
     let mut metadata = ImportedJwtMetadata::default();
-    for token in [id_token, access_token].into_iter().flatten() {
+    for (token, is_access_token) in [(id_token, false), (access_token, true)] {
+        let Some(token) = token else { continue };
         let Some(claims) =
             crate::accounts::decode_unverified_jwt_payload::<Value>(token).filter(Value::is_object)
         else {
@@ -82,15 +83,15 @@ pub(in crate::accounts::import::item) fn imported_jwt_metadata(
         metadata.subscription_expires_at = metadata.subscription_expires_at.or_else(|| {
             auth.and_then(|auth| safe_expiry(auth.get("chatgpt_subscription_active_until")))
         });
-        metadata.expires_at = metadata
-            .expires_at
-            .or_else(|| safe_expiry(claims.get("exp")));
+        if is_access_token {
+            metadata.expires_at = safe_expiry(claims.get("exp"));
+        }
     }
     metadata
 }
 
-fn jwt_email(value: Option<&Value>) -> Option<String> {
-    value
+fn jwt_email(claim_value: Option<&Value>) -> Option<String> {
+    claim_value
         .and_then(Value::as_str)
         .and_then(normalize_login_email)
 }

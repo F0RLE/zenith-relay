@@ -35,11 +35,11 @@ fn hotp(key: &[u8], counter: u64) -> Option<String> {
     Some(format!("{:06}", binary % 1_000_000))
 }
 
-fn base32_decode(value: &str) -> Option<Vec<u8>> {
+fn base32_decode(secret_text: &str) -> Option<Vec<u8>> {
     let mut buffer = 0u32;
     let mut bits = 0u32;
-    let mut output = Vec::new();
-    for character in value.chars() {
+    let mut decoded_bytes = Vec::new();
+    for character in secret_text.chars() {
         if character == '=' {
             break;
         }
@@ -52,11 +52,11 @@ fn base32_decode(value: &str) -> Option<Vec<u8>> {
         bits += 5;
         if bits >= 8 {
             bits -= 8;
-            output.push((buffer >> bits) as u8);
+            decoded_bytes.push((buffer >> bits) as u8);
             buffer &= (1 << bits) - 1;
         }
     }
-    (!output.is_empty()).then_some(output)
+    (!decoded_bytes.is_empty()).then_some(decoded_bytes)
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ pub enum ReauthReason {
     ExpiredRefreshToken,
     InvalidatedRefreshToken,
     AccessTokenExpired,
+    TokenRotationRecoveryRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,8 +55,7 @@ pub(super) fn explicit_account_disable(code: &str) -> bool {
         )
 }
 
-/// A generic HTTP 403 was previously stored as a permanent block. That code
-/// does not prove the account was disabled, so restore routing and drop it.
+/// Clear legacy permanent blocks recorded for generic HTTP 403 responses.
 pub fn clear_false_upstream_block(
     health: &mut AccountHealthState,
     last_error_code: &mut Option<String>,
@@ -116,6 +116,25 @@ pub fn automatic_quota_monitoring_eligible(enabled: bool, auth_state: AccountAut
     enabled && !auth_state.requires_fresh_login()
 }
 
+/// Older discovery failures could persist a whole-account block. Repair only
+/// that exact legacy state; keep the catalog error until a successful read.
+/// Authentication and explicit account-disable failures remain authoritative.
+pub fn repair_model_discovery_block(
+    auth_state: AccountAuthState,
+    health: &mut AccountHealthState,
+    last_error_code: Option<&str>,
+) -> bool {
+    if *health != AccountHealthState::Blocked
+        || last_error_code != Some(error_codes::MODELS_FORBIDDEN)
+        || auth_state.requires_fresh_login()
+        || auth_state == AccountAuthState::Error
+    {
+        return false;
+    }
+    *health = AccountHealthState::Degraded;
+    true
+}
+
 /// Applies the common terminal state for a failed account model discovery.
 /// Callers retain ownership of their catalog storage and only share the account
 /// status transition.
@@ -126,6 +145,7 @@ pub fn apply_model_discovery_failure(
     code: &str,
     retryable: bool,
 ) {
+    repair_model_discovery_block(*auth_state, health, last_error_code.as_deref());
     if auth_state.requires_fresh_login() && *health != AccountHealthState::Blocked {
         *health = AccountHealthState::Unhealthy;
     }
@@ -184,10 +204,9 @@ pub fn apply_model_discovery_failure(
 
 /// Applies one successful model-catalog read.
 ///
-/// A blank payload is not a catalog. It must not replace models the account
-/// already reported, and it is not substituted from a cache. A nonempty read
-/// replaces the discovered list. The configured baseline is filled only while
-/// it is still empty.
+/// A nonempty read replaces the discovered list. Blank payloads preserve saved
+/// models; the current read is authoritative. Fill the configured baseline only
+/// while it is empty.
 pub fn accept_discovered_models(
     models: &mut Vec<String>,
     discovered_models: &mut Option<Vec<String>>,
@@ -214,6 +233,7 @@ pub fn recover_model_discovery_state(
     health: &mut AccountHealthState,
     last_error_code: &mut Option<String>,
 ) -> bool {
+    repair_model_discovery_block(*auth_state, health, last_error_code.as_deref());
     let recovered = last_error_code
         .as_deref()
         .is_some_and(|code| code.starts_with("models_"));

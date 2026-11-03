@@ -32,8 +32,8 @@ pub(super) async fn initial_application_messages(
                 origin,
             ));
         }
-        let (has_output, terminal) = initial_message_state(&message);
-        let committed = has_output || terminal.outcome.is_some();
+        let (has_generation, terminal) = initial_message_state(&message);
+        let committed = has_generation || terminal.outcome.is_some();
         messages.push(message);
         if committed {
             return Ok(messages);
@@ -53,8 +53,7 @@ async fn first_application_message(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                upstream
-                    .send(UpstreamMessage::Ping(Default::default()))
+                send_message(upstream, UpstreamMessage::Ping(Default::default()))
                     .await
                     .map_err(|_| GatewayFailure::transport(origin))?;
             }
@@ -63,9 +62,8 @@ async fn first_application_message(
                     Some(Ok(message @ (UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)))) => {
                         return Ok(message);
                     }
-                    Some(Ok(UpstreamMessage::Ping(payload))) => {
-                        upstream
-                            .send(UpstreamMessage::Pong(payload))
+                    Some(Ok(UpstreamMessage::Ping(ping_payload))) => {
+                        send_message(upstream, UpstreamMessage::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::transport(origin))?;
                     }
@@ -90,33 +88,36 @@ pub(in crate::gateway::websocket) fn message_serves_rejected_model(
     message: &UpstreamMessage,
     expected: &str,
 ) -> bool {
-    let payload = match message {
+    let upstream_message_bytes = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
         _ => return false,
     };
-    serde_json::from_slice::<Value>(payload).is_ok_and(|value| {
-        super::super::super::streaming::served_model_is_rejected(&value, expected)
+    if crate::gateway::streaming::fast_response_delta_json(upstream_message_bytes).is_some() {
+        return false;
+    }
+    serde_json::from_slice::<Value>(upstream_message_bytes).is_ok_and(|upstream_payload| {
+        super::super::super::streaming::served_model_is_rejected(&upstream_payload, expected)
     })
 }
 
 pub(super) fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
-    let payload = match message {
+    let upstream_message_bytes = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
         // This function is only called for application messages, but retain
         // conservative behavior if that invariant changes.
         _ => return (true, EventTerminal::default()),
     };
-    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+    let Ok(upstream_message_value) = serde_json::from_slice::<Value>(upstream_message_bytes) else {
         // A malformed frame has already reached the bridge and must never be
         // replayed to another account as if it were setup metadata.
         return (true, EventTerminal::default());
     };
-    let event_type = value.get("type").and_then(Value::as_str);
+    let event_type = upstream_message_value.get("type").and_then(Value::as_str);
     (
-        has_semantic_output(&value, event_type),
-        event_terminal(&value),
+        has_generation_evidence(&upstream_message_value, event_type),
+        event_terminal(&upstream_message_value),
     )
 }
 
@@ -141,16 +142,19 @@ pub(in crate::gateway::websocket) fn initial_payloads_are_empty_incomplete(
     if terminal.get("type").and_then(Value::as_str) != Some("response.incomplete") {
         return false;
     }
-    let saw_output = payloads
-        .iter()
-        .any(|payload| has_semantic_output(payload, payload.get("type").and_then(Value::as_str)));
+    let saw_output = payloads.iter().any(|upstream_payload| {
+        has_semantic_output(
+            upstream_payload,
+            upstream_payload.get("type").and_then(Value::as_str),
+        )
+    });
     let completed_output_items = payloads
         .iter()
-        .filter(|payload| {
-            let event_type = payload.get("type").and_then(Value::as_str);
+        .filter(|upstream_payload| {
+            let event_type = upstream_payload.get("type").and_then(Value::as_str);
             event_type == Some("response.output_item.done")
-                && !is_compaction_payload(payload, event_type)
+                && !is_compaction_payload(upstream_payload, event_type)
         })
         .count();
-    is_empty_responses_incomplete(terminal, saw_output, completed_output_items)
+    is_empty_responses_terminal(terminal, saw_output, completed_output_items)
 }

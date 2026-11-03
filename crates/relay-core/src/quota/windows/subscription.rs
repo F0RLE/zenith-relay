@@ -29,28 +29,28 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub fn normalize(input: SubscriptionInput) -> Self {
-        let plan_type = input
+    pub fn normalize(subscription_input: SubscriptionInput) -> Self {
+        let plan_type = subscription_input
             .plan_type
-            .map(|value| normalize_subscription_plan(&value))
-            .filter(|value| !value.is_empty());
-        let status = if input.forbidden {
+            .map(|plan_name| normalize_subscription_plan(&plan_name))
+            .filter(|normalized_plan| !normalized_plan.is_empty());
+        let status = if subscription_input.forbidden {
             SubscriptionStatus::Forbidden
-        } else if input
+        } else if subscription_input
             .active_until_ms
-            .is_some_and(|active_until| active_until <= input.observed_at_ms)
+            .is_some_and(|active_until| active_until <= subscription_input.observed_at_ms)
         {
             SubscriptionStatus::Expired
-        } else if plan_type.is_some() || input.active_until_ms.is_some() {
+        } else if plan_type.is_some() || subscription_input.active_until_ms.is_some() {
             SubscriptionStatus::Active
         } else {
             SubscriptionStatus::Unknown
         };
         Self {
             plan_type,
-            active_until_ms: input.active_until_ms,
+            active_until_ms: subscription_input.active_until_ms,
             status,
-            updated_at_ms: Some(input.observed_at_ms),
+            updated_at_ms: Some(subscription_input.observed_at_ms),
         }
     }
 
@@ -61,9 +61,9 @@ impl Subscription {
     }
 }
 
-pub(crate) fn normalize_subscription_plan(value: &str) -> String {
-    let value = value.trim().to_ascii_lowercase();
-    let compact = value
+pub(crate) fn normalize_subscription_plan(plan_name: &str) -> String {
+    let normalized_plan = plan_name.trim().to_ascii_lowercase();
+    let compact = normalized_plan
         .bytes()
         .filter(u8::is_ascii_alphanumeric)
         .map(char::from)
@@ -84,6 +84,6 @@ pub(crate) fn normalize_subscription_plan(value: &str) -> String {
         "enterprise" | "enterpriseplan" | "chatgptenterprise" | "chatgptenterpriseplan" => {
             "enterprise".to_string()
         }
-        _ => value,
+        _ => normalized_plan,
     }
 }

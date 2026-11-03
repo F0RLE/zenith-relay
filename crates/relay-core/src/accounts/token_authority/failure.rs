@@ -21,6 +21,7 @@ pub enum TokenRefreshFailureKind {
     ReusedRefreshToken,
     ExpiredRefreshToken,
     InvalidatedRefreshToken,
+    RotationRecoveryRequired,
     Transient,
 }
 
@@ -49,6 +50,9 @@ impl TokenRefreshFailure {
                 Some(ReauthReason::InvalidatedRefreshToken)
             }
             TokenRefreshFailureKind::Transient => None,
+            TokenRefreshFailureKind::RotationRecoveryRequired => {
+                Some(ReauthReason::TokenRotationRecoveryRequired)
+            }
         }
     }
 }

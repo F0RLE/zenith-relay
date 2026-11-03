@@ -1,143 +1,83 @@
 import type {
-  MessagesReasoningMode,
   CacheWriteTtl,
   SourceAdapter,
   SourceProtocolBinding,
   SourceSummary,
   SourceWireApi,
 } from "./api/types";
-import { modelIdKey } from "./modelGroups";
+import { modelIdKey, uniqueModelIds } from "./modelGroups";
 
-export const sourceWireApis = [
+const sourceWireApis = [
   "responses",
   "chat_completions",
   "messages",
   "gemini",
+  "gemini_interactions",
 ] as const satisfies readonly SourceWireApi[];
 
-function isSourceWireApi(value: string): value is SourceWireApi {
-  return sourceWireApis.includes(value as SourceWireApi);
+function isSourceWireApi(wireApiValue: string): wireApiValue is SourceWireApi {
+  return sourceWireApis.includes(wireApiValue as SourceWireApi);
 }
 
-function normalizedCacheWriteTtl(value: SourceProtocolBinding): CacheWriteTtl {
-  return value.cacheWriteTtl === "5m" || value.cacheWriteTtl === "1h"
-    ? value.cacheWriteTtl
+function normalizedCacheWriteTtl(binding: SourceProtocolBinding): CacheWriteTtl {
+  return binding.cacheWriteTtl === "5m" || binding.cacheWriteTtl === "1h"
+    ? binding.cacheWriteTtl
     : "provider";
 }
 
-export function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
-  return binding.adapter && sourceWireApis.some((upstream) => adapterBetween(binding.wireApi, upstream) === binding.adapter)
-    ? binding.adapter : "native";
-}
-
-export function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter {
+function adapterBetween(client: SourceWireApi, upstream: SourceWireApi): SourceAdapter | undefined {
+  if (client !== upstream && (client === "gemini_interactions" || upstream === "gemini_interactions")) return undefined;
   return client === upstream ? "native" : `${client}_to_${upstream}` as SourceAdapter;
 }
 
-export function upstreamWireApi(binding: SourceProtocolBinding): SourceWireApi {
-  const adapter = normalizedAdapter(binding);
+function upstreamWireApi(binding: SourceProtocolBinding): SourceWireApi {
+  const adapter = binding.adapter ?? "native";
   return sourceWireApis.find((upstream) => adapterBetween(binding.wireApi, upstream) === adapter) ?? binding.wireApi;
 }
 
-export function normalizedReasoningMode(
-  _binding: SourceProtocolBinding,
-  adapter = normalizedAdapter(_binding),
-): MessagesReasoningMode {
-  // Reasoning is selected by the client and constrained in Pool -> Model
-  // Rules. Keep accepting the legacy field on read; Relay derives the adapter
-  // and uses the current upstream translation path for the requested effort.
-  return adapter === "native" ? "disabled" : "adaptive";
-}
-
-export function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
-  const knownModels = new Map(
+function normalizedModelIds(modelIds: readonly string[], availableModels: readonly string[]) {
+  const availableModelsById = new Map(
     availableModels.map((model) => [modelIdKey(model), model] as const),
   );
-  const seen = new Set<string>();
-  return modelIds.flatMap((model) => {
-    const normalized = modelIdKey(model);
-    const known = knownModels.get(normalized);
-    if (!known || seen.has(normalized)) return [];
-    seen.add(normalized);
-    return [known];
-  });
+  const models = uniqueModelIds(modelIds);
+  if (availableModels.length && models.some((model) => !availableModelsById.has(modelIdKey(model)))) return null;
+  return models.map((model) => (availableModelsById.get(modelIdKey(model)) ?? model).trim());
 }
 
-export function normalizedBindings(
-  bindings: readonly SourceProtocolBinding[],
-  availableModels: readonly string[],
-): SourceProtocolBinding[] {
-  const seen = new Set<string>();
-  return bindings.flatMap((binding) => {
-    const adapter = normalizedAdapter(binding);
-    const routeKey = `${binding.wireApi}:${adapter}`;
-    if (!isSourceWireApi(binding.wireApi) || seen.has(routeKey)) return [];
-    seen.add(routeKey);
-    const modelIds = binding.modelIds.length
-      ? normalizedModelIds(binding.modelIds, availableModels)
-      : [];
-    return [{
-      wireApi: binding.wireApi,
-      modelIds,
-      adapter,
-      reasoningMode: normalizedReasoningMode(binding, adapter),
-      cacheWriteTtl: normalizedCacheWriteTtl(binding),
-    }];
-  });
-}
+type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models" | "resolvedProtocolBindings">;
 
-type ProtocolBindingSource = Pick<SourceSummary, "wireApi" | "protocolBindings" | "models" | "protocolConfig" | "resolvedProtocolBindings">;
-
-/** Prefer routes computed by Rust. Older snapshots fall back to their stored
- * bindings or single wire protocol until the server publishes a projection. */
+/** Prefer Rust's resolved routes; only a sole, unresolved legacy native route
+ * may expand an empty model list to the source catalog. */
 export function effectiveSourceProtocolBindings(
   source: ProtocolBindingSource,
 ): SourceProtocolBinding[] {
-  if (source.resolvedProtocolBindings) return normalizedBindings(source.resolvedProtocolBindings, source.models);
-  const configured = source.protocolBindings?.length
-    ? normalizedBindings(source.protocolBindings, source.models)
-    : [];
-  return configured.length
-    ? configured
-    : [{ wireApi: source.wireApi, modelIds: [...source.models] }];
-}
-
-function sourceBindingModels(
-  source: ProtocolBindingSource,
-  bindings: readonly SourceProtocolBinding[],
-  binding: SourceProtocolBinding,
-) {
-  return binding.modelIds.length || bindings.length !== 1 || normalizedAdapter(binding) !== "native"
-    ? binding.modelIds
-    : source.models;
-}
-
-/** Returns the routes computed by Rust, with a legacy snapshot fallback. */
-export function runtimeSourceProtocolBindings(
-  source: ProtocolBindingSource,
-): SourceProtocolBinding[] {
-  return effectiveSourceProtocolBindings(source);
-}
-
-/**
- * Mirrors the runtime's resolved source routes for one client protocol. A
- * sole empty legacy binding retains the source-wide catalog.
- */
-export function sourceModelsForWireApi(
-  source: ProtocolBindingSource,
-  wireApi: SourceWireApi,
-) {
-  const bindings = runtimeSourceProtocolBindings(source);
-  const seen = new Set<string>();
-  return bindings.flatMap((binding) => {
-    if (binding.wireApi !== wireApi) return [];
-    return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = modelIdKey(model);
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
-      return true;
+  const models = uniqueModelIds(source.models.map((model) => model.trim()));
+  const bindings: readonly SourceProtocolBinding[] = source.resolvedProtocolBindings ?? (source.protocolBindings?.length
+    ? source.protocolBindings
+    : [{ wireApi: source.wireApi, modelIds: models }]);
+  const expandLegacyModels = source.resolvedProtocolBindings == null && bindings.length === 1;
+  const seenRouteKeys = new Set<string>();
+  const normalized: SourceProtocolBinding[] = [];
+  for (const binding of bindings) {
+    const adapter = binding.adapter ?? "native";
+    const routeKey = `${binding.wireApi}:${adapter}`;
+    if (!isSourceWireApi(binding.wireApi) || seenRouteKeys.has(routeKey)) return [];
+    const upstream = sourceWireApis.find((upstream) => adapterBetween(binding.wireApi, upstream) === adapter);
+    const cacheWriteTtl = normalizedCacheWriteTtl(binding);
+    if (!upstream || (cacheWriteTtl !== "provider" && upstream !== "messages")) return [];
+    let modelIds = normalizedModelIds(binding.modelIds, models);
+    if (modelIds === null) return [];
+    if (!modelIds.length && expandLegacyModels && adapter === "native") modelIds = [...models];
+    seenRouteKeys.add(routeKey);
+    normalized.push({
+      wireApi: binding.wireApi,
+      modelIds,
+      adapter,
+      reasoningMode: adapter === "native" ? "disabled" : "adaptive",
+      cacheWriteTtl,
     });
-  });
+  }
+  return normalized;
 }
 
 /**
@@ -145,25 +85,18 @@ export function sourceModelsForWireApi(
  * Messages routes and Responses routes translated by the Messages adapter.
  */
 export function sourceModelsWithCacheWritePricing(source: ProtocolBindingSource) {
-  const bindings = runtimeSourceProtocolBindings(source);
-  const seen = new Set<string>();
+  const bindings = effectiveSourceProtocolBindings(source);
+  const seenModelIds = new Set<string>();
   return bindings.flatMap((binding) => {
     const messagesUpstream = upstreamWireApi(binding) === "messages";
     if (!messagesUpstream) return [];
-    return sourceBindingModels(source, bindings, binding).filter((model) => {
-      const normalized = modelIdKey(model);
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
+    return binding.modelIds.filter((model) => {
+      const normalizedModelId = modelIdKey(model);
+      if (seenModelIds.has(normalizedModelId)) return false;
+      seenModelIds.add(normalizedModelId);
       return true;
     });
   });
-}
-
-export function sourceSupportsWireApi(
-  source: ProtocolBindingSource,
-  wireApi: SourceWireApi,
-) {
-  return sourceModelsForWireApi(source, wireApi).length > 0;
 }
 
 /**
@@ -175,8 +108,8 @@ export function sourceSupportsNativeProtocol(source: ProtocolBindingSource, prot
   return bindings.some(
     (binding) =>
       (protocol === undefined || binding.wireApi === protocol)
-      && normalizedAdapter(binding) === "native"
-      && sourceBindingModels(source, bindings, binding).length > 0,
+      && binding.adapter === "native"
+      && binding.modelIds.length > 0,
   );
 }
 

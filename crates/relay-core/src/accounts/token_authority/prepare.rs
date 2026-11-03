@@ -38,31 +38,31 @@ impl TokenAuthority {
         adapter: &dyn TokenRefreshAdapter,
         persistence: Option<&dyn TokenPersistenceAdapter>,
     ) -> Result<PreparedToken, TokenAuthorityError> {
-        let entry = lock(&self.slots)
+        let slot_handle = lock(&self.slots)
             .get(account_id)
             .cloned()
             .ok_or(TokenAuthorityError::AccountNotFound)?;
-        let mut slot = entry.lock().await;
-        self.ensure_current_slot(account_id, &entry)?;
+        let mut slot = slot_handle.lock().await;
+        self.ensure_current_slot(account_id, &slot_handle)?;
         if slot.persistence_pending {
             let persistence = persistence.ok_or(TokenAuthorityError::PersistenceRequired)?;
-            let revision = entry.snapshot();
+            let revision = slot_handle.snapshot();
             persistence
                 .persist_fenced(account_id, &slot.tokens, &revision)
                 .await
                 .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
-            self.ensure_current_slot(account_id, &entry)?;
+            self.ensure_current_slot(account_id, &slot_handle)?;
             slot.persistence_pending = false;
             slot.auth_state_persistence_pending = true;
         }
         if slot.auth_state_persistence_pending {
             let persistence = persistence.ok_or(TokenAuthorityError::PersistenceRequired)?;
-            let revision = entry.snapshot();
+            let revision = slot_handle.snapshot();
             persistence
                 .persist_auth_state_fenced(account_id, slot.auth_state, &revision)
                 .await
                 .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
-            self.ensure_current_slot(account_id, &entry)?;
+            self.ensure_current_slot(account_id, &slot_handle)?;
             slot.auth_state_persistence_pending = false;
         }
         if matches!(
@@ -72,10 +72,10 @@ impl TokenAuthority {
             // Older Relay versions persisted this transient OAuth race as a
             // hard reauthentication state. Heal the record before selecting a
             // token so an update can retry or use the still-valid access token.
-            entry.bump();
+            slot_handle.bump();
             slot.auth_state = AccountAuthState::Active;
-            persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot()).await?;
-            self.ensure_current_slot(account_id, &entry)?;
+            persist_auth_state(account_id, &mut slot, persistence, &slot_handle.snapshot()).await?;
+            self.ensure_current_slot(account_id, &slot_handle)?;
         }
         if let AccountAuthState::RequiresReauth(reason) = slot.auth_state {
             return Err(TokenAuthorityError::RequiresReauth(reason));
@@ -84,21 +84,21 @@ impl TokenAuthority {
             return Ok(PreparedToken {
                 status: PrepareStatus::Ready,
                 tokens: slot.tokens.clone(),
-                dispatch_revision: entry.snapshot(),
+                dispatch_revision: slot_handle.snapshot(),
             });
         }
         let Some(refresh_token) = slot.tokens.refresh_token.clone() else {
-            entry.bump();
+            slot_handle.bump();
             slot.auth_state = AccountAuthState::DegradedAccessOnly;
-            persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot()).await?;
-            self.ensure_current_slot(account_id, &entry)?;
+            persist_auth_state(account_id, &mut slot, persistence, &slot_handle.snapshot()).await?;
+            self.ensure_current_slot(account_id, &slot_handle)?;
             return Err(TokenAuthorityError::AccessTokenExpired);
         };
 
         let previous_auth_state = slot.auth_state;
-        entry.bump();
+        slot_handle.bump();
         slot.auth_state = AccountAuthState::Refreshing;
-        let refresh_revision = entry.snapshot();
+        let refresh_revision = slot_handle.snapshot();
         match adapter
             .refresh_fenced(account_id, &refresh_token, now_ms, &refresh_revision)
             .await
@@ -116,40 +116,45 @@ impl TokenAuthority {
                     let slots = lock(&self.slots);
                     if slots
                         .get(account_id)
-                        .is_none_or(|registered| !Arc::ptr_eq(registered, &entry))
+                        .is_none_or(|registered| !Arc::ptr_eq(registered, &slot_handle))
                     {
                         return Err(TokenAuthorityError::AccountNotFound);
                     }
-                    entry.bump();
+                    slot_handle.bump();
                     slot.tokens = tokens.clone();
                     slot.auth_state = AccountAuthState::Active;
                 }
                 if let Some(persistence) = persistence {
                     slot.persistence_pending = true;
-                    let revision = entry.snapshot();
+                    let revision = slot_handle.snapshot();
                     persistence
                         .persist_fenced(account_id, &slot.tokens, &revision)
                         .await
                         .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
-                    self.ensure_current_slot(account_id, &entry)?;
+                    self.ensure_current_slot(account_id, &slot_handle)?;
                     slot.persistence_pending = false;
-                    persist_auth_state(account_id, &mut slot, Some(persistence), &entry.snapshot())
-                        .await?;
-                    self.ensure_current_slot(account_id, &entry)?;
+                    persist_auth_state(
+                        account_id,
+                        &mut slot,
+                        Some(persistence),
+                        &slot_handle.snapshot(),
+                    )
+                    .await?;
+                    self.ensure_current_slot(account_id, &slot_handle)?;
                 }
                 Ok(PreparedToken {
                     status: PrepareStatus::Refreshed,
                     tokens,
-                    dispatch_revision: entry.snapshot(),
+                    dispatch_revision: slot_handle.snapshot(),
                 })
             }
             Err(failure) => {
-                self.ensure_current_slot(account_id, &entry)?;
+                self.ensure_current_slot(account_id, &slot_handle)?;
                 if let Some(reason) = failure.reauth_reason() {
                     slot.auth_state = AccountAuthState::RequiresReauth(reason);
-                    persist_auth_state(account_id, &mut slot, persistence, &entry.snapshot())
+                    persist_auth_state(account_id, &mut slot, persistence, &slot_handle.snapshot())
                         .await?;
-                    self.ensure_current_slot(account_id, &entry)?;
+                    self.ensure_current_slot(account_id, &slot_handle)?;
                     Err(TokenAuthorityError::RequiresReauth(reason))
                 } else {
                     // Network, timeout, lock, and temporary storage failures do

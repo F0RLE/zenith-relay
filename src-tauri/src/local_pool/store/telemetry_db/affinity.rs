@@ -1,10 +1,10 @@
-use super::{db_error, sql_u64, TelemetryDb, MAX_RESPONSE_AFFINITY_ROWS};
+use super::{MAX_RESPONSE_AFFINITY_ROWS, TelemetryDb, db_error, sql_u64};
 use crate::local_pool::error::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 use zenith_relay_core::{
-    ResponseAffinityBinding, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
-    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
-    RESPONSE_AFFINITY_UPSERT_SQL,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    ResponseAffinityBinding,
 };
 
 impl TelemetryDb {

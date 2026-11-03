@@ -7,6 +7,10 @@ pub struct QuotaRefreshFailure {
     pub retryable: bool,
     http_status: Option<u16>,
     retry_after_ms: Option<u64>,
+    endpoint_stage: Option<&'static str>,
+    response_format: Option<&'static str>,
+    response_mitigation: Option<&'static str>,
+    cf_ray: Option<Box<str>>,
 }
 
 impl QuotaRefreshFailure {
@@ -16,6 +20,10 @@ impl QuotaRefreshFailure {
             retryable,
             http_status: None,
             retry_after_ms: None,
+            endpoint_stage: None,
+            response_format: None,
+            response_mitigation: None,
+            cf_ray: None,
         }
     }
 
@@ -25,6 +33,56 @@ impl QuotaRefreshFailure {
 
     pub fn retry_after_ms(&self) -> Option<u64> {
         self.retry_after_ms
+    }
+
+    pub fn endpoint_stage(&self) -> Option<&'static str> {
+        self.endpoint_stage
+    }
+
+    pub fn response_format(&self) -> Option<&'static str> {
+        self.response_format
+    }
+
+    pub fn response_mitigation(&self) -> Option<&'static str> {
+        self.response_mitigation
+    }
+
+    pub fn cf_ray(&self) -> Option<&str> {
+        self.cf_ray.as_deref()
+    }
+
+    pub(crate) fn with_cf_ray(mut self, value: Option<&str>) -> Self {
+        self.cf_ray = Self::validated_cf_ray(value);
+        self
+    }
+
+    pub(crate) fn validated_cf_ray(value: Option<&str>) -> Option<Box<str>> {
+        value
+            .filter(|value| {
+                let Some((id, location)) = value.split_once('-') else {
+                    return false;
+                };
+                id.len() == 16
+                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && location.len() == 3
+                    && location.bytes().all(|byte| byte.is_ascii_uppercase())
+            })
+            .map(Into::into)
+    }
+
+    pub(crate) fn with_endpoint_stage(mut self, stage: &'static str) -> Self {
+        self.endpoint_stage = Some(stage);
+        self
+    }
+
+    pub(crate) fn with_response_format(mut self, format: &'static str) -> Self {
+        self.response_format = Some(format);
+        self
+    }
+
+    pub(crate) fn with_response_mitigation(mut self, mitigation: Option<&'static str>) -> Self {
+        self.response_mitigation = mitigation;
+        self
     }
 
     pub(crate) fn with_retry_after(mut self, delay: Option<u64>) -> Self {
@@ -38,9 +96,9 @@ impl QuotaRefreshFailure {
     }
 }
 
-pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
+pub fn classify_quota_http_failure(status: u16, response_body: &[u8]) -> QuotaRefreshFailure {
     let retryable = status == 429 || status >= 500;
-    let code = provider_error_code(body).unwrap_or_else(|| {
+    let code = provider_error_code(response_body).unwrap_or_else(|| {
         match status {
             401 => error_codes::QUOTA_UNAUTHORIZED,
             403 => error_codes::QUOTA_FORBIDDEN,
@@ -53,8 +111,8 @@ pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFail
     QuotaRefreshFailure::new(&code, retryable).with_http_status(status)
 }
 
-fn provider_error_code(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+fn provider_error_code(response_body: &[u8]) -> Option<String> {
+    let error_payload: serde_json::Value = serde_json::from_slice(response_body).ok()?;
     [
         "/detail/code",
         "/detail/error/code",
@@ -64,6 +122,10 @@ fn provider_error_code(body: &[u8]) -> Option<String> {
         "/type",
     ]
     .into_iter()
-    .filter_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+    .filter_map(|pointer| {
+        error_payload
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+    })
     .find_map(normalize_error_code)
 }

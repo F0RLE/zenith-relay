@@ -4,7 +4,12 @@ import { useTranslation } from "react-i18next";
 import { Button } from "./buttons";
 import { Dialog } from "./dialogs";
 
-type ConfirmOptions = { title?: string; confirmLabel?: string; cancelLabel?: string; danger?: boolean };
+type ConfirmOptions = {
+  title?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+};
 type ConfirmRequest = ConfirmOptions & { message: string };
 type ConfirmHandler = (message: string, options?: ConfirmOptions) => Promise<boolean>;
 
@@ -29,10 +34,14 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   return <ConfirmContext.Provider value={confirm}>
     {children}
     {request ? <Dialog
+      layer="top"
+      className="confirm-dialog"
       title={request.title ?? t("common.confirmationTitle")}
       onClose={() => settle(false)}
       footer={<><Button variant="secondary" onClick={() => settle(false)}>{request.cancelLabel ?? t("common.cancel")}</Button><Button variant={request.danger ? "danger" : "primary"} onClick={() => settle(true)}>{request.confirmLabel ?? t("common.confirm")}</Button></>}
-    ><p className="confirm-dialog-message">{request.message}</p></Dialog> : null}
+    >
+      <p className="confirm-dialog-message">{request.message}</p>
+    </Dialog> : null}
   </ConfirmContext.Provider>;
 }
 

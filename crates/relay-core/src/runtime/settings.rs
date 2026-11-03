@@ -3,6 +3,45 @@
 use super::*;
 
 impl GatewayRuntime {
+    pub(crate) fn diagnostics_enabled(&self) -> bool {
+        (self.diagnostics_enabled)()
+    }
+
+    pub(crate) fn apply_request_timezone(&self, candidate_id: &str, body: &mut Value) {
+        if let Some(timezone) = self.request_timezone(candidate_id) {
+            crate::request_timezone::rewrite_request_timezone(body, &timezone);
+        }
+    }
+
+    pub(crate) fn request_timezone(&self, candidate_id: &str) -> Option<String> {
+        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let proxy_timezone = crate::poison::read(&account.proxy_timezone);
+        proxy_timezone
+            .as_ref()
+            .and_then(|evidence| evidence.current(crate::unix_time_ms()))
+            .map(str::to_owned)
+    }
+
+    /// Proxy checks update future account requests without rebuilding the
+    /// gateway or interrupting an in-flight response. Host mutation guards
+    /// serialize this with proxy reassignment and runtime replacement.
+    pub fn set_account_proxy_timezone(
+        &self,
+        account_id: &str,
+        timezone: Option<crate::request_timezone::ProxyTimezone>,
+    ) -> Result<()> {
+        if timezone
+            .as_ref()
+            .is_some_and(|evidence| !crate::is_valid_timezone(&evidence.timezone))
+        {
+            return Err(Error::Validation("invalid proxy timezone".into()));
+        }
+        if let Some(account) = self.chatgpt_accounts.get(account_id) {
+            *crate::poison::write(&account.proxy_timezone) = timezone;
+        }
+        Ok(())
+    }
+
     /// Installs a lightweight observer for request start/end activity.
     /// The callback carries only routing identifiers and live counts; request
     /// data and provider responses never cross the host boundary.
@@ -10,8 +49,8 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(RuntimeActivitySnapshot) + Send + Sync + 'static,
     ) {
-        if let Ok(mut current) = self.activity_callback.lock() {
-            *current = Arc::new(callback);
+        if let Ok(mut callback_slot) = self.activity_callback.lock() {
+            *callback_slot = Arc::new(callback);
         }
     }
 
@@ -22,8 +61,8 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(Vec<String>) + Send + Sync + 'static,
     ) {
-        if let Ok(mut current) = self.chatgpt_team_breaker_callback.lock() {
-            *current = Arc::new(callback);
+        if let Ok(mut callback_slot) = self.chatgpt_team_breaker_callback.lock() {
+            *callback_slot = Arc::new(callback);
         }
     }
 
@@ -48,16 +87,24 @@ impl GatewayRuntime {
         crate::poison::read(&self.tool_policy).clone()
     }
 
-    pub fn set_tool_policy(&self, policy: crate::ToolPolicy) -> Result<()> {
-        let policy = policy
-            .normalized()
-            .map_err(|message| Error::Validation(message.to_string()))?;
+    pub fn set_tool_policy(&self, policy: crate::ToolPolicy) {
         *crate::poison::write(&self.tool_policy) = policy;
-        Ok(())
     }
 
     pub fn set_codex_background_tasks_enabled(&self, enabled: bool) {
         self.control.set_codex_background_tasks_enabled(enabled);
+    }
+
+    pub fn codex_background_request_enabled(&self, kind: &str) -> bool {
+        self.control.codex_background_request_enabled(kind)
+    }
+
+    pub fn set_codex_memory_extraction_enabled(&self, enabled: bool) {
+        self.control.set_codex_memory_extraction_enabled(enabled);
+    }
+
+    pub fn set_codex_memory_consolidation_enabled(&self, enabled: bool) {
+        self.control.set_codex_memory_consolidation_enabled(enabled);
     }
 
     pub fn codex_websockets_enabled(&self) -> bool {
@@ -106,8 +153,8 @@ impl GatewayRuntime {
         self.control.route_recovery_window_ms()
     }
 
-    pub fn set_route_recovery_window_ms(&self, value: u64) {
-        self.control.set_route_recovery_window_ms(value);
+    pub fn set_route_recovery_window_ms(&self, window_ms: u64) {
+        self.control.set_route_recovery_window_ms(window_ms);
         self.candidate_availability.notify_waiters();
     }
 
@@ -125,6 +172,7 @@ impl GatewayRuntime {
         local_key_id: &str,
         requested_model: &str,
         wire_api: WireApi,
+        transport: crate::UsageTransport,
         origin: &'static str,
     ) {
         self.control.blocked_codex_background_event(
@@ -133,6 +181,7 @@ impl GatewayRuntime {
             local_key_id,
             requested_model,
             wire_api,
+            transport,
             origin,
         );
     }
@@ -165,32 +214,37 @@ impl GatewayRuntime {
                 "max retry candidates must be between 1 and 8".into(),
             ));
         }
-        let mut updates = key_scopes.iter().collect::<Vec<_>>();
-        updates.sort_by(|(left, _), (right, _)| left.cmp(right));
-        let mut seen = BTreeSet::new();
-        let mut keys = Vec::with_capacity(updates.len());
-        for (id, scope) in updates {
-            if !seen.insert(id) {
+        let mut sorted_scope_updates = key_scopes.iter().collect::<Vec<_>>();
+        sorted_scope_updates
+            .sort_by(|(left_key_id, _), (right_key_id, _)| left_key_id.cmp(right_key_id));
+        let mut seen_key_ids = BTreeSet::new();
+        let mut keys_to_update = Vec::with_capacity(sorted_scope_updates.len());
+        for (key_id, requested_scope) in sorted_scope_updates {
+            if !seen_key_ids.insert(key_id) {
                 return Err(Error::Validation(
                     "duplicate gateway key scope update".into(),
                 ));
             }
-            let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == *id) else {
+            let Some(key) = self
+                .keys
+                .iter()
+                .find(|key| key.enabled && key.id == *key_id)
+            else {
                 return Ok(false);
             };
-            keys.push((key, scope));
+            keys_to_update.push((key, requested_scope));
         }
-        let mut locked = Vec::with_capacity(keys.len());
-        for (key, scope) in keys {
-            locked.push((key, scope, crate::poison::write(&key.scope)));
+        let mut locked_key_scopes = Vec::with_capacity(keys_to_update.len());
+        for (key, requested_scope) in keys_to_update {
+            locked_key_scopes.push((key, requested_scope, crate::poison::write(&key.scope)));
         }
         let mut scheduler = self.lock_scheduler();
         scheduler.set_pool_routing(policy)?;
         self.max_retry_candidates
             .store(usize::from(max_retry_candidates), Ordering::Relaxed);
-        for (key, scope, mut current) in locked {
-            if *current != *scope {
-                *current = scope.clone();
+        for (key, requested_scope, mut existing_scope) in locked_key_scopes {
+            if *existing_scope != *requested_scope {
+                *existing_scope = requested_scope.clone();
                 key.scope_revision.fetch_add(1, Ordering::AcqRel);
             }
         }
@@ -224,12 +278,12 @@ impl GatewayRuntime {
     ) -> Result<()> {
         let overrides = normalize_model_service_tier_overrides(overrides)
             .map_err(|message| Error::Validation(message.to_string()))?;
-        *crate::poison::mutex(&self.model_service_tier_overrides) = overrides;
+        *crate::poison::mutex(&self.model_state.service_tier_overrides) = overrides;
         Ok(())
     }
 
     pub(crate) fn model_effective_service_tier(&self, model: &str) -> DefaultServiceTier {
-        let requested = crate::poison::mutex(&self.model_service_tier_overrides)
+        let requested = crate::poison::mutex(&self.model_state.service_tier_overrides)
             .get(&crate::model_id_key(model))
             .copied()
             .unwrap_or_else(|| self.default_service_tier());
@@ -237,20 +291,7 @@ impl GatewayRuntime {
     }
 
     pub fn set_model_display_order(&self, models: Vec<String>) {
-        *crate::poison::mutex(&self.model_display_order) = crate::normalize_model_ids(models);
-    }
-
-    /// Switches the explicitly labelled Excel/Basis Points transport for OAuth
-    /// accounts without rebuilding the scheduler. Agent Identity accounts
-    /// cannot use this transport. The account candidate, quota state and
-    /// concurrency reservation remain unchanged.
-    pub fn set_basis_points_enabled(&self, enabled: bool) {
-        for account in self.chatgpt_accounts.values() {
-            let oauth = crate::poison::read(&account.agent_identity).is_none();
-            account
-                .basis_points_enabled
-                .store(enabled && oauth, Ordering::Relaxed);
-        }
+        *crate::poison::mutex(&self.model_state.display_order) = crate::normalize_model_ids(models);
     }
 
     /// A host replaces this runtime's routing graph without waiting for

@@ -1,7 +1,7 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   for (const narrow of [false, true]) {
     test(`provider error details survive ${mode} usage at ${narrow ? "mobile" : "desktop"} width`, async ({ page }, testInfo) => {
       await page.setViewportSize(narrow ? { width: 390, height: 844 } : { width: 1160, height: 760 });
@@ -14,10 +14,13 @@ for (const mode of ["local", "remote"] as const) {
       await page.getByRole("button", { name: "Usage", exact: true }).click();
       await page.getByRole("button", { name: `Request details: req_synthetic_${mode}` }).click();
       const dialog = page.getByRole("dialog", { name: "Request details" });
-      await expect(dialog.getByRole("heading", { name: "Provider response" })).toBeVisible();
+      await expect(dialog.getByRole("region", { name: "Error" })).toBeVisible();
+      await dialog.locator(".request-technical-details > summary").click();
       await expect(dialog.getByText("future_validation_error", { exact: true })).toBeVisible();
       await expect(dialog.getByText("invalid_request_error", { exact: true })).toBeVisible();
       await expect(dialog.locator(".request-upstream-message pre")).toHaveText(message);
+      await expect(dialog.getByText("Sensitive data hidden", { exact: true })).toHaveCount(0);
+      await expect(dialog.locator(".request-provider-response .form-note")).toHaveText("Message truncated");
       await expect(dialog.locator(".request-details-list > div").filter({ has: page.getByText("Provider HTTP status", { exact: true }) }).locator("dd")).toHaveText("422");
       await dialog.getByRole("button", { name: "Copy provider message", exact: true }).click();
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(message);
@@ -26,7 +29,7 @@ for (const mode of ["local", "remote"] as const) {
         return element.scrollWidth <= element.clientWidth + 1 && box.left >= 0 && box.right <= window.innerWidth;
       });
       expect(messageFits).toBe(true);
-      expect(await dialog.locator(".request-provider-fields dd").evaluateAll((elements) =>
+      expect(await dialog.locator(".request-technical-details .request-details-list dd").evaluateAll((elements) =>
         elements.every((element) => element.scrollWidth <= element.clientWidth + 1),
       )).toBe(true);
       await page.screenshot({ path: testInfo.outputPath("provider-error.png") });
@@ -40,7 +43,7 @@ test("legacy failures show absence without inventing a provider message", async 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await expect(dialog.getByText("No provider message recorded", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-upstream-message")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Copy provider message" })).toHaveCount(0);
 });
 
@@ -48,15 +51,18 @@ test("Russian provider diagnostics fit a narrow dialog", async ({ page }, testIn
   await page.setViewportSize({ width: 390, height: 844 });
   await installTauriMock(page, {
     mode: "local", locale: "ru", populated: true, usageFailure: true,
-    usageUpstreamError: { httpStatus: 400, code: "future_validation_error", errorType: "INVALID_ARGUMENT", message: "Invalid field: temperature", redacted: false, truncated: false },
+    usageUpstreamError: { httpStatus: 400, code: "future_validation_error", errorType: "INVALID_ARGUMENT", message: "Invalid field: temperature", redacted: true, truncated: false },
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
-  await expect(dialog.getByRole("heading", { name: "Ответ провайдера" })).toBeVisible();
+  await expect(dialog.getByRole("region", { name: "Ошибка" })).toBeVisible();
+  await expect(dialog.getByText("Чувствительные данные скрыты", { exact: true })).toHaveCount(0);
+  await expect(dialog.locator(".request-provider-response .form-note")).toHaveCount(0);
+  await dialog.locator(".request-technical-details > summary").click();
   await expect(dialog.getByText("future_validation_error", { exact: true })).toBeVisible();
-  expect(await dialog.locator(".request-provider-fields dd").evaluateAll((elements) =>
+  expect(await dialog.locator(".request-technical-details .request-details-list dd").evaluateAll((elements) =>
     elements.every((element) => element.scrollWidth <= element.clientWidth + 1),
   )).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("provider-error-ru.png") });

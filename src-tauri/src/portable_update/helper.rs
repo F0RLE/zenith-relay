@@ -38,7 +38,7 @@ pub(super) fn update_paths() -> io::Result<UpdatePaths> {
         .ok_or_else(|| io::Error::other("executable has no parent directory"))?;
     let stem = target
         .file_stem()
-        .and_then(|value| value.to_str())
+        .and_then(|executable_stem| executable_stem.to_str())
         .ok_or_else(|| io::Error::other("executable has no valid file name"))?;
     let helper = parent.join(format!("{stem}.update.exe"));
     let temp = parent.join(format!("{stem}.update.exe.tmp"));
@@ -83,9 +83,9 @@ pub(super) fn write_helper(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    value.into()
+    let mut suffixed_path = path.as_os_str().to_os_string();
+    suffixed_path.push(suffix);
+    suffixed_path.into()
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -105,7 +105,7 @@ where
     let deadline = Instant::now() + FILE_WAIT;
     loop {
         match operation() {
-            Ok(value) => return Ok(value),
+            Ok(operation_result) => return Ok(operation_result),
             Err(_error) if Instant::now() < deadline => thread::sleep(Duration::from_millis(150)),
             Err(error) => return Err(error),
         }

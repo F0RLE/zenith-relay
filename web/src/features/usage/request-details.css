@@ -1,0 +1,86 @@
+/* Hosted request receipt: result, charge and timing, then token detail. */
+.hosted-app .request-dialog.hosted-request-details { width: min(760px, calc(100% - 32px)); border-radius: 16px; box-shadow: var(--overlay-lift); }
+.hosted-app .hosted-request-details .dialog-header { min-height: 56px; padding: 8px 16px 8px 24px; }
+.hosted-app .hosted-request-details .dialog-header h2 { color: var(--text); font-size: 16px; font-weight: 550; line-height: 24px; letter-spacing: -.015em; }
+.hosted-app .hosted-request-details .dialog-header .icon-button { width: 40px; height: 40px; min-height: 40px; padding: 0; border-color: transparent; background: transparent; box-shadow: none; transform: none; }
+.hosted-app .request-dialog.hosted-request-details .dialog-body { gap: 20px; padding: 24px; }
+.hosted-request-details .request-overview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; margin: 0; }
+.hosted-request-details .request-details-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 24px; }
+.hosted-request-details .request-details-identity { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; }
+.hosted-request-details .request-details-model { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hosted-request-details .request-details-model h3 { min-width: 0; margin: 0; font-size: 20px; line-height: 28px; font-weight: 550; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.hosted-request-details .request-details-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); flex-shrink: 0; font-size: 11px; }
+.hosted-request-details .request-details-status[data-status="completed"] { color: var(--accent); }
+.hosted-request-details .request-details-status[data-status="failed"] { color: var(--error); }
+.hosted-request-details .request-details-model:has([data-status="failed"], [data-status="running"]) { flex-wrap: wrap; }
+.hosted-app .hosted-request-details .request-details-export { width: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); box-shadow: none; transform: none; }
+.hosted-app .hosted-request-details .request-details-export:is(:hover, :focus-visible) { background: var(--accent-soft); color: var(--accent); }
+.hosted-request-details .request-details-subtitle { display: flex; flex-wrap: wrap; gap: 8px 20px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.hosted-request-details .request-details-subtitle > div { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.hosted-request-details .request-details-subtitle dt { display: flex; align-self: center; flex-shrink: 0; color: var(--muted); }
+.hosted-request-details .request-details-subtitle svg { width: 14px; height: 14px; }
+.hosted-request-details .request-details-subtitle dd { min-width: 0; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.hosted-request-details .request-details-subtitle time { font-variant-numeric: tabular-nums; }
+.hosted-request-details .request-details-metrics { display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); align-items: baseline; gap: 20px; margin: 0; padding: 16px 0; border: 0; border-block: 1px solid var(--border); border-radius: 0; background: transparent; }
+.hosted-request-details .request-details-metrics > div { display: grid; align-content: start; gap: 6px; padding: 0; text-align: left; min-width: 0; }
+.hosted-request-details .request-details-metrics > div:first-child { padding-inline-start: 0; }
+.hosted-request-details .request-details-metrics > div:last-child { padding-inline-end: 0; }
+.hosted-request-details .request-details-metrics > div + div { border-inline-start: 0; }
+.hosted-request-details .request-details-metrics dt { color: var(--muted); font-size: 11px; }
+.hosted-request-details .request-details-metrics dd { font-size: 16px; font-weight: 500; line-height: 28px; letter-spacing: -.015em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hosted-request-details .request-charge-metric dd { color: var(--accent); font-size: 24px; font-weight: 550; letter-spacing: -.025em; }
+.hosted-request-details .request-token-details { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.hosted-request-details .request-token-total { margin: 0; }
+.hosted-request-details .request-token-total > div { display: flex; align-items: baseline; justify-content: flex-start; flex-wrap: wrap; gap: 12px; }
+.hosted-request-details .request-token-total dt { color: var(--text); font-size: 13px; font-weight: 500; }
+.hosted-request-details .request-token-total dd { font-size: 16px; font-weight: 550; line-height: 24px; font-variant-numeric: tabular-nums; }
+.hosted-request-details .token-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.hosted-request-details .token-group { display: block; padding: 0; border: 0; border-radius: 0; background: transparent; min-width: 0; }
+.hosted-request-details :is(.request-token-header, .token-heading, .token-row) { display: grid; grid-template-columns: minmax(0, 1fr) 96px 128px; gap: 16px; align-items: center; }
+.hosted-request-details .request-token-header { padding-bottom: 12px; }
+.hosted-request-details .request-token-header > span { color: var(--muted); font-size: 11px; text-align: right; }
+.hosted-request-details .token-heading { min-height: 40px; margin: 0 0 4px; padding: 8px 0 0; border-top: 1px solid var(--border); border-bottom: 0; }
+.hosted-request-details .token-heading dt { color: var(--text); font-size: 13px; font-weight: 550; }
+.hosted-request-details .token-heading > dd { font-size: 14px; font-weight: 550; }
+.hosted-request-details .token-group dd { min-width: 0; white-space: normal; overflow-wrap: anywhere; text-align: right; font-variant-numeric: tabular-nums; }
+.hosted-request-details .token-row { min-height: 32px; padding: 4px 0; color: var(--secondary); font-size: 12px; }
+.hosted-request-details .token-row dt { font-size: 12px; }
+.hosted-request-details .token-charge { color: var(--text); font-size: 12px; }
+.hosted-request-details .token-included { color: var(--muted); font-size: 10px; }
+.hosted-request-details .token-group :is(.token-charge, .token-included) { grid-column: auto; }
+.hosted-request-details .request-technical-details { margin: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; min-width: 0; }
+.hosted-request-details .request-technical-details > summary { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 12px 0; padding-inline-end: var(--control-chevron-inset); background: transparent; cursor: pointer; list-style: none; font-size: 13px; font-weight: 500; }
+.hosted-request-details .request-technical-details > summary::-webkit-details-marker { display: none; }
+.hosted-request-details .request-disclosure-icon { display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 0; color: var(--muted); }
+.hosted-app .hosted-request-details .request-disclosure-chevron { margin-inline-start: auto; color: var(--muted); width: 14px; height: 14px; transition: transform 150ms ease; }
+.hosted-request-details .request-technical-details[open] .request-disclosure-chevron { transform: rotate(180deg); }
+.hosted-request-details .request-technical-body { display: grid; gap: 16px; padding: 8px 0 0; }
+.hosted-request-details .request-technical-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 20px; }
+.hosted-request-details .request-technical-grid > div { display: grid; min-width: 0; align-content: start; gap: 6px; }
+.hosted-request-details .request-technical-grid dt { color: var(--muted); font-size: 11px; }
+.hosted-request-details .request-technical-grid dd { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.hosted-request-details .request-id { margin: 0; }
+.hosted-request-details .request-id dd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hosted-request-details .request-id code { user-select: all; }
+.hosted-request-details .request-id .icon-button { width: 28px; min-height: 28px; height: 28px; }
+@media (max-width: 639px) {
+  .hosted-app .request-dialog.hosted-request-details { width: calc(100% - 24px); max-height: calc(100dvh - 24px); }
+  .hosted-app .hosted-request-details .dialog-header { padding-inline: 16px 8px; }
+  .hosted-app .request-dialog.hosted-request-details .dialog-body { gap: 20px; padding: 20px 16px; }
+  .hosted-request-details .request-details-header { gap: 12px; }
+  .hosted-request-details .request-details-model h3 { font-size: 20px; }
+  .hosted-request-details .request-details-subtitle { gap: 8px 16px; }
+  .hosted-request-details .request-details-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .hosted-request-details .request-details-metrics > div, .hosted-request-details .request-details-metrics > div + div { padding: 0; border-inline-start: 0; }
+  .hosted-request-details .request-details-metrics dd { font-size: 16px; }
+  .hosted-request-details .request-charge-metric dd { font-size: 20px; }
+  .hosted-request-details :is(.request-token-header, .token-heading, .token-row) { grid-template-columns: minmax(0, 1fr) 48px 96px; gap: 12px; }
+  .hosted-request-details .request-token-total { grid-column: 1 / -1; }
+  .hosted-request-details .request-token-header > span:first-of-type { grid-column: 2; }
+  .hosted-app .hosted-request-details .request-details-export { width: 44px; min-height: 44px; padding: 0; }
+  .hosted-request-details .request-technical-grid { grid-template-columns: minmax(0, 1fr); }
+  .hosted-request-details .request-id .icon-button { width: 44px; height: 44px; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hosted-app .hosted-request-details .request-disclosure-chevron { transition: none; }
+}

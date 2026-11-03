@@ -1,6 +1,6 @@
 use super::super::*;
 use super::connect::connect_upstream;
-use super::Connected;
+use super::{Connected, ConnectedTransport};
 
 /// Keeps a persistent pre-output retry cancellable by the client. Candidate
 /// recovery may wait indefinitely, but a closed client WebSocket must release
@@ -15,16 +15,47 @@ pub(in crate::gateway::websocket) async fn connect_upstream_while_client_connect
     allow_previous_response_reset: bool,
     attempt_offset: u16,
 ) -> Result<Connected, GatewayFailure> {
+    match connect_transport_while_client_connected(
+        downstream,
+        runtime,
+        key,
+        client_headers,
+        request,
+        allow_previous_response_reset,
+        attempt_offset,
+    )
+    .await?
+    {
+        ConnectedTransport::Websocket(connected) => Ok(*connected),
+        // Existing native-socket reconnects retain their transport boundary.
+        // Dropping this unstarted handoff releases its capacity normally.
+        ConnectedTransport::Http(_) => Err(GatewayFailure::websocket_http_fallback(
+            ErrorOrigin::Account,
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::gateway::websocket) async fn connect_transport_while_client_connected(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    client_headers: &HeaderMap,
+    request: ClientRequest,
+    allow_previous_response_reset: bool,
+    attempt_offset: u16,
+) -> Result<ConnectedTransport, GatewayFailure> {
     await_while_client_connected(
         downstream,
-        connect_upstream(
+        // Reconnects run inside the live bridge; keep the retry future off its stack.
+        Box::pin(connect_upstream(
             runtime,
             key,
             client_headers,
             request,
             allow_previous_response_reset,
             attempt_offset,
-        ),
+        )),
     )
     .await?
 }
@@ -41,18 +72,16 @@ pub(in crate::gateway::websocket) async fn await_while_client_connected<F: std::
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            result = &mut future => return Ok(result),
+            connection_result = &mut future => return Ok(connection_result),
             _ = heartbeat.tick() => {
-                downstream
-                    .send(Message::Ping(Default::default()))
+                send_message(downstream, Message::Ping(Default::default()))
                     .await
                     .map_err(|_| GatewayFailure::client_closed())?;
             }
             message = downstream.recv() => {
                 match message {
-                    Some(Ok(Message::Ping(payload))) => {
-                        downstream
-                            .send(Message::Pong(payload))
+                    Some(Ok(Message::Ping(ping_payload))) => {
+                        send_message(downstream, Message::Pong(ping_payload))
                             .await
                             .map_err(|_| GatewayFailure::client_closed())?;
                     }

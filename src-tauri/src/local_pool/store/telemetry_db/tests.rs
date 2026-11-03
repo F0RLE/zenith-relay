@@ -1,13 +1,29 @@
+use super::usage::{usage_groups, usage_model_equivalents};
 use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
 };
+mod filter_cache;
+mod filter_options;
+mod image_usage;
+mod lazy_pages;
 mod maintenance;
+mod performance;
+mod performance_samples;
 mod pricing;
+mod reader;
+mod report_performance;
+mod report_summary;
 mod reporting;
+mod retention_batches;
 mod rollups;
+mod send_usage;
+mod support;
+mod unknown_tiers;
+mod workloads;
+mod write_path;
 
-fn aggregate_test_event(
+pub(super) fn aggregate_test_event(
     request_id: &str,
     attempt: u16,
     input_tokens: u64,
@@ -30,6 +46,7 @@ fn aggregate_test_event(
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: true,
@@ -51,6 +68,7 @@ fn aggregate_test_event(
         total_tokens: Some(input_tokens + output_tokens),
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }
 
@@ -86,6 +104,7 @@ fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: WireApi::Responses,
+        transport: zenith_relay_core::UsageTransport::Http,
         service_tier: DefaultServiceTier::Standard,
         applied_service_tier: None,
         success: false,
@@ -107,5 +126,6 @@ fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
         total_tokens: None,
         upstream_error: None,
         quota_snapshot: None,
+        image_usage: None,
     }
 }

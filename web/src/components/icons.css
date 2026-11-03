@@ -1,0 +1,24 @@
+/* A single authored grid and stroke for all Hosted functional glyphs. */
+.relay-app { --icon-stroke: 1.5px; }
+.relay-app svg.relay-icon {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--icon-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.relay-app .relay-icon > * { vector-effect: non-scaling-stroke; }
+.hosted-app .relay-sidebar nav .relay-icon,
+.hosted-app :is(.icon-button, .relay-icon-button, .account-kind-icon) > .relay-icon,
+.landing [data-theme-toggle] > .relay-icon { width: 20px; height: 20px; }
+.hosted-app :is(.hosted-balance, .notification-open, .table-status) .relay-icon,
+.hosted-app .request-details-subtitle .relay-icon { width: 16px; height: 16px; }
+.relay-app .option-trigger > .relay-icon { width: 14px; height: 14px; }
+.relay-app .option-list .relay-icon { width: 16px; height: 16px; }
+/* The filled bell itself is the unread cue; no separate badge. */
+.hosted-app .notification-button[data-unread="true"] > .relay-icon { fill: currentColor; }

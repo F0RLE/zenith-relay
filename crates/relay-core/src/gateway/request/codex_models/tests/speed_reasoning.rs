@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn relay_speed_policy_overrides_missing_empty_and_conflicting_account_fields() {
+fn unknown_reference_modes_do_not_invent_speeds_from_account_fields() {
     use crate::gateway::request::normalization::ServiceTierPolicy;
 
     let models = ["gpt-future", "gpt-another-synthetic"];
@@ -33,16 +33,12 @@ fn relay_speed_policy_overrides_missing_empty_and_conflicting_account_fields() {
         for model in response["models"].as_array().unwrap() {
             let id = model["slug"].as_str().unwrap();
             assert!(models.contains(&id));
-            assert_eq!(model["service_tiers"][0]["id"], "priority");
-            assert_eq!(model["service_tiers"][1]["id"], "ultrafast");
-            assert_eq!(
-                model["additional_speed_tiers"],
-                json!(["fast", "ultrafast"])
-            );
+            assert_eq!(model["service_tiers"], json!([]));
+            assert_eq!(model["additional_speed_tiers"], json!([]));
             assert!(model.get("default_service_tier").is_none());
             let mut request = json!({"model": id, "service_tier": "ultrafast"});
             let policy = ServiceTierPolicy::pool_owned(&request);
-            let selected = policy.select_for_model(&runtime, id);
+            let selected = policy.selected_tier();
             assert_eq!(selected, DefaultServiceTier::Ultrafast);
             policy.prepare_for_candidate(&mut request, selected, WireApi::Responses);
             assert_eq!(request["service_tier"], "ultrafast");
@@ -51,11 +47,10 @@ fn relay_speed_policy_overrides_missing_empty_and_conflicting_account_fields() {
 }
 
 #[test]
-fn basis_points_account_still_publishes_model_speed_tiers() {
+fn native_speed_fields_cannot_expand_reference_modes() {
     let models = ["gpt-future"];
     let runtime =
         native_catalog_test_runtime_with_accounts(None, None, &["basis-account"], &models);
-    runtime.set_basis_points_enabled(true);
     let key = runtime.authenticate_secret("secret").unwrap();
     let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
     let manifest = json!({
@@ -73,12 +68,55 @@ fn basis_points_account_still_publishes_model_speed_tiers() {
     )
     .unwrap();
     let model = &response["models"][0];
-    assert_eq!(model["service_tiers"][0]["id"], "priority");
-    assert_eq!(model["service_tiers"][1]["id"], "ultrafast");
-    assert_eq!(
-        model["additional_speed_tiers"],
-        json!(["fast", "ultrafast"])
-    );
+    assert_eq!(model["service_tiers"], json!([]));
+    assert_eq!(model["additional_speed_tiers"], json!([]));
+}
+
+#[test]
+fn very_high_reasoning_alias_reaches_the_live_chatgpt_catalog() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+    use std::collections::BTreeMap;
+
+    for (reference_level, saved_level) in [("very_high", "xhigh"), ("xhigh", "extra_high")] {
+        let metadata = json!({
+            "gpt-native": {
+                "reasoning": true,
+                "reasoning_effort_levels": ["low", "medium", "high", reference_level, "max"],
+                "default_reasoning_effort": reference_level
+            }
+        });
+        let catalog = ModelMetadataCatalog::from_models_dev_json(&metadata.to_string()).unwrap();
+        let runtime = native_catalog_test_runtime_with_accounts(
+            None,
+            Some(ModelMetadataCatalogHandle::new(catalog)),
+            &["native-account"],
+            &["gpt-native"],
+        );
+        runtime
+            .set_model_reasoning_allowed_levels(BTreeMap::from([(
+                "gpt-native".into(),
+                vec![saved_level.into()],
+            )]))
+            .unwrap();
+        let key = runtime.authenticate_secret("secret").unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], 0);
+        let response = build_codex_models_response_from_manifests(
+            &runtime,
+            &key,
+            &visible,
+            [(
+                "native-account".into(),
+                json!({"models": [{"slug": "gpt-native"}]}),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            response["models"][0]["supported_reasoning_levels"],
+            json!([{"effort": "xhigh", "description": "xhigh"}]),
+            "reference {reference_level}, saved policy {saved_level}"
+        );
+        assert_eq!(response["models"][0]["default_reasoning_level"], "xhigh");
+    }
 }
 
 #[test]
@@ -192,6 +230,33 @@ fn manual_reasoning_modes_allow_provider_specific_efforts() {
         ])
     );
     assert!(model.get("default_reasoning_level").is_none());
+}
+
+#[test]
+fn very_high_aliases_keep_the_provider_description_and_one_picker_option() {
+    let mut model = json!({
+        "supported_reasoning_levels":[
+            {"effort":"Very high","description":"Provider very high"},
+            {"effort":"x_high","description":"Duplicate"},
+            {"effort":"high","description":"Provider high"}
+        ]
+    });
+    super::super::project::sort_supported_reasoning_levels(&mut model);
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([
+            {"effort":"high","description":"Provider high"},
+            {"effort":"xhigh","description":"Provider very high"}
+        ])
+    );
+    apply_model_reasoning_allowed_levels(&mut model, Some(&["extra_high".into()]));
+    assert_eq!(
+        model["supported_reasoning_levels"],
+        json!([
+            {"effort":"xhigh","description":"Provider very high"}
+        ])
+    );
+    assert_eq!(model["default_reasoning_level"], "xhigh");
 }
 
 #[test]

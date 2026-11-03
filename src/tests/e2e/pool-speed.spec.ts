@@ -8,7 +8,6 @@ async function savedTiers(page: Page) {
     }).__TAURI_TEST_INVOKES__;
     return calls.flatMap(({ command, args }) => {
       if (command === "update_local_routing") return [args.input?.defaultServiceTier];
-      if (command === "execute_remote_server_action" && args.input?.action?.type === "set_routing_policy") return [args.input.payload?.defaultServiceTier];
       return [];
     });
   });
@@ -18,7 +17,7 @@ function speedControl(page: Page) {
   return page.getByRole("radiogroup", { name: "Request speed" });
 }
 
-for (const mode of ["local", "remote"] as const) {
+for (const mode of ["local"] as const) {
   test(`${mode} pool speed selects each mode and keeps it after leaving the page`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });
     await page.goto("/");
@@ -54,8 +53,7 @@ for (const mode of ["local", "remote"] as const) {
       };
       const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
       scope.__TAURI_INTERNALS__.invoke = (command, args, options) => {
-        const action = (args as { input?: { action?: { type?: string } } } | undefined)?.input?.action?.type;
-        if (command === "update_local_routing" || (command === "execute_remote_server_action" && action === "set_routing_policy")) {
+        if (command === "update_local_routing") {
           return new Promise((_, reject) => {
             scope.__REJECT_SPEED__ = () => reject({ code: "upstream_error", message: "Synthetic routing save failure" });
           });
@@ -77,15 +75,6 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("remote pool speed works without optional runtime routing telemetry", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["accounts", "sources", "models"] });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = speedControl(page);
-  await speed.getByRole("radio", { name: "Ultrafast", exact: true }).click();
-  await expect(speed.getByRole("radio", { name: "Ultrafast", exact: true })).toBeEnabled();
-  await expect.poll(() => savedTiers(page)).toEqual(["ultrafast"]);
-});
 
 test.describe("touch pool speed", () => {
   test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });

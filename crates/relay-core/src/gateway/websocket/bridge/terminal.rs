@@ -1,6 +1,28 @@
 use super::super::upstream::first_message_terminal;
 use super::super::*;
-use super::BridgeState;
+use super::{BridgeState, InFlight};
+
+fn has_output_evidence(in_flight: &InFlight) -> bool {
+    in_flight.client_visible_output
+        || in_flight.event.ttft_ms.is_some()
+        || in_flight.event.output_tokens.is_some()
+        || in_flight.event.tool_use.tool_call_count > 0
+        || in_flight.event.tool_use.text_output
+}
+
+fn failed_terminal_before_generation(
+    state: &BridgeState,
+    message: &UpstreamMessage,
+) -> Option<EventTerminal> {
+    if has_output_evidence(state.in_flight.as_ref()?) {
+        return None;
+    }
+    let terminal = first_message_terminal(message)?;
+    if terminal.outcome != Some(EventTerminalOutcome::Failure) || terminal.generation_evidence {
+        return None;
+    }
+    Some(terminal)
+}
 
 pub(super) fn retryable_disconnect_request(
     runtime: &GatewayRuntime,
@@ -11,16 +33,11 @@ pub(super) fn retryable_disconnect_request(
         // A disconnect after response.create has no pre-execution proof.
         return None;
     }
-    if in_flight.client_visible_output
-        || in_flight.event.ttft_ms.is_some()
-        || in_flight.event.output_tokens.is_some()
-        || in_flight.event.tool_use.tool_call_count > 0
-        || in_flight.event.tool_use.text_output
-    {
+    if has_output_evidence(in_flight) {
         return None;
     }
     if in_flight.request.has_previous_response_id() {
-        return replay_in_flight_continuation(runtime, state);
+        return replay_in_flight_continuation(runtime, state, false);
     }
     if in_flight.request.has_unpaired_tool_output() {
         return None;
@@ -31,10 +48,12 @@ pub(super) fn retryable_disconnect_request(
 fn replay_in_flight_continuation(
     runtime: &GatewayRuntime,
     state: &BridgeState,
+    retain_owner: bool,
 ) -> Option<ClientRequest> {
     let in_flight = state.in_flight.as_ref()?;
-    let mut request = in_flight.request.clone();
-    request
+    let mut replay_request = in_flight.request.clone();
+    let owner_key = replay_request.response_affinity_key.clone();
+    replay_request
         .replay_native_continuation(
             runtime,
             &state.local_key_id,
@@ -42,7 +61,17 @@ fn replay_in_flight_continuation(
             &in_flight.route.source_model,
         )
         .ok()?
-        .then_some(request)
+        .then_some(replay_request)
+        .map(|mut replay_request| {
+            if retain_owner {
+                replay_request.response_affinity_key = owner_key;
+                crate::gateway::continuation::retain_materialized_continuation_owner(
+                    &mut replay_request.requires_affinity_owner,
+                    &mut replay_request.has_unpaired_tool_output,
+                );
+            }
+            replay_request
+        })
 }
 
 pub(super) fn retryable_terminal_request(
@@ -50,24 +79,13 @@ pub(super) fn retryable_terminal_request(
     state: &BridgeState,
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
-        return None;
-    }
     let in_flight = state.in_flight.as_ref()?;
-    if in_flight.client_visible_output
-        || in_flight.event.ttft_ms.is_some()
-        || in_flight.event.output_tokens.is_some()
-        || in_flight.event.tool_use.tool_call_count > 0
-        || in_flight.event.tool_use.text_output
-    {
-        return None;
-    }
+    let terminal = failed_terminal_before_generation(state, message)?;
     let (status, category) = resolved_terminal_failure(&terminal);
     let status = super::super::super::errors::canonical_upstream_status(status, category);
     if in_flight.request.has_previous_response_id() {
         return super::super::super::errors::retryable_failure(status, category, true)
-            .then(|| replay_in_flight_continuation(runtime, state))
+            .then(|| replay_in_flight_continuation(runtime, state, false))
             .flatten();
     }
     if in_flight.request.has_unpaired_tool_output()
@@ -83,36 +101,32 @@ pub(super) fn repairable_terminal_request(
     state: &mut BridgeState,
     message: &UpstreamMessage,
 ) -> Option<ClientRequest> {
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) {
+    let terminal = failed_terminal_before_generation(state, message)?;
+    if terminal.error_category == Some(error_codes::UPSTREAM_TURN_RATE_LIMITED) {
         return None;
     }
     if terminal.previous_response_not_found {
-        let in_flight = state.in_flight.as_ref()?;
-        if in_flight.client_visible_output {
-            return None;
-        }
-        let request = replay_in_flight_continuation(runtime, state)?;
-        return Some(request);
+        let repaired_continuation = replay_in_flight_continuation(runtime, state, true)?;
+        return Some(repaired_continuation);
     }
-    let body = match message {
+    let upstream_message_bytes = match message {
         UpstreamMessage::Text(text) => Some(text.as_bytes()),
         UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
         _ => None,
     }?;
-    if !super::super::super::errors::responses_tool_call_links_rejected(body) {
+    if !super::super::super::errors::responses_tool_call_links_rejected(upstream_message_bytes) {
         return None;
     }
     let in_flight = state.in_flight.as_mut()?;
-    if in_flight.client_visible_output || in_flight.legacy_call_id_repair_attempted {
+    if in_flight.legacy_call_id_repair_attempted {
         return None;
     }
-    let mut request = in_flight.request.clone();
-    if !request.repair_legacy_call_ids() {
+    let mut repair_request = in_flight.request.clone();
+    if !repair_request.repair_legacy_call_ids() {
         return None;
     }
     in_flight.legacy_call_id_repair_attempted = true;
-    Some(request)
+    Some(repair_request)
 }
 
 pub(super) fn finish_terminal(
@@ -128,8 +142,8 @@ pub(super) fn finish_terminal(
     };
     // `response.incomplete` is a terminal event for this request, so the
     // client WebSocket may carry its next independent request. It is not a
-    // successful response: do not retain response/session affinity or reset
-    // slot health from a partially completed stream.
+    // successful response: do not persist affinity or reset slot health.
+    // An owner binding below is limited to this live connection.
     let terminal_success = matches!(outcome, EventTerminalOutcome::Success);
     let keep_client_socket = !matches!(outcome, EventTerminalOutcome::Failure);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
@@ -139,6 +153,11 @@ pub(super) fn finish_terminal(
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     in_flight.event.success = terminal_success;
+    if let Some(routing) = in_flight.event.routing.as_mut() {
+        routing
+            .attempt_outcome
+            .get_or_insert(crate::AttemptOutcome::ReturnedFailure);
+    }
     if terminal_success {
         in_flight.event.tool_use.finish();
     }
@@ -153,6 +172,7 @@ pub(super) fn finish_terminal(
     }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
+        in_flight.route.account_token_generation,
         match outcome {
             EventTerminalOutcome::Success => terminal.status.unwrap_or(StatusCode::OK),
             EventTerminalOutcome::Incomplete => StatusCode::OK,
@@ -179,7 +199,9 @@ pub(super) fn finish_terminal(
     }
     if let Some(lease) = state.lease.take() {
         if terminal_success {
-            lease.settle_rotation_success(now_ms());
+            let recovered =
+                lease.settle_rotation_success_with_latency(now_ms(), in_flight.event.ttft_ms);
+            in_flight.event.consecutive_failures = recovered.then_some(0);
         } else if outcome != EventTerminalOutcome::Failure {
             lease.settle_rotation_terminal(now_ms());
         } else {
@@ -192,6 +214,8 @@ pub(super) fn finish_terminal(
             );
             if in_flight.client_visible_output {
                 failure.execution = crate::scheduler::rotation::ExecutionObservation::committed();
+            } else if terminal.generation_evidence {
+                failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
             }
             super::super::super::errors::settle_attempt_failure(
                 runtime,
@@ -203,6 +227,9 @@ pub(super) fn finish_terminal(
         }
     }
     if terminal_success {
+        in_flight
+            .tool_call_capture
+            .bind(runtime, &state.local_key_id, &in_flight.route, now_ms());
         if let Some(response) = in_flight
             .native_replay_capture
             .finish(terminal.response.clone(), in_flight.response_id.as_deref())
@@ -210,25 +237,15 @@ pub(super) fn finish_terminal(
             runtime.capture_native_responses_replay(
                 &state.local_key_id,
                 &in_flight.route.candidate_id,
-                &in_flight.request.native_replay_value(),
+                &in_flight.request.native_replay_request(),
                 &in_flight.route.source_model,
                 &response,
                 now_ms(),
             );
         }
-        let recovered = runtime.record_success_with_metrics(
-            &in_flight.route.candidate_id,
-            &in_flight.route.source_model,
-            now_ms(),
-            in_flight.event.output_tokens,
-            in_flight
-                .event
-                .generation_ms
-                .unwrap_or(in_flight.event.latency_ms),
-        );
-        runtime.bind_response_affinity(
+        runtime.bind_response_route_affinity(
             in_flight.response_id.as_deref(),
-            &in_flight.route.candidate_id,
+            &in_flight.route,
             now_ms(),
         );
         runtime.bind_prompt_affinity(
@@ -236,7 +253,6 @@ pub(super) fn finish_terminal(
             &in_flight.route.candidate_id,
             now_ms(),
         );
-        in_flight.event.consecutive_failures = recovered.then_some(0);
     } else if matches!(outcome, EventTerminalOutcome::Failure) {
         let (status, category) = resolved_terminal_failure(&terminal);
         let status = super::super::super::errors::canonical_upstream_status(status, category);
@@ -267,6 +283,15 @@ pub(super) fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeStat
     };
     in_flight.event.success = false;
     in_flight.event.error_category = Some(category.to_string());
+    if let Some(routing) = in_flight.event.routing.as_mut() {
+        routing.attempt_outcome = Some(
+            if matches!(category, error_codes::CLIENT_CANCELLED | "client_websocket") {
+                crate::AttemptOutcome::ClientDisconnected
+            } else {
+                crate::AttemptOutcome::ExecutionUncertain
+            },
+        );
+    }
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     if let Some(status) = incomplete_status(category) {
         in_flight.event.http_status = status.as_u16();

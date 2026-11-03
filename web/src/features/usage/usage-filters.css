@@ -1,0 +1,47 @@
+/* Promote the existing filters when the content area has room for one row. */
+.hosted-app .usage-page { --usage-action-size: 40px; }
+.hosted-app .usage-page .usage-refresh { flex-shrink: 0; }
+.hosted-app .usage-page .usage-extra-filters {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+.hosted-app .usage-page .usage-extra-filters[data-expanded="false"] { display: none; }
+.hosted-app .usage-filter-reset { display: inline-flex; align-items: center; gap: 8px; }
+
+@container relay-page (min-width: 1120px) {
+  .hosted-app .usage-page .usage-filters {
+    --usage-filter-columns: minmax(112px, .9fr) minmax(124px, 1fr) minmax(144px, 1.2fr) minmax(120px, 1fr) minmax(124px, 1fr) minmax(118px, .85fr) minmax(136px, 1fr) minmax(80px, 1fr);
+    grid-template-columns: var(--usage-filter-columns) var(--usage-action-size);
+    gap: 8px;
+  }
+  .hosted-app .usage-page .usage-filters:has(.usage-filter-footer) {
+    grid-template-columns: var(--usage-filter-columns) var(--usage-action-size) var(--usage-action-size);
+  }
+  .hosted-app .usage-page .usage-key-controls,
+  .hosted-app .usage-page .usage-extra-filters[data-expanded] { display: contents; }
+  .hosted-app .usage-page .usage-filter-trigger { display: none; }
+  .hosted-app .usage-page .usage-refresh { grid-column: -2 / -1; grid-row: 1; }
+  .hosted-app .usage-page .usage-extra-filters > label { font-size: 0; gap: 0; }
+  .hosted-app .usage-page .usage-extra-filters input { min-height: 40px; height: 40px; padding: 9px 12px; font-size: 12px; }
+  .hosted-app .usage-page .usage-filter-footer { grid-column: auto; }
+  .hosted-app .usage-page .usage-filter-reset {
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--secondary);
+    outline: none;
+  }
+  .hosted-app .usage-page .usage-filter-reset > span { display: none; }
+  .hosted-app .usage-page .usage-filter-reset:is(:hover, :focus-visible) { background: var(--accent-soft); color: var(--accent); }
+  .hosted-app .usage-page .usage-filter-reset:focus-visible { outline: none; }
+}
+@media (pointer: coarse) {
+  .hosted-app .usage-page { --usage-action-size: 44px; }
+}
+@media (forced-colors: active) {
+  .hosted-app .usage-page .usage-filter-reset:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }
+}

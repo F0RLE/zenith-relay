@@ -1,0 +1,24 @@
+/* One whole-page reveal; individual controls must not capture half-changed colors. */
+html[data-theme-transition] .relay-app,
+html[data-theme-transition] .relay-app *,
+html[data-theme-transition] .relay-app *::before,
+html[data-theme-transition] .relay-app *::after { transition: none !important; }
+html[data-theme-transition]::view-transition { pointer-events: none; }
+html[data-theme-transition]::view-transition-group(root) { animation: none; }
+html[data-theme-transition]::view-transition-image-pair(root) { isolation: isolate; }
+html[data-theme-transition]::view-transition-old(root),
+html[data-theme-transition]::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+html[data-theme-transition]::view-transition-old(root) { z-index: 1; }
+html[data-theme-transition]::view-transition-new(root) { z-index: 2; }
+
+/* Older engines keep a short, consistent color fade without a spatial effect. */
+html[data-theme-fade] .relay-app,
+html[data-theme-fade] .relay-app *,
+html[data-theme-fade] .relay-app *::before,
+html[data-theme-fade] .relay-app *::after { transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, fill 180ms ease, stroke 180ms ease !important; }
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme-fade] .relay-app,
+  html[data-theme-fade] .relay-app *,
+  html[data-theme-fade] .relay-app *::before,
+  html[data-theme-fade] .relay-app *::after { transition: none !important; }
+}

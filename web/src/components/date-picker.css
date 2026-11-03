@@ -1,0 +1,56 @@
+.hosted-app .date-field { display: grid; align-content: start; gap: 6px; min-width: 0; color: var(--secondary); font-size: 12px; }
+.hosted-app .date-control { position: relative; min-width: 0; }
+.hosted-app .date-control input { width: 100%; min-width: 0; padding-inline: 12px 44px; border: 1px solid var(--border); caret-color: var(--accent); font-variant-numeric: tabular-nums; }
+.hosted-app .date-toggle { position: absolute; inset: 0 0 0 auto; display: grid; place-items: center; width: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--secondary); cursor: pointer; }
+.hosted-app .date-toggle .relay-icon { width: 16px; height: 16px; }
+.hosted-app .date-toggle[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .date-error { color: var(--error); line-height: 1.5; }
+.hosted-app .date-control input[aria-invalid="true"] { border-color: var(--error); }
+
+.hosted-app .date-calendar { position: fixed; z-index: 180; visibility: hidden; box-sizing: border-box; overflow: auto; overscroll-behavior: contain; width: 324px; padding: 12px; border: 1px solid var(--control-border); border-radius: 12px; background: var(--surface); color: var(--text); font-family: var(--font-body); font-size: 13px; scrollbar-width: thin; scrollbar-color: var(--control-border) var(--surface); }
+.hosted-app .date-calendar-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 8px; }
+.hosted-app .date-calendar-navigation { display: flex; flex-shrink: 0; gap: 2px; }
+.hosted-app .date-calendar button { display: inline-grid; place-items: center; min-width: 0; min-height: 40px; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; font-variant-numeric: tabular-nums; transition: background-color 160ms ease, color 160ms ease; }
+.hosted-app .date-calendar-navigation button { width: 40px; }
+.hosted-app .date-calendar-navigation .relay-icon { width: 16px; height: 16px; }
+.hosted-app .date-calendar .date-calendar-period { display: flex; flex: 1; justify-content: space-between; gap: 8px; padding: 6px 8px; font-size: 14px; font-weight: 550; text-align: left; }
+.hosted-app .date-calendar-period span { min-width: 0; text-transform: capitalize; }
+.hosted-app .date-calendar-period .relay-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.hosted-app .date-calendar-body { min-height: 278px; }
+.hosted-app .date-calendar table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.hosted-app .date-calendar :is(thead, tbody, tr, th, td) { border: 0; background: transparent; box-shadow: none; }
+.hosted-app .date-calendar th { height: 26px; padding: 0; color: var(--secondary); font-size: 11px; font-weight: 400; text-align: center; }
+.hosted-app .date-calendar td { padding: 1px 0; text-align: center; }
+.hosted-app .date-calendar td button { display: grid; width: 100%; }
+.hosted-app .date-calendar .date-period-grid { height: 278px; }
+.hosted-app .date-calendar .date-period-grid td { padding: 4px; }
+.hosted-app .date-calendar .date-period-grid button { min-height: 56px; font-size: 12px; text-transform: capitalize; }
+.hosted-app .date-calendar button[data-outside] { color: var(--muted); }
+.hosted-app .date-calendar button[aria-current="date"] { border-color: var(--accent); }
+.hosted-app .date-calendar button[data-selected] { color: var(--accent-ink); background: var(--accent); font-weight: 600; }
+.hosted-app .date-calendar-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.hosted-app .date-calendar-footer button { padding-inline: 8px; color: var(--accent); font-size: 12px; }
+.hosted-app .date-calendar button:disabled { opacity: .5; cursor: not-allowed; }
+.relay-app.hosted-app .date-calendar button:focus-visible, .relay-app.hosted-app .date-toggle:focus-visible { outline-offset: -3px; }
+.relay-app.hosted-app .date-calendar button[data-selected]:focus-visible { outline-color: var(--accent-ink); }
+@media (hover: hover) and (pointer: fine) {
+  .hosted-app .date-calendar button:not(:disabled):not([data-selected]):hover, .hosted-app .date-toggle:hover { background: var(--accent-soft); color: var(--accent); }
+  .hosted-app .date-calendar button[data-selected]:hover { background: var(--accent-hover); }
+}
+@media (max-width: 639px), (pointer: coarse) {
+  .hosted-app .date-control input { font-size: 16px; padding-right: 48px; }
+  .hosted-app .date-toggle { width: 44px; }
+  .hosted-app .date-calendar { padding: 10px; }
+  .hosted-app .date-calendar button { min-height: 44px; }
+  .hosted-app .date-calendar-navigation button { width: 44px; }
+  .hosted-app .date-calendar .date-calendar-period { font-size: 13px; padding-inline: 6px; }
+  .hosted-app .date-calendar-body { min-height: 302px; }
+  .hosted-app .date-calendar .date-period-grid { height: 302px; }
+  .hosted-app .date-calendar .date-period-grid button { min-height: 60px; }
+}
+@media (forced-colors: active) {
+  .hosted-app .date-calendar { background: Canvas; border-color: ButtonText; }
+  .hosted-app .date-calendar button[data-selected] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .relay-app.hosted-app .date-calendar button[data-selected]:focus-visible { outline-color: HighlightText; }
+  .hosted-app .date-calendar button[aria-current="date"] { border-color: ButtonText; }
+}

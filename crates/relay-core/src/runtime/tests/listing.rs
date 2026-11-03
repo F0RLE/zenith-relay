@@ -7,9 +7,55 @@ fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
         {"slug":"gpt-test", "input_modalities":["text"], "supported_reasoning_levels":[{"effort":"high","description":"high"}]}
     ]}), current_time_ms());
     let capabilities = runtime.model_capabilities("gpt-test");
-    assert_eq!(capabilities.input_modalities, ["text", "image"]);
+    assert_eq!(capabilities.input_modalities, ["text"]);
     assert!(capabilities.reasoning_effort_levels.is_empty());
-    assert_eq!(capabilities.tool_call, Some(true));
+    assert_eq!(capabilities.tool_call, None);
+}
+
+#[test]
+fn cached_native_context_windows_belong_to_the_exact_model_and_account() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    runtime.remember_codex_model_manifest(
+        "account-1",
+        serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-test",
+                    "context_window": 272_000,
+                    "max_context_window": 872_000
+                },
+                {
+                    "slug": "gpt-medium",
+                    "context_window": 128_000,
+                    "max_context_window": 256_000
+                },
+                {
+                    "slug": "gpt-short",
+                    "context_window": 272_000
+                }
+            ]
+        }),
+        current_time_ms(),
+    );
+
+    for (model, default_tokens, maximum_tokens) in [
+        ("GPT-TEST", Some(272_000), Some(872_000)),
+        ("gpt-medium", Some(128_000), Some(256_000)),
+        ("gpt-short", Some(272_000), None),
+        ("missing", None, None),
+    ] {
+        assert_eq!(
+            runtime.model_context_windows(model, ["account-1"]),
+            crate::catalog::context_policy::ModelContextWindows {
+                default_tokens,
+                maximum_tokens,
+            }
+        );
+    }
+    assert_eq!(
+        runtime.model_context_windows("gpt-test", ["missing-account"]),
+        Default::default()
+    );
 }
 #[test]
 fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
@@ -27,6 +73,8 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
             checked_at_ms: 1,
             features: BTreeMap::new(),
             reasoning_efforts: vec!["low".into(), "xhigh".into()],
+            token_limits: Default::default(),
+            service_tiers: None,
         }];
         configured
     });
@@ -53,7 +101,7 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         .unwrap();
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
-        ["low"]
+        ["low", "xhigh"]
     );
     assert_eq!(
         runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
@@ -71,13 +119,14 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
         ["low", "xhigh"]
     );
-    assert!(runtime
-        .client_reasoning_levels(&key, "missing", WireApi::Responses)
-        .is_empty());
+    assert!(
+        runtime
+            .client_reasoning_levels(&key, "missing", WireApi::Responses)
+            .is_empty()
+    );
 }
-#[test]
-fn websocket_transport_capability_is_model_scoped_and_expires() {
-    let runtime = GatewayRuntime::from_pool(
+fn websocket_capability_runtime() -> GatewayRuntime {
+    GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source",
             "provider",
@@ -87,17 +136,129 @@ fn websocket_transport_capability_is_model_scoped_and_expires() {
         GatewayRuntimeOptions::default(),
         Arc::new(|_| {}),
     )
+    .unwrap()
+}
+
+#[test]
+fn http3_respects_runtime_source_and_account_proxy_boundaries() {
+    let mut proxied = source("proxied", "synthetic", &["model-a"]);
+    proxied.proxy_url = Some("http://127.0.0.1:8080".to_string());
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("direct", "synthetic", &["model-a"])),
+            RuntimeSource::unrestricted(proxied),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
     .unwrap();
-    runtime.mark_websocket_http_only("source", "model-a", 1_000);
-    assert!(runtime.websocket_is_http_only("source", "model-a", 1_001));
-    assert!(!runtime.websocket_is_http_only("source", "model-b", 1_001));
-    assert!(!runtime.websocket_is_http_only(
-        "source",
-        "model-a",
-        1_000 + WEBSOCKET_CAPABILITY_TTL_MS
-    ));
-    runtime.mark_websocket_supported("source", "model-a");
-    assert!(!runtime.websocket_is_http_only("source", "model-a", 1_001));
+    assert!(runtime.direct_http_route("direct"));
+    assert!(!runtime.direct_http_route("proxied"));
+    assert!(!runtime.direct_http_route("missing"));
+    let account = quota_runtime(QuotaSnapshot::default());
+    assert!(account.direct_http_route("account-1"));
+    assert!(
+        !RuntimeHttpClients::new(Some(&ProxyConfig::parse("http://127.0.0.1:8080").unwrap()))
+            .unwrap()
+            .direct
+    );
+}
+
+#[test]
+fn websocket_transport_capability_is_model_scoped_and_expires() {
+    let runtime = websocket_capability_runtime();
+    let authorization = AuthorizationIncarnation::Source;
+    runtime.mark_websocket_http_only("source", "model-a", &authorization, 1_000);
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::HttpOnly
+    );
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-b", &authorization, 1_001),
+        WebsocketTransportPreference::Native
+    );
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "source",
+            "model-a",
+            &authorization,
+            1_000 + WEBSOCKET_CAPABILITY_TTL_MS
+        ),
+        WebsocketTransportPreference::Native
+    );
+    runtime.mark_websocket_supported("source", "model-a", &authorization);
+    assert_eq!(
+        runtime.websocket_transport_preference("source", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::Native
+    );
+}
+
+#[test]
+fn repeated_slow_handshakes_defer_only_the_same_route_and_authorization_briefly() {
+    let runtime = websocket_capability_runtime();
+    let authorization = AuthorizationIncarnation::Agent(1);
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 1_000);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 1_001),
+        WebsocketTransportPreference::Native,
+        "one slow handshake must not suppress the next native attempt"
+    );
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 2_000);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::SlowHandshake
+    );
+    for (scope, model, incarnation) in [
+        ("other-route", "model-a", authorization.clone()),
+        ("route", "model-b", authorization.clone()),
+        ("route", "model-a", AuthorizationIncarnation::Agent(2)),
+    ] {
+        assert_eq!(
+            runtime.websocket_transport_preference(scope, model, &incarnation, 2_001),
+            WebsocketTransportPreference::Native
+        );
+    }
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "route",
+            "model-a",
+            &authorization,
+            2_000 + WEBSOCKET_FAST_PATH_BACKOFF_MS
+        ),
+        WebsocketTransportPreference::Native,
+        "native transport is eligible again after the short backoff"
+    );
+}
+
+#[test]
+fn websocket_success_clears_slow_observations_without_weakening_confirmed_rejections() {
+    let runtime = websocket_capability_runtime();
+    let authorization = AuthorizationIncarnation::Source;
+    for at in [1_000, 2_000] {
+        runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, at);
+    }
+    runtime.mark_websocket_supported("route", "model-a", &AuthorizationIncarnation::Agent(2));
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::SlowHandshake
+    );
+    runtime.mark_websocket_supported("route", "model-a", &authorization);
+    assert_eq!(
+        runtime.websocket_transport_preference("route", "model-a", &authorization, 2_001),
+        WebsocketTransportPreference::Native
+    );
+    runtime.mark_websocket_http_only("route", "model-a", &authorization, 3_000);
+    runtime.observe_slow_websocket_handshake("route", "model-a", &authorization, 4_000);
+    assert_eq!(
+        runtime.websocket_transport_preference(
+            "route",
+            "model-a",
+            &authorization,
+            4_000 + WEBSOCKET_FAST_PATH_BACKOFF_MS
+        ),
+        WebsocketTransportPreference::HttpOnly
+    );
 }
 #[test]
 fn messages_source_models_are_automatically_available_to_responses_clients() {
@@ -126,101 +287,20 @@ fn messages_source_models_are_automatically_available_to_responses_clients() {
         .into_iter()
         .map(|route| route.candidate_id)
         .collect::<Vec<_>>();
-    assert!(route_ids.iter().any(|id| id == "anthropic-source"));
-    assert!(route_ids
-        .iter()
-        .any(|id| id == "anthropic-source::responses_to_messages"));
-}
-#[test]
-fn automatic_responses_lite_requires_every_configured_route_to_confirm_support() {
-    let account_only = quota_runtime(QuotaSnapshot::default());
-    let account_only_key = account_only
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    assert!(
-        !account_only.codex_model_responses_routes_all_support_lite(&account_only_key, "gpt-test")
+    assert_eq!(route_ids, vec!["anthropic-source"]);
+    let scheduler = runtime.lock_scheduler();
+    let candidate = scheduler
+        .candidate("anthropic-source")
+        .expect("source candidate");
+    assert_eq!(
+        candidate.model_protocols["claude-test"],
+        BTreeSet::from([
+            WireApi::Responses,
+            WireApi::ChatCompletions,
+            WireApi::Messages,
+            WireApi::Gemini,
+        ])
     );
-    account_only.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
-    assert!(
-        account_only.codex_model_responses_routes_all_support_lite(&account_only_key, "gpt-test")
-    );
-
-    let first = quota_account(QuotaSnapshot::default());
-    let mut second = first.clone();
-    second.id = "account-2".to_string();
-    second.chatgpt_account_id = "account-2".to_string();
-    let all_accounts = GatewayRuntime::from_mixed_pool(
-        Vec::new(),
-        vec![first, second],
-        vec![RuntimeMixedLocalKey {
-            key: key("key-1", "local-secret"),
-            enabled: true,
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
-        }],
-        RuntimeChatGptAuth {
-            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
-            refresh_adapter: Arc::new(NeverRefresh),
-            persistence_adapter: Arc::new(NoopPersistence),
-            refresh_skew_ms: 60_000,
-            agent_identities: HashMap::new(),
-        },
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let all_accounts_key = all_accounts
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    all_accounts.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
-    assert!(
-        !all_accounts.codex_model_responses_routes_all_support_lite(&all_accounts_key, "gpt-test")
-    );
-    all_accounts.set_codex_model_uses_responses_lite("account-2", "gpt-test", true);
-    assert!(
-        all_accounts.codex_model_responses_routes_all_support_lite(&all_accounts_key, "gpt-test")
-    );
-    assert!(all_accounts
-        .codex_model_account_responses_routes_all_support_lite(&all_accounts_key, "gpt-test"));
-
-    let mixed = GatewayRuntime::from_mixed_pool(
-        vec![RuntimeSource::unrestricted(source(
-            "api-source",
-            "upstream-secret",
-            &["gpt-test"],
-        ))],
-        vec![quota_account(QuotaSnapshot::default())],
-        vec![RuntimeMixedLocalKey {
-            key: key("key-1", "local-secret"),
-            enabled: true,
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
-        }],
-        RuntimeChatGptAuth {
-            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
-            refresh_adapter: Arc::new(NeverRefresh),
-            persistence_adapter: Arc::new(NoopPersistence),
-            refresh_skew_ms: 60_000,
-            agent_identities: HashMap::new(),
-        },
-        GatewayRuntimeOptions::default(),
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-    let mixed_key = mixed
-        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
-        .unwrap();
-    mixed.set_codex_model_uses_responses_lite("account-1", "gpt-test", true);
-    assert!(!mixed.codex_model_responses_routes_all_support_lite(&mixed_key, "gpt-test"));
-    assert!(mixed.codex_model_account_responses_routes_all_support_lite(&mixed_key, "gpt-test"));
 }
 #[tokio::test]
 async fn source_capability_failure_does_not_permanently_hide_a_declared_model() {
@@ -239,7 +319,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
     let now_ms = current_time_ms();
-    runtime.apply_usage_event(
+    let _ = runtime.apply_usage_event(
         &UsageEvent {
             request_id: "request".into(),
             attempt: 1,
@@ -255,6 +335,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             requested_reasoning_effort: None,
             effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
+            transport: crate::UsageTransport::Http,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
             success: false,
@@ -276,6 +357,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             total_tokens: None,
             upstream_error: None,
             quota_snapshot: None,
+            image_usage: None,
         },
         now_ms,
     );
@@ -335,24 +417,40 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
             .as_deref(),
         Some("gpt-5.4-mini")
     );
-    assert!(!connector
-        .protocol_bindings()
-        .iter()
-        .any(|binding| binding.wire_api == WireApi::ChatCompletions));
+    assert!(
+        !connector
+            .protocol_bindings()
+            .iter()
+            .any(|binding| binding.wire_api == WireApi::ChatCompletions)
+    );
 }
 #[test]
-fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health() {
+fn reference_speed_choices_survive_temporary_route_health_changes() {
     let model = "gpt-future-synthetic";
     let runtime = GatewayRuntime::from_pool(
         vec![
             RuntimeSource::unrestricted(source("source-1", "synthetic-one", &[model])),
             RuntimeSource::unrestricted(source("source-2", "synthetic-two", &[model])),
-        ],
+        ]
+        .into_iter()
+        .map(|mut source| {
+            source.protocol_config.endpoint_hint = Some(WireApi::Responses);
+            source
+        })
+        .collect(),
         vec![RuntimeLocalKey::unrestricted(key(
             "key-1",
             "synthetic-pool",
         ))],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(crate::model_metadata::ModelMetadataCatalogHandle::new(
+                crate::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                    r#"{"gpt-future-synthetic":{"service_tiers":["priority","ultrafast"]}}"#,
+                )
+                .unwrap(),
+            )),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap();
@@ -381,81 +479,82 @@ fn speed_choices_and_preferences_are_independent_of_source_metadata_and_health()
     );
 }
 #[test]
-fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
-    let models = normalized_set(
-        [
-            "gpt-5.6-terra".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "gpt-5.4-mini".to_string(),
-        ]
-        .iter()
-        .collect::<Vec<_>>(),
-    );
-    // Automatic selection uses the immutable LiteLLM snapshot when one is
-    // available.  Keep the fixture explicit so this test does not depend on
-    // the shared LiteLLM fixture catalog.
-    let catalog = crate::pricing::PricingCatalog::from_litellm_json(
-        r#"{
-            "gpt-5.6-terra": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000002",
-                "output_cost_per_token": "0.000012"
-            },
-            "gpt-5.6-sol": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000004",
-                "output_cost_per_token": "0.000020"
-            },
-            "gpt-5.4-mini": {
-                "litellm_provider": "openai",
-                "input_cost_per_token": "0.000001",
-                "output_cost_per_token": "0.000006"
-            }
-        }"#,
+fn standard_tier_shortcut_matches_route_projection_after_catalog_and_membership_changes() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let model = "gpt-future-synthetic";
+    let catalog = ModelMetadataCatalogHandle::new(ModelMetadataCatalog::empty());
+    let runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "synthetic",
+            &[model],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-pool",
+        ))],
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(catalog.clone()),
+            ..GatewayRuntimeOptions::default()
+        },
+        Arc::new(|_| {}),
     )
     .unwrap();
+    for payload in [
+        r#"{"gpt-future-synthetic":{"reasoning":false}}"#,
+        r#"{"gpt-future-synthetic":{"service_tiers":["priority"]}}"#,
+        r#"{"gpt-future-synthetic":{"service_tiers":["priority","ultrafast"]}}"#,
+        r#"{"gpt-future-synthetic":{"reasoning":false}}"#,
+    ] {
+        catalog.replace(ModelMetadataCatalog::from_models_dev_json(payload).unwrap());
+        for lookup in [model, "MODEL-NOT-CONFIGURED"] {
+            let scope = CandidateScope::default();
+            let ids = runtime
+                .lock_scheduler()
+                .candidates()
+                .filter(|candidate| candidate.is_configured(lookup, &WireApi::ALL_NATIVE, &scope))
+                .map(|candidate| candidate.id.clone())
+                .collect::<Vec<_>>();
+            let routes = ids
+                .iter()
+                .filter_map(|id| {
+                    runtime.executor_route(id, lookup, &scope, &WireApi::ALL_NATIVE, false)
+                })
+                .collect::<Vec<_>>();
+            let expected = crate::catalog::model_service_tiers(
+                lookup,
+                &runtime.model_capabilities(lookup).service_tiers,
+            )
+            .into_iter()
+            .filter(|tier| {
+                *tier == DefaultServiceTier::Standard
+                    || routes
+                        .iter()
+                        .any(|route| GatewayRuntime::route_supports_service_tier(route, *tier))
+            })
+            .collect::<Vec<_>>();
+            assert_eq!(runtime.model_supported_service_tiers(lookup), expected);
+        }
+    }
+    runtime.remove_candidate("source-1");
     assert_eq!(
-        super::images::cheapest_image_main_model_with_catalog(&models, Some(&catalog)).as_deref(),
-        Some("gpt-5.4-mini")
+        runtime.model_supported_service_tiers(model),
+        [DefaultServiceTier::Standard]
     );
-    // An empty/offline snapshot must still allow a deterministic runtime
-    // build; its choice is a stable fallback, not an implicit price claim.
-    let empty = crate::pricing::PricingCatalog::empty();
-    assert_eq!(
-        super::images::cheapest_image_main_model_with_catalog(&models, Some(&empty)).as_deref(),
-        Some("gpt-5.6-sol")
-    );
-    let terra = normalized_set(["gpt-5.6-terra".to_string()].iter());
-    assert_eq!(
-        cheapest_image_main_model(&terra).as_deref(),
-        Some("gpt-5.6-terra")
-    );
-    let image = normalized_set([IMAGE_API_MODEL.to_string()].iter());
-    assert!(cheapest_image_main_model(&image).is_none());
 }
+
 #[test]
-fn explicit_image_base_model_is_used_only_when_available() {
-    let models = normalized_set(
-        ["gpt-5.4-mini".to_string(), "gpt-5.6-sol".to_string()]
-            .iter()
-            .collect::<Vec<_>>(),
-    );
-    assert_eq!(
-        select_image_main_model(&models, Some("gpt-5.6-sol")).as_deref(),
-        Some("gpt-5.6-sol")
-    );
-    assert_eq!(select_image_main_model(&models, Some("future-model")), None);
-    let future = normalized_set(["gpt-future".to_string()].iter());
-    assert!(cheapest_image_main_model(&future).is_none());
-    assert_eq!(
-        select_image_main_model(&future, Some("gpt-future")).as_deref(),
-        Some("gpt-future")
-    );
-    let legacy = normalized_set(["gpt-4.1-mini".to_string()].iter());
-    assert!(cheapest_image_main_model(&legacy).is_none());
+fn legacy_image_base_model_configuration_remains_readable() {
     assert_eq!(
         normalize_image_base_model(Some(" auto ".into())).unwrap(),
         None
+    );
+    assert_eq!(
+        normalize_image_base_model(Some("gpt-legacy".into()))
+            .unwrap()
+            .as_deref(),
+        Some("gpt-legacy")
     );
 }
 #[test]
@@ -488,9 +587,11 @@ fn key_scope_and_prefix_filter_visible_models_without_scope_escalation() {
         runtime.visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms()),
         vec!["team/gpt-a"]
     );
-    assert!(runtime
-        .visible_models_for_secret("wrong", &[WireApi::Responses], current_time_ms())
-        .is_empty());
+    assert!(
+        runtime
+            .visible_models_for_secret("wrong", &[WireApi::Responses], current_time_ms())
+            .is_empty()
+    );
     assert_eq!(
         runtime
             .resolve_model(&authenticated, "TEAM/gpt-a")
@@ -573,23 +674,27 @@ fn configured_model_resolution_accepts_temporary_health_outage_but_not_unknown_m
         .unwrap();
     assert!(runtime.set_candidate_health("source", CandidateHealth::Unhealthy));
 
-    assert!(runtime
-        .resolve_visible_model(
-            &authenticated,
-            "gpt-test",
-            &[WireApi::Responses],
-            current_time_ms(),
-        )
-        .is_none());
+    assert!(
+        runtime
+            .resolve_visible_model(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                current_time_ms(),
+            )
+            .is_none()
+    );
     assert_eq!(
         runtime
             .resolve_configured_model(&authenticated, "gpt-test", &[WireApi::Responses])
             .as_deref(),
         Some("gpt-test")
     );
-    assert!(runtime
-        .resolve_configured_model(&authenticated, "unknown", &[WireApi::Responses])
-        .is_none());
+    assert!(
+        runtime
+            .resolve_configured_model(&authenticated, "unknown", &[WireApi::Responses])
+            .is_none()
+    );
 }
 #[test]
 fn global_hidden_models_apply_to_listing_and_requests() {

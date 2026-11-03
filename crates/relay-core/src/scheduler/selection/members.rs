@@ -64,6 +64,7 @@ impl PoolScheduler {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_native_route(&mut self, candidate_id: &str, native: bool) {
         if native {
             self.native_routes.insert(candidate_id.to_string());

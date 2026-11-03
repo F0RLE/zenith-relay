@@ -5,16 +5,8 @@ use zenith_relay_core::automations::{WakeHistory, WakeTask};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuntimeTarget {
-    pub kind: &'static str,
-    pub connected: bool,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LocalPoolSnapshot {
     pub schema_version: u32,
-    pub runtime_target: RuntimeTarget,
     pub gateway: GatewaySettings,
     pub platform: &'static str,
     pub capabilities: PlatformCapabilities,

@@ -40,6 +40,8 @@ pub(in crate::local_pool::accounts) fn credential_item_error(
         }
         CredentialErrorCode::SecretMissing => error_codes::CREDENTIALS_MISSING,
         CredentialErrorCode::SecretStoreUnavailable => error_codes::CREDENTIAL_STORE_UNAVAILABLE,
+        CredentialErrorCode::RotationOutcomeUnknown
+        | CredentialErrorCode::RotationCheckpointInvalid => error_codes::RECOVERY_REQUIRED,
     };
     ImportItemError::new(code, &error.message)
 }

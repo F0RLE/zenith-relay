@@ -35,13 +35,12 @@ async fn apply_local_model_reasoning(
         return Ok(());
     }
     state.store()?.replace_gateway(gateway.clone())?;
-    if let Some(runtime) = state.gateway.runtime().await {
-        if let Err(error) =
+    if let Some(runtime) = state.gateway.runtime().await
+        && let Err(error) =
             runtime.set_model_reasoning_allowed_levels(gateway.model_reasoning_allowed_levels)
-        {
-            state.store()?.replace_gateway(old_gateway)?;
-            return Err(LocalPoolError::invalid_state(error).into());
-        }
+    {
+        state.store()?.replace_gateway(old_gateway)?;
+        return Err(LocalPoolError::invalid_state(error).into());
     }
     Ok(())
 }

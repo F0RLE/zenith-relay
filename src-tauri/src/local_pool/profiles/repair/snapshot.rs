@@ -11,8 +11,16 @@ pub(super) fn preview_from_snapshot(
         target_provider: snapshot.target_provider.clone(),
         profile_count: snapshot.profile_roots.len(),
         rollout_file_count: snapshot.rollout_files.len(),
-        rollout_record_count: snapshot.rollout_files.iter().map(|item| item.records).sum(),
-        sqlite_row_count: snapshot.databases.iter().map(|item| item.rows).sum(),
+        rollout_record_count: snapshot
+            .rollout_files
+            .iter()
+            .map(|rollout_file| rollout_file.records)
+            .sum(),
+        sqlite_row_count: snapshot
+            .databases
+            .iter()
+            .map(|database_snapshot| database_snapshot.rows)
+            .sum(),
         codex_running,
         expires_at_ms: snapshot.expires_at_ms,
     }
@@ -25,6 +33,9 @@ pub(super) fn save_snapshot(state_root: &Path, snapshot: &RepairSnapshot) -> Res
     let path = snapshot_path(state_root, &snapshot.session_id)?;
     let bytes = serde_json::to_vec(snapshot)
         .map_err(|_| "repair preview serialization failed".to_string())?;
+    if bytes.len() as u64 > MAX_REPAIR_MANIFEST_BYTES {
+        return Err("repair preview is too large".to_string());
+    }
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -35,10 +46,17 @@ pub(super) fn save_snapshot(state_root: &Path, snapshot: &RepairSnapshot) -> Res
 }
 
 pub(super) fn load_snapshot(state_root: &Path, session_id: &str) -> Result<RepairSnapshot, String> {
-    let bytes = fs::read(snapshot_path(state_root, session_id)?).map_err(io_error)?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        return Err("repair preview is too large".to_string());
-    }
+    let bytes = crate::files::read_regular_file_bounded(
+        &snapshot_path(state_root, session_id)?,
+        MAX_REPAIR_MANIFEST_BYTES,
+    )
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            "repair preview is unsafe or too large".to_string()
+        } else {
+            io_error(error)
+        }
+    })?;
     serde_json::from_slice(&bytes).map_err(|_| "repair preview is invalid".to_string())
 }
 
@@ -58,9 +76,19 @@ pub(super) fn validate_snapshot_paths(snapshot: &RepairSnapshot) -> Result<(), S
     for path in snapshot
         .rollout_files
         .iter()
-        .map(|item| &item.path)
-        .chain(snapshot.history_rollouts.iter().map(|item| &item.path))
-        .chain(snapshot.databases.iter().map(|item| &item.path))
+        .map(|rollout_file| &rollout_file.path)
+        .chain(
+            snapshot
+                .history_rollouts
+                .iter()
+                .map(|history_rollout| &history_rollout.path),
+        )
+        .chain(
+            snapshot
+                .databases
+                .iter()
+                .map(|database_snapshot| &database_snapshot.path),
+        )
     {
         let canonical = portable_canonicalize(Path::new(path))?;
         if !roots.iter().any(|root| canonical.starts_with(root)) {

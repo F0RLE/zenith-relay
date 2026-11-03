@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { CandidateRuntimeSnapshot, RuntimeSnapshot } from "../src/features/relay/api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeSnapshot } from "../src/features/relay/api/types";
 import type { PoolMember } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../src/features/relay/routingOrder";
+import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../src/features/relay/routingOrder";
 import {
   orderedPoolMembers,
   poolActivityState,
   poolMemberRuntimeStates,
   poolMembersFromRuntime,
-  poolMemberSourceIds,
   poolMemberStatusCounts,
+  poolMemberDisplayStatus,
   poolProviderCreditsSummary,
   poolRoutingAvailability,
 } from "../src/features/relay/pages/pool/poolMembersModel";
@@ -38,6 +38,22 @@ const candidate = (candidateId: string, overrides: Record<string, unknown> = {})
   ...overrides,
 } as CandidateRuntimeSnapshot);
 
+function linkedQuotaPool(donorKind: "codex" | "excel_bps" = "excel_bps") {
+  const now = Date.now();
+  const window = (remaining: number) => ({ kind: "primary", availableBasisPoints: remaining,
+    observedAtMs: now - 1_000, resetAtMs: now + 60_000, windowMinutes: 300 });
+  const account = (id: string, overrides: Record<string, unknown> = {}) => member("account", id, {
+    oauthClientKind: "excel_bps", subscription: {}, refreshState: { quota: "fresh" }, ...overrides,
+  }) as Extract<PoolMember, { kind: "account" }>;
+  const selected = account("siwc", { oauthClientKind: "siwc", routeGroupId: "linked",
+    quota: { primary: null, secondary: null, supplemental: [], limitReached: false } });
+  const donor = account("reference", { oauthClientKind: donorKind, routeGroupId: "linked", routeInactive: true,
+    inPool: false, quota: { primary: window(5_600), secondary: { ...window(6_500), kind: "secondary" } } });
+  const members = [3_400, 2_800, 900].map((remaining) => account(`quota-${remaining}`, { quota: { primary: window(remaining) } }));
+  members.push(selected);
+  return { selected, donor, members, accounts: [...members, donor], now };
+}
+
 describe("pool members model", () => {
   test("uses the backend preview even when the selected member is busy or not first", () => {
     const members = [member("account", "account"), member("source", "source-a")];
@@ -56,6 +72,24 @@ describe("pool members model", () => {
       const order = [candidate("account", { nextForNewRequest: preview }), candidate("source-a")];
       expect(poolActivityState(members, poolMemberRuntimeStates(members, order), order).nextMember).toBeNull();
     }
+  });
+
+  test("next-member projection stops at the first eligible preview without reading later routes", () => {
+    const members = [
+      member("account", "blocked", { enabled: false, models: ["gpt"] }),
+      member("account", "first", { models: ["gpt"] }),
+      member("account", "later", { models: ["gpt"] }),
+    ];
+    const order = ["removed", "blocked", "first", "later"].map((id) => candidate(id, { nextForNewRequest: true }));
+    const byMember = poolMemberRuntimeStates(members, order);
+    let laterReads = 0;
+    Object.defineProperty(order[3]!, "available", {
+      get() { laterReads += 1; return true; },
+    });
+    const state = poolActivityState(members, byMember, order, undefined, ["gpt"]);
+    expect(state.nextMember).toBe(members[1]!);
+    expect(laterReads).toBe(0);
+    expect(order.map((item) => item.candidateId)).toEqual(["removed", "blocked", "first", "later"]);
   });
 
   test("invalidates an old preview after activity and accepts a newer backend snapshot", () => {
@@ -143,7 +177,7 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, []).map((item) => item.id)).toEqual(["ready", "source-ready", "wait", "error", "disabled"]);
   });
 
-  test("projects only pooled accounts and sources and keeps source ids stable", () => {
+  test("projects only pooled accounts and sources", () => {
     const runtime = {
       accounts: [{ id: "account-1", inPool: true }, { id: "account-2", inPool: false }],
       sources: [{ id: "source-2", inPool: true }, { id: "source-1", inPool: true }],
@@ -154,7 +188,6 @@ describe("pool members model", () => {
       "source:source-2",
       "source:source-1",
     ]);
-    expect(poolMemberSourceIds(members)).toBe("source-1\nsource-2");
   });
 
   test("maps protocol candidates back to source cards and preserves backend order", () => {
@@ -165,7 +198,7 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, order).map((item) => item.id)).toEqual(["account-1", "source-1"]);
   });
 
-  test("keeps the saved member order while a live request bubbles another card", () => {
+  test("keeps active work ahead of the scheduler's next member and saved order", () => {
     const members = [
       member("account", "first", { label: "First" }),
       member("account", "second", { label: "Second" }),
@@ -178,36 +211,264 @@ describe("pool members model", () => {
     expect(orderedPoolMembers(members, live, [
       { id: "first" },
       { id: "second" },
-    ]).map((item) => item.id)).toEqual(["first", "second"]);
+    ]).map((item) => item.id)).toEqual(["second", "first"]);
+    const busyOnly = live.map((item) => ({ ...item, nextForNewRequest: false }));
+    expect(orderedPoolMembers(members, busyOnly, members, "round_robin").map((item) => item.id)).toEqual(["second", "first"]);
   });
 
-  test("automatic mode places the largest remaining quota on the left and keeps an active card there", () => {
+  test("automatic cards keep active work first, then rank fresh quota ahead of manual order", () => {
     const window = (availableBasisPoints: number) => ({ availableBasisPoints });
     const members = [
       member("source", "api", { name: "Zenith API" }),
-      member("account", "empty", { label: "Empty", quota: { primary: window(0), providerCreditsAvailable: true } }),
-      member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) } }),
-      member("account", "leader", { label: "Leader", quota: { primary: window(8_300) } }),
+      member("account", "empty", {
+        label: "Empty",
+        quota: { primary: window(0), providerCreditsAvailable: true, availableCreditsMicroUnits: 40_000_000 },
+        refreshState: { models: "stale", quota: "fresh" },
+      }),
+      member("account", "empty-lower", {
+        label: "Empty lower",
+        quota: { primary: window(0), providerCreditsAvailable: true, availableCreditsMicroUnits: 20_000_000 },
+        refreshState: { models: "stale", quota: "fresh" },
+      }),
+      member("account", "lower", { label: "Lower", quota: { primary: window(7_800), secondary: window(9_000) }, refreshState: { quota: "fresh" } }),
+      member("account", "leader", { label: "Leader", quota: { primary: window(8_300) }, refreshState: { quota: "fresh" } }),
     ];
     const live = [
-      candidate("lower", { activeRequestCount: 1, nextForNewRequest: true }),
+      candidate("lower", { activeRequestCount: 1 }),
       candidate("leader"),
       candidate("empty"),
       candidate("api"),
     ];
-    const saved = [{ id: "api" }, { id: "empty" }, { id: "lower" }, { id: "leader" }];
+    const saved = [{ id: "api" }, { id: "empty" }, { id: "empty-lower" }, { id: "lower" }, { id: "leader" }];
     expect(orderedPoolMembers(members, live, saved, "automatic").map((item) => item.id)).toEqual([
-      "leader",
       "lower",
+      "leader",
       "empty",
+      "empty-lower",
       "api",
     ]);
     expect(orderedPoolMembers(members, live, saved, "in_order").map((item) => item.id)).toEqual([
+      "lower",
       "api",
       "empty",
-      "lower",
+      "empty-lower",
       "leader",
     ]);
+  });
+
+  test("all modes show active work before the scheduler's fallback preference", () => {
+    const members = ["a", "b", "c"].map((id) => member("account", id, {
+      label: id, quota: { primary: { availableBasisPoints: id === "a" ? 10_000 : 1_000 } }, refreshState: { quota: "fresh" },
+    }));
+    const order = [candidate("a", { selectionRank: 2, activeRequestCount: 1 }),
+      candidate("b", { selectionRank: 0, nextForNewRequest: true }), candidate("c", { selectionRank: 1 })];
+    for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, order, members, mode).map((item) => item.id)).toEqual(["a", "b", "c"]);
+    }
+    expect(members.map((item) => item.id)).toEqual(["a", "b", "c"]);
+  });
+
+  test("live unavailable members cannot outrank ready members, even with a stale preview", () => {
+    const members = [
+      member("account", "disabled", { enabled: false, lastErrorCode: "invalid_grant" }),
+      member("account", "draining", { draining: true }),
+      member("account", "error", { operationalStatus: "unavailable" }),
+      member("account", "wait-late"), member("account", "wait-soon"),
+      member("account", "ready"), member("account", "no-secret", { secretAvailable: false }),
+    ];
+    const order = members.map((item) => candidate(item.id, item.id.startsWith("wait")
+      ? { available: false, quotaWait: true, nextRetryAtMs: item.id === "wait-soon" ? 100 : 200, selectionRank: 0 }
+      : { available: true, selectionRank: item.id === "ready" ? 1 : 0 }));
+    const states = poolMemberRuntimeStates(members, order);
+    for (const mode of ["automatic", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, order, members, mode, states).map((item) => item.id))
+        .toEqual(["ready", "wait-soon", "wait-late", "error", "no-secret", "disabled", "draining"]);
+    }
+    expect(poolMemberDisplayStatus(members[0]!, states.get("disabled"))).toBe("disabled");
+    expect(poolMemberStatusCounts(members, states)).toMatchObject({ rotation: 1, quotaWait: 2, disabled: 2 });
+  });
+
+  test("source aliases preserve preference and only wait when no binding is ready", () => {
+    const members = [member("source", "source"), member("account", "account")];
+    const order = [candidate("source::messages", { available: false, quotaWait: true }),
+      candidate("source::responses", { selectionRank: 0 }), candidate("account", { selectionRank: 1 })];
+    const states = poolMemberRuntimeStates(members, order);
+    expect(states.get("source")).toMatchObject({ available: true, quotaWait: false, selectionRank: 0 });
+    expect(orderedPoolMembers(members, order, members, "automatic", states).map((item) => item.id)).toEqual(["source", "account"]);
+    expect(sameRuntimeOrder(order, order.map((item) => ({ ...item, selectionRank: 2 })))).toBe(false);
+    expect(sameRuntimeOrder(order, order.map((item) => ({ ...item, quotaWait: false })))).toBe(false);
+  });
+
+  test("distinguishes cooldown, capacity, recovery and draining from terminal errors", () => {
+    const ready = member("account", "account");
+    const cooling = candidate("account", { available: false, nextRetryAtMs: 200 });
+    expect(poolMemberDisplayStatus(ready, cooling)).toBe("cooldown");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { available: false, capacityWait: true, activeRequestCount: 1 }))).toBe("busy");
+    expect(poolMemberDisplayStatus(member("account", "account", { operationalStatus: "unavailable" }),
+      candidate("account", { available: false, activeRequestCount: 1 }))).toBe("unavailable");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { halfOpen: true }))).toBe("rotation");
+    expect(poolMemberDisplayStatus({ ...ready, draining: true }, cooling)).toBe("draining");
+    expect(poolMemberDisplayStatus(member("account", "account", { authState: { state: "requires_reauth" } }), cooling)).toBe("unavailable");
+    expect(poolMemberDisplayStatus(member("account", "account", { routingBlockReason: "subscription_expired" }), cooling)).toBe("unavailable");
+    expect(poolMemberDisplayStatus(ready, candidate("account", { available: false }))).toBe("rotation");
+    expect(poolMemberDisplayStatus(ready, { ...cooling, available: true })).toBe("rotation");
+    expect(poolMemberStatusCounts([ready], new Map([[ready.id, cooling]])))
+      .toEqual({ rotation: 0, quotaWait: 0, waiting: 1, errors: 0, disabled: 0 });
+    const source = member("source", "source", { operationalStatus: "unavailable" });
+    expect(poolMemberStatusCounts([source], new Map([[source.id, candidate("source", { available: false, capacityWait: true })]])))
+      .toEqual({ rotation: 0, quotaWait: 0, waiting: 1, errors: 0, disabled: 0 });
+  });
+
+  test("new activity invalidates the whole preference, not just its first member", () => {
+    const members = [member("account", "a"), member("account", "b")];
+    const order = [candidate("a", { activityRevision: 2, selectionRank: 1 }), candidate("b", { activityRevision: 2, selectionRank: 0, nextForNewRequest: true })];
+    const activity = { revision: 3, lastCandidateId: "b", candidates: {
+      b: { candidateId: "b", revision: 3, inFlight: 1, activeRequestCount: 1, activeModels: [] },
+    } };
+    const states = poolMemberRuntimeStates(members, order, activity);
+    expect(states.get("a")?.selectionRank).toBeNull();
+    expect(states.get("b")?.selectionRank).toBeNull();
+    expect(orderedPoolMembers(members, order, members, "round_robin", states).map((item) => item.id)).toEqual(["b", "a"]);
+  });
+
+  test("automatic cards do not rank stale, undated or explicitly exhausted quota as fresh capacity", () => {
+    const fresh = member("account", "fresh", {
+      quota: { primary: { availableBasisPoints: 1_000 } }, refreshState: { quota: "fresh" },
+    });
+    for (const overrides of [
+      { refreshState: { quota: "stale" } },
+      { refreshState: undefined },
+      { quota: { primary: { availableBasisPoints: 10_000 }, limitReached: true } },
+      { quota: { primary: { availableBasisPoints: 20_000 } } },
+    ]) {
+      const outdated = member("account", "outdated", {
+        quota: { primary: { availableBasisPoints: 10_000 } }, refreshState: { quota: "fresh" }, ...overrides,
+      });
+      expect(orderedPoolMembers([outdated, fresh], [], [outdated, fresh], "automatic").map((item) => item.id))
+        .toEqual(["fresh", "outdated"]);
+    }
+  });
+
+  test("automatic fallback ranks a hidden linked quota source without changing account data", () => {
+    for (const kind of ["codex", "excel_bps"] as const) {
+      const { members, accounts } = linkedQuotaPool(kind);
+      const before = JSON.stringify(accounts);
+      const visible = poolMembersFromRuntime({ accounts, sources: [] } as unknown as RuntimeSnapshot);
+      for (const order of [[], members.map((item) => candidate(item.id))]) {
+        expect(orderedPoolMembers(visible, order, members, "automatic", undefined, accounts).map((item) => item.id))
+          .toEqual(["siwc", "quota-3400", "quota-2800", "quota-900"]);
+      }
+      expect(JSON.stringify(accounts)).toBe(before);
+      expect(visible).toHaveLength(4);
+    }
+  });
+
+  test("quota ordering is independent of the selected account client", () => {
+    for (const kind of ["codex", "excel_bps", "siwc"] as const) {
+      const { selected, donor, members, accounts } = linkedQuotaPool();
+      selected.oauthClientKind = kind;
+      if (kind !== "siwc") selected.quota = donor.quota;
+      expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts)[0]?.id).toBe("siwc");
+    }
+  });
+
+  test("linked ranking expires on the display clock without replacing the inventory", () => {
+    const { members, accounts, now } = linkedQuotaPool();
+    expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts, now)[0]?.id).toBe("siwc");
+    expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts, now + 60_000).at(-1)?.id).toBe("siwc");
+  });
+
+  test("a reference never transfers provider credits or hides own supplemental evidence", () => {
+    const { selected, donor, members, accounts } = linkedQuotaPool();
+    selected.quota.supplemental = [{ id: "fast", label: "Fast", serviceTier: "fast", window: donor.quota.primary! }];
+    expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts).at(-1)?.id).toBe("siwc");
+    selected.quota.supplemental = [];
+    donor.quota = { ...donor.quota, primary: null, secondary: null, providerCreditsAvailable: true, availableCreditsMicroUnits: 1_000_000_000 };
+    const ownCredits = member("account", "own-credits", { refreshState: { quota: "fresh" }, quota: { providerCreditsAvailable: true, availableCreditsMicroUnits: 1_000_000 } });
+    expect(orderedPoolMembers([selected, ownCredits], [], [selected, ownCredits], "automatic", undefined, accounts)[0]?.id).toBe("own-credits");
+  });
+
+  test("linked fallback rejects stale, invalid and unavailable reference evidence", () => {
+    const invalid: Record<string, (donor: AccountSummary, now: number) => void> = {
+      stale: (a, now) => { a.quota.primary!.observedAtMs = now - 20 * 60_000; },
+      future: (a, now) => { a.quota.primary!.observedAtMs = now + 60_000; },
+      undated: (a) => { a.quota.primary!.observedAtMs = 0; },
+      reset: (a, now) => { a.quota.primary!.resetAtMs = now - 1; },
+      subscription: (a, now) => { a.subscription.activeUntilMs = now - 1; },
+      missingCounter: (a) => { a.quota.primary!.availableBasisPoints = null; },
+      invalidCounter: (a) => { a.quota.primary!.availableBasisPoints = 10_001; },
+      exhausted: (a) => { a.quota.secondary!.availableBasisPoints = 0; },
+      limit: (a) => { a.quota.limitReached = true; },
+      failed: (a) => { a.quota.error = { code: "quota_failed", occurredAtMs: Date.now() }; },
+      unavailable: (a) => { a.secretAvailable = false; },
+      disabled: (a) => { a.enabled = false; },
+      draining: (a) => { a.draining = true; },
+      reauth: (a) => { a.authState = { state: "requires_reauth", reason: "invalidated_refresh_token" }; },
+      recovery: (a) => { a.recoveryRequired = true; },
+      unlinked: (a) => { a.routeGroupId = "unrelated"; },
+    };
+    for (const [reason, invalidate] of Object.entries(invalid)) {
+      const { donor, members, accounts, now } = linkedQuotaPool();
+      invalidate(donor, now);
+      expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts).at(-1)?.id, reason).toBe("siwc");
+    }
+  });
+
+  test("runtime resources and selection rank remain authoritative over linked fallback", () => {
+    const { members, accounts } = linkedQuotaPool();
+    const headroom = { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: false };
+    expect(orderedPoolMembers(members, [candidate("siwc", { resourceHeadroom: headroom })], members, "automatic", undefined, accounts).at(-1)?.id)
+      .toBe("siwc");
+    expect(orderedPoolMembers(members, [candidate("quota-900", { selectionRank: 0 })], members, "automatic", undefined, accounts)[0]?.id)
+      .toBe("quota-900");
+  });
+
+  test("own quota and explicit routing modes are preserved instead of borrowing a larger reference", () => {
+    for (const remaining of [0, 800]) {
+      const { selected, donor, members, accounts } = linkedQuotaPool();
+      selected.quota = { ...donor.quota, primary: { ...donor.quota.primary!, availableBasisPoints: remaining } };
+      expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts).at(-1)?.id).toBe("siwc");
+    }
+    const { members, accounts } = linkedQuotaPool();
+    for (const mode of ["in_order", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, [], members, mode, undefined, accounts).map((item) => item.id))
+        .toEqual(members.map((item) => item.id));
+    }
+  });
+
+  test("scheduler resource evidence overrides raw quotas and monitoring freshness", () => {
+    const members = [
+      member("account", "stale", { quota: { primary: { availableBasisPoints: 10_000 } }, refreshState: { quota: "fresh" } }),
+      member("account", "fresh", { quota: { primary: { availableBasisPoints: 1_000 } }, refreshState: { quota: "stale" } }),
+    ];
+    const order = [
+      candidate("stale", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+      candidate("fresh", { resourceHeadroom: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+    ];
+    expect(orderedPoolMembers(members, order, members, "automatic").map((item) => item.id)).toEqual(["fresh", "stale"]);
+  });
+
+  test("credit ranking follows the independent scheduler ledger evidence", () => {
+    const members = [
+      member("account", "stale", { quota: { availableCreditsMicroUnits: 1_000_000_000, providerCreditsAvailable: true }, refreshState: { quota: "fresh" } }),
+      member("account", "fresh", { quota: { availableCreditsMicroUnits: 1_000_000 }, refreshState: { quota: "stale" } }),
+    ];
+    const order = [
+      candidate("stale", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: false } }),
+      candidate("fresh", { resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: 1_000_000, providerCreditsUnlimited: false } }),
+    ];
+    expect(orderedPoolMembers(members, order, members, "automatic").map((item) => item.id)).toEqual(["fresh", "stale"]);
+    const unlimited = { ...order[0], resourceHeadroom: { quotaRemainingBasisPoints: null, providerCreditsMicroUnits: null, providerCreditsUnlimited: true } };
+    expect(orderedPoolMembers(members, [unlimited, order[1]], members, "automatic").map((item) => item.id)).toEqual(["stale", "fresh"]);
+  });
+
+  test("resource-only snapshot changes are not discarded as unchanged activity", () => {
+    const before = candidate("account", { resourceHeadroom: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: 2_000_000, providerCreditsUnlimited: false } });
+    expect(sameRuntimeOrder([before], [structuredClone(before)])).toBe(true);
+    for (const change of [{ quotaRemainingBasisPoints: null }, { providerCreditsMicroUnits: null }, { providerCreditsUnlimited: true }]) {
+      const after = { ...before, resourceHeadroom: { ...before.resourceHeadroom!, ...change } };
+      expect(sameRuntimeOrder([before], [after])).toBe(false);
+    }
   });
 
   test("derives active and last-used route state from runtime snapshots", () => {
@@ -350,7 +611,7 @@ describe("pool members model", () => {
       member("source", "disabled", { operationalStatus: "disabled" }),
       member("account", "quota", { operationalStatus: "quotaWait" }),
     ];
-    expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, errors: 2, disabled: 1 });
+    expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, waiting: 1, errors: 2, disabled: 1 });
   });
 
   test("sums provider credits only for accounts currently in the pool", () => {

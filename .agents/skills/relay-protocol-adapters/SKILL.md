@@ -1,0 +1,87 @@
+---
+name: relay-protocol-adapters
+description: Review or repair Relay native forwarding, API conversion, or conversation continuation. Excludes UI-only changes and production Zenith routing.
+---
+
+# Relay protocol adapters
+
+Preserve the conversation contract across a client API and an upstream API.
+Qualify the complete cycle: text, tool call, tool result, then the next
+assistant response.
+
+Follow the official provider contract workflow in
+[CONTRIBUTING.md](../../../CONTRIBUTING.md#api-and-protocol-references).
+Use the affected [PLANNING.md](../../../docs/project/PLANNING.md) contract;
+consult [ROADMAP.md](../../../docs/project/ROADMAP.md) when the task concerns
+unfinished capability or acceptance, not as a prerequisite for every fix.
+
+## Trace the failing contract
+
+- Identify the client API, selected upstream endpoint, requested features,
+  continuation mode, and whether the failure occurs in JSON or streaming.
+  Endpoint support requires route evidence; model groups supply preferences.
+- Follow source resolution, request preparation, response conversion, and the
+  next request containing tool results. Inspect both `contracts/source.rs`
+  dispatch and the owning converter under `crates/relay-core/src/protocol/adapter`.
+  Determine native versus converted support from current dispatch and tests,
+  not a fixed protocol count. Preserve native wire extensions on native routes;
+  reuse the shared typed translation pipeline where conversion is supported.
+  Portable types live in `translation/model.rs`; `AdapterContinuationState`
+  and `AdapterContinuationStore` are shared state owners, not Messages-only
+  implementations. Do not restore protocol-named compatibility aliases.
+- For continuation, trace `contracts/bridge.rs`, `store.rs`, and
+  `translation/continuation.rs` with their callers. Distinguish restored native
+  state from client-supplied history and foreign opaque payloads.
+- Read the exact endpoint's [official contract](references/contracts.md) first.
+  For undocumented account transports, mark observed behavior explicitly.
+  Use [implementations.md](references/implementations.md) only for a targeted
+  implementation comparison; record its inspected SHA and file paths if used.
+  For BPS-specific source discovery, use
+  [BPS development](../relay-bps-development/SKILL.md); public Responses docs
+  alone do not specify that account transport.
+
+## Adapt in the owning layer
+
+Reuse Relay's existing adapter contracts, continuation store, and stream state
+machines. Consolidate conflicting rules at their owner instead of adding a
+third conversion engine or a repair branch keyed by a harness or model name.
+
+Keep these distinctions explicit:
+
+- A response item ID and its tool `call_id` are different identities. Preserve
+  call/result associations, tool kind, namespace, declared name, and argument
+  fragments. If names require aliases, make the mapping reversible and reject
+  collisions. Do not invent a missing name or turn an orphan result into text.
+- Preserve schema constraints, tool-choice semantics, and parallel-call policy.
+  A conversion that cannot preserve a requested feature needs a specific error,
+  not a silent switch to `auto`, disabled thinking, or a weaker schema.
+- Provider ciphertext and signatures remain opaque. Decode only a
+  Relay-owned carrier, if one is used, and unwrap it before native forwarding.
+  Decoding a carrier is not decrypting OpenAI reasoning. Never translate a
+  foreign blob into an Anthropic or Gemini signature.
+- Replay the original native blocks in order. Bind saved state to the
+  conversation and originating route/credential identity; bound its lifetime,
+  count, and bytes. Inspect existing isolation before adding another cache.
+  Keep sensitive state in Relay's existing volatile store unless persistence is
+  explicitly part of the requested change.
+- Use documented synthetic-history sentinels only for synthetic history. Real
+  response roundtrips require their original native state.
+- Distinguish completed, incomplete, and invalid streams. Preserve known usage
+  after interruption and avoid duplicate output or tool calls. Continuation
+  replay does not make an unknown execution safe to retry.
+
+Use native forwarding when the selected route supports the requested contract.
+For converted routes, retain the original provider state separately from the
+portable text/tool representation.
+
+## Establish acceptance
+
+Use [acceptance.md](references/acceptance.md) for the affected protocol pair.
+Inspect existing coverage first; run or extend checks only within task and
+harness permissions. Use synthetic conversations and signatures, never real
+prompts, credentials, or captured provider bodies.
+
+Report the reference revisions, adopted behavior, intentional differences,
+and checks actually performed. Distinguish static review, automated checks,
+and live provider acceptance. Preserve source attribution and applicable
+license notices when copying or adapting code.

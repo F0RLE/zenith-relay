@@ -1,17 +1,17 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tauri::{
+    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::local_pool::{commands::gateway::lifecycle as gateway, DesktopState};
-use crate::platform::ui_text;
+use crate::local_pool::{DesktopState, commands::gateway::lifecycle as gateway};
+use crate::platform::localization::text as ui_text;
 
 pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -23,6 +23,8 @@ pub struct AppState {
 }
 
 struct TrayUi {
+    show: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
     toggle: MenuItem<tauri::Wry>,
     tray: TrayIcon<tauri::Wry>,
 }
@@ -63,13 +65,19 @@ pub fn build_tray(app: &AppHandle, _state: &State<'_, AppState>) -> tauri::Resul
     let show = MenuItem::with_id(
         app,
         "show",
-        ui_text("Open Zenith Relay", "Открыть Zenith Relay"),
+        ui_text(|copy| &copy.open, "Open Zenith Relay"),
         true,
         None::<&str>,
     )?;
     let toggle = MenuItem::with_id(app, "toggle", toggle_text(false), true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", ui_text("Quit", "Выйти"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        ui_text(|copy| &copy.quit, "Quit"),
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(app, &[&show, &toggle, &separator, &quit])?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
@@ -117,12 +125,23 @@ pub fn build_tray(app: &AppHandle, _state: &State<'_, AppState>) -> tauri::Resul
         })
         .build(app)?;
 
-    app.manage(TrayUi { toggle, tray });
+    app.manage(TrayUi {
+        show,
+        quit,
+        toggle,
+        tray,
+    });
 
     Ok(())
 }
 
 pub async fn refresh_tray(app: &AppHandle) {
+    if let Some(tray) = app.try_state::<TrayUi>() {
+        let _ = tray
+            .show
+            .set_text(ui_text(|copy| &copy.open, "Open Zenith Relay"));
+        let _ = tray.quit.set_text(ui_text(|copy| &copy.quit, "Quit"));
+    }
     let runtime = app.state::<DesktopState>().gateway.runtime().await;
     let running = runtime.is_some();
     let ui = app.state::<TrayUi>();
@@ -138,22 +157,22 @@ async fn toggle_pool(app: AppHandle) {
         .runtime()
         .await
         .is_some();
-    let result = if running {
+    let toggle_result = if running {
         gateway::stop_local_gateway(app.clone(), app.state()).await
     } else {
         gateway::start_local_gateway(app.clone(), app.state()).await
     };
     let _ = app.emit("zenith-state-changed", ());
-    if result.is_err() {
+    if toggle_result.is_err() {
         show_main_window(&app);
     }
 }
 
-fn toggle_text(running: bool) -> &'static str {
+fn toggle_text(running: bool) -> String {
     if running {
-        ui_text("Stop pool", "Остановить пул")
+        ui_text(|copy| &copy.stop_pool, "Stop pool")
     } else {
-        ui_text("Start pool", "Запустить пул")
+        ui_text(|copy| &copy.start_pool, "Start pool")
     }
 }
 
@@ -161,26 +180,26 @@ fn tooltip_text(running: bool) -> String {
     format!(
         "Zenith Relay · {}",
         if running {
-            ui_text("pool running", "пул работает")
+            ui_text(|copy| &copy.pool_running, "pool running")
         } else {
-            ui_text("pool stopped", "пул остановлен")
+            ui_text(|copy| &copy.pool_stopped, "pool stopped")
         }
     )
 }
 
 pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        if let Some(state) = app.try_state::<DesktopState>() {
-            state.set_background_session_active(true);
+        if let Some(desktop_state) = app.try_state::<DesktopState>() {
+            desktop_state.set_background_session_active(true);
         }
         reveal_main_window(&window);
         return;
     }
 
-    let Some(state) = app.try_state::<AppState>() else {
+    let Some(app_state) = app.try_state::<AppState>() else {
         return;
     };
-    if !state.try_start_main_window_open() {
+    if !app_state.try_start_main_window_open() {
         return;
     }
 
@@ -195,8 +214,8 @@ pub fn show_main_window(app: &AppHandle) {
             // The frontend reveals a new window after applying its saved theme.
             let _ = create_main_window(&app);
         }
-        if let Some(state) = app.try_state::<AppState>() {
-            state.finish_main_window_open();
+        if let Some(app_state) = app.try_state::<AppState>() {
+            app_state.finish_main_window_open();
         }
     });
 }
@@ -211,7 +230,7 @@ fn reveal_main_window(window: &WebviewWindow<tauri::Wry>) {
 /// initial application window. The native app, tray, and local gateway remain
 /// alive when this window is later destroyed.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri::Wry>> {
-    let config = app
+    let window_config = app
         .config()
         .app
         .windows
@@ -219,12 +238,17 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
         .find(|window| window.label == MAIN_WINDOW_LABEL)
         .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
-    let window = WebviewWindowBuilder::from_config(app, config)?
+    let builder = WebviewWindowBuilder::from_config(app, window_config)?
         .data_directory(webview_data)
-        .visible(false)
-        .build()?;
-    if let Some(state) = app.try_state::<DesktopState>() {
-        state.set_background_session_active(true);
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
+    let window = builder.build()?;
+    if let Some(desktop_state) = app.try_state::<DesktopState>() {
+        desktop_state.set_background_session_active(true);
     }
     Ok(window)
 }
@@ -233,10 +257,10 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// process, tray, and local pool keep running. The next open creates a new
 /// window; a failed destroy still hides the current one instead of exiting.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        if window.destroy().is_err() {
-            let _ = window.hide();
-        }
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
+        && window.destroy().is_err()
+    {
+        let _ = window.hide();
     }
 }
 
@@ -250,13 +274,8 @@ mod tests {
 
     #[test]
     fn tray_toggle_label_tracks_pool_state() {
-        let (running, stopped) = if crate::platform::system_language_is_russian() {
-            ("Остановить пул", "Запустить пул")
-        } else {
-            ("Stop pool", "Start pool")
-        };
-        assert_eq!(toggle_text(true), running);
-        assert_eq!(toggle_text(false), stopped);
+        assert_eq!(toggle_text(true), "Stop pool");
+        assert_eq!(toggle_text(false), "Start pool");
     }
 
     #[test]

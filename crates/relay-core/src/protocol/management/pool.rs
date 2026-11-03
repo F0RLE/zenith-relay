@@ -42,33 +42,56 @@ pub fn pool_model_summaries_with_pricing(
     catalog: &PricingCatalog,
     context: &PricingContext,
 ) -> Vec<ModelSummary> {
+    pool_model_projection_with_pricing(sources, accounts, hidden_models, catalog, context).models
+}
+
+pub struct PoolModelProjection {
+    pub models: Vec<ModelSummary>,
+    pub pricing_source: PricingSourceSummary,
+}
+
+/// Resolve model prices and their aggregate provenance in the same pass.
+/// Reuse is limited to this projection; live pricing and member policy are
+/// always read from the supplied context, never a previous summary's prices.
+pub fn pool_model_projection_with_pricing(
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    hidden_models: &[String],
+    catalog: &PricingCatalog,
+    context: &PricingContext,
+) -> PoolModelProjection {
     let models = collect_pool_models(sources, accounts);
+    let mut price_sources = Vec::new();
     let mut summaries = models
         .into_values()
         .map(|model| {
-            let id = model.id.clone();
-            let resolved = resolve_pool_model_price(&model, &id, catalog, context);
+            let model_id = model.id.clone();
+            let resolved =
+                resolve_pool_model_price(&model, &model_id, catalog, context, &mut price_sources);
             let quote = resolved.as_ref().and_then(|price| price.quote);
             let enabled = !hidden_models
                 .iter()
-                .any(|hidden| hidden.eq_ignore_ascii_case(&id));
+                .any(|hidden| hidden.eq_ignore_ascii_case(&model_id));
             (
                 model.upstream_order,
                 model_summary(
-                    id.clone(),
+                    model_id.clone(),
                     model.members.len(),
                     enabled,
                     quote,
-                    catalog.image_request_prices(&id),
+                    catalog.image_request_prices(&model_id),
                 ),
             )
         })
         .collect::<Vec<_>>();
     summaries.sort_by_key(|(upstream_order, _)| *upstream_order);
-    summaries.into_iter().map(|(_, summary)| summary).collect()
+    PoolModelProjection {
+        models: summaries.into_iter().map(|(_, summary)| summary).collect(),
+        pricing_source: PricingSourceSummary::from_sources(price_sources),
+    }
 }
 
-/// Returns the provenance represented by the currently eligible pool models.
+/// Returns the provenance represented by the configured pool inventory.
 /// A snapshot can contain several source/account policies, so selecting the
 /// first model's source would be misleading; every resolved member contributes
 /// to the aggregate and mixed provenance is reported explicitly.
@@ -101,6 +124,16 @@ fn collect_pool_models(
 ) -> BTreeMap<String, PoolModel> {
     let mut models = BTreeMap::<String, PoolModel>::new();
     let mut upstream_order = 0usize;
+    // Match ModelRegistry: native accounts supply the first order for shared
+    // IDs. API sources append models not already present in those inventories.
+    for account in accounts.iter().filter(|account| account.in_pool) {
+        add_member_models(
+            &mut models,
+            &crate::scheduler::account_member_key(&account.id),
+            &account.models,
+            &mut upstream_order,
+        );
+    }
     for source in sources.iter().filter(|source| source.in_pool) {
         let pool_models = crate::normalize_model_ids(
             source.models.iter().chain(
@@ -117,15 +150,6 @@ fn collect_pool_models(
             &mut upstream_order,
         );
     }
-    for account in accounts.iter().filter(|account| account.in_pool) {
-        add_member_models(
-            &mut models,
-            &crate::scheduler::account_member_key(&account.id),
-            &account.models,
-            &mut upstream_order,
-        );
-    }
-
     models
 }
 
@@ -136,16 +160,21 @@ fn model_summary(
     quote: Option<TokenPrice>,
     image_request_prices: Vec<ImageRequestPrice>,
 ) -> ModelSummary {
-    let (input, cached, cache_write_5m, cache_write_1h, output) =
-        quote.map_or((None, None, None, None, None), |price| {
-            (
-                Some(price.input),
-                price.cache_read,
-                price.cache_write_5m,
-                price.cache_write_1h,
-                Some(price.output),
-            )
-        });
+    let (
+        input_price,
+        cache_read_price,
+        short_cache_write_price,
+        long_cache_write_price,
+        output_price,
+    ) = quote.map_or((None, None, None, None, None), |price| {
+        (
+            Some(price.input),
+            price.cache_read,
+            price.cache_write_5m,
+            price.cache_write_1h,
+            Some(price.output),
+        )
+    });
     ModelSummary {
         enabled,
         protocol_routes: Vec::new(),
@@ -154,6 +183,8 @@ fn model_summary(
         id,
         member_count,
         catalog_provider: None,
+        catalog_source_model_id: None,
+        catalog_canonical_model_id: None,
         catalog_family: None,
         catalog_name: None,
         catalog_release_date: None,
@@ -163,6 +194,9 @@ fn model_summary(
         catalog_reasoning_method: None,
         catalog_reasoning_effort_levels: Vec::new(),
         catalog_default_reasoning_effort: None,
+        catalog_reasoning_budget_min_tokens: None,
+        catalog_reasoning_budget_max_tokens: None,
+        catalog_reasoning_budget_default_tokens: None,
         catalog_tool_call: None,
         catalog_structured_output: None,
         catalog_attachment: None,
@@ -170,13 +204,19 @@ fn model_summary(
         catalog_input_modalities: Vec::new(),
         catalog_output_modalities: Vec::new(),
         catalog_context_limit: None,
+        context_windows: None,
+        context_policy: crate::ModelContextPolicy::Short,
+        context_configurable: false,
         catalog_input_limit: None,
         catalog_output_limit: None,
-        input_micro_usd_per_million: input,
-        cached_input_micro_usd_per_million: cached,
-        cache_write_5m_micro_usd_per_million: cache_write_5m,
-        cache_write_1h_micro_usd_per_million: cache_write_1h,
-        output_micro_usd_per_million: output,
+        catalog_capabilities: None,
+        input_micro_usd_per_million: input_price,
+        cached_input_micro_usd_per_million: cache_read_price,
+        cache_write_5m_micro_usd_per_million: short_cache_write_price,
+        cache_write_1h_micro_usd_per_million: long_cache_write_price,
+        cache_write_micro_usd_per_million: quote.and_then(|price| price.cache_write),
+        output_micro_usd_per_million: output_price,
+        token_price: quote,
         image_request_prices,
         custom_price: false,
         reasoning_levels: Vec::new(),
@@ -196,6 +236,7 @@ fn resolve_pool_model_price(
     model_id: &str,
     catalog: &PricingCatalog,
     context: &PricingContext,
+    price_sources: &mut Vec<PriceSource>,
 ) -> Option<ResolvedPrice> {
     let mut fallback = None;
     let mut resolved: Option<ResolvedPrice> = None;
@@ -205,25 +246,40 @@ fn resolve_pool_model_price(
         };
         let candidate = context.candidate_price(catalog, kind, candidate_id, Some(model_id));
         if let Some(candidate_quote) = candidate.quote {
+            price_sources.push(candidate.source);
             if let Some(mut current) = resolved {
                 let current_quote = current
                     .quote
                     .expect("a resolved pool price always has a quote");
-                current.quote = Some(TokenPrice {
-                    input: current_quote.input,
-                    cache_read: current_quote.cache_read,
-                    // The same public model can be exposed by a generic route
-                    // and an Anthropic Messages route. Preserve the primary
-                    // route's price while filling cache-write fields only
-                    // from the route-aware Messages evidence.
-                    cache_write_5m: current_quote
-                        .cache_write_5m
-                        .or(candidate_quote.cache_write_5m),
-                    cache_write_1h: current_quote
-                        .cache_write_1h
-                        .or(candidate_quote.cache_write_1h),
-                    output: current_quote.output,
-                });
+                let mut quote = current_quote;
+                // The same public model can be exposed by a generic route
+                // and an Anthropic Messages route. Preserve the primary
+                // route's price while filling cache-write fields only
+                // from the route-aware Messages evidence.
+                quote.cache_write_5m = current_quote
+                    .cache_write_5m
+                    .or(candidate_quote.cache_write_5m);
+                quote.cache_write_1h = current_quote
+                    .cache_write_1h
+                    .or(candidate_quote.cache_write_1h);
+                if quote.flex.is_empty() {
+                    quote.flex = candidate_quote.flex;
+                }
+                if quote.priority.is_empty() {
+                    quote.priority = candidate_quote.priority;
+                }
+                for (target, candidate) in [
+                    (&mut quote.above_100k, candidate_quote.above_100k),
+                    (&mut quote.above_128k, candidate_quote.above_128k),
+                    (&mut quote.above_200k, candidate_quote.above_200k),
+                    (&mut quote.above_272k, candidate_quote.above_272k),
+                    (&mut quote.above_512k, candidate_quote.above_512k),
+                ] {
+                    if target.is_empty() {
+                        *target = candidate;
+                    }
+                }
+                current.quote = Some(quote);
                 resolved = Some(current);
             } else {
                 resolved = Some(candidate);
@@ -251,11 +307,11 @@ fn add_member_models(
         let model_order = *upstream_order;
         *upstream_order = upstream_order.saturating_add(1);
         let key = crate::model_id_key(model);
-        let entry = models.entry(key).or_insert_with(|| PoolModel {
+        let pool_model = models.entry(key).or_insert_with(|| PoolModel {
             id: model.clone(),
             members: BTreeSet::new(),
             upstream_order: model_order,
         });
-        entry.members.insert(member_id.to_string());
+        pool_model.members.insert(member_id.to_string());
     }
 }

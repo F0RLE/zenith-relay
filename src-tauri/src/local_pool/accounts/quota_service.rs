@@ -1,6 +1,6 @@
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
-    accounts::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate},
+    accounts::{AccountQuotaOutcome, AccountQuotaUpdate, reduce_account_quota},
     quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
 };
 
@@ -12,15 +12,15 @@ pub struct AppliedQuota {
 
 pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
-    data: QuotaRefreshResult,
+    quota_result: QuotaRefreshResult,
 ) -> Result<AppliedQuota, &'static str> {
-    let observed_at_ms = data.quota.observed_at_ms;
+    let observed_at_ms = quota_result.quota.observed_at_ms;
     let update = reduce_account_quota(
         &account.account.quota,
         &account.account.subscription,
         account.account.health,
         account.account.last_error_code.as_deref(),
-        Ok(data),
+        Ok(quota_result),
         observed_at_ms,
     )
     .map_err(|_| "quota response could not be normalized")?;
@@ -144,10 +144,12 @@ mod tests {
             SubscriptionStatus::Active
         );
         assert_eq!(account.account.subscription.active_until_ms, Some(2_000));
-        assert!(apply_quota_success(&mut account, refresh(100.0, 30))
-            .unwrap()
-            .transitions
-            .is_empty());
+        assert!(
+            apply_quota_success(&mut account, refresh(100.0, 30))
+                .unwrap()
+                .transitions
+                .is_empty()
+        );
     }
 
     #[test]
@@ -251,10 +253,10 @@ mod tests {
     #[test]
     fn provider_access_denial_blocks_without_erasing_quota() {
         let mut account = account();
-        let mut data = refresh(95.0, 10);
-        data.allowed = Some(false);
-        data.reported_limit_reached = Some(false);
-        apply_quota_success(&mut account, data).unwrap();
+        let mut quota_refresh = refresh(95.0, 10);
+        quota_refresh.allowed = Some(false);
+        quota_refresh.reported_limit_reached = Some(false);
+        apply_quota_success(&mut account, quota_refresh).unwrap();
         assert_eq!(account.account.health, AccountHealthState::Blocked);
         assert_eq!(
             account
@@ -292,10 +294,10 @@ mod tests {
     #[test]
     fn exhausted_window_uses_quota_without_creating_a_cooldown() {
         let mut account = account();
-        let mut data = refresh(0.0, 10);
-        data.quota.primary.as_mut().unwrap().reset =
+        let mut quota_refresh = refresh(0.0, 10);
+        quota_refresh.quota.primary.as_mut().unwrap().reset =
             Some(ResetTime::AbsoluteUnixMilliseconds(5_000));
-        data.quota.secondary = Some(QuotaWindowInput {
+        quota_refresh.quota.secondary = Some(QuotaWindowInput {
             kind: QuotaWindowKind::Secondary,
             available_percent: Some(30.0),
             explicitly_full: Some(false),
@@ -304,7 +306,7 @@ mod tests {
             provider_cycle_id: None,
             observed_at_ms: 10,
         });
-        apply_quota_success(&mut account, data).unwrap();
+        apply_quota_success(&mut account, quota_refresh).unwrap();
 
         assert_eq!(
             account
