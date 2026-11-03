@@ -35,7 +35,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-process": "^2.4.0",
-    "@tauri-apps/plugin-updater": "^2.14.0",
+    "@tauri-apps/plugin-updater": "^2.14.1",
     "i18next": "^26.5.11",
     "lucide-react": "^1.61.0",
     "mdast-util-gfm": "3.1.0",
