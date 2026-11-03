@@ -18,10 +18,12 @@ use super::process::{process_stop_is_stable, running_target_pids};
 fn launch_confirmation_requires_a_running_desktop() {
     for product in ["OpenCode", "Claude Desktop"] {
         assert!(
-            super::process::wait_for_application_start(|| true, Duration::ZERO, product).is_ok()
+            super::process::wait_for_application_start(|| Ok(true), Duration::ZERO, product)
+                .is_ok()
         );
-        let error = super::process::wait_for_application_start(|| false, Duration::ZERO, product)
-            .unwrap_err();
+        let error =
+            super::process::wait_for_application_start(|| Ok(false), Duration::ZERO, product)
+                .unwrap_err();
         assert!(error.contains(product));
         assert!(error.contains("saved profile was kept"));
     }
@@ -30,7 +32,7 @@ fn launch_confirmation_requires_a_running_desktop() {
         super::process::wait_for_application_start(
             || {
                 probes += 1;
-                probes == 2
+                Ok(probes == 2)
             },
             Duration::from_secs(2),
             "OpenCode",
@@ -38,6 +40,22 @@ fn launch_confirmation_requires_a_running_desktop() {
         .is_ok()
     );
     assert_eq!(probes, 2);
+}
+
+#[test]
+fn launch_confirmation_propagates_process_inspection_failure() {
+    let mut probes = 0;
+    let error = super::process::wait_for_application_start(
+        || {
+            probes += 1;
+            Err("process inspection unavailable".to_string())
+        },
+        Duration::from_secs(2),
+        "OpenCode",
+    )
+    .unwrap_err();
+    assert_eq!(error, "process inspection unavailable");
+    assert_eq!(probes, 1);
 }
 
 #[test]
@@ -147,8 +165,8 @@ fn windows_opencode_desktop_path_excludes_cli_installation() {
 #[test]
 fn target_pid_probe_ignores_unrelated_processes() {
     let current = std::process::id();
-    assert_eq!(running_target_pids(&[current]), vec![current]);
-    assert!(running_target_pids(&[u32::MAX]).is_empty());
+    assert_eq!(running_target_pids(&[current]).unwrap(), vec![current]);
+    assert!(running_target_pids(&[u32::MAX]).unwrap().is_empty());
 }
 
 #[test]
@@ -323,6 +341,9 @@ fn start_apps_parser_prefers_chatgpt_and_rejects_unrelated_apps() {
 #[test]
 fn detects_running_installed_codex_when_requested() {
     if std::env::var("ZENITH_TEST_RUNNING_CODEX").as_deref() == Ok("1") {
-        assert!(is_codex_running(), "running Codex desktop was not detected");
+        assert!(
+            is_codex_running().unwrap(),
+            "running Codex desktop was not detected"
+        );
     }
 }

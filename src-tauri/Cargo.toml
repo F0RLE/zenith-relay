@@ -38,16 +38,16 @@ jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_
 rand = "0.10.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls", "stream"] }
 futures-util = "0.3.34"
-rusqlite = { version = "0.41.0", default-features = false, features = ["backup", "bundled", "cache"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["backup", "bundled", "cache"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 sys-locale = "0.3.2"
-sysinfo = "0.39.6"
+sysinfo = "0.40.1"
 tauri = { version = "2.12.5", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
 tauri-plugin-opener = "2.7.2"
-tauri-plugin-dialog = "2.8.3"
+tauri-plugin-dialog = "2.8.4"
 tauri-plugin-process = "2.4.0"
 tauri-plugin-updater = "2.14.1"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
@@ -59,7 +59,7 @@ uuid = { version = "1.29.0", features = ["v4"] }
 zenith-relay-core = { path = "../crates/relay-core" }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
-tauri-plugin-single-instance = "2.5.4"
+tauri-plugin-single-instance = "2.5.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

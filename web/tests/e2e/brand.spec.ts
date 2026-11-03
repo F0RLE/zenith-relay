@@ -137,14 +137,18 @@ test("shared Hosted design preserves route layouts and semantic states", async (
 test("sidebar retains pine navigation and cream selection in both themes", async ({ page }) => {
   await page.goto("/app/overview");
   await expect(page.getByRole("heading", { name: "Обзор", exact: true })).toBeVisible();
+  const app = page.locator(".hosted-app");
   const sidebar = page.locator(".relay-sidebar");
   const selected = sidebar.locator('button[aria-current="page"]');
   for (let pass = 0; pass < 2; pass++) {
-    const dark = await page.locator(".hosted-app").getAttribute("data-theme") === "dark";
+    const dark = await app.getAttribute("data-theme") === "dark";
     await expect(sidebar).toHaveCSS("background-color", dark ? "rgb(23, 63, 50)" : "rgb(22, 76, 60)");
     await expect(selected).toHaveCSS("background-color", "rgb(240, 242, 220)");
     await expect(selected).toHaveCSS("color", "rgb(22, 76, 60)");
-    if (pass === 0) await page.getByRole("button", { name: dark ? "Светлая тема" : "Тёмная тема", exact: true }).click();
+    if (pass === 0) {
+      await page.getByRole("button", { name: dark ? "Светлая тема" : "Тёмная тема", exact: true }).click();
+      await expect(app).toHaveAttribute("data-theme", dark ? "light" : "dark");
+    }
   }
 });
 

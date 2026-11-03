@@ -22,7 +22,7 @@ struct ProcessMemory {
 struct MemoryDiagnostics {
     sampled_at_ms: u64,
     build_profile: &'static str,
-    processes: Vec<ProcessMemory>,
+    processes: Option<Vec<ProcessMemory>>,
     caches: Vec<zenith_relay_core::gateway::CacheMemoryDiagnostics>,
 }
 
@@ -75,9 +75,9 @@ fn webview_role(arguments: &[OsString]) -> &'static str {
     }
 }
 
-fn collect(state: &DesktopState) -> MemoryDiagnostics {
+fn collect_process_memory() -> Result<Vec<ProcessMemory>, sysinfo::Error> {
     let root = std::process::id();
-    let mut system = System::new();
+    let mut system = System::new()?;
     // Discover ancestry first; do not read command lines or memory of unrelated apps.
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -121,6 +121,11 @@ fn collect(state: &DesktopState) -> MemoryDiagnostics {
             })
         })
         .collect();
+    Ok(processes)
+}
+
+fn collect(state: &DesktopState) -> MemoryDiagnostics {
+    let processes = collect_process_memory().ok();
     let mut caches = zenith_relay_core::gateway::cache_memory_diagnostics();
     caches.extend(state.continuation_memory_diagnostics());
     let metadata = state.model_metadata_loader().source_memory_diagnostics();
@@ -205,11 +210,14 @@ fn write_snapshot(
             ("sampled_at_ms", sample.clone()),
             ("reason", reason.to_string()),
             ("build_profile", snapshot.build_profile.to_string()),
-            ("process_count", snapshot.processes.len().to_string()),
+            (
+                "process_count",
+                number(snapshot.processes.as_ref().map(Vec::len)),
+            ),
             ("cache_count", snapshot.caches.len().to_string()),
         ],
     );
-    for process in &snapshot.processes {
+    for process in snapshot.processes.iter().flatten() {
         write(
             "process",
             &[
@@ -249,12 +257,12 @@ mod tests {
         let snapshot = MemoryDiagnostics {
             sampled_at_ms: 123,
             build_profile: "debug",
-            processes: vec![ProcessMemory {
+            processes: Some(vec![ProcessMemory {
                 pid: 1,
                 role: "native",
                 resident_bytes: Some(0),
                 private_bytes: None,
-            }],
+            }]),
             caches: vec![zenith_relay_core::gateway::CacheMemoryDiagnostics {
                 key: "sqlite_pages",
                 entries: None,
@@ -285,6 +293,27 @@ mod tests {
             rows.iter()
                 .all(|(_, details)| details["sampled_at_ms"] == "123")
         );
+    }
+
+    #[test]
+    fn failed_process_collection_is_unavailable_not_zero() {
+        let snapshot = MemoryDiagnostics {
+            sampled_at_ms: 123,
+            build_profile: "debug",
+            processes: None,
+            caches: Vec::new(),
+        };
+        let mut rows = 0;
+        write_snapshot(&snapshot, "logs_opened", |message, details| {
+            rows += 1;
+            assert_eq!(message, "snapshot");
+            assert!(
+                details
+                    .iter()
+                    .any(|(key, value)| { *key == "process_count" && value == "unavailable" })
+            );
+        });
+        assert_eq!(rows, 1);
     }
 
     #[test]
