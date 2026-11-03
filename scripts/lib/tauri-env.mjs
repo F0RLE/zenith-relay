@@ -256,9 +256,8 @@ export function withZenithRustEnv(env = process.env) {
       prependPath(nextEnvironment, toolPaths);
     }
 
-    // The portable SDK is not registered with CMake. Ninja keeps native
-    // builds on the configured MSVC/SDK environment instead of asking the
-    // Visual Studio generator to discover a system SDK from the registry.
+    // Ninja uses the configured portable MSVC/SDK paths directly; Visual Studio
+    // generators require an SDK registered with the system.
     if (portableToolchainConfigured && existsSync(ninjaExecutable)) {
       configureNinjaEnvironment(nextEnvironment, ninjaExecutable);
     }

@@ -4,19 +4,16 @@ Current executor contract. The [architecture map](PLANNING.md) owns shared
 runtime boundaries; [open acceptance](ROADMAP.md#excel--basis-points-acceptance)
 remains in the Desktop roadmap.
 
-BPS is a separate account executor, not the public Responses API. Its behavior
-is observed and regression-tested, not guaranteed by public OpenAI documentation.
+BPS uses a dedicated account executor. This document describes observed,
+regression-tested behavior; public Responses documentation covers a separate API.
 
 ## HTTP request encoding
 
-Relay leaves BPS Responses JSON uncompressed, including when client
-ingress uses WebSocket. Native Codex compression and response-compression
-negotiation (`Accept-Encoding`) do not establish BPS request support.
-Neither an HTTP 401/422 status nor telemetry compression proves inference
-request-decoder support. Do not enable it without endpoint-specific evidence
-or resend a generation after an encoding failure. The local
+Relay sends uncompressed BPS Responses JSON, including for WebSocket ingress.
+Request compression requires endpoint-specific decoder support. An encoding
+failure retains the existing execution-certainty and retry rules. The local
 [compression probe](../../CONTRIBUTING.md#request-compression-probe) measures
-transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
+transfer costs; BPS compatibility requires a separate endpoint check.
 
 ## Access and request context
 
@@ -73,14 +70,8 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   so the handoff does not create a new logical turn or reset iteration.
 - Metadata sent upstream contains only Relay's task/turn/iteration fields.
   Client metadata stays local and is restored in the translated response.
-  Turn fingerprints borrow the relevant history prefix; JSON hashing streams
-  through a bounded buffer shared with cross-protocol continuation keys. Their
-  serialized meaning and identifiers stay unchanged, without extra full-history
-  clones or serialized copies.
-- After copying the client history for preparation, compact messages, generated
-  text prologues and visible reasoning move their owned text buffers instead of
-  cloning them again. Wire field order, extensions, metadata and provider-owned
-  ciphertext behavior remain unchanged; the caller's request is not mutated.
+  Preparation preserves the caller's request, history identity, extensions,
+  field ordering and provider-owned ciphertext boundaries.
 
 ## Executable calls and stream validation
 
@@ -112,6 +103,21 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   in both the client error and request usage record, without regeneration.
   Completed client calls cannot reuse a call ID already present in supplied
   history, in compact/full mode as well as local discovery.
+  Identity checks use the same length normalization as replay: a long ID and
+  its upstream hash cannot reappear as distinct calls, in history, a parallel
+  response or a later catalog lookup. Single-item and array history reserve
+  batch parent IDs alike. The entire response is rejected before releasing
+  client calls or advancing discovery; no regeneration follows an invalid ID.
+  Short opaque call IDs remain unchanged. Identifier normalization borrows
+  already-valid strings and allocates only when the wire value must change.
+  Incoming history rejects distinct source call IDs that normalize to the same
+  value before rewriting any identifiers. Repeated call definitions, duplicate
+  results for a known call, and function/custom result-kind mismatches fail
+  before provider generation rather than silently rewriting their meaning.
+  Native transport envelopes can carry either client kind; standalone native
+  results and pending calls keep their existing replay behavior. History with
+  no reserved batch aliases retains its original storage without batch grouping;
+  malformed aliases still enter the full batch validator.
 - Complex function string arguments may use Relay's explicit private frame:
   `relay-function-string-v1 {"field":"cmd","args":{}}`, one newline, then
   the unchanged string value. Other arguments live in the JSON header. The
@@ -172,12 +178,20 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   they are not shortened to the default cooldown or exposed as raw error bodies.
   Both consume coalesced SSE frames without shifting the remaining buffer for
   each event; frame/response limits and the first-terminal boundary still apply.
+  Buffered reads and streaming discovery enforce their existing response-byte
+  budgets only through the first terminal event. Excess bytes coalesced after
+  that event neither invalidate the completed response nor release another call.
+  A genuine overflow before terminal completion still fails without replay;
+  the permitted prefix remains available for reported usage and diagnostics.
+  This boundary does not depend on the served-model guard being enabled.
+  Buffered SSE reads resume scanning at the old incomplete frame's last byte,
+  preserving split LF/CR/CRLF delimiters without rescanning its entire prefix.
 
 ## Diagnostics and timings
 
-- Dispatch moves the prepared BPS body instead of retaining a duplicate history;
-  catalog diagnostics share the session's parsed declarations. Wire bytes,
-  discovery authority and cache-prefix ordering stay unchanged.
+- Context sizes, local CPU probes, provider token usage, prompt-cache evidence
+  and transport latency are separate measurements. A faster envelope parser
+  alone establishes neither smaller requests nor provider/cache improvements.
 - Paired context sizes describe the client request and the final prepared body,
   after catalog preloads and inline-image replacement. Optional `conversation`
   counters partition conversation bytes into messages, tool calls, tool results,
@@ -191,10 +205,10 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   collision, and dispatch-budget fallback. Missing legacy reasons stay unknown.
   `relayToolInstructionBytes` measures the known generated tool-instruction
   text as JSON bytes: it is a subset of upstream instruction bytes, can include
-  the catalog, and does not claim to measure all Relay-generated history text.
+  the catalog, and covers generated tool instructions only.
 - `httpVersion` records the actual upstream HTTP response version when observed,
-  independently of client WebSocket ingress. It does not prove connection reuse;
-  failures before response headers leave it absent.
+  independently of client WebSocket ingress and connection reuse. It is available
+  only after response headers arrive.
 
 - Safe request diagnostics retain the client's explicit parallel-call boolean
   separately from the native BPS final-generation call count and validated
@@ -313,12 +327,23 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 
 ## Catalogs, discovery and cache boundaries
 
+- Historical call names, namespaces and function/custom kinds come from the
+  recorded items, not the current catalog. Replacing a kind, moving a declaration
+  into another namespace or removing it cannot reinterpret old payloads, including
+  batch children. Replay preserves their call/result association without scanning
+  current tools or constructing synthetic schema-bearing declarations. Current
+  schemas and tool-choice permissions still validate every newly generated call;
+  historical identity never grants execution permission.
 - With explicit `additional_tools`/`tool_search_output` history, the transport
   prologue is catalog-independent and each declared batch renders at its original
   position. Later batches cannot rewrite earlier declarations; compact/full
   schemas or discovery indexes follow the requested presentation policy.
-  Root declarations overriding that history are supplied after history, with
-  current schemas/permissions authoritative for execution. Root-only catalogs
+  An explicit root `tools` catalog replaces historical execution permissions,
+  including `tools: []`; historical declarations and call/result pairs remain
+  replayable but cannot reauthorize omitted tools. When root `tools` is absent,
+  explicit input declarations retain the incremental-catalog protocol. Nonempty
+  root declarations are supplied after history, with current schemas/permissions
+  authoritative for execution. Root-only catalogs
   retain their original prefix placement so an unchanged catalog does not move
   on every turn. A changed root-only catalog or presentation mode can still
   invalidate that prefix: Relay does not invent a hidden historical snapshot.
@@ -341,16 +366,14 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   declarations and reserved lazy rendering space; they are not process RSS.
   Oversized definitions work without retention. No arguments, history, provider
   state, credentials or per-request permissions enter this cache.
-  Current-catalog collection borrows declarations until historical/root overrides
-  are resolved, then prepares only the surviving definitions. First-position
-  ordering, current root precedence and malformed-declaration rejection remain
-  unchanged; historical catalog messages keep their original timeline.
+  Historical/root overrides resolve before preparing surviving definitions;
+  first-position ordering, current root precedence and malformed-declaration
+  rejection apply without changing the historical timeline.
 - Catalogs use compact schema presentation without changing the original
   validator. Complex/unknown JSON Schema constructs remain complete JSON.
   Compact property names and annotation keywords have deterministic ordering,
   so reordering those schema keys does not rewrite the rendered catalog prefix.
-  Annotation rendering borrows schema values;
-  descriptions, constraints, defaults and examples remain intact.
+  Descriptions, required fields, constraints, defaults and examples remain intact.
   Closed objects retain explicit `additionalProperties:false` at every schema
   depth; a missing ellipsis alone is not their model-facing constraint. Tool
   arguments use the current declaration, not historical or transport fields.
@@ -361,22 +384,23 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   validate normally without retention; changed schemas compile independently.
   Compilation stays outside the cache lock. No tool arguments or provider
   continuation state enter this cache, and no remote references are retrieved.
-  Immutable prepared declarations also remember successful schema preparation,
-  avoiding repeated schema serialization and digest lookup during preflight.
-  This retains only a success marker, not another compiled validator. Changed
-  definitions compile independently, failures are never marked successful, and
-  every actual call still validates arguments and current-turn permissions.
+  Prepared declarations remember successful schema preparation, not another
+  validator. Changed definitions compile independently; failures are not cached
+  as success. Every call validates arguments and current-turn permissions.
   Automatic Relay-local discovery applies from 24 tools and 24 KiB of complete
   declarations (including descriptions, schemas, and custom formats):
   the initial JSON index groups names by their declared kind and namespace;
   qualified names reconstruct exactly, without aliases or inferred namespaces.
   Lookup searches the original names, descriptions, and schema text and returns
-  the complete trusted definitions, including usage rules; descriptions and
-  argument names are not repeated for every unloaded tool. Previously
-  called tools start loaded with lossless compact schema presentation after
+  the complete trusted definitions, including usage rules. Unloaded tools do not
+  repeat their descriptions/schemas in the index. Query ranking returns the
+  requested one-to-eight best candidates with deterministic exact-name tie order.
+  Previously called tools start loaded with lossless compact schema presentation after
   history, without rewriting the stable index prefix. A bounded eager set also
   loads declared `exec_command`, `apply_patch`, and `write_stdin`, plus explicitly
   non-deferred tools, up to eight tools and 16 KiB; explicit deferral is respected.
+  Oversized eager candidates yield to later smaller ones within that budget;
+  core-tool priority, historical loaded names and current permissions still apply.
   Discovery remembers at most 64 names per completed tool-call checkpoint in a
   volatile 256-entry, one-hour cache scoped to the local key, model, and history
   call ID. Lookup uses validated prepared history's upstream call IDs: compact
@@ -396,8 +420,11 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   never return through this cache. Missing or expired hints fall back to ordinary
   discovery. The notation legend is
   sent only with schema presentation, not with an index-only request. Lookup
-  returns each original full definition once per discovery session; repeated
-  selections refer to its earlier lookup result. Client instructions, history,
+  returns each previously unrendered original full definition once per discovery
+  session. Already visible compact preloads are referenced by name with
+  `source: loaded_tool_contracts`; repeated full lookups reference their original
+  `call_id`. Neither reuse path repeats schema bytes or fabricates a lookup ID.
+  Client instructions, history,
   reasoning effort, and original validators are not pruned or reduced.
 - Those checkpoints may also retain the Relay-generated transport prologue, at
   most 32 KiB per entry, shared across a response's call IDs under the same
@@ -425,6 +452,10 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   It allows at most eight lookup rounds, eight tools per lookup, 4 MiB retained
   input added by discovery, and 16 MiB per response. Admitted conversation
   history is not charged again against the discovery continuation limit.
+  BPS lookup advances stage only the current round's catalog additions. An
+  invalid item identity, continuation byte limit, input shape, or iteration
+  counter leaves both the request and discovery state unchanged; successful
+  advances commit together after validation. This does not authorize retries.
   Every generation consumes the original dispatch budget and retains its
   OAuth incarnation/route/lease; no
   background task, owner change, paid probe, or post-uncertainty replay exists.
@@ -445,11 +476,14 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   referenced payloads and custom input stay opaque at this boundary.
   A mixed completed response consumes local lookups and returns its validated
   client calls without another generation; it never executes those tools inside
-  Relay or clones schemas that will not be sent. Those lookups do not count as
+  Relay, resolves unused lookup queries, or clones schemas that will not be sent.
+  Those lookups do not count as
   rendered/loaded contracts. Completed calls cannot reuse an identity from
   supplied history or an earlier lookup round. Incomplete answers retain their
   status, visible text, and reported usage without releasing partial calls or
   starting another generation. Exhaustion and malformed completed calls fail.
+  Required/named tool choices still accept a typed assistant refusal; ordinary
+  text-only completions fail, and a refusal cannot bypass call/schema validation.
 - `relay_bps_tool_catalog` on Responses requests selects `auto` (default),
   `compact`, `full`, or `discovery`; it never reaches the BPS endpoint. Converted
   clients use the same automatic policy after their existing typed conversion.
@@ -457,8 +491,9 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
 - Parsed declarations belong to the immutable prepared client request and are
   reused for discovery and final JSON/SSE validation. This is not a cross-request
   permission cache: selection, tool choice and argument validation still use the
-  current request. Account-only BPS preparation borrows unchanged history until
-  a model or timezone rewrite needs ownership, then builds the wire body once.
+  current request. After dispatch, response validation retains the catalog,
+  historical IDs, output/parallel policies, client metadata and sealing context;
+  ordinary normalized streams release unneeded input payloads and declarations.
 - Discovery preserves upstream SSE for streaming inference clients. Ordinary
   text streams before terminal validation; executable calls remain withheld.
   After a withheld tool, later output whose index may shift waits for the
@@ -477,6 +512,13 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   native internal items replay only inside that request, not in a cross-request
   discovery store. Dropping the response drops discovery and its upstream body;
   no detached generation survives client cancellation.
+  A terminal event, read timeout, transport error or local rejection releases
+  the provider reader before delivering queued client events, without waiting
+  for another downstream poll. Discovery also closes each completed reader
+  before awaiting the next generation's response headers, including a provider
+  that leaves its HTTP body open after terminal. Queued validated output and
+  recorded usage remain available; this cleanup does not release the logical
+  request lease early, change retry eligibility, or fabricate completion.
 
 ## Attachments, capability limits and authorization failures
 
@@ -489,6 +531,13 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   Final encoding is measured in `serializationMs`, not upload time;
   image validation, account/credential cache boundaries and cancellation are
   unchanged. Tools still wait for complete response validation before release.
+- Inline-image requests prepare OAuth before looking up either attachment cache.
+  Uploads and the generation dispatch retain that exact authorization incarnation,
+  including when an inline image resolves from cache. A changed owner rejects the
+  prepared attempt instead of sending old file IDs with a replacement login;
+  the next explicit request can prepare and upload with its current credentials.
+  Missing credentials never become a shared default cache key. Text-only and
+  client-supplied file references keep their credential-lookup-free preparation.
 - Inline-image uploads share in-flight success or failure for the same endpoint,
   account, credential fingerprint, media type and image bytes. Only file IDs
   enter the existing 512-entry cache; upload failures are not retained there.
@@ -507,6 +556,11 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   only completed IDs/errors wait for their input position. An observed failure
   stops admitting new jobs while earlier uploads resolve the input-ordered error.
   Cancellation/failure drops pending work before generation.
+- An attachment HTTP 429 preserves a valid `Retry-After` for the client using
+  the shared retry-header parser, without starting generation, switching
+  accounts, or adding an account-wide cooldown. Missing or invalid hints do
+  not invent a delay. Upload error bodies remain private, and upload failures
+  do not enter the file-reference cache; an explicit later request may retry.
 - BPS does not accept provider-side `previous_response_id`. Responses clients
   may continue through Relay's bounded, volatile native replay store: validate
   the exact predecessor owner, materialize its complete history before route
@@ -514,17 +568,26 @@ transfer costs, not BPS compatibility, model tokens or prompt-cache savings.
   Missing replay state fails locally; over WebSocket, `previous_response_not_found`
   lets a compatible client resend full history on a new connection. Relay never
   drops context or rotates merely because BPS cannot resolve an opaque ID.
+  Unresolved `item_reference` inputs, including ID-only shorthand, fail before
+  BPS generation instead of being silently omitted from the conversation.
   Native replay uses the existing 16 MiB total budget without a separate 2 MiB
   conversation cutoff. Full supplied history also reconstructs
   the tool catalog. The catalog preload hint cache is separate and cannot restore
   a conversation. Non-Standard tiers, native strict output, native web search/image
   generation and Agent Identity remain unsupported.
-- A JSON schema with explicit `strict: false` buffers output and validates the
-  unchanged self-contained schema locally without a Relay-private request flag.
-  `relay_bps_output_validation: false` opts out; the explicit `true` option also
-  enables the existing local JSON-object mode. Neither is constrained decoding;
-  `strict: true`, invalid/incomplete output, and external references fail.
-  Omitted strictness still requires explicit opt-in. JSON and streaming catalog
+- JSON-object mode and a JSON schema with non-strict output buffer the final
+  answer and validate it locally without a Relay-private request flag. Schema
+  validation uses the unchanged self-contained schema; JSON-object mode requires
+  one complete object, not schema adherence. See the client API's
+  [JSON-mode distinction](https://developers.openai.com/api/docs/guides/structured-outputs).
+  `relay_bps_output_validation: false` opts out; `true` remains an explicit opt-in.
+  Neither mode is native constrained decoding. `strict: true` is still rejected
+  with `text.format.strict`, including without the private option; invalid or
+  incomplete output and external references fail. Enabling the option without
+  a structured format does not buffer ordinary text.
+  Omitted or null `text.format.strict` uses the documented false default
+  ([Responses text format](https://developers.openai.com/api/reference/resources/responses/methods/retrieve));
+  this is separate from function-tool strictness. JSON and streaming catalog
   discovery withhold the complete answer until terminal validation succeeds.
   Admission checks native and converted output formats before reserving a BPS
   member; catalog/access discovery stays independent. Incompatible BPS routes

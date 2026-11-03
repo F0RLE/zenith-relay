@@ -1,8 +1,7 @@
 # Official protocol contracts
 
-Read the contract for the actual endpoint, not just the model family. These
-links are starting points, not snapshots; check the current documented fields
-and corresponding official SDK types before changing behavior.
+Check the exact endpoint's current documentation and official SDK types before
+changing behavior. Use the links below to locate those contracts.
 
 | Protocol | Primary sources | Boundaries to verify |
 | --- | --- | --- |
@@ -27,6 +26,9 @@ of context-window overflow or a request-size 413.
 The [Structured Outputs guide](https://developers.openai.com/api/docs/guides/structured-outputs)
 defines schema adherence and separate refusals. A command-approval request must
 not silently lose its schema or acquire a prompt-only strict-mode substitute.
+The Responses text-format reference defines absent or null `text.format.strict`
+as false. This differs from function-tool defaults; locally validated non-strict
+output must still retain the client's unchanged schema and explicit opt-out.
 The [function-calling strict-mode contract](https://developers.openai.com/api/docs/guides/function-calling#strict-mode)
 distinguishes omitted `strict`: Responses attempts strict normalization with a
 best-effort fallback, while Chat Completions defaults to non-strict. Foreign

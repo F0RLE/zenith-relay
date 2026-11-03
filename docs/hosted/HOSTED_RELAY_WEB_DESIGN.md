@@ -1,6 +1,8 @@
 # Hosted Relay Web Design
 
 **Design specification for future implementation.**
+Some screens already exist in the [web preview](../../web/README.md); its guide
+describes what can run locally and which integrations are still pending.
 This document owns visuals, screen composition and interaction states.
 [Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns routes, permissions and data/money
 semantics; [roadmap](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
@@ -15,9 +17,15 @@ Navigation: [principles](#design-principles) · [visual system](#visual-system) 
 
 ## Design principles
 
-1. **Original design.** Author composition, typography, assets, wording,
-   chart treatment and interactions. Reference projects contribute functional
-   lessons only. Do not copy their screenshots, page components, CSS or branding.
+1. **Owned implementation.** The public landing uses a green field,
+   large locally hosted type and an original
+   woven connection diagram. Keep Relay's palette and factual product copy.
+   Do not invent traffic, availability, pricing or customer data.
+   Customer and owner screens extend the approved identity in an operating mode:
+   pine navigation, cream selection, Golos Text and quiet work surfaces. Preserve
+   their data, accounting meaning and actions, but recompose page bodies for
+   Hosted rather than preserving the Desktop arrangement. Desktop is outside
+   this visual change.
 2. **Clarity before decoration.** The customer can answer: what is available, how
    to connect, what was used, what was charged and what action is safe now.
 3. **Money and uncertainty are explicit.** Available, held, charged and pending
@@ -35,6 +43,69 @@ surfaces, a muted green action accent, clear typography and restrained grouping.
 Use solid surfaces, compact metrics and activity backed by request data. The web
 scope covers public information, the customer cabinet and owner controls; retain
 Relay's existing Desktop design, light/dark themes and single-workspace model.
+
+The public landing uses a deliberately short, separate visual composition: a plain
+explanation of API access, a large green opening and a full-width woven connection
+field. Four first questions follow on the same page, with all answers visible.
+Native scrolling and the Questions anchor move to them; scrolling is not intercepted.
+There is no helper note under the
+hero actions, product-data showcase, pricing fixtures or placeholder
+connection settings. Start opens the cabinet's brief, skippable first-use guide;
+the header's cabinet link enters directly. Help can reopen the guide later.
+The connection field is illustrative, not live traffic: three SVG thread bundles
+connect an application through Relay to a model. Request strokes travel at constant
+speed with staggered 4.8–6.4 second cycles. Hover and theme changes do not reset the
+phase; reduced motion, a hidden tab or offscreen content stop the animation.
+Golos Text is served locally for the landing, customer/owner workspaces and entry
+screens with Cyrillic coverage and its SIL OFL license; no font-service requests
+are made. The shared mark, palette and type connect the surfaces; decorative
+traffic remains exclusive to the landing. Shared and surface-specific tokens live in
+`web/DESIGN.md` and the development-only Impeccable surface brief.
+The public landing omits demo/development labels; synthetic
+money and account data remain labelled inside the development cabinet. The frontend
+now exposes the customer `/app/*` shell and the separate owner `/admin/*` shell;
+the landing enters the customer shell. Production builds omit fixtures and show
+unavailable data/actions until backend integration, without inventing a session,
+balance or role. Sign-in remains disconnected. One shared theme preference carries
+between landing and cabinet. Local mode, application launching, profiles and Desktop
+runtime/credentials are not copied into the web application.
+The cabinet reuses base components with a Hosted-only composition layer:
+232-pixel sidebar (56-pixel collapsed rail), 32-pixel content gutters (24 below
+1100px; 16 on phones), a compact joined metric panel and a full-width token chart. At a
+workspace-container width of 960px, related charts form pairs below the primary
+series; narrower layouts stack them. Overview's four headline cells are 88px high
+on desktop and form a two-by-two grid on phones. Usage joins headline totals,
+token counters and generation measurements in one panel before its data table;
+secondary metrics share its lower section rather than a separate speed card.
+Exact charges and uncertainty hints remain available. Navigation retains pine
+green in both themes, pale supporting text and a cream selected row. The pine balance
+panel sits beside payment history at wide widths. Its demo top-up form is inline:
+amount input, quick amounts and a payment-method selector sourced from the demo
+snapshot. Errors and success stay on the page; no payment provider is called.
+Keys, connections, pool members
+and customers use full-width resource rows. Settings align section headings beside
+their controls. The logo toggles the rail without navigation, or closes the phone
+drawer. Settings stay above the footer divider; logout is the only footer action.
+The customer help page/dialog and footer preview label are removed. First-use
+onboarding and owner connections remain separate, unchanged capabilities.
+These compositions collapse to one column when their container is narrow.
+Request details place model/status above key and UTC context, with diagnostics
+at the trailing edge. Exact posted charge leads the left-aligned timing row;
+the token total anchors two open token columns rather than nested cards.
+Parameters stay quiet and left-aligned; technical details use the existing
+disclosure. Phone layouts stack token groups and retain 44px export/copy targets.
+Missing charges, token counts and accounting warnings keep their existing meaning.
+Forms, notifications,
+onboarding, empty results and signed-out/not-found screens share the same materials.
+Headings are 28px on desktop and 24px on mobile; controls are 40/44px high with
+8px corners and soft shadows. The cream balance action is flat on pine. Information
+panels use 16px corners; tables and settings control groups use 12px.
+Keyboard focus uses a two-pixel accent outline with a three-pixel gap, cream in
+the pine sidebar, and system Highlight in forced-colors mode. Mobile utilities are
+sticky in normal flow; the navigation drawer retains focus trapping and Escape.
+Only presentation crosses the boundary; native state, IPC, credentials and local
+controls do not. Hosted calculations, role separation and disconnected state remain
+unchanged. The current shell dimensions supersede earlier layout proposals below.
 
 ## Visual system
 
@@ -72,8 +143,8 @@ is not a certification of every rendered combination.
 
 ### Typography, spacing and surfaces
 
-- Use the platform UI sans-serif stack with Cyrillic support; no remote font
-  requests. A later custom font needs local assets, licensing and loading review.
+- Use locally served Golos Text with Cyrillic support and its bundled OFL license;
+  no remote font requests. Keep the system fallback for Chinese glyphs.
   Monospace is reserved for IDs, API paths and configuration examples.
 - Type sizes/line heights: hero 40/48 desktop, 30/38 mobile; page title 28/36;
   section 20/28; body 16/24; dense data 14/20; secondary caption 12/16. Critical
@@ -221,7 +292,7 @@ Tabs, sheets and dialogs do not create a new top-level app for each operation.
 | WS-06 | Customer `/app/keys` | Issue, restrict, replace and revoke an inference key |
 | WS-07 | Customer `/app/billing` | Fund access and reconcile payments, holds and journal |
 | WS-08 | Customer `/app/settings` | Manage identity, sessions, preferences and account requests |
-| WS-09 | Customer `/app/help` | Connect a client and get safe support information |
+| WS-09 | Removed | No standalone customer help route or dialog |
 | WS-10 | Customer header notice sheet | Read own notifications and follow permitted next actions |
 | WS-11 | Owner `/admin/login` | Authenticate an existing owner with a passkey |
 | WS-12 | Owner `/admin/operations/setup` | Complete explicit setup/readiness steps |
@@ -246,13 +317,20 @@ Tabs, sheets and dialogs do not create a new top-level app for each operation.
 becomes Open cabinet. Never
 render personalized balances into public/cacheable HTML.
 
-**Top-to-bottom composition:**
+**Current minimal composition:** `/` contains a full-screen hero and a second
+screen with four fully visible answers, reached by scroll or `/#faq` / `/#features`.
+Start and the questions-section cabinet action retain the skippable first-use guide.
+Customer authentication starts through the cabinet's sign-in flow.
+
+**Planned expanded public content (not the current minimal preview):**
 
 1. Header: brand, How it works, Models and prices, FAQ, support, locale/theme,
    Sign in. Section links use `/#how-it-works`, `/#models`, `/#faq`, `/#support`.
 2. Hero: left, a short product promise and two-line explanation; right, an
    original static diagram `Your client -> Relay API -> Available model`.
-   Primary Start action opens `/login`; secondary View models scrolls to prices.
+   Primary Start action opens `/app/overview` for a verified active session;
+   otherwise `/login` continues to that panel after authentication. Never infer
+   authentication from a browser preference. Secondary View models scrolls to prices.
    Example RU headline: `Доступ к моделям. Расходы под контролем.` EN:
    `Model access. Usage you can understand.` Do not promise unlimited capacity,
    fixed availability, free trials or unqualified providers.
@@ -324,6 +402,13 @@ authenticated personal workspace, never a chosen owner-panel filter. Each passpo
 inherits WS-24's loading, denied, unavailable and session-expiry behavior.
 
 ### WS-03 — Overview
+
+On the first authenticated visit, offer a short welcome dialog with the steps
+Models, Funding, Key and Client setup. Include Skip and close/Escape; neither
+performs a financial action or affects access. Keep the guide available in Help
+after dismissal. A stored dismissal is a UI preference, not authentication or
+proof of a completed request. The local preview exercises this journey with
+explicit synthetic data; it does not qualify Hosted login or billing.
 
 **Header:** `Обзор / Overview`, short period context, primary Top up; Create key
 is secondary unless the account has no key, when the onboarding block highlights it.
@@ -512,7 +597,7 @@ closure/help. On mobile navigation becomes a labelled section selector, not tiny
   Same email is not automatic account merge; failures preserve existing access.
 - Sessions show bounded safe device/client description, last activity and current
   session marker. Revoke other/current session has clear consequences; revoking
-  customer sessions does not claim to revoke inference keys or owner sessions.
+  customer sessions leaves inference keys and owner sessions active.
 - Notifications show supported event preferences and threshold semantics. External
   delivery appears only for a qualified channel with verified recipient/consent;
   in-app read status is not acceptance of a tariff or resolution of an incident.
@@ -526,23 +611,12 @@ Each editable section has its own Save/Cancel state, revision conflict and resul
 Navigating away warns about ordinary unsaved edits; credentials/proof are not saved
 in a browser draft. Failed save never marks unrelated sections as successfully saved.
 
-### WS-09 — Connection and help
+### WS-09 — Removed standalone help
 
-**Composition:** connection checklist; model/protocol/client selection; configured
-API base URL; model ID; placeholder key; minimal compatible example; troubleshooting;
-support/status links. Show only qualified client/protocol combinations. No account
-credentials, auto-detected local application launcher or unsupported client badge.
-
-Copy base URL and model separately. Copy example uses `YOUR_RELAY_API_KEY`, unless
-the user explicitly includes a just-issued secret still held in transient memory.
-State that executing a model example may cost money; visiting Help and copying it
-does not. Do not add automatic connection probes or an in-browser playground.
-
-Troubleshooting begins with scope/key, available funds, model availability and
-request status, then opens the matching safe Usage record. Support summary includes
-safe code/ID, observed time and build/API context, not prompts, responses, full keys,
-headers or raw browser exceptions. No promise that support can recover lost keys.
-Mobile code scrolls inside its own region with an accessible Copy action outside.
+The customer help route, modal, navigation entry and connection-help actions were
+removed. `/app/help` and its legacy preview URL use the normal not-found state.
+This does not remove first-use onboarding, model ID copying, safe Usage details,
+or the owner's connection inventory.
 
 ### WS-10 — Notices
 
@@ -745,6 +819,14 @@ it is not a persistent full-access token displayed on page load. Revocation expl
 which future management actions stop and which ongoing domain operations remain
 accountable. Show concurrent revision conflicts without silently recreating pairing.
 Mobile keeps authority/scope/status visible before expandable technical details.
+
+The pairing review grants only a subset of the
+[Desktop Hosted scope](HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope): Overview,
+Usage, and Connections and pool. Do not offer an all-admin scope. Customer
+administration, balances/keys, payments, tariffs and installation/security settings
+remain in the web owner panel; pairing must not grant these operations merely
+because they are hidden in Desktop navigation. Display denied, expired and revoked
+authority without silently upgrading or recreating the device grant.
 
 **Explicit Desktop transfer:** show this as a separate paired-device operation,
 not automatic synchronization or a website credential scrape. Desktop initiates
@@ -987,11 +1069,11 @@ persist credentials, authentication proof or payment-sensitive details as drafts
 Decimal money input stays an exact typed value, not a floating-point recalculation.
 
 Submission displays progress and prevents another submission of the same effect.
-Leaving a page does not claim to cancel a server payment, credential update or
-inference. A slow operation remains pending with a safe reference/status action.
+Server payments, credential updates and inference continue after page navigation.
+A slow operation stays pending with a safe reference/status action.
 Use server deadlines/retry guidance; no frontend timeout converts pending to failed.
 Ordinary unsaved edits get Leave/Stay; loss of a displayed one-time key gets a
-different warning. Escape/back closes a view, not an already committed operation.
+different warning. Escape/back closes the view; committed operations stay active.
 
 Fresh-proof prompts show action context before the platform ceremony. After proof,
 revalidate target/revision and explicitly confirm the pending action; a successful
@@ -1112,7 +1194,6 @@ Every screen/action/state still needs reviewed RU/EN copy before implementation.
 | Inference keys | API-ключи | API keys |
 | Billing | Баланс и платежи | Balance and payments |
 | Account settings | Аккаунт и безопасность | Account and security |
-| Connection help | Подключение и помощь | Connection and help |
 | Available money | Доступно | Available |
 | Request hold | Зарезервировано для запросов | Held for requests |
 | Refund hold | Зарезервировано для возврата | Held for refunds |
@@ -1163,7 +1244,7 @@ case when needed.
 | WS-03/04: overview, reports, request detail | H10, H12, H14 | Current versus historical separation, chart/table/export reconciliation, coverage/retention, both outcomes and no raw content |
 | WS-05/06: models and keys | H07, H09, H14 | Exact bands/scopes, unavailable grants, bounded limits, one-time key, lost acknowledgement and revoke semantics |
 | WS-07: money | H04, H08, H14 | Quote/intent/credit/refund distinctions, duplicate/lost return, holds and exact monetary display |
-| WS-08/09/10: settings, help, notices | H06, H09, H12, H14 | Last-login/session safety, placeholder examples, safe support, verified consent and permitted notice targets |
+| WS-08/10: settings, notices | H06, H09, H12, H14 | Last-login/session safety, safe support, verified consent and permitted notice targets |
 | WS-11/12: owner auth/setup | H03, H05, H15, H16 | No public ownership claim, fresh proof, real readiness evidence, invalidation and guarded opening |
 | WS-13/14/15/16: capacity/pool/prices | H01, H04, H07, H15 | Parity, saved versus admitted, current counts, stale/partial mutations and revisioned publication |
 | WS-17/18/19: access/customers/payments | H04, H05, H08, H09, H15 | Separate authorities, no impersonation, audited restrictions/adjustments and money outcome recovery |

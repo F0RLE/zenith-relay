@@ -3,10 +3,9 @@
 Use the [official Tauri v2 command guide](https://v2.tauri.app/develop/calling-rust/)
 for framework behavior and the current source for Relay's command contract.
 
-Version check on 2026-10-23: Relay's installed `@tauri-apps/api` and the Rust
-`tauri` package in [Cargo.lock](../../../../src-tauri/Cargo.lock) both resolve
-to `2.12.1`. Check the installed package and lockfile again when implementing
-a change; a manifest's compatible version range is not its resolved version.
+Check the installed `@tauri-apps/api` and resolved Rust `tauri` version in
+[Cargo.lock](../../../../src-tauri/Cargo.lock) before changing the IPC contract.
+Use resolved versions when consulting framework documentation.
 
 ## Trace an existing read and mutation
 

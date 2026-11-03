@@ -14,9 +14,9 @@ For suspected vulnerabilities, follow the
 ## License and contributor agreement
 
 Zenith Relay is **AGPL-3.0-only**. Keep the [LICENSE](LICENSE) text intact.
-The assignment terms are only in the
+The assignment terms are in the
 [Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). Read that file
-before a pull request. This section does not restate them.
+before a pull request.
 
 For each pull request, describe the change and the checks, then check the
 single Contributor Agreement checkbox yourself. Keep its wording unchanged.
@@ -90,8 +90,38 @@ do not copy contributor guidance into relayed user requests.
 
 In a workspace checkout, the parent `CONTRIBUTING.md#agent-guidance` and
 `.agents/skill-selection.cases.json` cover authoring and selection checks.
-These are optional for a standalone checkout. Structural checks do not establish
-model-selection quality or authorize live probes, releases, or subagents.
+These checks are optional in a standalone checkout. Evaluate model-selection
+quality separately; live probes, releases and subagents require explicit authorization.
+
+### Design and independent review
+
+Use this workflow for substantial changes with unresolved architectural choices,
+especially across routing, protocol, account recovery, or local/Hosted boundaries.
+Small, clear fixes keep the normal implementation and focused-check workflow.
+No plugin or additional skill is required.
+
+1. Inspect the owning code and affected contracts. Summarize scope, non-goals,
+   alternatives, ownership, failure/recovery behavior, affected paths, and
+   acceptance checks in chat. Resolve material design choices before coding;
+   do not ask for approval at every routine step.
+2. When the user explicitly authorizes independent review, use a fresh-context
+   reviewer. Supply the proposal, applicable instructions, and relevant source
+   and test paths, not the earlier design conversation. Check missing assumptions,
+   contract violations, unnecessary complexity, failure cases, and testability
+   against the actual code. Same-context self-review is not independent review;
+   if isolation is unavailable, report that limitation instead of claiming a pass.
+3. Return actionable findings and source references in chat. Validate findings
+   before changing the proposal; the user decides material architectural
+   trade-offs. Do not silently accept unresolved blockers or expand the scope.
+4. Implement the agreed scope and run the owning focused checks. Review approval
+   does not replace tests or establish installed-app or live-provider acceptance.
+5. Update existing contract documents only when their maintained behavior changes.
+   When checking documentation against code, distinguish current contracts from
+   planned work in the roadmaps and Hosted designs. Do not report an explicitly
+   future feature as a missing implementation of a current contract.
+
+Keep this proportional to the task. Do not create design or review-report files
+unless requested; use the existing document owners rather than parallel specs.
 
 ## API and protocol references
 
@@ -102,9 +132,8 @@ behavior is observed, not specified by the public OpenAI API.
 
 Follow the [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md) and
 the matrix for the affected protocol pair and contract. Third-party comparisons
-need an inspected revision, file paths, and retained license/attribution; they are
-not the spec or a replacement runtime. A passing first answer does not prove tool
-continuation.
+need an inspected revision, file paths and retained license/attribution. Implement
+against official contracts and qualify the complete tool-continuation cycle.
 
 ## Account connector references
 
@@ -112,7 +141,7 @@ Use [account connectors](.agents/skills/relay-account-connectors/SKILL.md) for
 OAuth, sign-in/import, and reauthentication; use
 [pool lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md) for renewal,
 quota, admission, execution ownership, and removal. Reuse Relay's authority and
-scheduler. A working login alone does not establish pool compatibility.
+scheduler, and qualify sign-in and pool execution separately.
 
 ## Development setup
 
@@ -154,13 +183,11 @@ For a prepared checkout, use `bun run app:dev`. Rust auto-restart is disabled
 by default, so editing backend code does not terminate pool requests made by
 the agent doing the work. Frontend hot reload remains enabled. Rust changes
 take effect only after you explicitly stop and restart the dev command;
-finish active agent requests before restarting. This is not data or process
-isolation from your working Relay profile.
+finish active agent requests before restarting. Dev shares your working Relay profile.
 
-Codex's **Relay · Dev** action uses the same `bun run app:dev` workflow and
-native default profile as ordinary terminal development. It does not create a
-separate profile or copy accounts. An explicit absolute `ZENITH_RELAY_DEV_DATA_DIR`
-can still select another debug profile when deliberately configured.
+Codex's **Relay · Dev** action uses `bun run app:dev` and the default native
+profile, sharing the same accounts as terminal development. Set an absolute
+`ZENITH_RELAY_DEV_DATA_DIR` to select a separate debug profile.
 
 To opt into automatic Rust rebuilds/restarts, use `bun run app:dev:watch`
 or `bun run start --watch`. Do not route the editing agent through that
@@ -170,9 +197,8 @@ Codex desktop actions are provided in `.codex/environments/environment.toml`.
 Use **Relay · Dev** from the Run menu to start the normal no-watch debug workflow in
 Codex's terminal. After an agent task finishes, stop that terminal command and
 run the action again to compile and apply Rust edits. Frontend hot reload stays
-enabled. The action list contains only Dev, TypeScript, UI tests, and Rust check;
-opening a chat does not run them automatically. Documentation checks and dependency
-setup remain available through the commands documented here, outside the action list.
+enabled. Run Dev, TypeScript, UI tests, or Rust check explicitly from the action
+list. Use the commands here for documentation checks and dependency setup.
 
 On Windows, Relay's scripts prefer the portable toolchain in
 `%USERPROFILE%\Development\visual-studio\build-tools` and initialize MSVC,
@@ -188,7 +214,7 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 ~~~
 
 When cloned inside the Zenith workspace, setup can call the sibling
-`scripts/setup/setup-development.ps1` to install missing portable Windows tools
+`../scripts/setup/setup-development.ps1` to install missing portable Windows tools
 under `Development`. This installer is not included in a standalone Relay
 clone. Standalone contributors must prepare native tools first. The workspace
 installer requires `winget` and an elevated PowerShell window;
@@ -221,8 +247,8 @@ Keep Tauri options before `--` and extra Cargo arguments after it.
 
 Identical renderer filenames and bytes retain their previous timestamps, allowing
 Cargo to reuse its release output. Changed assets still trigger native work.
-Every build runs frontend validation; release LTO, codegen units and the ES2020
-WebView target stay unchanged. Gzip measures frontend size, not compiler speed.
+Every build validates the frontend and uses the configured release optimizations
+and ES2020 WebView target. Gzip is used for frontend size budgets.
 
 For the Windows workspace's build-and-restart shortcut, use the parent
 `CONTRIBUTING.md` section **Rebuild the local Relay desktop executable**.
@@ -268,6 +294,11 @@ review history, or unfinished acceptance evidence in them. Keep contributor
 commands in this file, current implementation facts in `docs/project/PLANNING.md`,
 and unfinished or live-provider acceptance gates in `docs/project/ROADMAP.md`.
 
+Group fixes by the behavior a user observes, rather than adding a bullet for
+each patch. Buffer allocation, file moves and dependency-version inventories
+belong in code or contributor guidance, not release notes. Preserve release
+headings, locale markers and references when condensing an existing section.
+
 Stable release tags must have a matching dated section in
 `docs/releases/CHANGELOG.md`. The
 release workflow fails when that section is missing instead of publishing an
@@ -279,11 +310,41 @@ localized Help error tables, including public aliases. The catalog test rejects
 undocumented codes; classification and recovery policy remain in their owning
 modules. Preserve unknown external provider codes as received.
 
-To add a locale, add one sequential guide at
-<code>docs/help/&lt;locale&gt;/README.md</code>, register its translation
-resources, and update the bundled Markdown registry in
-<code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep the guide
-accurate for the UI's current labels and section order.
+### Desktop localization
+
+English in `src/src/i18n/locales/en.ts` is the canonical message/key source.
+Keep runtime code and diagnostics in English; additional UI languages belong
+only in locale dictionaries. Do not add per-language branches to components,
+startup, tray or OAuth windows. Hosted has its own localization owner.
+
+To add a language:
+
+1. From `src`, run `bun run locale:template <BCP-47-code>` to print an English
+   starter with the target language's plural categories. Save and translate it
+   as `src/src/i18n/locales/<code>.json` (path relative to the repository root).
+2. Add one record in `src/src/i18n/registry.json`: `code`, `nativeName`,
+   `englishName`, `direction`, ordered `fallbacks`, `helpLocale` and `format: "json"`.
+   Optional `aliases` map explicit OS/region spellings; never infer a different
+   script from the same base language. English must remain the final fallback.
+3. Preserve keys, placeholders and arrays. Review the translation, long text,
+   font coverage and RTL layout before enabling it. `bun run check:locales`
+   checks every registered dictionary, interpolation, plural forms and Help path.
+   Ordinary UI tests run the same gate in CI; no extra CI language list is needed.
+
+Settings, setup, resource loading and native language validation use that registry.
+Only the selected dictionary and fallback chain load. UI switching is latest-wins;
+failed loading retains the current language. A small saved public-text snapshot
+localizes pre-bundle startup and the native tray; corrupt optional preferences
+fall back to English without blocking startup. No credentials or user labels enter it.
+Native labels update before preferences are saved; a failed save leaves the active
+language applied and is recorded through the existing IPC diagnostics.
+
+UI and Help coverage are independent. Set `helpLocale: "en"` until a translated
+guide is ready. A new guide needs only `docs/help/<locale>/README.md` and the
+registry value; keep topic/error-reference markers and current UI steps intact.
+Release notes already use exact-locale, base-language and English fallback.
+Resource budgets separately constrain shared application code, each language
+pack, all packs and Help. Do not raise startup limits merely to add dictionaries.
 
 Screenshots are generated from the mocked desktop shell. Update the scenario
 when the UI changes, then regenerate:
@@ -310,21 +371,18 @@ bun run verify --quick
 bun run verify --base origin/main
 ~~~
 
-`--quick` runs script tests, documentation checks, agent guardrails,
-duplicate-code checks, and unit tests plus production builds for both Desktop
-UI and the web preview. It deliberately skips native Rust, browser tests, and
-dependency audits; it is not a release gate.
+`--quick` covers scripts, documentation, guardrails, duplicate-code checks, and
+Desktop UI/web unit tests and production builds. Full verification adds Rust
+formatting, Clippy, native and browser tests, and audits of both Bun and Cargo
+lockfiles. Release gates are listed separately below.
 
-Without `--quick`, verification also runs formatting, Clippy and tests for both
-Rust packages, both browser suites, both Bun audits, and audits of both Cargo
-lockfiles. Script/documentation/guardrail checks run first. Independent Desktop
-UI, web and Rust lanes then run with a maximum of two concurrent commands; each
-lane stays sequential. Use `--jobs 1` for sequential execution or `--jobs 3` to
-allow all three lanes. After a failure, no new command starts, and already-started
-commands finish before verification exits unsuccessfully. Desktop Rust tests keep
-one test thread. `bun run verify` from `src` calls the same root runner. Each
-command reports elapsed time. Both Rust packages reuse `src-tauri/target` by
-default; explicit Cargo target-directory overrides still apply.
+Script, documentation and guardrail checks run first. Desktop UI, web and Rust
+then run in independent, sequential lanes, two at a time. Use `--jobs 1` for
+sequential execution or `--jobs 3` for all three lanes. A failure stops scheduling;
+started commands finish before the runner exits unsuccessfully. Each command
+reports elapsed time. Desktop Rust tests use one thread. Both Rust packages
+reuse `src-tauri/target`; explicit Cargo target-directory overrides take priority.
+The root and `src` verification commands use the same runner.
 
 Full verification needs the pinned Rust toolchain and native build libraries,
 locked dependencies in `src` and `web`, Playwright Chromium, `cargo-audit`, and
@@ -337,22 +395,21 @@ headless setup used in CI.
 
 `--base` selects the existing Git reference used by guardrail and duplicate-code
 checks. Use the actual PR target and fetch it first; omit the option to use each
-check's normal local default. Verification does not package installers, publish
-a release, restart Desktop, or establish installed-app acceptance.
+check's normal local default. Packaging, publication, Desktop restarts and
+installed-app acceptance are separate steps.
 
 ### Required CI and dependency maintenance
 
 The Build workflow checks pull requests and pushes to `main` and `release/**`.
-A release-branch push omits its duplicate suite only after confirming an open PR
-for that exact commit and a separate, non-cancelled PR Build run. Standalone
-release pushes, PRs, `main`, tags and manual runs retain their checks; API lookup
-failures or an unconfirmed PR run also retain the complete suite. Windows CI
-reports test compilation (`--no-run --timings`) separately from execution.
-Its `Check` status succeeds only when runtime checks, every Desktop browser
-shard, Windows Rust tests, and web-preview checks all succeed; a skipped or
-cancelled dependency is not a pass. The `main` ruleset requires `Check` and
-`Release context` on an up-to-date branch. CODEOWNERS identifies reviewers;
-it does not itself require an additional reviewer or grant a merge bypass.
+A release push with an open PR and a separate, non-cancelled Build run for that
+exact commit delegates checks to the PR run. All other cases, including API
+lookup failures, run the complete suite. Windows CI reports test compilation
+(`--no-run --timings`) separately from execution.
+`Check` requires successful runtime checks, every Desktop browser shard, Windows
+Rust tests and web-preview checks. Failed, skipped or cancelled dependencies fail
+the gate. The `main` ruleset requires `Check` and `Release context` on an up-to-date
+branch. CODEOWNERS identifies reviewers; the ruleset controls review requirements
+and merge bypasses.
 
 Third-party Actions are pinned to full commit IDs. Dependabot maintains those
 pins, both Cargo packages, and the actual Bun lockfiles in `src` and `web`.
@@ -366,6 +423,47 @@ not local workflow files. Changes to checked-in workflows and maintenance rules
 take effect on GitHub only after they reach the relevant branch. Installer
 builds still require a manual run or version-tag push; publication remains
 restricted to version-tag pushes.
+
+### Subscription proxy diagnostics
+
+For a bounded, anonymous comparison of the first two saved proxies, build the
+debug executable with the standard Rust wrapper, then run from the repository root:
+
+~~~powershell
+bun scripts/build/cargo.mjs build --manifest-path src-tauri/Cargo.toml --locked
+& .\src-tauri\target\debug\zenith-relay.exe --diagnose-subscription-proxies "$env:LOCALAPPDATA\Zenith Relay"
+~~~
+
+This mode exits before desktop, gateway, or single-instance initialization. It
+reads the existing proxy vault without key creation, migration, or file recovery;
+it never changes assignments or passes account tokens/cookies. It issues at most
+two header-only GET observations per proxy, through the selected proxy only,
+using the subscription client's public headers and management HTTP admission.
+Challenges stop that route; rate limits or positive Retry-After stop the comparison.
+
+JSON labels A/B follow saved pool order and omit proxy URLs, credentials, labels,
+and account inventory. `authentication: none` and `generationTested: false` are
+explicit: a 401 proves neither account access nor model eligibility. `complete`
+means both routes were observed, not that authentication succeeded; `deferred`
+means a provider pause prevented the second route. Exit 0 returns observations;
+exit 2 indicates a setup, argument, or output failure. Setup and argument errors
+use fixed codes. The running Relay is not restarted.
+
+To compare the exact subscription query with and without a bearer, use
+`--diagnose-subscription-authorization` with the same absolute data root.
+It selects one enabled, non-draining Codex account eligible for quota monitoring,
+with an existing explicit proxy assignment. Pool membership is not required for
+this metadata-only read. It validates the account through the normal account
+check, then uses the same canonical `account_id` for two subscription requests:
+anonymous first, bearer second. A challenge, rate limit, or Retry-After stops
+further requests. The bounded diagnostic never refreshes tokens, retries, changes
+assignments, launches the desktop, or stores provider responses. It rechecks
+account registration, credentials, and proxy assignment before each dispatch.
+The account-check body is parsed only in memory; subscription observations retain
+safe headers only. Account ids, credentials, URLs, and bodies are omitted from JSON.
+`accountCheckAccepted` proves that check only, not subscription or model access.
+Both subscription requests must complete for `status: complete`; inspect their
+individual statuses rather than interpreting completion as authorization success.
 
 ### Focused checks
 
@@ -477,28 +575,20 @@ bun run screenshots
 The visual matrix is the responsive/appearance gate. The operations folder is
 the interaction and state-transition gate. The screenshots command regenerates
 only the committed `docs/screenshots` assets.
-The browser scripts invoke the installed Playwright CLI through `bunx --no-install`
-so it keeps its Node interpreter instead of inheriting Bun's Windows browser
-transport and temporary-profile limitations. No package is downloaded by these
-scripts.
+Browser scripts use the installed Playwright CLI through `bunx --no-install`,
+preserving its Node interpreter on Windows.
 
-The root verification command includes these unit, build and browser checks
-alongside native tests. Packaging or updater changes also require:
+The root verification command includes unit, build, browser and native checks.
+Packaging or updater changes also require `bun run app:build`; see
+[Build the desktop executable](#build-the-desktop-executable) for installer options
+and compiler setup. On Windows, the executable is
+`src-tauri/target/release/zenith-relay.exe`. Building does not replace or restart
+an installed Relay.
 
-~~~powershell
-bun run app:build
-~~~
-
-Run it from the repository root or from `src`. To build only the executable,
-without an installer:
-
-~~~powershell
-bun run app:build --no-bundle
-~~~
-
-On Windows, the executable is written to
-`src-tauri/target/release/zenith-relay.exe`. Building does not replace or
-restart an installed Relay.
+The Desktop release profile uses 16 codegen units for `zenith-relay-core` to
+avoid the observed Windows compiler crash with a single large unit. Release
+optimization and cross-crate LTO remain enabled; other packages retain their
+existing profile settings.
 
 ### Web preview
 
@@ -514,8 +604,8 @@ bun run test:e2e
 Browser tests use only loopback. Install their Chromium with
 `bunx --no-install playwright install chromium`, or set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing executable. The Build workflow
-checks this package separately before packaging. These checks do not establish
-Hosted backend readiness or real WebView integration.
+checks this package separately before packaging. Qualify the Hosted backend and
+real WebView integration after connecting them.
 
 ### Build artifacts
 
@@ -540,7 +630,20 @@ user data, and installed applications are not targets.
 Cleanup paths and their validation live next to the command in
 `scripts/maintenance/artifact-paths.mjs`; `scripts/lib` is for shared tooling.
 Run `bun test ./scripts/maintenance/clean.test.mjs` after cleanup-tooling changes.
-These synthetic checks do not delete build artifacts; CI runs them too.
+These synthetic cleanup checks also run in CI and preserve build artifacts.
+
+### Windows private sign-in check
+
+Run the opt-in native regression on a Windows desktop with WebView2 installed:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay private_webviews_start_clean_while_another_private_window_stays_open -- --ignored --test-threads=1
+~~~
+
+It opens hidden WebViews against a synthetic loopback page, checks cookies and
+local storage across consecutive sign-in windows while another private window
+stays open, and verifies cache cleanup after browser shutdown. It uses temporary
+profiles, not saved accounts, provider requests or the installed Relay process.
 
 ### Shared runtime
 
@@ -562,6 +665,17 @@ the same machine, build profile and fixtures before/after; preserve unrelated
 dirty work. Report results in chat or review, not this guide. Local CPU, bytes and
 mock timings do not establish installed-app memory, provider TTFT, cache hits or
 billing savings. Keep ordinary correctness/continuation tests passing.
+
+#### BPS discovery continuation probe
+
+Check retained-size accounting and exact continuation-budget boundaries, then
+measure local lookup advancement for small, large-schema, and fragmented-output
+fixtures. Preparation stays outside the timing window; use the same build profile
+for both runs. These timings do not measure provider latency or process memory.
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib discovery::tests::continuation -- --include-ignored --nocapture --test-threads=1
+~~~
 
 #### Request compression probe
 
@@ -602,14 +716,35 @@ current-call permissions. Debug fingerprint timings do not describe debug-off wo
 
 #### BPS stream and batch probes
 
-Measure parallel stream normalization and passthrough output during batch expansion:
+Measure parallel stream normalization, passthrough output during batch expansion,
+and single-call batch screening:
 
 ~~~powershell
-bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib -- parallel_stream_normalization_latency measure_bps_batch_passthrough --ignored --nocapture --test-threads=1
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib -- parallel_stream_normalization_latency measure_bps_batch_passthrough measure_bps_single_call_batch_probe --ignored --nocapture --test-threads=1
 ~~~
 
 Preserve native call identity, output order, atomic batch validation and terminal
-barriers. These synthetic CPU probes do not measure provider generation or caching.
+barriers. These probes measure local CPU work; qualify provider timing/cache separately.
+
+#### BPS tool-envelope probe
+
+Compare referenced and legacy envelope decoding on identical synthetic inputs:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib performance::envelope -- --include-ignored --nocapture --test-threads=1
+~~~
+
+Run the same build profile before and after a change. The probe checks exact
+payload serialization and unchanged inputs, then reports local decode medians
+and p90 for object and JSON-string envelopes. It does not measure provider
+latency or token savings; small timing differences may be noise.
+
+Discovery classification and cleanup, including the client call/result/next-response
+regression and malformed-argument checks:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib discovery::tests::inspection -- --include-ignored --nocapture --test-threads=1
+~~~
 
 ### BPS attachment preparation probe
 
@@ -730,7 +865,9 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 Pull requests and pushes to <code>main</code> and <code>release/**</code> run checks only. They do not build
 installers or publish artifacts. Pushing a <code>v*</code> tag builds the desktop
 installers and, after those checks pass, publishes the GitHub Release and updater
-manifest. A manual Build run retains desktop installers as Actions artifacts
+manifest. The release remains a draft until every asset upload and the stable
+updater manifest succeed. Failed uploads stop publication and can be retried.
+A manual Build run retains desktop installers as Actions artifacts
 without publishing, even when started from a tag.
 
 Browser checks run in four independent Playwright shards, preserving the local

@@ -100,7 +100,7 @@ export async function runVerification(steps, { root = repoRoot(), spawn = spawnP
       }
     }
   };
-  // Finish already-started processes after a failure; do not orphan Cargo or its compiler children.
+  // Await started processes so Cargo and its compiler children finish together.
   await Promise.all(Array.from({ length: Math.min(jobs, pending.length) }, worker));
   if (failure) return failure;
   log(`[verify] All selected checks passed (${((performance.now() - started) / 1000).toFixed(1)}s).`);

@@ -5,13 +5,19 @@ Planned Hosted implementation and acceptance. The
 the [Desktop roadmap](../project/ROADMAP.md) owns current-runtime work. Development and
 release checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
+The [existing web preview](../../web/README.md) is UI work, not completion of the
+service packages below. Authentication, server operations and paid acceptance
+remain open independently of screen readiness.
+
 ## Hosted multi-user Relay
 
 The first public Hosted release is a complete prepaid model-token service backed
 by operator-managed account/API-provider capacity. It has
 owner-configured Google/Telegram/OIDC customer login, one identity/wallet across
-channels, scoped keys, direct inference and local-pool control parity. Desktop is
-an operator client; the Hosted panel has no local Applications section.
+channels, scoped keys, direct inference and local-pool control parity in the web
+owner panel. Desktop is a [limited operator console](HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope)
+with Overview, Usage, and Connections and pool, not full web-admin parity.
+The Hosted panel has no local Applications section.
 The [Hosted target contract](HOSTED_RELAY_ARCHITECTURE.md)
 owns product decisions, launch defaults and safety gates.
 
@@ -74,8 +80,8 @@ Paths below are future artifacts unless marked existing. The
 [implementation contract map](HOSTED_RELAY_ARCHITECTURE.md#implementation-contract-map)
 owns target names/types, table inventory, transaction rules, API names and open
 decisions. Use `Hxx.nn` for subtasks and `HC-xx`/`HD-xx` for contract/decision
-references in their acceptance descriptions. These are not dates, estimates or
-claims that the package has started.
+references in their acceptance descriptions. Track implementation status separately
+from these identifiers.
 
 | Package | Result | Prerequisites |
 | --- | --- | --- |
@@ -94,7 +100,7 @@ claims that the package has started.
 | H12 | Usage/diagnostic/reporting/notice/export/retention projections | H08, H10; H11 for resume reporting; HD-13 only for optional external notices |
 | H13 | Default web shell, typed API and branding | H02 contract; H05/H06 for authenticated acceptance; H07 for public model/pricing acceptance |
 | H14 | Complete customer cabinet | H08, H09, H12, H13 |
-| H15 | Complete operator surfaces and Desktop parity/transfer | H05, H07, H08, H12, H13 |
+| H15 | Complete web owner panel, scoped Desktop console and transfer | H05, H07, H08, H12, H13 |
 | H16 | Release packaging, operations, backups and recovery drills | H02/H03 foundation; H10–H15 for full acceptance |
 | H17 | Paid-product acceptance and supported deployment matrix | All prior packages and applicable HD decisions |
 
@@ -116,7 +122,7 @@ The first internal end-to-end proof is identity → verified funding → key →
 - **H00.06 — Scenarios:** check SC-01–SC-08 against those contracts; name blockers instead of inventing facts.
 
 **Acceptance:** consistent links, identifiers, dependencies and expected checks.
-Design review does not establish runtime or commercial qualification.
+Runtime and commercial qualification follow implementation.
 
 #### H01 — Shared-core qualification and reuse boundary
 
@@ -195,10 +201,12 @@ owner/device schema and `tests/admin_auth.rs`.
 - **H05.02 — WebAuthn:** verified library-backed RP/origin, discoverable-credential and user-verification contracts.
 - **H05.03 — Sessions:** protected cookies, CSRF, expiry/authorization epoch and fresh-proof action matrix.
 - **H05.04 — Recovery:** second/last-key guards and audited server-local recovery; no weaker public reset.
-- **H05.05 — Desktop:** bounded owner-approved pairing/scopes/revocation and browser step-up, not an admin bypass.
+- **H05.05 — Desktop:** bounded owner-approved pairing/scopes/revocation and browser step-up for the [limited Desktop scope](HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope); enforce operation-level grants on the server, not full owner authority or an admin bypass.
 
 **Acceptance:** `tests/admin_auth.rs` rejects wrong origin/RP, replay, foreign/stale
-authority, CSRF/fixation and setup races. Qualify real authenticators separately.
+authority, CSRF/fixation and setup races. Paired-device credentials cannot invoke
+web-only customer, key, money or settings operations even through direct API calls.
+Qualify real authenticators separately.
 
 #### H06 — Customer registration, linking and recovery
 
@@ -227,12 +235,22 @@ No second wallet, email-based merge or customer leakage. Authorize live login se
 - **H07.03 — Parity:** reuse local validators for controls, proxies, automations and request/publication policies.
 - **H07.04 — Catalog:** separate granted customer routes from bounded public descriptors/tariffs at `GET /public/models`.
   Preserve freshness/privacy; prices do not belong in `/public/config`, and aliases add no capacity.
+  Group by validated Relay catalog company identity, never by account kind or model-name guesses.
+  Persist a canonical `modelDisplayOrder` of complete company blocks: owners can move a company
+  or reorder models inside it, not reassign their company. Keep disabled model positions;
+  append new discoveries within their company and ignore stale IDs in projections.
+  Admin, granted customer catalog and public sales descriptors share this order after their
+  respective visibility/grant filters; no client-side alphabetical or popularity re-sort.
 - **H07.05 — Qualification:** require HD-01 and finite billable bounds for paid routes; reuse core discovery/validation.
 - **H07.06 — Races:** revision-check refresh/removal, activation, tariffs and draining; reads cannot activate or probe providers.
+  Revision-check display-order mutations too: reject stale writes without losing new discoveries,
+  prices or enablement; reordering is presentation only and never changes routing priority,
+  eligibility, grants or billing. Return the canonical accepted order to all projections.
 - **H07.07 — Publication:** implement [SC-06](HOSTED_RELAY_ARCHITECTURE.md#price-and-model-change-walkthrough), preserving holds and fencing failed/superseded activation.
 
 **Acceptance:** `tests/pool_catalog.rs` covers lifecycle/revision/grant isolation,
-alias capacity, unknown quota and controlled-clock publication/notice races.
+alias capacity, unknown quota and controlled-clock publication/notice races, plus company-block
+and within-company ordering, disabled-position retention, discovery reconciliation and stale-order rejection.
 Qualify Desktop/server families together; disclose unsupported mutations.
 
 #### H08 — Payments, receipts, refunds and external reconciliation
@@ -363,28 +381,49 @@ SC-03 reconciliation and lifecycle/notice states across mobile, locales and them
 No repeated payment/key/generation or secret-bearing support copy. Chat, image UI,
 teams and saved conversations remain outside scope.
 
-#### H15 — Operator surfaces, Desktop parity and explicit transfer
+#### H15 — Owner web panel, scoped Desktop and explicit transfer
 
 **Owns:** HC-03/04/07/08/09/10, HD-12. Target: `web/src/features/admin/`, Hosted
 management handlers, affected typed Desktop wrappers and transfer tests.
 Implement the [owner screen passports](HOSTED_RELAY_WEB_DESIGN.md#owner-panel)
-WS-11–WS-23 with H13's shared design system and distinct owner authority; preserve
-the explicit Desktop-transfer flow instead of treating web sign-in as synchronization.
+WS-11–WS-23 in the web owner panel with H13's shared design system and distinct
+owner authority. Desktop implements only the
+[three-area operator scope](HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope), not
+every web owner screen. Preserve the explicit Desktop-transfer flow instead of
+treating web sign-in as synchronization.
 
 - **H15.01 — Actions:** bind controls to server permission, fresh proof, revision, confirmation, audit and failure state.
-- **H15.02 — Inventory/pool:** preserve local lifecycle and policy semantics for sources, membership, rotation and publication.
-- **H15.03 — Access/usage:** separate logical/physical counts and trusted identity from User-Agent; no Applications launcher.
-- **H15.04 — Customers/money/settings:** audited suspension/refund/adjustment and safe diagnostics; expose uncertainty, not prompt bodies.
-- **H15.05 — Transfer:** inspect/snapshot/confirm/stage-and-drain/verify, preserving sources and recovery; no implicit synchronization.
-- **H15.06 — Compatibility:** paired Desktop shares owner capabilities/revisions/fresh-proof policy without overwriting local profiles.
-- **H15.07 — Investigation:** canonical error/detail routes, nested attempts and bounded capture; no raw-payload or replay console.
-- **H15.08 — Lifecycle:** implement SC-01/06/07/08 setup, readiness, guarded transitions and change/closure confirmations.
+- **H15.02 — Web inventory/pool:** preserve complete local lifecycle and policy semantics for sources, membership, rotation and publication; Desktop exposes only connection addition/status and explicit pool inclusion/removal.
+- **H15.03 — Web access/usage:** separate logical/physical counts and trusted identity from User-Agent; no Applications launcher. Desktop receives scoped server-wide statistics/history, not customer-management screens or key administration.
+- **H15.04 — Web customers/money/settings:** audited suspension/refund/adjustment and safe diagnostics; expose uncertainty, not prompt bodies. These management actions remain unavailable to paired Desktop devices.
+- **H15.05 — Transfer:** inspect/snapshot/confirm/stage-and-drain/verify, preserving
+  sources and recovery; no implicit synchronization. Transfer selected accounts/API
+  sources with their effective proxies, protected proxy authentication and remapped
+  bindings under the [proxy-preservation contract](HOSTED_RELAY_ARCHITECTURE.md#preserve-the-effective-proxy-during-transfer).
+  Preserve explicit direct overrides and shared bindings without replacing the
+  server's common proxy; unresolved proxy dependencies block activation rather
+  than falling back to direct traffic.
+- **H15.06 — Desktop console:** implement Overview, Usage, and Connections and pool with explicit active-server identity and operation-scoped pairing. Reuse revision/fresh-proof policy for allowed actions without inheriting full owner authority or overwriting local profiles.
+- **H15.07 — Web investigation:** canonical error/detail routes, nested attempts and bounded capture; no raw-payload or replay console. Desktop reads only granted safe request/error detail, not capture administration.
+- **H15.08 — Web lifecycle:** implement SC-01/06/07/08 setup, readiness, guarded transitions and change/closure confirmations; do not duplicate service administration in Desktop.
 
 **Acceptance:** `tests/{management_parity,transfer_recovery}.rs` and
 `web/tests/e2e/{admin,diagnostics,service-lifecycle}.spec.ts` cover advertised actions,
 authority/revision races, source-preserving transfer, safe counters/capture and
 closure obligations. Polling/acknowledging cannot trigger inference, change money
-or bypass readiness. Check mobile/keyboard and RU/EN states.
+or bypass readiness. Check mobile/keyboard and RU/EN states. Desktop acceptance
+covers all three areas, explicit connection admission/removal, permission/expiry/
+revocation failures and rejection of direct calls to web-only operations. Mode
+switches do not upload local accounts, overwrite profiles or stop the local API;
+closing Desktop does not stop server inference. Confirmed transfers retain the
+existing ownership and recovery guarantees.
+
+Transfer acceptance also covers account/API-specific proxies, inherited local
+common proxies, explicit direct overrides, shared-proxy ID remapping and protected
+proxy authentication. Verify the same effective route after a server restart and
+with Desktop closed. Missing/unreachable proxy dependencies must leave the target
+blocked and preserve source recovery; reject secret leakage, endpoint-only proxy
+deduplication and silent changes to unrelated server bindings.
 
 #### H16 — Deployment, operations and recoverable release
 

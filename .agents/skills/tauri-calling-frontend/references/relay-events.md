@@ -11,15 +11,15 @@ own source:
 - [Native state notifications](../../../../src-tauri/src/local_pool/state/adapters.rs)
   and [background loops](../../../../src-tauri/src/local_pool/background/loops.rs).
 
-`zenith-state-changed` is a notification to reread state, not a replacement
-snapshot. `zenith-runtime-activity` carries a typed activity payload. Preserve
-that distinction and inspect the emitting owner before changing either contract.
+`zenith-state-changed` requests a state reread; `zenith-runtime-activity` carries
+a typed activity payload. Preserve that distinction and inspect the emitting
+owner before changing either contract.
 
 ## Cleanup when registration finishes after unmount
 
 This minimal form illustrates the existing hook's `active`/`unlisten` pattern.
-The callbacks come from the component's existing refresh and feedback owners;
-do not add this as a second subscription to the same event.
+Integrate the pattern into the component's existing subscription, refresh and
+feedback owners.
 The relative import below assumes a hook under the feature's `state/` directory.
 
 ```ts
@@ -50,10 +50,8 @@ function watchStateChanges(
 
 The containing React effect returns the cleanup function. If the component
 unmounts before `listen` resolves, the late `unlisten` is still called. Preserve
-the actual hook's batching, revisions and generation checks as well; the small
-example intentionally does not duplicate that orchestration.
+the actual hook's batching, revisions and generation checks with their owner.
 
 Check remount, late registration, late payload, and registration failure when
-those branches change. A listener test is not evidence of native event delivery
-or live-provider acceptance. Ordinary subscription work does not require a
-new `eval` bridge or expanded Tauri capabilities.
+those branches change. Qualify native event delivery and live providers separately.
+Use the existing subscription and Tauri capabilities for ordinary listener work.

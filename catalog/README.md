@@ -73,8 +73,8 @@ Consumers can read the `models` array as supplied, or filter their own available
 IDs and retain the same relative order. `id` identifies a reference record;
 `metadata.canonicalModelId` links a hosted alias when the reference supplies it.
 `identity.provider` is the display manufacturer, whereas `metadata.provider`
-retains the reference namespace. Do not merge account access or routes using
-display identity alone.
+retains the reference namespace. Account access and route identity are resolved
+independently from display identity.
 
 `orderRevision` identifies the policy; `metadataRevision` identifies the merged
 reference data. `sources` records each source's revision, fetch time, and stale
@@ -82,7 +82,6 @@ state: `models_dev`, `models_dev_details`, `openrouter`, and `litellm`.
 Unavailable sources may leave a partial or stale export; inspect these fields.
 No usable reference data makes the export fail.
 
-The export includes only public reference records. Its `.cache/` directory is
-local refresh state, not a consumer artifact. The command does not publish
-files. Reference source URLs and capability contracts are documented in
+The export includes public reference records only. `.cache/` stores local refresh
+state; distribute the generated export separately. Source URLs and capability contracts are in
 [PLANNING.md](../docs/project/PLANNING.md#connections-discovery-and-metadata).

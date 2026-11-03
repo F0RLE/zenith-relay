@@ -12,15 +12,14 @@ and work with the model stay in your chosen application.
 
 ## Quick start
 
-You need your own account or provider API key and an installed application
-to work in. Relay does not install ChatGPT, Claude Desktop, or OpenCode.
+Install your client and have your account or provider API key ready.
 
 ### Connect an application through the pool
 
 1. Select **Computer** mode.
 2. Add at least one connection:
-   - account: **Connections → Accounts → Sign in → ChatGPT** or **Excel / Basis Points**,
-     then **Open sign-in window**;
+   - account: **Connections → Accounts → Sign in**, choose **ChatGPT (SIWC)**
+     or **Excel / Basis Points** for text, then **Open sign-in window**;
    - API: **Connections → Sources → Add source**, select the service
      and enter its key.
 3. Open **Pool → Members → Add**. Select the saved connection and add it.
@@ -49,14 +48,15 @@ blocking is separate. This experimental route is not official OpenAI API access:
 errors, restrictions and lower availability/quality are possible. Requested
 model names do not prove actual model identity; Relay cannot guarantee it.
 
-The client badge selects the route; **Connect**
-adds its separate sign-in/quota. Switching preserves sign-ins, **Notes** and
+The client badge selects the route. **Connect** reuses a matching saved connection
+or opens sign-in; ambiguous matches stop the switch. Each method keeps its own
+authorization and quota. Switching preserves sign-ins, **Notes** and
 weight/concurrency, but clears image-only opt-in. Finish active requests first
 and fix incompatible automation models: rules follow the selected route.
 Codex/BPS can use saved Notes for email/password/authenticator 2FA on all three
 OSes; new accounts, missing Notes and SIWC stay manual. See [Account sign-in](#account-sign-in).
 
-Quick Setup configures mode, connection and client without launching it.
+Quick Setup saves mode, connection and client settings. Launch the client separately.
 Skip or repeat it via **Help → Repeat quick setup**. Claude Desktop needs Computer mode.
 
 ### Work without the pool
@@ -76,8 +76,7 @@ A pooled request follows this path:
 - **Connection:** a saved account sign-in or an API address with its key.
 - **Pool member:** a connection allowed to receive requests through Relay.
   Saving a connection and adding it to the pool are separate actions.
-- **Model:** an exact provider model ID. Similar names do not imply
-  identical access.
+- **Model:** an exact provider model ID with its own access requirements.
 - **Client:** the application that sends requests. Connect it to the pool
   after adding members.
 
@@ -89,7 +88,8 @@ A pooled request follows this path:
 | **Relay Hosted** | In development. |
 
 In **Computer**, closing the window keeps Relay in the tray; quitting stops
-the local API and automations. Mode changes do not stop it or transfer secrets.
+the local API and automations. Changing modes keeps the local API running and
+credentials on this device.
 
 ### Install on macOS
 
@@ -163,15 +163,28 @@ Account behavior settings are under **Access → Accounts**.
 
 Open **Connections → Accounts → Sign in** and choose a method:
 
-- **Codex** — the default; account switching, linked SIWC quota display, and explicit pool membership. Images only by default; text requires separate consent in Settings.
-- **ChatGPT (SIWC)** — Relay sign-in window, for the pool.
-- **Excel / Basis Points** — pool use; access is checked with the provider (BPS).
+- **Codex** — switch the account used by the installed Codex client, manually or
+  through account automations. The client then uses that account directly.
+- **Excel / Basis Points (BPS)** — use the account in Relay's pool. Relay translates
+  requests and client tools into the Excel/BPS transport and returns the results
+  in the client's format.
+- **ChatGPT (SIWC)** — experimental pool access through the public Responses API,
+  with the user's permission to use their ChatGPT plan. It uses the protocol
+  directly, without the Excel/BPS tool bridge. SIWC is the more experimental
+  Relay integration; a shorter protocol path does not imply greater stability.
+
+Codex also supports linked SIWC quota display and explicit image-only pool
+membership. Text pool access requires separate consent in Settings. BPS and SIWC
+require manual pool admission and access checks for their own authorization.
 
 1. Select **Open sign-in window**.
 2. Sign in. Relay saves the account and closes the dialog.
 3. Add the account to **Pool** manually when needed.
 
 Every method has **Copy sign-in link** for browser recovery on the same computer.
+Each Relay sign-in window starts with a fresh private browser session. Cookies
+and website storage are not reused on the next opening. Saved accounts, Notes
+and Relay settings are kept. An external browser manages its own session.
 
 **Notes** saves email, phone, password and 2FA with the account. A new-account
 draft survives folding, clears on cancellation, and does not autofill login forms.
@@ -181,7 +194,7 @@ For selected text, use **Ctrl+C** (**Cmd+C** on macOS) or the context menu.
 
 For an existing **Excel / Basis Points** account, right-click **Sign-in required**
 to use saved email/password and optional authenticator 2FA. Left-click stays manual.
-This works on Windows, macOS and Linux with the account's isolated profile/proxy.
+This works on Windows, macOS and Linux with a fresh private session and the account's proxy.
 CAPTCHA, additional checks, consent, unfamiliar forms, errors or a 45-second limit
 reveal the window for manual continuation. **Open sign-in window** does so at any
 time. Email/SMS codes and social sign-in remain manual. Relay validates account
@@ -294,14 +307,20 @@ when pool policy permits it; otherwise they remain unavailable.
 A preset fills in the address and request format. Obtain a key and check model
 access with your provider. For **Custom API**, use its specified address and format.
 
+In **Edit source → General**, **Check connection** measures HTTP and, for
+Responses sources, a WebSocket upgrade using the saved address, key and proxy.
+Save connection changes first. The check generates no response and changes no
+models or capabilities. HTTP and WebSocket failures are reported separately;
+a throttled HTTP check skips WebSocket.
+
 Direct ChatGPT launch requires a Responses endpoint. If direct launch is
 unavailable because of the API format, add the source to the pool and connect
 the application through it, provided the pool supports the required conversion.
 
 **Moonshot / Kimi API** and **Kimi Code** are different connections. Choose
-the preset for your key and console region. Relay does not currently read
-Kimi Code quota or MiniMax balance and M Plan quota; check them with
-the provider. Other supported services are listed in the add-source dialog.
+the preset for your key and console region. Check Kimi Code quota and MiniMax
+balance/M Plan quota in the provider's console. Other supported services are
+listed in the add-source dialog.
 
 ### Automations
 
@@ -316,17 +335,15 @@ If the selected model is no longer available for the accounts, edit the rule
 and choose another. Relay keeps your selection without replacing it automatically.
 
 Starting the countdown sends a request and may use quota. A reset requires
-support from the provider. Automations do not add subscription allowance.
-Tasks run while Relay runs.
-There is no manual run button.
+support from the provider. Automations use your subscription allowance and run
+automatically while Relay runs.
 
 ### Saved account recovery
 
-The old personal-server desktop mode is retired. Saved settings open **Computer**;
-they do not connect to Relay Hosted or delete server credentials or inactive local
-account recovery records. Stop the old server's use of an account before choosing
-**Recover local account**. Relay does not contact that server; the recovered account
-remains disabled and outside the pool until you explicitly enable it.
+Saved personal-server settings now open **Computer**. Server credentials and
+inactive local recovery records are preserved. Stop the old server's use of an
+account before choosing **Recover local account**. Recovery uses the local copy;
+the account stays disabled and outside the pool until you explicitly enable it.
 **Relay Hosted** is a separate service in development. To share this computer's
 pool, enable **Access → Local API → Allow local network access**.
 
@@ -671,16 +688,20 @@ available. Interruptions retain observed usage without automatic regeneration.
 
 ## 6. Recovery
 
-In **Computer** mode, this page restores client settings—not quota, deleted
-Relay accounts or conversations.
+In **Computer** mode, this page restores the saved client connection.
+A snapshot does not recover quota, deleted Relay accounts or deleted conversations.
 
 1. Select the client's tab. Before changes, enter a **Snapshot name** and
    select **Create snapshot**.
 2. To restore, select the snapshot, choose **Restore** and review the confirmation.
 
-**ChatGPT** keeps several named snapshots; restoration replaces its configuration
-and sign-in. Its automatic protected backup is separate and preserves newer
-manual sign-ins. Check the current profile if recovery reports a conflict.
+**ChatGPT** saves the current account/API sign-in, active route and Relay binding.
+Restore returns the connection and chat visibility, preserving existing conversations,
+new chats, MCP and reasoning preferences. Inactive profiles keep their own overrides,
+but shared connection settings can affect them too. Model selections change when
+the route changes. Credentials come from the file or standard OS
+keyring; an unavailable store requires recovery. Explicit restore returns the saved
+sign-in; automatic attachment undo preserves newer manual sign-ins.
 
 **OpenCode** keeps one snapshot, consumed on restoration.
 

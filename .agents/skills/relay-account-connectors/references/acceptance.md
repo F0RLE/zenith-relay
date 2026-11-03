@@ -1,9 +1,8 @@
 # Account connector acceptance
 
 Select the cases affected by the change and inspect existing coverage first.
-Use synthetic callbacks, credentials, and provider responses. These are
-observable acceptance criteria, not a claim that every connector implements
-them. Run or extend checks only within task and harness permissions.
+Use synthetic callbacks, credentials and provider responses. Run or extend
+the affected acceptance checks within task and harness permissions.
 
 ## Authorization completion
 

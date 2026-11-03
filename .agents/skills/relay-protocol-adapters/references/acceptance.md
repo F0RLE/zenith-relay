@@ -2,8 +2,8 @@
 
 Apply these cases to the affected client/upstream pair. Distinguish native
 forwarding from conversion, and JSON from SSE. The client formats are Responses,
-Chat Completions, Anthropic Messages, and Gemini Generate Content; advertising
-a route is not evidence that its complete conversation cycle works.
+Chat Completions, Anthropic Messages and Gemini Generate Content. Qualify the
+complete conversation cycle for every advertised route.
 
 ## Minimum conversation cycle
 

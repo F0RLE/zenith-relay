@@ -1,10 +1,13 @@
 # Hosted Relay Architecture
 
-**Target product contract, not shipped behavior.** Current Desktop contracts are in
+**Planned product contract.** Current Desktop contracts are in
 [PLANNING.md](../project/PLANNING.md); implementation order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages).
 
+The [web preview](../../web/README.md) implements the interface. Service,
+authentication, accounting and operations are planned backend work.
+
 Navigation: [design gates](#specification-before-implementation) ·
-[product](#decision) · [website](#customer-website) ·
+[product](#decision) · [Desktop scope](#desktop-hosted-scope) · [website](#customer-website) ·
 [web design](HOSTED_RELAY_WEB_DESIGN.md) ·
 [selected reference patterns](#reference-derived-implementation-decisions) ·
 [scenario map](#step-by-step-scenario-map) · [notifications](#customer-notifications-and-delivery) ·
@@ -23,9 +26,8 @@ meaning. Link to its owning section from other documents.
 
 This document owns the target contracts; [the detailed delivery plan](HOSTED_RELAY_ROADMAP.md#hosted-implementation-work-packages)
 owns ordered work packages, dependencies and acceptance. `PLANNING.md` continues to
-describe implemented behavior. A specified table, endpoint, file or command below
-is a target, not evidence that it exists. Do not mark a capability shipped because
-its design, mock screen or happy-path test exists.
+describe implemented behavior. Tables, endpoints, files and commands below are
+implementation targets. Mark a capability shipped after implementation and acceptance.
 
 Before implementing a work package, its specification must identify:
 
@@ -124,8 +126,9 @@ bundles, and a marketplace are not part of this first offer.
 
 - Website and Telegram are clients of one identity/account API, not separate
   balances, user registries, payment truth, or key logic.
-- Applications call inference directly with scoped keys. Desktop is an operator
-  management client, not a required inference hop.
+- Applications call inference directly with scoped keys. Desktop is a
+  [limited operator console](#desktop-hosted-scope), not a required inference hop
+  or a second full owner panel.
 - Capacity is explicitly platform-shared, workspace-private, or shared by grant.
   Importing a credential does not make it public or commercially usable.
 - Provider/product permission, region, credential type, and supported billable
@@ -186,10 +189,11 @@ the retention policy, not a cascading deletion of requests or money records.
 
 ### Operator interface and customer cabinet
 
-The Hosted operator interface preserves the current local-pool controls and
-semantics, not a simplified replacement. Desktop remains an operator client;
-the server-side interface has no local application launcher/profile attachment.
-Preserve Desktop local application integrations and LAN access.
+The Hosted web owner panel preserves the current local-pool controls and
+semantics, not a simplified replacement. Desktop exposes only the
+[limited Hosted scope](#desktop-hosted-scope), not every owner action below.
+The server-side interface has no local application launcher/profile attachment.
+Preserve Desktop Computer-mode application integrations and LAN access.
 
 | Area | First-release responsibilities |
 | --- | --- |
@@ -217,14 +221,57 @@ prices, balance/top-up/receipts, API keys and connection instructions, own usage
 sessions and support. It does not expose operator pool controls. A user-labelled
 request means the authenticated key's assigned user, not a name supplied in JSON.
 
+### Desktop Hosted scope
+
+Desktop Hosted is a compact operator console for observing a server and supplying
+provider connections to its pool. It is not a customer cabinet or a duplicate of
+the full web administration panel. Its planned first-release scope has three areas:
+
+| Area | Desktop responsibility |
+| --- | --- |
+| Overview | Server-wide request/token/error statistics, generation speed and pool availability; distinguish active logical requests from physical attempts and show stale/unavailable data honestly. |
+| Usage | Server-wide request history with period/model/status filters and safe request/error details; no separate customer pages or customer-account administration. |
+| Connections and pool | Add supported provider-account/API connections to the server, inspect their status, and explicitly include them in or remove them from the server pool. |
+
+Here an account means a provider connection, not a Hosted customer identity.
+Saving a connection does not silently admit it to the pool. Removing membership
+retains the saved connection and its protected credentials; it is not deletion.
+Advanced routing/model policy, prices and other pool configuration remain in the
+web owner panel rather than expanding these basic Desktop controls.
+
+Customer creation/list/detail/administration, customer balances and keys, payments,
+refunds, tariffs, installation/security settings and service administration are
+web-owner-only surfaces. Desktop has no per-customer cabinet or management flow.
+This boundary does not remove the customer's own key/balance controls from the
+separate web customer cabinet.
+
+**Connection and authority.** The operator selects a server and completes explicit
+owner-approved device pairing. Show the active server identity before reads or
+mutations. Grant only the approved overview/usage/connection/pool operations,
+with bounded lifetime and revocation; owner identity is not a blanket admin grant
+to the paired device. The backend enforces the allowlist on every request, including
+direct calls to excluded customer, key, money and settings endpoints. Preserve
+revision checks, fresh verification and audit for permitted mutations; hiding
+navigation alone does not establish the boundary.
+
+**Local separation and transfer.** Switching modes neither uploads local accounts
+nor replaces local profiles, and does not stop the local API. Adding a local
+connection to the server requires selection, a source/destination preview and
+explicit confirmation under the [transfer contract](#local-and-hosted-pool-transfer).
+Preserve credential ownership, recovery and unsupported-family checks; do not
+invent automatic synchronization or source deletion. Inference runs on the server
+and remains available when Desktop is closed.
+
+This is planned functionality. The current Desktop mode remains the development
+placeholder described in [PLANNING.md](../project/PLANNING.md); a web preview does
+not implement pairing, remote statistics or account transfer.
+
 ## Reference-derived implementation decisions
 
-Adopt the selected functional patterns and failure cases below, not another
-product's frontend or runtime. These are inputs to the target contract and named
-implementation packages, not claims of shipped functionality. Existing Relay
-contracts and official provider specifications remain authoritative; a reference
-implementation, its popularity or a passing upstream test does not prove our
-money, security or protocol behavior.
+Implement the selected patterns and failure cases in Relay's own frontend and
+runtime. Qualify money, security and protocol behavior against Relay's contracts
+and official provider specifications; upstream implementations supply reference
+patterns and tests.
 
 ### Pinned reference inventory
 
@@ -513,8 +560,9 @@ button is shown only for a configured method. Public model information contains
 no upstream inventory and does not promise access beyond the customer's grants.
 After sign-in, open Overview in the customer's personal workspace.
 
-Public `/` uses section anchors for explanation, models/prices, FAQ and support;
-`/login` owns customer sign-in. The public price table uses `GET /public/models`
+Public `/` explains the service and has a second screen at `/#faq` / `/#features`,
+whose answers are visible without expanding individual items; `/login` owns customer sign-in.
+The planned public price table uses `GET /public/models`
 under the Hosted API prefix, never the authenticated customer model projection or
 frontend constants. Publish only deliberately public qualified model descriptors,
 supported operations/protocols and complete retail tariff/band revisions, including
@@ -703,6 +751,12 @@ If key issuance committed but the response was lost, identify the resulting key
 by the same operation without disclosing its secret; explicitly revoke it and issue
 a replacement only on a new confirmed action. A page reload is not that action.
 Keep the first-request guide in `/app/help` and the empty Overview state.
+Offer it as a skippable welcome dialog on the first authenticated panel visit.
+Skip, close and Escape only dismiss the guide; they never issue a key, fund a
+wallet or send a request. Start on the landing enters Overview through verified
+session handling, using `/login` first when necessary. Telegram can link to this
+panel and support without owning a second customer-management interface; keep
+legacy fulfillment available until existing obligations have been reconciled.
 Explain "available", "reserved", "charged" and "pending" in
 RU/EN beside the relevant values, with the [money examples](#money-scenarios-and-worked-checks).
 
@@ -994,7 +1048,7 @@ tables are not evidence that a model or plan supports a surface.
 Native upstream and client ingress are separate: permitted ingress bridges use
 the existing four codecs to reach the chosen model's exact native surface.
 Unsupported required semantics fail before dispatch. A route may require
-`native_only`; this is not a global prohibition on ingress conversion.
+`native_only`; this restriction applies to that route's ingress conversion.
 
 Versioned model mappings are explicit. No cross-provider/model substitution or
 fallback. Credential rotation stays within the same provider, product, model,
@@ -1161,7 +1215,7 @@ Reservation has two stages:
 
 Snapshot tariff, sizing method/result, context band, output cap, and calculation
 inputs. Unsupported/unbounded requests or missing tariffs cannot enter paid
-dispatch. Stopping visible output does not prove stopped provider billing.
+dispatch. Provider billing may continue after visible output stops.
 Settle one logical customer charge from supported evidence; each physical
 attempt retains separate expense/usage even when it fails.
 
@@ -1311,8 +1365,10 @@ structured logs and the documented monitoring stack.
 The owner Errors tab remains inside Usage, alongside the existing request/model/
 pool-member views. Do not add an eighth customer navigation section or expose the
 operator table to customers. Background incidents do not become fake inference
-requests. Paired Desktop clients may read only their explicitly granted diagnostic
-scope; starting extended capture requires the owner's fresh passkey verification.
+requests. Paired Desktop clients may read only safe request/error detail within
+their [Usage scope](#desktop-hosted-scope). Extended capture and its session
+administration remain web-owner-only; starting capture requires fresh passkey
+verification, not a broader Desktop grant.
 
 #### Normalized diagnostic record and evidence
 
@@ -1381,8 +1437,8 @@ accounting-problem requests and failed physical attempts. Explain that the count
 may overlap: do not sum them into a fictitious number of failed requests. If showing
 a failed-request rate, name it and use `failed / (completed + incomplete + failed)`;
 exclude active, uncertain and confirmed cancelled work, disclose the denominator
-and show unavailable when empty. This does not redefine the existing completion
-rate or classify every failed request as an internal service defect.
+and show unavailable when empty. Keep failed-request, completion and internal
+service-defect rates distinct.
 
 Request detail answers these questions in order:
 
@@ -1443,8 +1499,8 @@ labels and accessible text convey outcomes without relying on red/green alone.
 The web shell and feature boundaries must render a safe fallback for an unexpected
 render failure instead of a blank page. Distinguish a failed reporting read, session
 expiry, permission denial, incompatible API version and unreachable backend. A
-browser network error alone does not establish whether the network, proxy or server
-failed. Deliberate navigation/request aborts are not service incidents.
+connection failure stays unclassified until its network, proxy or server cause
+is confirmed. Classify deliberate navigation/request aborts separately from incidents.
 
 Keep the last successful snapshot visibly stale with its time, or show unavailable;
 never replace failed usage/balance reads with zeros. Retrying a safe read is separate
@@ -1477,8 +1533,8 @@ repeated quota failures are grouped; sustained rates or latency can raise a warn
 Stuck settlement/holds, unavailable durable stores, failed refresh across usable
 capacity and missing backup delivery follow explicit threshold/runbook rules.
 Define severity, observation window, threshold, recovery condition, cooldown and
-notification destination before enabling each alert. An acknowledged alert remains
-an acknowledgement, not proof that the underlying fault is fixed.
+notification destination before enabling each alert. Acknowledgement records
+operator receipt; resolution requires the defined recovery condition.
 
 Normal production diagnostics are always safe and bounded. Extended diagnostics
 add only approved timing/state/structural metadata, not customer content. They do
@@ -1569,6 +1625,45 @@ the source drained until an explicit completion/restore. Delete the source only
 after operator verification and confirmation. Reverse transfer follows the same
 rules. No newer revision or opaque conversation state is overwritten/transferred.
 
+### Preserve the effective proxy during transfer
+
+A confirmed local-to-server transfer of an account or API-provider connection
+includes its effective proxy and the connection-to-proxy binding, not just the
+provider credentials. Transfer the selected saved proxy's configuration and,
+when required, its authentication into the destination vault. After transfer,
+server inference, discovery, quota checks and credential renewal continue to use
+that proxy under the existing shared routing rules; Desktop is not a forwarding
+hop and does not need to stay open.
+
+- An account-specific or API-source-specific proxy remains explicitly bound to
+  that connection on the server. Remap local proxy IDs to destination IDs; do not
+  interpret a local ID as an existing server proxy.
+- If the connection inherits the local common proxy, include that effective proxy
+  and create an explicit destination binding for the transferred connection.
+  Do not overwrite the server's common proxy or move unrelated local bindings.
+  An explicit direct/bypass-common selection remains direct rather than silently
+  inheriting the destination's common proxy.
+- A proxy shared by several selected accounts/API sources is transferred once
+  with all selected bindings preserved. Reuse only a matching validated proxy
+  identity; the same host/port with different authentication is not sufficient
+  evidence that two proxies are interchangeable.
+
+The revisioned preview and confirmation identify the proxy dependencies and the
+effective route without revealing authentication. Proxy secrets use the same
+confirmed HTTPS-to-vault path as provider secrets, never renderer snapshots,
+ordinary configuration manifests, logs, audit payloads or diagnostics. Persist
+the destination proxy and its bindings so server restarts do not change the route.
+Local proxy configuration remains intact under the source-preservation rules.
+
+Stage the connection and proxy dependencies together. A missing secret, unresolved
+binding, unsupported proxy or destination network-policy/reachability failure
+keeps the affected connection out of the runnable pool; never fall back silently
+to direct traffic or a different server proxy. A loopback, LAN or Desktop-local
+proxy address must be evaluated from the server, not assumed to remain reachable.
+Changing that route requires a new explicit preview/confirmation. Destination
+verification obtains its own observations; local latency, speed, location or
+successful-check results do not prove that the server can use the proxy.
+
 ## Data and deployment
 
 PostgreSQL owns identities/workspaces, grants/keys, pool/route revisions,
@@ -1593,12 +1688,10 @@ require shared admission/member leases, durable ownership, and idempotent usage.
 
 ### Recommended first-production stack
 
-This is the recommended implementation/deployment baseline, not an inventory of
-installed services. Optimize for a complete, supportable first paid product and
-reuse of Relay, not maximum theoretical scale. Start in one region on one supported
-Linux host with Docker Engine and Compose, persistent storage, off-host backups,
-and an independent availability check. This topology has a single-host failure
-domain; it does not promise high availability or zero-downtime maintenance.
+Recommended deployment baseline: one region and one supported Linux host with
+Docker Engine and Compose, persistent storage, off-host backups and an independent
+availability check. Prioritize a complete, supportable paid product and Relay reuse.
+Plan for single-host outages, maintenance windows and recovery.
 
 | Layer | Recommended choice | Responsibility and boundary |
 | --- | --- | --- |
@@ -1757,9 +1850,9 @@ marked as qualification activity without exempting its real economic effect.
 
 ### Service modes and public condition
 
-One installation-level `service_control` record owns intended service mode and its
-revision. It is not a replacement for workspace/key/model policy or runtime health.
-Every admitting path checks effective mode; hiding frontend buttons is insufficient.
+One installation-level `service_control` record owns intended service mode and
+revision. Every backend admission path combines effective mode, workspace/key/model
+policy and runtime health; frontend controls reflect that decision.
 
 | Mode | New registration / funding / inference | Existing work and customer access |
 | --- | --- | --- |
@@ -1768,7 +1861,7 @@ Every admitting path checks effective mode; hiding frontend buttons is insuffici
 | `live` | Open subject to all ordinary eligibility, capacity and money checks | Normal usage, history, billing, support and recovery |
 | `maintenance` | No new registration, payment intents or inference dispatch | Drain/reconcile existing work; authenticated history/status and approved refund handling remain available when their stores are healthy |
 | `closing` | No new sales, registration, keys or inference dispatch | Resolve current work, return eligible unused funds, provide receipts/export and controlled support |
-| `closed` | Sales and inference remain disabled | Retention/reconciliation and the published support/archive access continue; this is not permission to erase records or ignore late payment events |
+| `closed` | Sales and inference remain disabled | Continue retention, reconciliation and published support/archive access; preserve records and process late payment events |
 
 Allowed paths are `setup -> qualification -> live`, `qualification/live ->
 maintenance`, `maintenance -> qualification/live` after revalidation, and
@@ -2126,7 +2219,7 @@ must be cleared before pooled connections are reused.
 | `admin_credentials` | `user_id`, `credential_id`, `public_key`, `user_handle`, `authenticator_metadata`, `revoked_at?` | Unique credential ID; library-required counter/backup state, no private key |
 | `admin_assignments` | `user_id`, `role`, `granted_by?`, `revoked_at?` | Installation owner only initially; workspace ownership cannot grant this |
 | `sessions` | `realm`, `user_id`, `token_verifier`, `authorization_epoch`, `last_seen_at`, `expires_at`, `fresh_verified_at?`, `revoked_at?` | Customer/admin realms distinct; server revocation and idle/absolute expiry |
-| `management_devices` | `owner_user_id`, `device_label`, `credential_verifier`, `scope`, `expires_at`, `revoked_at?` | Explicit owner-approved Desktop pairing; no permanent master-token login |
+| `management_devices` | `owner_user_id`, `device_label`, `credential_verifier`, `scope`, `expires_at`, `revoked_at?` | Explicit owner-approved pairing within the limited Desktop scope; no full owner grant or permanent master-token login |
 | `inference_keys` | `workspace_id`, `assigned_user_id?`, `public_prefix`, `secret_verifier`, `verifier_version`, `status`, `expires_at?`, `last_used_at?`, `authorization_epoch` | Secret shown once; does not authenticate customer/admin APIs |
 | `key_policies` | `workspace_id`, `key_id`, `policy_version`, `allowed_operations`, `model_scope`, `limit_policy` | Typed narrowing of workspace grants; H09 specifies each policy field |
 | `revocation_events` | `target_kind`, `target_id`, `workspace_id?`, `authorization_epoch`, `reason_code`, `effective_at` | Durable restore fence; no resurrection of revoked access |
@@ -2399,14 +2492,15 @@ complete merely because this inventory names it. Below, paths omit the prefix.
 | `GET /usage/requests`, `GET /usage/requests/{id}` | Own paginated safe detail, localized-message key, stable code, coverage, execution/accounting status and safe next action; never the owner diagnostic DTO |
 | `POST /usage/exports`, `GET /usage/exports/{id}` | Bounded scoped CSV job/status/download; authorization checked again on download |
 | `GET /requests/{id}/status` | Original workspace/key inference authority; safe duplicate/recovery status, no response replay |
-| `/admin/*` | Owner session or explicitly scoped paired device; action matrix and fresh-proof requirements below |
+| `/admin/*` | Owner session; paired Desktop only for the explicit three-area operation allowlist, not wildcard admin authority; action matrix and fresh-proof requirements below |
 | `GET /admin/usage/errors` | Authorized owner/scoped device, bounded filters/cursor and canonical logical-request counters; recovered attempts and confirmed cancellation are separate filters |
-| `GET /admin/usage/requests/{id}` | Owner/scoped device request timeline, nested attempts, safe evidence and live domain-derived accounting projection; GET never probes/reexecutes |
-| `GET /admin/operations/status`, `GET /admin/operations/events` | Owner/scoped device current condition/coverage and paginated retained job/component events; absence of events is not a health proof |
-| `GET /admin/operations/diagnostic-sessions`, `GET /admin/operations/diagnostic-sessions/{id}` | Owner/scoped device metadata: scope, original expiry, budget consumption, state and stop reason; no raw log download |
+| `GET /admin/usage/requests/{id}` | Owner request timeline, nested attempts, safe evidence and live domain-derived accounting projection; scoped Desktop receives only its permitted usage/detail projection, not customer-wallet/payment-management data; GET never probes/reexecutes |
+| `GET /admin/operations/status` | Owner current condition/coverage; scoped Desktop receives only the server/pool-health summary needed by Overview |
+| `GET /admin/operations/events` | Owner browser session, paginated retained job/component events; absence of events is not a health proof |
+| `GET /admin/operations/diagnostic-sessions`, `GET /admin/operations/diagnostic-sessions/{id}` | Owner browser session metadata: scope, original expiry, budget consumption, state and stop reason; no raw log download or paired Desktop access |
 | `POST /admin/operations/diagnostic-sessions` | Owner browser session + CSRF + fresh passkey; audited reason, finite scope/budgets and idempotent start operation; repeated operation returns the same unextended session |
 | `POST /admin/operations/diagnostic-sessions/{id}/stop` | Owner browser session + CSRF; idempotent stop, no capture extension or inference/payment effect; automatic expiry/revocation also enforced server-side |
-| `GET /admin/operations/readiness`, `GET /admin/operations/service` | Owner/scoped device current checklist/mode/revision and missing prerequisites; reads do not run qualification checks |
+| `GET /admin/operations/readiness`, `GET /admin/operations/service` | Owner browser session current checklist/mode/revision and missing prerequisites; reads do not run qualification checks; Desktop uses its reduced Overview status projection instead |
 | `POST /admin/operations/readiness-checks` | Owner + fresh passkey + CSRF; named allowlisted check, scoped operation and explicit approval of any cost/external effect; no arbitrary command/URL |
 | `POST /admin/operations/service/transitions` | Owner + fresh passkey + CSRF; expected mode/revision, operation ID and reason; backend enforces readiness/admission fence and closure rules |
 | `GET /admin/operations/announcements`, `POST /admin/operations/announcements` | Owner list/create a bounded staged change referencing a valid domain revision; create requires CSRF, no automatic publication |
@@ -2426,6 +2520,12 @@ Admin resource families are `/admin/connections`, `/admin/pools`, `/admin/models
 `/admin/credentials`. H05/H07/H08/H15 enumerate each allowed verb/action, including
 park/drain/trash/restore, revision conflict, secret export and fresh verification.
 No generic arbitrary-SQL, arbitrary-URL fetch or generic credential-read endpoint.
+
+The [Desktop scope](#desktop-hosted-scope) is an operation and response-projection
+allowlist, not access to entire resource families. H05/H07/H12/H15 and HD-12 must
+specify the exact permitted reads, connection-addition/transfer and pool-membership
+mutations. All other actions are denied to paired-device credentials even when
+the owner could perform them through a separately authenticated browser session.
 
 Wire rules for the Hosted control API:
 
@@ -2520,9 +2620,9 @@ not copied into the public runtime configuration.
 
 ### Design decisions that must not be guessed
 
-These are required decisions/evidence, not a progress log. H00 assigns an accountable
-owner; the cited packages cannot implement/activate the affected contract until its
-design gate is satisfied. Independent specifications can proceed meanwhile.
+H00 assigns an owner to each required decision and evidence item below. Complete
+the design gate before implementing or activating the affected contract;
+independent specifications can proceed meanwhile.
 
 | Decision | Required answer/evidence | Blocks |
 | --- | --- | --- |
@@ -2537,13 +2637,12 @@ design gate is satisfied. Independent specifications can proceed meanwhile.
 | HD-09 | Financial/legal retention, deletion obligations, operator identity/support/refund terms and launch jurisdiction | H12 financial cleanup design, H17 commercial launch |
 | HD-10 | Pinned component/artifact versions, deployment paths, trusted edge/network policy and secret delivery | H02/H16 production packaging |
 | HD-11 | Verified off-host backup/key location, recovery/revocation replay and payment reconciliation after DB rollback | H16/H17 reopening after restore |
-| HD-12 | Existing local-pool parity gaps, exact supported account families and Desktop management/pairing compatibility | H01/H07/H15 promised controls |
+| HD-12 | Web owner/local-pool parity gaps, exact supported account families, and operation/projection allowlist plus pairing compatibility for the limited Desktop scope | H01/H05/H07/H12/H15 promised controls |
 | HD-13 | Optional external notice channel, verified-recipient ceremony, consent, safe template fields, provider delivery/idempotency contract and finite retry/retention settings | H06/H12 external notification delivery only; in-app notices and existing operator alerts do not require it |
 
 Completeness review walks every user/owner journey across UI → API → authorization
 → domain transaction → persistence → external effect → report → recovery. Every
-arrow needs an owner and a failure case. A named dependency, table or endpoint is
-an index for that review, not evidence the implementation problem is solved.
+arrow needs an owner and a tested failure/recovery case.
 
 ## Delivery and acceptance
 
@@ -2553,8 +2652,10 @@ blocked until acceptance establishes:
 - A new customer can sign in through each supported Google/Telegram/configured
   OIDC integration, pay, create a key, call an enabled model and inspect the correct
   charge; linking/recovery/suspension never creates another wallet or admin role.
-- Operator inventory/pool controls match Desktop semantics, including parking,
-  enable/disable, prices and live activity; customer screens never expose inventory.
+- Web owner inventory/pool controls match local Desktop semantics, including
+  parking, enable/disable, prices and live activity; customer screens never expose
+  inventory. Hosted Desktop implements only its three-area scope, with tests for
+  allowed reads/addition/membership actions and rejected web-only API calls.
 - User-Agent labels remain untrusted and bounded; usage attribution comes from
   authenticated identities. Retention, deletion and restored revocation are tested.
 - Versioned installation/upgrade/rollback, TLS/SSE/WS, alerting, backup and isolated

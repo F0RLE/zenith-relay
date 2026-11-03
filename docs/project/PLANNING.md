@@ -4,31 +4,45 @@ Current implementation contracts. Code and focused tests define exact behavior.
 Use [ROADMAP.md](ROADMAP.md) for open work, [CONTRIBUTING.md](../../CONTRIBUTING.md)
 for development checks, and [Help](../help/en/README.md) for user steps.
 
-Navigation: [core layout](#core-layout) · [Desktop](#desktop-workspace) ·
-[connections](#connections-discovery-and-metadata) · [pool](#pool-and-execution) ·
-[continuations](#continuations-errors-and-redaction) · [protocols](#protocol-adapters) ·
-[BPS](BASIS_POINTS.md) · [tools](#tool-catalog) · [usage](#usage-and-prices) ·
-[profiles](#application-profiles).
+## Contract map
+
+This is the current architecture reference, not a delivery plan. The historical
+filename remains stable for existing links. Use the owning section below rather
+than treating release notes or planned Hosted contracts as runtime behavior.
+
+| Question | Current contract |
+| --- | --- |
+| Which component owns the behavior? | [Scope and ownership](#scope-and-ownership), [core layout](#core-layout) |
+| What runs locally, and how does the UI observe it? | [Desktop workspace](#desktop-workspace), [statistics and refresh](#statistics-and-refresh) |
+| Where are credentials and private data kept? | [State and secret boundaries](#state-and-secret-boundaries) |
+| How do sign-in, imports and model discovery work? | [Connections](#connections-discovery-and-metadata) |
+| Which route may execute a request? | [Pool and execution](#pool-and-execution) |
+| Who owns a continuation or failed request? | [Continuations, errors and redaction](#continuations-errors-and-redaction) |
+| What survives protocol conversion? | [Protocol adapters](#protocol-adapters), [tool catalog](#tool-catalog), [BPS](BASIS_POINTS.md) |
+| How does a proxy affect request context? | [Request timezone](#request-timezone) |
+| What do usage, cache and cost values mean? | [Usage and prices](#usage-and-prices) |
+| What does connecting or restoring a client change? | [Application profiles](#application-profiles) |
+| What remains outside the current product? | [Implementation boundaries](#not-provided-by-the-current-implementation), [open Desktop work](ROADMAP.md) |
 
 ## Scope and ownership
 
-Relay is a local-first desktop application. The retired personal-server runtime
-is removed. It is separate from production Zenith Gateway and Control. Production
-credentials, customer data, inventory, billing, and routing logic do not belong
-here. [Hosted Relay](../hosted/HOSTED_RELAY_ARCHITECTURE.md) describes the planned service.
+Relay is a local-first desktop application, independent of production Zenith
+Gateway and Control. Production credentials, customer data, inventory, billing
+and routing stay in those systems. [Hosted Relay](../hosted/HOSTED_RELAY_ARCHITECTURE.md)
+describes the planned service.
 
 | Area | Owns |
 | --- | --- |
 | `src/src` | React UI, i18n, snapshots, typed Tauri calls |
 | `src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
 | `crates/relay-core` | Shared discovery, routing, protocols, quota, scheduling, usage |
-| `web` | Independent Hosted UI preview; no live Hosted backend |
+| `web` | Independent Hosted UI preview; backend integration is planned |
 | `catalog` | Versioned model reference data and export contract |
 | `scripts` | Build, setup, verification, release and maintenance commands; shared helpers in `lib` |
 | `docs/project`, `docs/hosted`, `docs/help`, `docs/releases` | Current contracts and Desktop roadmap, future Hosted plans, localized user steps, release history; navigation in `docs/README.md` |
 
-The renderer does not read secrets, call providers, or decide routing. Desktop
-uses `relay-core` in-process. Closing the desktop window leaves the local process
+Desktop Rust owns secrets, provider calls and routing, using `relay-core`
+in-process. Closing the desktop window leaves the local process
 running; explicitly quitting stops it. LAN access shares that same local runtime.
 
 ### File organization
@@ -37,7 +51,7 @@ Rust uses `module.rs` with child files in `module/`; for example,
 `src-tauri/src/codex_config.rs` owns `codex_config/auth.rs`,
 `codex_config/provider.rs`, and `codex_config/tests.rs`. Keep module declarations,
 imports, and tests aligned when moving a file. Compatibility readers and recovery
-backups remain with their owners; an old format is not proof of dead code.
+backups remain with their owners for supported saved data.
 
 Desktop runtime assembly, live-policy synchronization and rollback live in
 `src-tauri/src/local_pool/runtime.rs` and `runtime/`, shared by commands,
@@ -111,18 +125,13 @@ separate locks and the shared visibility handle observed by candidate leases.
 
 ## Desktop workspace
 
-The desktop entrypoint is `src-tauri/src/desktop.rs`. Its IPC surface serves the
-current UI; the retired Ready API activation, separate catalog and top-up flows
-are not exposed. Explicit source launches retain read-only access to saved legacy
-keys. Profile backups and history recovery remain owned by the pool integration.
+The desktop entrypoint is `src-tauri/src/desktop.rs`. Explicit source launches
+retain read-only access to saved legacy keys. Profile backups and history
+recovery belong to the pool integration.
 
 Data pages use the workspace beside the sidebar. Card tracks remain compact;
 settings, dialogs, and reading content have bounded readable widths. User-facing
 labels and workflows belong in localized Help, not this architecture document.
-Action-menu item panels mount only while expanded; their triggers and dismissal
-handlers remain attached so rapid outside clicks and Escape still close them.
-Sidebar auto-collapse follows viewport changes until the user explicitly chooses
-a sidebar state for the current session.
 
 Live activity keeps each candidate's newest event within its runtime generation.
 Events from different candidates may arrive out of order; a late release still
@@ -136,6 +145,9 @@ the fixed loopback web preview and opens a separate incognito `hosted-preview`
 window with no Desktop capabilities, no external navigation and no account/runtime
 access. Release builds hide the action and reject the native command. This is a
 UI-only demo, not Hosted activation or a server connection.
+The planned replacement is the [limited Desktop Hosted console](../hosted/HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope),
+not full web-admin parity. Its three-area scope and permissions remain future work
+in the Hosted roadmap; the placeholder does not implement them.
 The retired personal-server desktop mode migrates to Computer. Its transport,
 IPC commands, background reconciliation, transfer state machine and UI are removed.
 Saved server metadata and incomplete operations are archived without deleting
@@ -183,236 +195,136 @@ other runtime mutations retain their refresh. Settings reuse immutable native
 storage roots only within the current renderer; mutable diagnostic settings still
 revalidate. Network observation does not restart for unrelated busy/feedback
 changes, and an older network read cannot undo a completed sharing change.
-Memory monitoring is log-only: Settings keeps the debug switch and existing
-diagnostic folder actions, without a monitoring panel or renderer heap/DOM walks.
-With debug enabled, startup, enabling debug and opening Logs/Operations record
-a native memory snapshot in `logs/operations/operations-*.jsonl`. Collection runs
-on a blocking worker at these boundaries only, never on a polling timer or each
-runtime refresh. Debug-off performs no process scan. Records include only Relay
-and its descendant WebView processes, OS working sets, Windows private commit
-and native cache accounting, linked by `sampled_at_ms`.
-Process ancestry uses a single-pass index; case-insensitive WebView name matching
-makes no lowercase copies.
-Immutable model/price payload accounting is reused for the same snapshot allocation.
-The measurement cache stores only numeric counters and a Weak identity, never
-keeps an old catalog alive, and recomputes after snapshot replacement. OS process
-memory and mutable caches are still sampled fresh on every requested measurement.
-Schema input bytes, source JSON, allocation estimates and configured SQLite
-budgets are labeled separately. Parsed model payloads, field provenance and
-catalog indices are counted separately without double-counting shared revision
-strings. Parsed prices, price lookup indices and compact pricing source JSON
-are also reported separately; these counts exclude container slack and allocator
-overhead. Continuation
-stores report their existing serialized-state byte budgets without reading history.
-The snapshot identifies debug/release builds; missing or busy measurements stay unavailable,
-not zero. These are not additive process totals or a complete heap profile.
-Snapshots contain numeric accounting and fixed component names, never command
-lines or cached payloads; memory records do not overwrite operation breadcrumbs.
-Diagnostic JSONL is appended directly without a lossy queue or deferred flush.
-Rotation resumes the newest daily part, including parts above 99; retention
-runs on writer initialization or creation of a part, not every event. Existing
-1 MiB parts and 14-part error/operation retention remain unchanged. Interrupted
-stage recovery alternates two small files with persisted sequences. A torn newer
-slot falls back to the previous complete slot, including after restart; legacy
-stage files remain readable and are cleared on clean exit. Hot writes validate
-their directory boundary without checking every sibling or recreating the README.
-Request/attempt history, totals and SQLite WAL/FULL durability are unchanged.
-Field provenance shares immutable source revision strings and borrows fixed field
-and source labels; unknown labels stay owned and keep their existing JSON form.
-Catalog construction
-tracks only normalized fields; direct
-payloads and legacy origins normalize without cloning their source JSON trees.
-Source merging consumes temporary auxiliary records. Compact reasoning evidence
-is extracted from the original sources
-before merging, preserving independent evidence order and explicit values.
-Catalog hashes stream the same JSON bytes through a bounded buffer instead of
-allocating a full serialized copy. Pricing keeps its validated source as shared
-compact JSON and stores entry keys, not duplicate price records, in lookup indices.
-The immutable price table is bulk-built to reduce BTree slack without adding
-per-record indirection or changing alias/conflict resolution.
-An unchanged pricing response, HTTP 304, or refresh failure shares the immutable
-price data and only updates freshness/status; older snapshots remain unchanged.
-Cache files keep their existing schema and validation at the read/network boundary.
-The existing minute maintenance worker also
-releases expired tool presentations and validators, without
-changing their TTLs or limits. It skips busy cache locks and drops removed entries
-outside those locks; request-owned handles remain valid.
-Native runtime snapshots record their total preparation time. Snapshots taking
-at least 250 ms also record fixed-name stage timings through deferred telemetry.
-Renderer timing samples use an async command and a blocking worker; waiting for
-the shared history connection or a durable write never occupies the window thread.
-Network-interface enumeration, OpenCode and memory-model configuration reads,
-profile-backup and trash lists, history clearing, and diagnostic writes also run
-off the window thread. Command results, validation and storage errors still settle
-before completion; pure in-memory settings reads remain synchronous.
-One validated batch uses one connection lock, one prepared statement and one
-transaction for the total and all slow-snapshot stages, retaining SQLite FULL durability and existing
-retention. A failed stage write rolls back the batch, including retention deletes;
-invalid batches write nothing. These contain no account, source, model, or
-credential values. Native preparation
-is measured separately from IPC, renderer paint, and interactive readiness.
-After asynchronous input preparation, CPU/SQLite projection runs on a blocking
-worker. Each Desktop state admits one full
-snapshot at a time, before reading inputs; clones share that bound, not the setup
-mutation lock. A canceled caller retains its slot until blocking work finishes.
-Queue and worker-dispatch waits have separate fixed-name timing stages. This
-changes execution placement, not routing policy or the serialized snapshot.
-Routing previews prepare admission lazily and reuse it within that fixed
-snapshot; an ambiguous rank stops work without advancing live rotation.
-Pool and Connections share one routing observer across navigation, preserving
-its in-flight read and fallback deadline. Leaving both pages stops observation.
-Pool availability and next-member presentation normalize visible model IDs lazily
-once per projection, reusing that set across eligible members. Each projection
-uses current inventory and catalog data; live scheduler selection is unchanged.
-Model configuration reuses resolved reasoning capabilities, and Standard-only
-reference tiers need no executor-route scan. No eligibility result is cached
-across snapshots.
-Display classification and sort keys are shared within one immutable metadata
-snapshot, while each member merges its own saved anchors independently. This
-presentation cache never supplies route or quota evidence.
-Reference-metadata caches persist validated source envelopes, not the derived
-merged JSON tree. Unchanged source revisions and freshness classes share immutable
-models and indexes; failed refreshes retain the prior data. Within the exact same
-provider/model scope, fresh sources win and stale sources only fill missing fields.
-Freshness changes recompute winners even after a 304 response; unchanged merged
-content still shares its immutable trees. Provider-specific models.dev, OpenRouter
-and LiteLLM records retain their hosting namespace, even for qualified upstream
-IDs. They never fill another host's or a canonical model's fields. Exact canonical
-links are presentation metadata, not permission to import hosted limits or enums.
-Field provenance and conflicts retain source revision, provider and scoped record
-ID, with compatibility for legacy markers. Nonpositive limits and input/output
-limits exceeding the known context remain unknown rather than being invented.
-Quota-equivalent projections reuse individual account windows across unrelated
-usage writes. Corrections invalidate both previous and incoming account owners;
-window/price changes, retention, history clearing and account purges remain
-invalidation boundaries. Revision checks under the cache lock fence late reads.
-History clearing deletes request logs, attempts, rollups and weekly-capacity
-state in one SQLite transaction. A failed database deletion rolls back the whole
-set; cache invalidation follows a successful commit.
-Usage filter choices read covering indexes.
-Usage opens with the selected sends page (50 by default) and its period summary,
-without a separate statistics toggle. Diagnostic payloads from neighboring pages
-are not decoded. Page buttons load only their
-selected page. Renderer memory keeps only the last selected report; changing
-page, report tab or filters reads that query on demand, not neighboring pages.
-The last selected all-time report can be reused until history or settings
-events invalidate it, including while Usage is inactive or hidden.
-General runtime events invalidate cached pages for the next visit, but do not
-reload the visible report. History writes, retention and pricing-catalog changes
-notify Usage explicitly; bursts coalesce into one visible-query refresh. Live
-refresh retains the rendered report without a spinner or pagination lock;
-initial loads, error retries and filter/page changes keep their loading state.
-There is no ordinary manual-refresh action. One Usage loader survives navigation:
-reads serialize behind the current native read and collapse intermediate
-revisions/filter selections into the latest active intent, without queuing stale
-SQLite work. Leaving discards queued work; returning shares an eligible pending
-read. Overview also cancels queued history refreshes when its view changes.
-Late filter-choice results and failures are ignored after their history
-revision or period changes.
-Only the visible selected query is refreshed. Rolling periods keep their
-existing freshness bound. In-flight
-reads from older revisions cannot satisfy a newer revision's refresh.
-Period totals accompany the selected view; model/member tabs request only
-their own aggregates. History-wide filter choices load on opening a filter.
-Native pagination reuses one exact-scope/history/pricing summary, with a 2 MiB
-retained-data budget and no events, diagnostics or filter inventories. Oversized
-summaries return in full without caching. Writes, corrections, retention and
-clearing invalidate reuse; unchanged price revisions still refresh catalog health.
-Sends-only replies mark counts as lower bounds and do not display empty summary
-totals as real zeroes. The optional Desktop IPC `includeReport` flag defaults to
-the previous full-report contract for other callers.
-One revision/period-scoped choice cache is shared by page, search and report-tab
-changes; writes, corrections, clearing and retention invalidate reuse. Choices
-still cover the whole retained period, independent of the selected filters.
-Request and error tables reuse unchanged rows, including after an event read;
-corrected diagnostics still replace the selected record's data. Loading-only
-changes and unsettled searches do not reformat the table.
-Request-detail selection and dismissal are owned by a separate modal host, so
-opening/closing details does not reconcile the underlying Usage workspace.
-New rows update the selected record; scope/page changes clear the selection.
-Dismissal does not await detail RPCs, and late results cannot reopen the dialog.
-Cache-session reads run on a blocking worker and select the exact chat, candidate
-and model before window functions and limits; earlier touches/TTLs remain valid.
-Closed technical disclosures do not mount their content or tooltips.
-Request details retain a dim backdrop without full-window blur. Closing yields a
-paint opportunity before restoring opener focus, without overriding newer focus
-or a newer dialog. Passive restoration does not trigger tooltip layout; genuine
-keyboard navigation continues to show hints. Other dialogs keep their existing
-backdrop and immediate focus restoration.
+### Diagnostics and native work
 
-Account-label projection reuses one current accounts-array/privacy-resolver pair
-across activity-only gateway updates, and clears that projection with the runtime.
-Hidden windows retain only the latest per-candidate activity overlay, including
-zero-count tombstones, without scheduling renderer flush timers. Visibility
-restores one coalesced update through the normal ordering checks. Usage is loaded
-by its active screen on demand.
-Queued background snapshots recheck visibility before starting. Pool/Connections
-routing reads debounce real activity; a change during a pending read queues one
-revalidation, whereas elapsed polling time does not. The five-second fallback is
-armed after each attempt, including failure, and pauses with a hidden window.
-Relative account, quota, sign-in and request-cache countdowns also pause while
-hidden and reconcile with wall time on return, including expired deadlines. Account date
-formatters are shared for the active locale rather than rebuilt on every tick.
-Overview and Usage can scope reports to conversations, memory, or other background
-work; the default includes all consumption. Scopes use retained explicit task
-markers, including blocked memory operations, not model names or prompt text.
-Unmarked and unrecognized records remain in conversations; old records cannot
-retroactively establish a missing task origin. The same scope applies to physical
-sends, request outcomes, model/member totals and time buckets. Unknown counters
-remain unknown. Query caches include the scope, and the desktop echoes the applied
-scope so an older host cannot silently present all usage as a filtered report.
-Usage displays only a completed report for the current query; before that, it
-leaves unknown content absent or shows a read error, not zero counters or an empty result. Refreshing
-the same query retains its last complete report, including on read failure.
-The last selected Usage query is available during render, not only after the
-loading effect, so returning to it does not insert a placeholder frame. Overview
-can display its persisted same-scope analytics before native inventory arrives.
-One redacted local inventory, eight exact-query Usage reports and one redacted
-proxy summary are retained in a bounded IndexedDB display cache. Changed previews
-coalesce for one second; equal accepted DTOs do not trigger another write. Hiding
-or leaving the document flushes pending previews. Native durability is independent.
-The Usage display cache keeps only its latest preview in renderer memory;
-the live-query cache also retains just the last selected report. Reports without provider
-errors share their immutable rows for persistence.
-Live-cache hits do not restore a second copy from IndexedDB. Whole-store restore,
-where needed for a single inventory, reads only the memory limit using a newest-first
-cursor.
-Usage restores only the selected exact-query preview by key; a same-scope legacy
-key is tried only on a miss. Other saved pages stay on disk until selected. Concurrent
-restores for one key share a read; clearing or a newer native value fences late
-saved data.
-Credentials, revealed identities and provider error messages are not cached;
-runtime activity and leases are not restored. Cache/storage failures are non-fatal.
-Restored data never enables native actions or establishes interactive readiness:
-runtime-dependent content stays read-only until a native snapshot succeeds,
-while sidebar navigation, Settings and Help remain usable. Hosted does not
-restore local inventory. A failed refresh retains saved data and offers retry.
-Accepted reads/mutations fence late restoration; successful history clearing
-invalidates saved Usage and Overview reports, including older in-flight reads.
-Usage commits request-ID typing after a 250 ms pause; clearing or leaving the
-request tab cancels the pending timer, and pagination resets only on commit.
-Pending draft input is marked busy without issuing intermediate report reads.
-Successive reports share exactly equal filter-choice arrays, not totals or send
-records. Changed choices and absent legacy projections remain authoritative;
-mode reset releases the last shared choices with the existing report cache.
-Overview publishes its in-memory report before persisting its derived cache.
-One pending 250 ms timer coalesces writes of the latest eight scopes without
-retaining a serialized copy per update. Document hiding/page exit flushes the
-pending write and cancels its timer; storage failure remains non-fatal. These
-snapshots are a revalidated display cache, not the durable usage database.
-Pool source-statistics signatures follow a stable inventory projection rather
-than activity-driven display order. Activity alone does not reserialize sources;
-new inventory snapshots retain the existing refresh and generation checks.
-Pool and Connections build candidate indexes for the current routing snapshot;
-source/protocol aggregation and activity fallback still use their existing
-membership rules. Indexes are local to that view.
-Linked-account display and group expansion index each immutable inventory once;
-weak ownership releases that index with its snapshot. Results keep inventory
-order and caller-owned arrays; quota, auth and routing decisions are not cached.
-Saved model ordering resolves normalized IDs and provider groups once per merge,
-then compares numeric positions and moves the original spellings into the result.
-Manual anchors and insertion policy are unchanged; this is presentation work,
-not dispatch, quota, continuation, or provider-cache policy.
+Memory monitoring is log-only and debug-gated. Startup, enabling debug and opening
+Logs/Operations collect a native snapshot on a blocking worker; there is no polling
+or renderer heap/DOM walk. `logs/operations/operations-*.jsonl` records only Relay
+and descendant WebView process measurements, build type and fixed-name native
+cache accounting, correlated by `sampled_at_ms`. It excludes command lines and
+cached payloads and does not replace operation breadcrumbs.
+
+OS memory, serialized bytes, allocation estimates and configured SQLite budgets
+are separate measurements, not additive process totals or a complete heap profile.
+Immutable payload accounting can be reused without retaining old catalogs;
+mutable caches and OS memory are sampled fresh. Missing or busy measurements
+remain unavailable, not zero.
+
+Diagnostic JSONL appends synchronously, resumes the newest daily part and retains
+1 MiB parts with 14-part error/operation retention. Interrupted-stage recovery
+alternates two sequenced files: a torn newer slot falls back to the previous
+complete slot after restart. Legacy stage files remain readable; clean exit clears
+stage state. Writes validate their directory boundary. History uses SQLite WAL/FULL
+durability independently of diagnostic files.
+
+Native snapshots, renderer timing writes and blocking configuration, filesystem
+and network-interface reads run off the window thread. Results include completed
+validation and storage errors. Snapshot timing separates native preparation,
+queue/worker waits, IPC, paint and interactive readiness; preparations of at least
+250 ms also record fixed-name stages. A timing batch commits atomically, including
+retention, and contains no account, source, model or credential values.
+
+Each Desktop state admits one full runtime snapshot before reading its inputs;
+clones share that bound separately from the setup mutation lock. Cancellation
+retains the slot until blocking work finishes. Routing previews use the current
+inventory/catalog, reuse admission only within that snapshot and never advance
+live rotation; ambiguous ranks stop the preview. Presentation indexes and saved
+model ordering provide no route, quota or authorization evidence.
+
+### Metadata and query caches
+
+Metadata caches persist validated source envelopes rather than the merged JSON
+tree. Immutable catalogs, pricing and indexes can be shared across unchanged
+revisions; refresh failure retains prior data and updates status. Freshness changes
+recompute metadata winners even after HTTP 304. Within the exact provider/model
+scope, fresh sources win and stale sources only fill missing fields.
+
+Provider-specific models.dev, OpenRouter and LiteLLM records retain their hosting
+namespace, including qualified IDs. Canonical presentation links do not import
+another host's limits or enums. Provenance/conflicts retain source revision,
+provider and scoped record ID, including legacy compatibility. Invalid limits
+remain unknown. Independent reasoning evidence is preserved before merging;
+price aliases and conflicts retain their established resolution rules.
+
+The minute maintenance worker releases expired tool presentations and validators
+without changing TTLs or limits; busy locks are skipped and request-owned handles
+remain valid. Quota-equivalent caches are account/window scoped. Corrections
+invalidate both old and new owners; price/window changes, retention, clearing and
+purges invalidate reuse. Revision checks fence late reads. History clearing deletes
+logs, attempts, rollups and weekly-capacity state in one transaction, then
+invalidates caches only after commit.
+
+### Usage loading and display recovery
+
+Usage loads the selected sends page (50 by default) and period summary on demand.
+Model/member tabs request their own aggregates; filter choices cover the whole
+retained period and load when a filter opens. Neighboring pages and diagnostic
+payloads are not prefetched. The renderer keeps the last selected live report.
+One loader serializes native reads and collapses queued revisions/filter changes
+to the latest active intent. Leaving cancels queued work; late results cannot
+satisfy a newer revision or reopen a dismissed detail dialog.
+
+History, retention and pricing events coalesce into a refresh of the visible query;
+general runtime events invalidate cached pages for the next visit. Rolling periods
+retain their freshness bound. Same-query refreshes retain the completed report,
+including on failure; a new query shows absent content or a read error until its
+own result arrives. Unknown counters never become zero or a false empty report.
+Request-ID search commits after a 250 ms pause; clearing or leaving cancels it.
+
+Native pagination reuses one exact-scope/history/pricing summary with a 2 MiB
+retained-data budget, excluding diagnostics, events and filter inventories.
+Oversized results return uncached. Writes, corrections, retention and clearing
+invalidate summaries and revision/period-scoped filter choices. Sends-only counts
+are lower bounds; the optional IPC `includeReport` flag defaults to full reports.
+Cache-session queries select the exact chat, candidate and model before limits
+and window functions, preserving earlier touches and TTLs.
+
+Overview and Usage support all consumption, conversations, memory and other
+background-work scopes. Explicit retained task markers establish scope, including
+blocked memory operations; model names and prompts do not. Unmarked/unrecognized
+records remain conversations. The scope applies to sends, outcomes, totals and
+time buckets, participates in cache keys and is echoed by the desktop host.
+
+IndexedDB retains one redacted local inventory, eight exact-query Usage reports
+and one redacted proxy summary. Only the selected Usage preview is restored;
+other pages remain on disk. Overview separately retains eight scoped previews.
+Writes coalesce and flush on hiding/leaving; storage failure is non-fatal and
+independent of native durability. Credentials, revealed identities and provider
+error messages are excluded; activity and leases are not restored.
+
+Saved previews are display-only. Runtime-dependent actions stay disabled until a
+native snapshot succeeds; navigation, Settings and Help remain usable. Hosted
+does not restore local inventory. Accepted reads/mutations fence late restoration;
+history clearing invalidates saved Usage/Overview data and older in-flight reads.
+Failed refreshes retain saved data and offer retry.
+
+Pool and Connections share one routing observer across navigation, retaining its
+pending read and fallback deadline. Activity changes during a read queue one
+revalidation; a five-second fallback follows each attempt, including failure.
+Leaving both pages stops observation. Hidden windows pause polling/countdowns and
+keep only the latest per-candidate activity, including zero-count tombstones.
+Visibility restores one ordered update and reconciles deadlines with wall time;
+queued background reads recheck visibility before starting.
+
+### Localization
+
+Desktop uses i18next with English as the complete key/fallback source and an
+explicit BCP-47 registry at `src/src/i18n/registry.json`. Dictionaries are lazy;
+only a selection's declared fallback chain is required. Script/region identities
+and explicit aliases remain distinct. A late load cannot override a newer choice;
+failed selection preserves the current locale, while startup can recover in English.
+Preference-storage failure is non-fatal. The i18next store retains at most four
+language bundles unless the active fallback chain itself needs more; ES-module
+caching remains browser-owned.
+
+Document `lang`/`dir`, setup and Settings use the same registry. Help has an
+independent registered fallback; untranslated guides do not prevent UI languages.
+Translated startup/native text is a bounded public-copy projection of the active
+dictionary, not another translation catalog. Native labels persist locally for
+tray-only restart and refresh on selection; they cannot alter account or routing
+policy. Runtime errors/diagnostics remain English, localized UI uses stable keys.
+The [contributor workflow](../../CONTRIBUTING.md#desktop-localization) owns adding
+languages, translation checks and separate startup/resource budgets.
 
 ## State and secret boundaries
 
@@ -436,6 +348,16 @@ not dispatch, quota, continuation, or provider-cache policy.
 
 ## Connections, discovery, and metadata
 
+### Connection checks and sign-in
+
+Explicit source connection checks use saved endpoints, authentication and proxy
+settings without generation, catalog mutation or capability promotion. HTTP
+headers and Responses WebSocket upgrades have separate redacted observations;
+WebSocket uses its own HTTP/1.1 client rather than an HTTP/2 catalog connection.
+Elapsed values include management admission and request/upgrade time, not model
+inference. Timeouts retain their known classification; HTTP throttling suppresses
+the extra WebSocket check. No redirects or direct proxy fallback are allowed.
+
 Connections stores accounts, API sources, and proxies. Saving a connection does
 not enable pool membership. Access owns listener/key settings and account
 request policies; Pool owns membership and per-model rules.
@@ -450,7 +372,18 @@ Connections offer Codex (`codex`, the default), ChatGPT/SIWC (`siwc`), and
 Excel/Basis Points (`excel_bps`) in the Tauri sign-in window. Each supports new sign-in,
 resume and reauthentication with its original issuing client; no connection is
 deleted, relabeled or silently converted to another login method.
-SIWC uses a separate `siwc-` WebView profile and the existing effective proxy.
+Each embedded sign-in opening uses a fresh incognito WebView. On Windows an
+exclusively created per-opening cache directory isolates WebView2 from other
+private windows; cleanup waits for WebView2 processes using that directory,
+then applies bounded file-lock retries off the UI thread. Process inspection is
+limited to this cleanup, and no command-line data enters diagnostics. Leftovers
+after an interrupted cleanup are never reopened.
+Linux/macOS use the engine's new ephemeral context/data store. Codex, SIWC and
+BPS never reuse browser cookies or website storage from an earlier opening, including resume
+and reauthentication. OAuth state, saved credentials, account Notes and Relay
+settings retain their existing authorities; external-browser sessions are not
+cleared. Existing on-disk sign-in caches are not opened or deleted by login.
+SIWC uses the existing effective proxy.
 Its exact redirect is captured by the same native callback validator as manual
 submission, without routing the loopback callback through the proxy. State,
 PKCE, nonce, issuing-client checks and cancellation fences remain unchanged;
@@ -467,7 +400,7 @@ sign-in remains manual. On Windows, macOS and Linux, right-clicking an
 Excel/BPS account's sign-in-required action immediately starts an automatic
 attempt without a menu, using its saved
 email/password and, on an identified authenticator challenge, a fresh TOTP.
-The existing isolated WebView profile, effective proxy, OAuth callback validation
+The fresh private WebView, effective proxy, OAuth callback validation
 and target-identity checkpoint remain authoritative. Notes stay native until an
 exact HTTPS auth.openai.com login form needs one value; no external-page IPC is
 enabled. Each evaluation carries a deadline checked in the page before filling
@@ -506,9 +439,21 @@ host ID, granted scopes, expiry and rotating tokens) using the existing vault.
 The initial dynamic client ID is never used for exchange or refresh. Callbacks
 use PKCE/state/nonce and 127.0.0.1; RS256/JWKS verification checks issuer,
 audience, expiry and nonce. Reauthorization stays with the selected registration.
+Returning sign-in may use its verified email as an attempt-bound `login_hint`;
+retained ID tokens stay out of browser URLs. Public signing keys use a bounded
+in-memory cache with serialized retrieval and key-rotation refresh. A key-service
+outage remains retryable; expired keys and invalid signatures are rejected.
 Missing plan permission preserves sign-in but prevents pool admission/inference;
-an explicit later sign-in requests consent. SIWC rotation checkpoints fence an
-uncertain refresh reply and recover a staged token set without refreshing twice.
+an identity-only reply saves verified identity without access or refresh tokens.
+Management request preparation checks this permission before registering tokens
+with the shared authority and again after preparing the current credentials.
+An unexpired token alone cannot enable plan usage.
+An explicit later sign-in requests consent. Refresh timing accepts Unix seconds
+or RFC3339 dates and retains omitted grant scopes on renewal. SIWC rotation
+checkpoints fence an uncertain refresh reply. Received replacements are persisted
+before fallible identity verification, outside usable credentials and authority.
+Restart or cancellation resumes verification of the same protected reply, bound
+to the current registration and credential generation, without refreshing twice.
 An unresolved rotation outcome or invalid checkpoint persists the existing
 reauthentication state with `token_rotation_recovery_required`; it stops automatic
 refresh and pool admission until a newer sign-in. A temporary vault I/O or
@@ -516,11 +461,20 @@ write-verification failure remains retryable and preserves the checkpoint and
 credentials. Request diagnostics distinguish recovery from credential-storage
 unavailability.
 Hard deletion attempts provider revocation before removing local credentials;
-trash is reversible and does not revoke. Remote revocation cannot be undone if
+identity-only sign-ins and unactivated imports have no owned renewable session
+to revoke. Revocation selects the latest protected rotation replacement under
+the credential lock without activating it. Unknown or invalid rotation outcomes
+retain the connection rather than revoking a consumed token and claiming success.
+Trash is reversible and does not revoke. Remote revocation cannot be undone if
 a subsequent local delete fails: rollback restores local data but closes the
 gateway; that connection needs reauthorization before restarting the gateway.
 SIWC uses account-scoped public `/v1/models` and `/v1/responses` HTTP/SSE,
 `store=false`, complete input history, and terminal `response.completed`.
+An upstream JSON reply to a streaming request goes through the existing bounded
+response collector and terminal/model validation. Valid completed or incomplete
+Responses bodies use the shared SSE encoder and client-protocol adapter; provider
+errors retain their failure semantics. This compatibility path never redispatches
+merely to obtain SSE, and synthetic events do not establish upstream token timing.
 Client `previous_response_id` continuations use the same bounded, owner-validated
 native replay as BPS before HTTP preparation, including the client WebSocket
 bridge. The upstream receives the full saved input, completed output and new
@@ -530,6 +484,11 @@ accounts. The [SIWC inference contract](https://developers.openai.com/siwc/token
 requires the public API, not ChatGPT backend endpoints; its
 [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 distinguish stateless HTTP from same-authenticated-connection WebSocket state.
+Native replay and buffered responses preserve completed reasoning ciphertext
+from `response.output_item.done`, including when the terminal snapshot omits or
+replaces it. The shared snapshot policy also serves protocol conversion; item
+index/identity must match before opaque state can be reused. See the
+[Responses item contract](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list).
 The client WebSocket `generate` option is not forwarded as an HTTP parameter.
 `generate: true` keeps normal generation; `generate: false` maps to the documented
 Responses `prompt_cache_options.prewarm: true` without changing cache mode or TTL.
@@ -563,6 +522,9 @@ media remain in place; replayed client calls receive their definitions before
 the call, and current overrides follow history. Cache options and reasoning
 remain unchanged. Required, specific or allowed-tool choices, small catalogs,
 reserved-name collisions and insufficient dispatch budgets keep native forwarding.
+The local catalog helper must not shadow a client's historical bare `relay_catalog`
+declaration or call, even if the current root catalog omits it. Those requests
+keep native forwarding; a namespaced client tool with that leaf name is distinct.
 Local lookups share the request budget, lease and exact authorization incarnation;
 they cannot change accounts, replay executable calls, or execute client tools.
 Malformed local reads can be corrected within eight bounded lookup rounds.
@@ -590,12 +552,23 @@ not enabled. An initial SIWC/BPS handoff retains the selected account and its
 unstarted reservation; changing transport does not select a second pool member
 or advance rotation twice. The HTTP executor rechecks compatibility and identity,
 and normal dispatch fences still enforce live scope and membership.
-A confirmed SIWC quota rejection before generation
+A structured `subscription_sharing_usage_limit_exceeded` rejection before generation
 uses the existing cooldown and bounded pool fallback, for HTTP 429 and an early
-SSE failure alike. Selection still respects configured membership, model/key
+SSE failure alike. Diagnostic prose, native Codex quota codes, and bare HTTP 429
+do not authorize SIWC replay. Known SIWC discriminators take precedence over
+message text; unknown SIWC codes retain status-based handling. Explicit invalid
+or unknown discriminator fields fence fallback fields and error envelopes;
+duplicate JSON keys cannot establish SIWC replay permission. Selection still
+respects configured membership, model/key
 scope and continuation ownership; Relay never injects another billing route.
 Other SIWC failures remain terminal. Any generation evidence or uncertain
 execution forbids replay, even when the terminal error reports exhausted quota.
+The rejection does not establish a whole-plan balance or a reset timestamp.
+At EOF before any SSE frame, bootstrap preserves a recognized JSON error body
+up to 64 KiB, including its actual HTTP status, code and safe parameter. Other
+early EOF diagnostics retain only content-type/body-shape classes and byte
+counts, never body snippets. This observation does not establish safe replay.
+Reference: https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery
 The structured `subscription_sharing_user_not_eligible` refusal has its own
 diagnostic category. It ends the request without credential repair, account
 cooldown, health penalty or automatic account switching; it does not revoke a login.
@@ -616,6 +589,8 @@ Live provider acceptance remains separate from automated local checks.
 Contract: https://developers.openai.com/siwc/token-sharing-open-source/sign-in
 and its token, models-and-inference, preview-limitations and recovery references.
 
+### Account bundles and linked authorizations
+
 Zenith account bundles preserve all three OAuth client kinds. SIWC exports retain
 the issued client ID, subject, issuer, host ID, scopes and refresh timing alongside
 the tokens; Codex-only and unqualified third-party formats reject SIWC rather
@@ -633,7 +608,13 @@ https://developers.openai.com/siwc/token-sharing-open-source
 Credential authorities remain separate even for the same principal. Local account
 cards can explicitly associate up to one Codex, SIWC and Excel/BPS connection.
 The client badge selects the route in both Accounts and Rotation; only that
-connection joins the pool. Association does not copy tokens, infer entitlement,
+connection joins the pool. Selecting another method first reuses its grouped
+connection or a single eligible saved connection. Rust validates identity and
+rejects ambiguous saved matches; OAuth starts only when no eligible match exists.
+After OAuth completion, association finishes before the renderer refreshes the
+account snapshot. A failed association retains the saved credentials, closes the
+completed sign-in and reports the error; retrying selection reuses the saved
+connection. Association does not copy tokens, infer entitlement,
 combine quota ledgers or automatically match accounts by editable login notes.
 Codex/BPS association checks the saved principal and workspace; SIWC association
 checks the original sign-in identity, not a workspace claim or shared allowance.
@@ -670,6 +651,9 @@ rotation while SIWC has no own quota evidence. The reference retains its source
 and expires at the oldest window's freshness bound, any reported reset, or
 subscription expiry. Missing counters, failed reads, recovery, unavailable
 credentials and reauthentication cannot supply this ranking signal.
+Without a scheduler snapshot, automatic pool-card ordering uses the same linked
+display observation when fresh; live scheduler ranks and resource evidence remain
+authoritative. Reference observations never transfer provider credits or access.
 Association does not verify SIWC's workspace or equivalent client allowances.
 Search, filters and groups use the selected connection's own metadata. A missing
 subscription date can display a linked Codex/BPS date for the same displayed plan,
@@ -727,6 +711,8 @@ The connection determines the transport; there is no global BPS switch.
 Legacy global flags are ignored on read and omitted from settings, presets,
 and runtime snapshots. Per-account BPS facts remain credential-derived.
 
+### Native Codex access
+
 Native Codex connections support direct account switching, explicitly linked
 SIWC plan/quota display, and explicit Desktop pool membership, image-only by default.
 An account-card or pool-picker membership action persists `imagePoolEnabled`;
@@ -768,10 +754,12 @@ CDP discovery bypasses system proxies and does not follow HTTP redirects.
 Managed ChatGPT catalog reads also reach the local gateway directly, without
 system proxies or HTTP redirects; provider proxy routing is unchanged.
 
-Discovery preserves inventory separately from executable routes. A model name,
-`/models` row, group label, or reference catalog does not prove endpoint access.
-Normal refresh does not send generation probes. Endpoint declarations retain
-their origin; address/key changes invalidate old evidence.
+### Model discovery and route evidence
+
+Discovery keeps model inventory and executable-route evidence separate. Names,
+`/models` rows, groups and reference entries describe inventory; endpoint access
+requires its own evidence. Refresh reads metadata rather than generating answers.
+Endpoint declarations retain their origin; address/key changes invalidate evidence.
 
 The renderer preserves Rust's resolved routes, including empty model lists.
 Only an unresolved sole legacy native binding may inherit the source catalog.
@@ -901,6 +889,32 @@ origins do not participate.
   subscription reads for the current registration, including manual retries,
   not quota polling or a replacement login/configuration. Polls never re-import
   a subscription date from old token claims after the provider has cleared it.
+  A persisted successful metadata read also keeps the 30-minute interval when
+  the provider omits an expiry; ordinary quota reads cannot reset this floor.
+  Subscription failures record the fixed endpoint stage (`accounts_check` or
+  `subscriptions`) and content-type category alongside the HTTP status, without
+  retaining response bodies, URLs or authorization headers. An HTML refusal
+  remains a refusal, not evidence that the account lost model access.
+  The documented `cf-mitigated: challenge` response header adds a fixed
+  `cloudflare_challenge` diagnostic; absent or unknown values remain unreported.
+  HTML alone does not establish the refusal's origin. See Cloudflare's
+  [challenge detection contract](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/).
+  Subscription diagnostics include the OAuth client kind, total probe elapsed
+  milliseconds (including management admission and optional retries), and a
+  validated Cloudflare Ray id when present. Arbitrary header values are omitted.
+  HTTP error status and Retry-After take precedence over an unread or truncated
+  error body; a broken refusal body cannot trigger a transport retry.
+  Subscription metadata must match the requested account's canonical id or an
+  alias present in the authenticated response. Canonical matches take priority;
+  a missing account never falls back to another account's ordered subscription.
+  A failed optional `subscriptions` lookup retains the authenticated account-check
+  fields and its separate diagnostic, without refreshing a retained expiry date.
+  A confirmed plan change clears the previous plan's expiry and freshness; explicit
+  account ids in fallback payloads must match the selected canonical account.
+  Transient fallback retries repeat only that lookup and honor Retry-After.
+  Per-account quota locks own single-flight; the shared subscription-floor mutex
+  is released before network I/O and persistence. Management HTTP admission
+  continues to bound concurrent requests across accounts.
 - Model, balance, quota, and usage refreshes are independent resource-scoped
   jobs. Readers join in-flight work. Manual refresh does not cancel shared work.
   Configuration/credential/delete revisions fence late results.
@@ -940,9 +954,13 @@ origins do not participate.
   account without inventing models or blocking the whole account. Independent
   authentication, verification and account-disable failures retain precedence.
   Legacy `blocked` + `models_forbidden` records are repaired to `degraded` on
-  load and discovery, retaining the catalog error until a successful nonempty
-  read. Repair preserves authentication failures, inventory, membership and
-  operator choices; it never supplies models or bypasses BPS access checks.
+  load and discovery, retaining the catalog error until a successful accepted
+  read. Native Codex/BPS empty reads retain their last good inventory. A successful
+  SIWC read with no visible models clears current discovery, including through
+  reauthorization's settings merges; its saved baseline remains intact but is
+  not routed. Failed discovery preserves the last observation, including an
+  empty SIWC catalog. Repair preserves authentication failures, inventory,
+  membership and operator choices; it never supplies models or bypasses BPS access checks.
   Failed login/import/refresh model probes use the existing error log to retain
   the attempt time, static endpoint stage, configured-proxy/default transport,
   safe code and HTTP status. Default transport is not proof of bypassing system
@@ -959,6 +977,14 @@ origins do not participate.
 - Token refresh/invalidation is revision-bound. A late 401 or invalid grant
   cannot overwrite a newer login, delete replacement credentials, restore a
   deleted account, or change operator disable/drain/membership choices.
+  Desktop model/quota reads and reset-credit authorization retain the exact
+  prepared token revision through 401 recovery, including when a replacement
+  session reuses a generation number or identical token bytes.
+  Refresh-error JSON is limited to 32 KiB and rejects duplicate object keys.
+  An explicit nested `error.code`, then top-level `code`, takes precedence over
+  OAuth `error` and `error.type`; a malformed explicit code stays unknown.
+  Ambiguous envelopes preserve credentials, and `refresh_token_reused` remains
+  transient because another refresh may already have rotated the grant.
   Access-only expiry applies to the rejected token snapshot and preserves an
   existing terminal sign-in reason. The five-minute renewal window applies only
   when a refresh grant exists; access-only tokens retain their actual lifetime.
@@ -1049,6 +1075,27 @@ Fresh provider credits are the fallback. Soft health/first-output latency and re
 resolve remaining choices. Wallet prices do not rank members. Missing latency
 does not exclude a member. Soft affinity can yield to a better eligible member;
 opaque response ownership cannot.
+Routing diagnostics also capture the selected candidate/model/operation's
+first-output latency before the request. A bounded in-memory window retains at
+most 64 successful physical attempts from the previous ten minutes; missing
+measurements have a separate count. Nearest-rank P50/P90/P95 require 20 measured
+attempts. Unknown, insufficient and expired samples stay distinct, and freshness
+is relative to the saved selection time. These diagnostic quantiles leave the
+existing EWMA selection policy unchanged and reset with route replacement/removal.
+HTTP SSE diagnostics additionally record the first nonempty decoded body read,
+first complete parsed SSE JSON and first meaningful upstream output during
+bootstrap, before conversion or tool buffering. These are dispatch-relative
+offsets, not additive CPU durations or client receipt times. Heartbeats,
+metadata-only events and output are separate observations. A preserved
+non-identity Content-Encoding leaves the decoded-body boundary unknown; no raw
+pre-decompression or network-arrival boundary is invented. JSON, native
+WebSocket and old records do not acquire synthetic HTTP SSE phases. Known
+observations survive bootstrap failure without changing retry certainty.
+Proxy checks retain their existing HTTPS-only elapsed time and expose separate
+queue, response-header/body offsets and full-check time (including optional
+location/address work). Header time includes client setup, the shared HTTP gate
+and upstream wait; it is not a standalone DNS/TCP/TLS measurement. No additional
+provider requests or inference probes are introduced for these diagnostics.
 Soft prompt affinity follows the admitted native route of its physical member
 when protocol aliases are deduplicated. It cannot restore an excluded member
 or move an opaque continuation to another route.
@@ -1072,9 +1119,9 @@ the durable owner, and cannot override explicit routing or opaque ownership.
 Hints use the binding TTL without extending the primary owner's expiry; owner
 replacement/expiry, candidate removal and candidate-scoped cache rejection clear
 the corresponding hints. They contain only candidate IDs and expiry times, not
-prompts or provider state, and are not restored from durable storage. Success is
-a reuse hint, not proof that the provider retained a cache; usage counters remain
-the provider-reported values, including genuine zero-cache sends after a switch.
+prompts or provider state, and are not restored from durable storage. These hints
+guide route reuse. Cache usage remains provider-reported, including zero-cache
+sends after a switch.
 
 Requests with a prompt-affinity key also retain bounded `cacheAffinity` admission
 evidence in routing diagnostics and the existing technical details/support report.
@@ -1169,6 +1216,19 @@ budgets across HTTP, SSE, WebSocket, and account paths. Retries require:
 - repeatable input and valid continuation ownership;
 - remaining request budget and no client-visible response bytes;
 - provider Retry-After/reset deadlines respected without shortening them.
+
+With diagnostics enabled, tracked HTTP request/attempt observations include
+optional `requestTiming.waiting` counters for local capacity admission, scheduled
+recovery, and event-only pool waits. They use the same monotonic wait budget,
+survive retry/repair handoffs, and include an active wait when a request is
+cancelled after a recorded attempt. Counts and durations are cumulative per
+logical request, not additive across attempt snapshots. The last proposed
+recovery delay is scheduler evidence, not a raw provider Retry-After or proof of
+why every route was unavailable. A missing field is not a measured zero. Fixed
+size counters retain no identities, prompts, headers, or provider bodies; queue
+full/expired outcomes are enums. Physical attempt latency, TTFT, usage and retry
+policy are unchanged. Cancellation before any send still does not invent an
+attempt or a usage record.
 
 An uncertain or completed generation is not safe to repeat. Positive reported
 output or reasoning usage proves generation even without visible content and
@@ -1321,6 +1381,18 @@ The current [reqwest HTTP/3 API](https://docs.rs/reqwest/0.13.5/reqwest/struct.C
 requires `--cfg reqwest_unstable`; provider support is established per origin,
 not inferred from a model or API name.
 
+TCP generation transport recovery is scoped to the candidate and upstream origin.
+A connection-level HTTP/2 error or interrupted TCP/TLS connection retires that pool
+for future requests. Two failed pool generations within two minutes temporarily
+select HTTP/1.1 for two minutes, then negotiate normally using a fresh pool.
+Concurrent errors from one retired generation count once; late errors cannot
+replace a newer pool. Recovery retains configured proxies and TLS validation,
+does not restart active streams, and never replays the failed request. Stream-local
+resets, client cancellation, provider HTTP errors, and response deadlines do not
+trigger recovery. Observations are bounded to 256 routes and expire after ten idle
+minutes once no request holds that pool generation. Quiet active requests retain
+their recovery owner; HTTP/3 probing is deferred during HTTP/1.1 recovery.
+
 WebSocket writes, including control frames and HTTP fallback output, have a
 60-second per-message deadline. This local I/O limit does not time out model
 generation. A stalled write ends the affected connection; uncertain upstream
@@ -1394,12 +1466,14 @@ Local adapter rejections retain the same safe error details in HTTP and WebSocke
 history, with Relay origin and no invented provider attempt, usage or cooldown.
 Client cancellation has its own non-successful UI outcome. Historical synthetic
 HTTP 502 cancellation rows receive the same label.
+New client-cancellation telemetry uses HTTP 499 for both HTTP and WebSocket
+requests, preserving reported consumption and the client-disconnected outcome.
 A logical cancellation does not inherit the previous attempt's provider error;
 that rejection remains on its physical attempt, with consumption unchanged.
 
-Shared runtime HTTP clients disable reqwest's internal protocol retries. HTTP/2
-refusals follow Relay's existing failure policy. Retry eligibility, the configured
-candidate limit, provider cooldowns and uncertain-execution rules remain unchanged.
+Relay owns HTTP protocol retries, with reqwest's internal retries disabled.
+HTTP/2 refusals follow the configured failure policy, candidate limit, provider
+cooldowns and uncertain-execution rules.
 
 Native generation HTTP dispatches can opt into
 `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` (1–1800; unset, zero or invalid disables
@@ -1456,10 +1530,6 @@ model and exact source/authorization. It cannot fall back to another account or
 source, and unknown state is rejected. Lifecycle-only SSE is not generation;
 completion requires a valid terminal, with known partial usage retained on failure.
 
-Canonical Gemini schema types use a no-allocation normalization path. Encoding
-an already-owned structured-output schema transforms it in place, avoiding a
-second clone while preserving literals, field order and exact numbers.
-
 Dispatch is in `protocol/adapter/contracts/source.rs`; preparation distinguishes
 `PreparedAdapterRequest::Native` from `Translated`. Portable content is separate
 from opaque provider state in `AdapterContinuationState` and the bounded volatile
@@ -1479,42 +1549,21 @@ fail explicitly, retain known usage, and do not authorize replay of uncertain
 execution or penalize account availability. BPS keeps its separate 16 MiB event
 limit.
 
-SSE parsing borrows single-line data payloads and consumes coalesced adapter,
-upstream-usage, and HTTP-to-WebSocket frames in place. With no pending tail,
-complete frames are borrowed directly from the input chunk without allocating
-or copying a frame buffer; only the incomplete tail is retained. Buffered
-fragments move the incomplete tail at most once per chunk. Shared frame consumers
-resume at the incomplete tail's last byte, preserving
-split CRLF and per-event limits.
-Line-delimiter search uses `memchr2` for CR/LF and skips the search for leading
-line endings without changing the
-[SSE framing rules](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream):
-CR, LF and CRLF endings, blank-line dispatch and byte-exact frames remain intact.
-Differential tests retain an independent scalar scanner and cover fragmented
-input, unaligned slices and vector boundaries. This optimization is shared by
-native forwarding and converted streams; event and completion validation stay
-in their protocol owners.
-Native Responses forwarding uses the validated delta fast
-path, including escaped text and tool arguments; usage, model identity, terminal
-events, and opaque compaction stay on their full validation paths. These local
-optimizations do not change service tiers, reasoning, or client cancellation.
-Native WebSocket forwarding shares decoded frame classification across served-model
-checks, late-event suppression, usage/replay observation and error rewriting.
-Message size is checked before forwarding inspection; ordinary text/binary buffers
-are retained when no error rewrite is needed. Committed output bypasses inapplicable
-retry parsing, not served-model checks. HTTP-to-WebSocket fallback consumes parsed
-JSON and opaque payloads without cloning them or decoding a serialized copy. Converted streams
-retain unchanged text, reasoning, refusal, and tool-call snapshots, including
-unchanged normalized argument strings; closed Messages blocks still close once
-and reject mutations. Deferred Gemini and tool-search calls stay behind their
-output barriers before argument snapshots are copied or normalized.
-Changed blocks validate append-only prefixes and tool identities against borrowed
-emitted snapshots rather than cloning the previous accumulated strings for each
-delta. Text, reasoning, refusal and function-argument suffixes extend retained
-snapshot buffers rather than copying accumulated content on each fragment. Argument
-normalization borrows the upstream buffer when unchanged. Snapshots change only after
-validation and successful delta emission; numeric normalization and Messages
-block-order/completion rules remain unchanged.
+Shared SSE parsing preserves
+[event-stream framing](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream):
+CR/LF/CRLF, blank-line dispatch, fragmented/coalesced input and per-event limits.
+Native forwarding retains byte-exact frames; each protocol owns event and terminal
+validation. Responses text/tool deltas still require validation, while usage,
+model identity, terminal events and opaque compaction retain their full checks.
+
+Native WebSocket forwarding checks message size, served model, late events,
+usage/replay and safe errors. Committed output disables inapplicable retry parsing,
+not served-model validation. Converted text, reasoning, refusal and argument
+snapshots change only after append-only/identity checks and successful emission.
+Closed Messages blocks reject mutations; deferred Gemini and tool-search calls
+stay behind their output barriers. Numeric normalization preserves exact values
+and does not release unfinished arguments. Service tiers, effort and cancellation
+do not change as a side effect of parsing optimizations.
 The ChatGPT WebSocket setting controls client ingress and the managed profile,
 not provider transport. Catalog changes do not override it. BPS and converted
 routes use the HTTP executor behind the same client socket; usage records the
@@ -1627,6 +1676,18 @@ fields, never provider keys or values.
   Exact schemas stay in the catalog/checkpoint; foreign search results carry
   loaded names rather than a second schema copy. MCP, file search and code
   execution remain native service features, not fake client functions.
+- Converted Responses client tool-search items use `tsc_` item IDs, independently
+  of their `call_id`. A precise pre-execution input-ID rejection can normalize
+  legacy search item IDs once, updating item references without touching call
+  links or opaque reasoning. Existing IDs are reserved to avoid collisions.
+- Native Messages preserves inline tool additions/removals, their ordered system
+  messages and the original tool catalog. On converted Responses/Chat routes,
+  Relay validates and applies client-owned changes to the final callable catalog,
+  preserving exact historical declarations as ordered system text. This is local
+  tool-availability lowering, not native inline-tool support or native cache
+  preservation. Schemas and forced choices remain enforced; unknown references,
+  MCP changes and incompatible late-system targets fail explicitly.
+  Contract: [Messages inline tools](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages).
 - Responses `web_search` / `web_search_2025_08_26` can use the native Messages
   `web_search_20250305` tool. JSON and SSE retain search IDs, queries, URL sources
   and URL citations, including mixed hosted searches and client functions.
@@ -1873,11 +1934,14 @@ definitions without changing current-over-history precedence or schema contents.
 Its compact/discovery presentation and bounds are owned by the BPS executor
 contract above, not by native-route relevance filtering.
 
-Converted Responses catalogs merge root declarations with loaded historical
-definitions; current roots win. Nested namespaces have reversible opaque aliases
-and retain descriptions. Custom tools use one `input` string. Unsupported hosted
-or client-search execution fails explicitly. Only direct client execution is
-representable; empty/non-direct caller policies are not widened.
+Converted Responses catalogs use explicit root declarations as current execution
+permissions, including an empty array. Historical discoveries and call/result
+pairs remain replayable but cannot restore omitted tools or namespace children.
+Without a root catalog, declarations remain incremental. Nested namespaces have
+reversible opaque aliases and retain descriptions. Custom tools use one `input`
+string. Unsupported hosted or client-search execution fails explicitly. Only
+direct client execution is representable; empty/non-direct caller policies are
+not widened.
 
 Forced/allowed tool choices cannot enable undeclared tools or broaden a restricted
 set. Choices reset per request; a continuation omitting the catalog retains its
@@ -1901,6 +1965,8 @@ as integer syntax without changing fractional, string, negative-zero, or large v
 
 ## Usage and prices
 
+### Diagnostic collection
+
 Detailed request telemetry is opt-in through the existing Desktop debug mode.
 Without it, request context/schema byte counting, cache-context fingerprints
 and comparisons, BPS catalog size diagnostics, and preparation-stage clocks
@@ -1914,13 +1980,14 @@ No debug setting changes routing, provider caching, or tool execution policy.
 
 New request diagnostics retain only JSON byte counts for client and prepared
 instructions, conversation, tool catalog, and whole body, across all four APIs.
-These are not token estimates and do not include provider-injected context.
-BPS's final prepared instructions include its embedded catalog; recording the
-intermediate converted catalog alone is not evidence of final wire size.
-BPS executor preparation leaves the final byte count to dispatch after catalog
+The counts measure serialized JSON bytes; provider-injected context is outside
+their scope.
+BPS measures the final dispatched body, including its embedded catalog after
 preloading/fallback.
 Cached tokens still occupy context; never subtract them from the displayed
 window or remove valid instructions/tools merely to reduce the counter.
+
+### Request records and retention
 
 Usage retains one final result per logical client request and one consumption
 record per physical send (`requestId`, `attempt`). The Usage list shows sends
@@ -1943,35 +2010,20 @@ Older Desktop hosts that omit model/member filter fields use an unfiltered,
 events-free aggregate read for the same period. This compatibility path does
 not substitute current inventory or one page of events; supported empty arrays
 remain empty, and concurrent fallback reads for the same period join in flight.
-Desktop report reads run in a blocking worker. Send-page selection reads covering
-`(created_at, ABS(id))` order indexes before decoding only the requested rows.
-A complete attempt prefix supplies an inclusive lower key bound for legacy sends;
-short prefixes retain the complete legacy branch. Counts, consumption totals, filter
-choices, model/member groups, filtered
-prices and histogram buckets use narrow projections for sorting and aggregation.
-A bounded read-only WAL connection pins one snapshot and history revision under a
-short writer lock; report computation
-then proceeds without holding up request/state writes. Its 24 MiB pager and the
-writer's 8 MiB pager share the previous 32 MiB configured budget. In-memory test
-databases retain their single connection. Cache publication cannot overwrite a
-newer writer revision or mix current totals with an older read snapshot. Filtered
-reports share two narrow scans for logical totals/groups and physical consumption,
-prices and send count. Logical reads compute request timings; physical reads
-compute send consumption. Both retain the shared aggregate column layout.
-Price grouping retains member/model/tier/context boundaries. Histograms share
-one physical consumption/pricing scan and a separate logical timing/count scan;
-per-bucket rounding remains separate from report totals. Event pricing releases the read snapshot
-after the complete page has been read. All paths
-retain the physical-send view's `(requestId, attempt)` legacy exclusion. Schema 37
-adds a covering history index and normally empty unaggregated-send indexes; it
-does not rewrite usage or replace the existing retention and pricing rules.
-Schema 43 shares two covering indexes across send-page keys, filter choices and
-aggregate reads, preserving every retained request and send.
-Schema 44 replaces the account/time indexes with two partial covering indexes
-for exact account quota windows. These aggregates share the report read snapshot
-and pager budget; pricing runs after releasing that snapshot. Cache publication
-retains the revision captured before reading cached account values, so a concurrent
-write cannot republish them under a newer snapshot revision.
+Desktop reports run on a blocking worker. A read-only WAL connection pins one
+snapshot/history revision under a short writer lock, then computes without holding
+up request/state writes. Its 24 MiB pager and the writer's 8 MiB pager share a
+32 MiB budget; in-memory tests retain one connection. Pagination decodes only
+selected rows; aggregates and filter choices use narrow indexed projections.
+
+Logical totals/timings remain separate from physical-send consumption/pricing.
+Price groups preserve member/model/tier/context boundaries; bucket rounding is
+separate from report totals. Every path keeps the `(requestId, attempt)` legacy
+exclusion. Account quota windows use the same read snapshot and pager budget,
+with pricing after snapshot release. Cache publication retains the revision
+captured before reading, so concurrent writes cannot relabel stale results or
+mix totals from different snapshots. Append-only index migrations do not rewrite
+retained requests or sends.
 Deleting/expiring usage removes corresponding attempts; missing earlier history
 is not reconstructed. Actual retry/stop decisions are recorded when known.
 
@@ -1981,21 +2033,16 @@ Startup, every 256 new requests, and a once-per-minute Desktop worker use bounde
 batches. The worker skips a busy writer; aggregate
 totals survive expiration and caches are invalidated after a committed batch.
 
-SQLite reuses a bounded cache of eight prepared statements for fixed state/usage
-writes, identity lookups and account-window aggregates; dynamic report queries do
-not populate it. Attempt
-lookups use both `(request_id, attempt)` index columns. Completion-only events do
-not read physical-send history. Unchanged state JSON and identical already-recorded
-consumption skip redundant updates, without dropping request/attempt observations
-or skipping account purges. Mixed state/purge batches and usage corrections remain
-atomic; WAL, FULL durability, history retention and accounting totals are unchanged.
-Schema 40 adds bounded per-item inventory observations. Usage updates persist only
-the changed account/source/key plus changed automation state in one transaction,
-then publish memory. Saved inventory and observation rows are merged on load.
-Full inventory replacement folds in these observations and clears the positional
-rows atomically, so removal, reordering and reimport cannot revive an older record.
-Registration changes still use the existing refresh-revision path; usage preserves
-its identity fence while notifying eligibility changes.
+Usage corrections and mixed state/purge batches are atomic with WAL/FULL durability.
+Unchanged values can skip redundant updates, never request/attempt observations
+or account purges. A bounded eight-statement cache excludes dynamic report queries.
+Per-item inventory observations persist changed accounts/sources/keys and automation
+state in one transaction before publishing memory. Full inventory replacement
+merges and clears these observations atomically, preventing removal, reorder or
+reimport from reviving older records. Registration revisions and usage identity
+fences remain authoritative when notifying eligibility changes.
+
+### Diagnostic exports
 
 Desktop request details can explicitly save a privacy-safe diagnostic JSON file.
 On explicit export only, `reasoningLatencyComparison` compares successful
@@ -2055,16 +2102,30 @@ error fields and observed upstream HTTP status in usage diagnostics, for both
 buffered and streamed responses. Client-facing discovery errors remain generic;
 retaining diagnostics does not authorize another generation or route replay.
 
+### Reported usage and cache evidence
+
 Counters, served model, tier, timings, and safe provider error IDs come from
-upstream observations. First output excludes heartbeats, empty deltas, lifecycle
+upstream observations. Buffered SSE retains the last reported service tier even
+after failure or truncated EOF; JSON discovery uses the shared nested-response
+usage and tier readers. An omitted tier stays unknown for a new generation.
+First output excludes heartbeats, empty deltas, lifecycle
 events, terminal snapshots, and synthetic client SSE. Unknown timing stays unknown.
+Buffered account SSE, including SIWC with a non-streaming client, observes the
+first upstream output during bootstrap and collection, retaining it after a
+partial failure. Its completion clock stops before client conversion. A JSON
+snapshot records upstream completion, but leaves TTFT and generation unknown;
+wrapping it in client SSE does not create timing evidence. Streaming SIWC clients
+receive native or converted output before the upstream terminal event.
+Each discovery generation owns its upstream timing: a follow-up interrupted
+before any output keeps TTFT and generation unknown, even if an earlier lookup
+already produced client-visible output. Client-output timing remains separate.
 Partial cumulative counters merge without null erasure; checked derived totals
 stay unknown on overflow, and reported totals are retained.
 Request-size diagnostics reuse exact serialized value sizes for both body and
 section totals.
 Callers that already measured the unchanged tool catalog reuse that byte count.
 Outer object and conversation-array delimiters contribute to body bytes;
-section totals retain their existing item boundaries. These are not token estimates.
+section totals retain their item boundaries. All sizes are serialized JSON bytes.
 
 Cache read/write counters remain per-request observations, including explicit
 zeroes. Local cache activity is scoped by chat, account/source identity, and
@@ -2089,6 +2150,8 @@ with root overrides and non-default tool controls after history; current schemas
 and permissions win. Root-only catalogs retain their original stable prefix
 placement. Changing a root-only catalog can
 still invalidate that prefix. Default automatic selection adds no policy suffix.
+
+### Request compression
 
 HTTP request compression runs after final credential/continuation guards and
 before dispatch admission. Only native Codex account POSTs to the official HTTPS
@@ -2117,6 +2180,8 @@ opens only the selected authorized route before constructing/sending the payload
 connection reuse is recorded separately. No background all-account warmup,
 `generate:false` model request, or provider cache prefill is introduced.
 
+### Cost estimates and remaining quota
+
 API-equivalent cost is a display-only estimate of token usage at API prices.
 Price resolution uses observed provider prices, exact reference,
 canonical reference, then manual fallback. Components, service tiers, and
@@ -2124,9 +2189,8 @@ published long-context bands stay separate; missing prices are not zero and do
 not inherit another tier. Actual input usage selects the highest strictly
 exceeded band. A model's context limit does not create a pricing threshold.
 Canonical and image lookups use indexes built with each immutable catalog, not
-full-catalog scans per projected model. Family isolation, conflicting aliases
-and image-match precedence remain unchanged; replacement swaps the indexes with
-the catalog.
+full-catalog scans per projected model. The indexes enforce family isolation,
+alias conflicts and image-match precedence, and are replaced with the catalog.
 Desktop request details itemize input, cache read/write, and output using the
 same query-time catalog snapshot and component rounding as the request total.
 Reasoning cost is included in output. Missing breakdowns or
@@ -2173,6 +2237,8 @@ workload/profile count, sample count and pricing coverage.
 Forecasts expire at target reset, stale quota or the calibration's next expiry
 even without a new snapshot. Provider-reported dollar balances remain distinct.
 These display-only estimates do not change quota, admission, routing or billing.
+
+### Weekly-capacity history
 
 Overview's weekly-capacity history estimates the **full** weekly window.
 A native coalesced worker
@@ -2237,6 +2303,8 @@ zero total purchase cost, and wholly unpriced account usage stay unavailable.
 Coverage details remain in tooltips. Usage-period filters do not change lifetime
 account payback. Overview retains its four original counters and chart selection.
 
+### Price provenance and service tiers
+
 Source editors receive source-scoped resolved quotes and provenance from the
 same query-time catalog and resolver as usage. A pool-wide model summary is
 not a fallback for another source; it may describe a different member's quote.
@@ -2282,7 +2350,22 @@ alias, not additional input or a cache write. Gemini thoughts join generated
 output once. This request-token estimate does not measure separately billed
 cache-storage token-time, hosted tools, grounding, or other non-token charges;
 it is not a complete provider invoice.
+Optional provider usage diagnostics retain reported web-search, web-fetch and
+code-execution counters and bounded cache-creation TTL buckets. Explicit zero
+and missing remain distinct; cumulative snapshots merge by maximum within an
+attempt, not by adding SSE frames. Native observations survive conversion and
+partial failures through the existing usage JSON. TTL buckets are subsets of
+cache-write totals, not additional tokens or inferred charges; arbitrary tool
+names, arguments and provider fields are excluded.
+Responses `cache_write_tokens_details` retains reported 30-minute and 12-hour
+buckets, including zero. Nonzero buckets establish written lifetimes instead
+of treating the echoed request default as every prefix's lifetime; later frames
+without usage cannot overwrite those lifetimes with the default. Missing
+write totals remain unknown rather than being reconstructed from buckets.
+Catalog lookup attempts retain their own provider counters; the next generation
+starts a separate observation. These counters do not measure subscription quota.
 Source contracts: [OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
 [GPT-6.1 Sol price schedules](https://developers.openai.com/api/docs/models/gpt-6.1-sol),
 [Anthropic caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
 [Gemini usage](https://ai.google.dev/api/generate-content#UsageMetadata),
@@ -2290,9 +2373,11 @@ Source contracts: [OpenAI pricing](https://developers.openai.com/api/docs/pricin
 [DeepSeek usage](https://api-docs.deepseek.com/api/create-chat-completion), and
 the [LiteLLM catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json).
 
-Debug context comparison uses bounded, salted in-memory fingerprints, never
-stored prompts or arguments. It does not prove provider prefix reuse or a cache
-hit. Native Responses, SIWC and BPS Responses share this diagnostic path,
+### Context comparison
+
+Debug context comparison uses bounded, salted in-memory fingerprints to compare
+local request prefixes; cache hits come from provider usage. Native Responses,
+SIWC and BPS Responses share this diagnostic path,
 including the HTTP bridge for WebSocket clients; debug-off requests collect no
 context fingerprints. BPS snapshots the actual dispatched body after catalog
 preloads and attachment resolution, and refreshes it for each discovery send.
@@ -2312,6 +2397,16 @@ Comparison is diagnostic only: it does not retrieve history, enable continuation
 change cache policy, add another inference, or authorize a retry. Provider
 classifications and token counts are retained separately from local prefix
 comparisons and observed usage; an unavailable comparison is not a cache miss.
+Bounded debug snapshots also expose client/sent cache mode, TTL, prewarm and
+key presence as allowlisted classifications, without key values. They distinguish
+omitted controls from explicit settings and unknown values rather than inferring
+model defaults. Content-block and function/custom-result cache markers are counted
+with their last input-item position and TTL-override count; a bounded partial scan
+is marked incomplete. Tool schemas and opaque state are not scanned as markers.
+Native SIWC preserves explicit breakpoints (including per-block TTL), intentional
+explicit-only requests with zero breakpoints, and appended configuration updates.
+Relay does not insert markers, change TTL, or generate extra requests to raise
+cache-hit counters. These controls do not prove cache eligibility or reuse.
 Reference: https://developers.openai.com/api/docs/guides/prompt-caching
 and https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics
 The manual `quality_probe` is opt-in, loopback-only, bounded, and separate
@@ -2385,6 +2480,11 @@ policy never automatically closes/restarts an application.
 ChatGPT, Claude Desktop, and OpenCode have separate profile ownership and recovery.
 Claude uses a Relay-owned UUID profile in its `Claude-3p` library, preserves foreign
 profiles/selections, and maps stable client-only Claude IDs back to real models.
+An explicit reconnect can repair stale recovery fingerprints using the same
+current-gateway proof as missing-recovery reclamation: endpoint, key, supported
+generated settings and the owned entry must match. The original recovery point
+is retained. Pending snapshots, foreign settings, background refresh and restore
+do not gain permission to adopt an externally changed profile.
 There is one entry per enabled Messages-routable model, not one per effort.
 Desktop's native effort menu is capped at the highest pool-allowed level on a
 Messages route. `maxEffort` cannot remove intermediate holes, and supported
@@ -2438,11 +2538,10 @@ cache the profile at startup must reload before its new effort list takes effect
 
 Connect validates routes, key, catalog, ownership, and launch target before process
 changes. Only the requested launch preference starts the client after attachment.
-Overview's application launcher only opens the selected installed application,
-even with the local API stopped or an empty pool. It does not attach a profile,
-refresh a catalog, change credentials, start the API, or stop a running client;
-existing client configuration remains unchanged. Launch does not depend on a
-Relay runtime refresh or the validity of a previous managed profile.
+Overview opens the selected installed application with its existing configuration,
+preserving running clients. It works with the local API stopped, an empty pool,
+or a stale runtime/profile. Profile attachment, catalog refresh, credential changes
+and API startup are separate actions.
 Launch preferences take precedence over `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN`,
 then installation discovery. Explicit overrides are validated even when a client
 is already running; invalid overrides never silently select another installation.
@@ -2452,8 +2551,31 @@ numerically. Process control requires a recognized desktop path and excludes
 Chromium helpers. OpenCode and Claude launch success requires a running desktop,
 not merely a successful spawn. Blocking launch/restart commands run off the UI
 thread; the legacy saved-key launch leaves Relay visible when launch fails.
-Restore refuses modified owned settings, preserves unrelated changes, and does
-not automatically relaunch. Source edits do not upgrade an already running binary.
+Automatic attachment rollback preserves newer user sign-ins and unrelated changes.
+Named ChatGPT snapshots capture the current account/API authorization and active route.
+Only root connection defaults, the selected named profile and its provider definition
+are restored. Inactive profile overrides, reasoning/context preferences, MCP and auth
+extensions remain current; shared defaults and provider definitions can still change
+an inactive profile's effective connection. Model selections are restored when the
+provider, endpoint or wire protocol changes, or the config is missing.
+A referenced Relay-owned catalog and managed binding's protected undo data are
+captured together. Restore recreates fresh undo references, preserving account identity,
+token synchronization, catalog refresh and later detach; the snapshot remains reusable.
+Payload v2 captures the effective credential document from `file`, OS `keyring`, or
+`auto` (keyring first, file only when its entry is absent). It supports direct keyring
+and `secret_auth_storage`: `secrets/codex_auth.age`, the Windows default, with only
+`global/CODEX_AUTH` replaced. The shared encryption key, MCP namespaces and other entries
+remain intact; a missing key for existing encrypted files requires recovery. Native
+restore clears the stale fallback file. A locked store or process-only `ephemeral`
+requires recovery rather than guessing credentials.
+Legacy v1 file snapshots remain readable; v1 keyring snapshots lack captured authorization.
+Codex's `auth.lock` coordinates credential changes. The profile undo journal includes
+native credentials, files and protected binding secrets for conditional error rollback.
+History repair uses the saved effective provider, including custom API providers, and
+preserves rollout content and newer chats. History rollback follows a failed connection
+restore. This in-process rollback is not a durable power-loss transaction.
+OpenCode and Claude retain their separate recovery scopes. Source edits do not upgrade
+an already running binary.
 
 The retired personal-server runtime, management client, deployment templates and
 account-transfer operations are removed. Existing ownership evidence is preserved

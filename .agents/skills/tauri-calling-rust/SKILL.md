@@ -16,8 +16,8 @@ rather than introducing a parallel invocation or diagnostics layer.
 
 - Add behavior to its Rust owner and wire it through the existing registration
   path. Keep the TypeScript wrapper and serialized argument/result shape aligned.
-- Validate runtime input in Rust; a TypeScript type assertion is not validation
-  or permission. Reuse safe structured errors rather than exposing raw I/O,
+- Enforce runtime input validation and permissions in Rust. Reuse safe structured
+  errors rather than exposing raw I/O,
   provider responses, or secrets.
 - Keep credentials, files, network calls, process control, and profile writes
   out of React. Return redacted DTOs needed by the UI.
@@ -29,5 +29,5 @@ rather than introducing a parallel invocation or diagnostics layer.
 
 Use [the affected checks](../../../CONTRIBUTING.md#verification) for changed
 serialization, errors, or registration. Verify the real IPC or existing mock
-boundary; internal calculations alone do not cover it. Add regression coverage
+boundary in addition to internal calculations. Add regression coverage
 only where existing checks leave a meaningful gap.

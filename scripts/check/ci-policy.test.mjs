@@ -242,6 +242,25 @@ describe("desktop CI", () => {
     expect(build.jobs["publish-updater-manifest"].if).toBe(`${releasePush} && !contains(github.ref_name, '-')`);
     expect(build.jobs["publish-release"].if).not.toContain("workflow_dispatch");
   });
+
+  test("a release stays draft until installers and updater uploads succeed", () => {
+    const release = build.jobs["publish-release"].steps.find((step) => step.name === "Publish release assets");
+    expect(release.run).toContain("'--verify-tag', '--draft'");
+    const assets = build.jobs["publish-release"].steps.find((step) => step.name === "Check all release assets before publishing");
+    expect(assets.run.indexOf("Copy-Item -LiteralPath LICENSE")).toBeLessThan(assets.run.indexOf("$hashes ="));
+    const upload = build.jobs["publish-updater-manifest"].steps.find((step) => step.name === "Upload updater assets");
+    expect(upload.run).toContain('if ($LASTEXITCODE -ne 0) { throw');
+    const final = build.jobs["finalize-release"];
+    expect(needs(final)).toEqual(["publish-release", "publish-updater-manifest"]);
+    expect(final.if).toContain(releasePush);
+    expect(final.if).toContain("!cancelled()");
+    expect(final.if).toContain("needs.publish-release.result == 'success'");
+    expect(final.if).toContain("needs.publish-updater-manifest.result == 'success'");
+    expect(final.if).toContain("contains(github.ref_name, '-') && needs.publish-updater-manifest.result == 'skipped'");
+    expect(final.if).not.toContain("workflow_dispatch");
+    expect(final.steps[0].run).toContain("--draft=false");
+    expect(final.steps[0].env.GH_REPO).toBe("${{ github.repository }}");
+  });
 });
 
 describe("agent guardrails", () => {

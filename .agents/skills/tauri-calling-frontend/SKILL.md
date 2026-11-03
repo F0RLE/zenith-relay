@@ -23,7 +23,7 @@ existing hook and event owners instead of adding another subscription manager.
 - Clean up subscriptions when components unmount, including when async listener
   registration completes after unmount. Avoid duplicate handlers on remount.
 - Preserve operation IDs/revisions where concurrent updates need ordering.
-  Events are not durable persistence or authorization evidence.
+  Persist and authorize through the canonical owners; events notify the UI.
 - Do not interpolate untrusted text into `eval`. If evaluation is genuinely
   necessary, use a fixed script and safe serialization, not string concatenation.
 

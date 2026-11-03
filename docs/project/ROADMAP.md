@@ -1,6 +1,6 @@
 # Zenith Relay roadmap
 
-Open Desktop work and acceptance, not shipped features or a progress log.
+Open Desktop work and acceptance criteria.
 Current contracts are in [PLANNING.md](PLANNING.md); development and release
 checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
@@ -11,8 +11,8 @@ Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md
 
 The shared typed pipeline, four interoperable native paths plus native-only
 Gemini Interactions, multiple source/model bindings,
-and native-upstream selection are already implementation contracts. Remaining
-work is qualification and specific missing semantics, not another adapter engine.
+and native-upstream selection are implemented. Remaining work covers
+qualification and specific missing semantics.
 
 | Work | Acceptance |
 | --- | --- |
@@ -34,10 +34,10 @@ evidence. Discovery must not generate paid probes across a catalog.
 
 Gemini Interactions needs permitted live qualification of the exact source,
 model and key scope for JSON/SSE text → calls → results → next answer, terminal
-usage and interruption. Synthetic native tests do not qualify account OAuth,
-agents/background execution, remote retrieval or cross-protocol conversion.
-Other account connectors remain paused: the current capability metadata is a
-frontend/credential-family foundation, not an implementation of new logins.
+usage and interruption. Account OAuth, agents/background execution, remote
+retrieval and cross-protocol conversion require separate qualification. Other
+account connectors are paused; their current scope is frontend and
+credential-family metadata.
 
 BPS multi-tool batching has a bounded [Relay-local contract](BASIS_POINTS.md) and
 synthetic roundtrip coverage for JSON/SSE, discovery, tool restrictions,
@@ -45,18 +45,17 @@ disabled parallel policy, typed results, and opaque reasoning. Remaining live
 qualification must verify model adoption of the envelope, client acceptance of
 reversible call IDs and result grouping, and the complete tool-results/next-turn
 cycle on each intended harness. Measure cache reuse, TTFT and end-to-end latency
-separately. Local protocol support is not evidence of concurrent client execution
-or a measured speedup, and a first response with several calls is insufficient.
+separately, across the complete client execution cycle.
 
 Request-stage diagnostics distinguish selected-attempt preparation, upstream
 headers/collection, normalized first stream output, and response/tool readiness.
 Qualify their coverage on the intended HTTP/SSE/discovery paths after installation;
 client receipt and between-request harness delays require client-side evidence.
 Cold-preparation qualification should compare request building, its initial
-schema-validation subset, catalog preparation, and attachment work. A synthetic
-validator benchmark does not identify a live cold-start bottleneck by itself.
-Use context-size and existing cache-prefix diagnostics before removing any work;
-token reuse alone does not establish the cause of TTFT or safe history reduction.
+schema-validation subset, catalog preparation, and attachment work. Locate live
+bottlenecks with request-stage timings alongside synthetic validator benchmarks.
+Use context-size and cache-prefix diagnostics to verify the cause of TTFT and
+the safety of any history reduction before removing work.
 
 | Area | Cases still requiring permitted live qualification |
 | --- | --- |

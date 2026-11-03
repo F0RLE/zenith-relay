@@ -22,8 +22,17 @@ if ($version -notmatch "^\d+\.\d+\.\d+$") {
 }
 $baseUrl = "https://github.com/$Repository/releases/download/$TagName"
 
-Remove-Item -Recurse -Force $OutputDir -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+if (Test-Path -LiteralPath $OutputDir) {
+  $output = Get-Item -LiteralPath $OutputDir -Force
+  if (!$output.PSIsContainer -or ($output.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw "Updater output must be a regular directory: $OutputDir"
+  }
+  if (Get-ChildItem -LiteralPath $OutputDir -Force | Select-Object -First 1) {
+    throw "Updater output must be empty; choose a new output directory: $OutputDir"
+  }
+} else {
+  New-Item -ItemType Directory -Path $OutputDir | Out-Null
+}
 
 function Copy-Asset {
   param(
@@ -42,13 +51,14 @@ function Copy-Asset {
     throw "Missing artifact folder: $folder"
   }
 
-  $source = Get-ChildItem -LiteralPath $folder -Recurse -File |
-    Where-Object { $_.Name -eq $SourceName } |
-    Select-Object -First 1
+  $sources = @(Get-ChildItem -LiteralPath $folder -Recurse -File |
+    Where-Object { $_.Name -eq $SourceName })
 
-  if (!$source) {
-    throw "Missing artifact file: $ArtifactFolder/$SourceName"
+  if ($sources.Count -ne 1) {
+    throw "Expected exactly one artifact file: $ArtifactFolder/$SourceName; found $($sources.Count)"
   }
+  $source = $sources[0]
+  if ($source.Length -eq 0) { throw "Empty artifact file: $ArtifactFolder/$SourceName" }
 
   $destination = Join-Path $OutputDir $DestinationName
   Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
@@ -76,6 +86,7 @@ function Add-Platform {
   Copy-Asset -ArtifactFolder $ArtifactFolder -SourceName "$SourceName.sig" -DestinationName "$DestinationName.sig" | Out-Null
 
   $signature = (Get-Content -Raw -LiteralPath (Join-Path $OutputDir "$DestinationName.sig")).Trim()
+  if (!$signature) { throw "Empty updater signature: $DestinationName.sig" }
   $platforms[$Key] = [ordered]@{
     signature = $signature
     url = "$baseUrl/$DestinationName"

@@ -6,8 +6,8 @@ description: Review or repair Relay native forwarding, API conversion, or conver
 # Relay protocol adapters
 
 Preserve the conversation contract across a client API and an upstream API.
-The minimum supported cycle is text, tool call, tool result, then the next
-assistant response. A successful first answer does not establish compatibility.
+Qualify the complete cycle: text, tool call, tool result, then the next
+assistant response.
 
 Follow the official provider contract workflow in
 [CONTRIBUTING.md](../../../CONTRIBUTING.md#api-and-protocol-references).
@@ -19,7 +19,7 @@ unfinished capability or acceptance, not as a prerequisite for every fix.
 
 - Identify the client API, selected upstream endpoint, requested features,
   continuation mode, and whether the failure occurs in JSON or streaming.
-  A model group supplies a preference; it does not prove endpoint support.
+  Endpoint support requires route evidence; model groups supply preferences.
 - Follow source resolution, request preparation, response conversion, and the
   next request containing tool results. Inspect both `contracts/source.rs`
   dispatch and the owning converter under `crates/relay-core/src/protocol/adapter`.
@@ -36,6 +36,9 @@ unfinished capability or acceptance, not as a prerequisite for every fix.
   For undocumented account transports, mark observed behavior explicitly.
   Use [implementations.md](references/implementations.md) only for a targeted
   implementation comparison; record its inspected SHA and file paths if used.
+  For BPS-specific source discovery, use
+  [BPS development](../relay-bps-development/SKILL.md); public Responses docs
+  alone do not specify that account transport.
 
 ## Adapt in the owning layer
 
@@ -61,9 +64,8 @@ Keep these distinctions explicit:
   count, and bytes. Inspect existing isolation before adding another cache.
   Keep sensitive state in Relay's existing volatile store unless persistence is
   explicitly part of the requested change.
-- A documented provider sentinel for synthetic history is not a replacement
-  for lost state from a real response. Do not use it automatically to hide a
-  broken roundtrip.
+- Use documented synthetic-history sentinels only for synthetic history. Real
+  response roundtrips require their original native state.
 - Distinguish completed, incomplete, and invalid streams. Preserve known usage
   after interruption and avoid duplicate output or tool calls. Continuation
   replay does not make an unknown execution safe to retry.

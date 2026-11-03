@@ -8,7 +8,7 @@ export function fileChanged(path) {
   return Object.assign(new Error(`File changed while checking: ${path}`), { code: "ESTALE" });
 }
 
-/** Validate the opened object, not a pathname that can be replaced before use. */
+/** Validate the open file handle to prevent path-replacement races. */
 export function openCheckedFile(path, { directories = false, writable = false } = {}, io = fs) {
   const before = io.lstatSync(path, { bigint: true });
   if (before.isSymbolicLink() || (!before.isFile() && !(directories && before.isDirectory()))) return null;

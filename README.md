@@ -22,7 +22,7 @@
   a compatible API.
 - Selects an available pool member for each request and shows its status,
   quota, and request history.
-- Supports direct use of one account or API source without pool rotation.
+- Launches a client with one saved account or API source directly.
 - Keeps the local pool running in the tray when the window is closed; optionally
   shares its API with other devices on a trusted LAN.
 
@@ -46,12 +46,10 @@ Download a package for your platform from
 | Mode | Use it when | What remains running |
 | --- | --- | --- |
 | **Computer** | Run the pool on this device, optionally sharing its API on a trusted LAN. | Relay and its local API. Closing the window leaves the process in the tray. |
-| **Relay Hosted** | In development; no hosted connection is made. | Selecting it does not stop the local API. |
+| **Relay Hosted** | Placeholder for the future hosted service. | The local API and automations keep running. |
 
-Computer mode also launches an application with one saved API source directly,
-without pool rotation, from **Connections → Sources → Launch**.
-
-Hosted is a separate future service; local network access is part of Computer mode.
+Launch a saved API source from **Connections → Sources → Launch**.
+For LAN access, use Computer mode.
 
 ## Quick start
 
@@ -65,20 +63,27 @@ Hosted is a separate future service; local network access is part of Computer mo
    from **Access**.
 5. Send a request from the client and find it in **Usage → Requests**.
 
-These authorizations stay independent. In local account cards, the **Codex**,
-**SIWC** or **Excel / BPS** badge next to the plan selects one route. **Account
-connections** can explicitly group matching authorizations without duplicate pool
-members or combined quota. **Codex** supports direct account switching and linked
-SIWC quota display, and explicit image-only pool membership. Text access through
-Codex requires separate consent in Settings; see the
+### Choose a sign-in method
+
+| Method | Main use in Relay | How requests run |
+| --- | --- | --- |
+| **Codex** | Switch the account used by the installed Codex client, manually or with account automations. | The client uses its selected account directly. |
+| **Excel / Basis Points (BPS)** | Add an account to Relay's pool. | Relay adapts requests and client tools to the Excel/BPS transport, then converts the results back for the client. |
+| **ChatGPT (SIWC)** | Experimental pool access with permission to use the ChatGPT plan. | Relay sends Responses requests directly to the public OpenAI API, without the Excel/BPS tool bridge. |
+
+SIWC is the more experimental integration in Relay. Its shorter protocol path
+describes how it works, not a reliability ranking; access, limits and supported
+features depend on the selected authorization.
+
+The account-card badge selects the route. **Account connections** groups matching
+authorizations under one pool member; each keeps its own quota. Codex also supports
+linked SIWC quota display and explicit image-only pool membership. Codex text
+pool access requires separate consent in Settings; see the
 [experimental-access warning](docs/help/en/README.md#connect-an-application-through-the-pool).
-**ChatGPT (SIWC)** is pool-only and requires plan-use permission in the browser.
-**Excel / Basis Points** is pool-only. Free plans are not blocked by name;
-execution requires fresh provider access evidence. Direct Codex account switching
-remains available.
+BPS access, including Free plans, is checked with the provider before use.
 All three support [Zenith export/import](docs/help/en/README.md#import-export-and-account-state).
-SIWC supports only Zenith and requires a fresh sign-in after import; existing SIWC
-connections are not overwritten. Exported files contain secrets: store them like passwords.
+SIWC imports use Zenith format and require a fresh sign-in; existing connections
+are preserved. Exported files contain secrets: store them like passwords.
 The guide covers [direct use](docs/help/en/README.md#work-without-the-pool),
 [manual API setup and LAN access](docs/help/en/README.md#local-api), and
 [saved account recovery](docs/help/en/README.md#saved-account-recovery).

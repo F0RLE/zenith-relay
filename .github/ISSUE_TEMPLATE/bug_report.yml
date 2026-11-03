@@ -54,7 +54,7 @@ body:
     id: diagnostics
     attributes:
       label: Safe diagnostics
-      description: Add redacted error messages, timestamps, and relevant logs. Do not include secrets or prompts.
+      description: Add redacted errors, timestamps and relevant logs; keep secrets and prompts private.
       render: text
   - type: checkboxes
     id: checks

@@ -20,13 +20,12 @@ workflow.
 - For a new flow or contract change, establish the provider, issuing OAuth
   client, principal/workspace identity, grant, scopes, endpoints, redirect,
   expiry, and renewal method. For a local fix, inspect the affected validation
-  and state invariants. Distinguish documented support from observed private
-  behavior; a client ID found in another app does not establish permission.
+  and state invariants. Require provider permission for the issuing client and
+  distinguish documented support from observed private behavior.
 - For a targeted implementation comparison, use the matching provider in
   [implementations.md](references/implementations.md#login-and-import).
   Record its inspected commit and paths and compare against the official
-  contract. An existing local callback/state fix does not by itself require
-  reading another application's code. New API's product-user OAuth is unrelated
+  contract. Use local source for callback/state fixes. New API's product-user OAuth is unrelated
   to provider account credentials.
 - Trace the affected owner under `src-tauri/src/local_pool/accounts/oauth/` or
   `src-tauri/src/local_pool/accounts/oauth_flow/`, then
@@ -62,15 +61,15 @@ workflow.
   the existing lock, checkpoint, revision, and conditional rollback owners.
 - Store secrets through the Desktop credential store and protected vault.
   Renderer state and diagnostics receive redacted status. An import consumes
-  an explicitly selected document; it does not scan browser profiles or harvest
-  cookies. Keep profile configuration and backups with the existing profile
+  an explicitly selected account document; browser profiles and cookies stay
+  outside the importer. Keep profile configuration and backups with the existing profile
   integration rather than inventing another store in the client's directory.
 
 ## Establish acceptance
 
 Use [acceptance.md](references/acceptance.md) for the affected login or import
 path. Inspect existing coverage; run or extend checks only within task and
-harness permissions. Local checks do not prove live-provider acceptance.
+harness permissions. Report local checks and live-provider acceptance separately.
 
 When pool execution or renewal changes, use the
 [pool lifecycle skill](../relay-account-pool-lifecycle/SKILL.md).

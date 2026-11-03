@@ -5,8 +5,8 @@ description: Review or change Relay pool membership, renewal, quota, dispatch ow
 
 # Relay account pool lifecycle
 
-Make an account connector usable by the existing pool without creating a
-parallel scheduler, token cache, or credential authority.
+Integrate account connectors with the existing pool scheduler, token cache and
+credential authority.
 
 Read the affected contracts in
 [PLANNING.md](../../../docs/project/PLANNING.md#pool-and-execution).
@@ -31,10 +31,9 @@ For additional implementations read the relevant
 ## Preserve the lifecycle distinctions
 
 - Saved identity, pool membership, valid authorization, model access, quota,
-  cooldown, and operator disable/draining are separate states. Sign-in does
-  not opt an account into the pool. A new connector needs its own supported
-  auth, renewal, entitlement, quota, usage, recovery, and live acceptance;
-  generic API compatibility does not supply them.
+  cooldown, and operator disable/draining are separate states. Pool membership
+  requires explicit admission. Qualify auth, renewal, entitlement, quota, usage,
+  recovery and live acceptance for each new connector.
 - Derive eligibility from the owning connector's current policy. Native
   ChatGPT and Excel/BPS are distinct connections and execution paths; inspect
   `providers/chatgpt/oauth.rs` rather than imposing one client's restrictions

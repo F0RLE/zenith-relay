@@ -9,8 +9,12 @@ const limits = {
   initialJavaScript: 150 * 1024,
   initialCss: 40 * 1024,
   // Includes lazy integration settings and debug context diagnostics.
-  totalAssets: 375 * 1024,
-  helpDocuments: 64 * 1024,
+  applicationAssets: 375 * 1024,
+  totalAssets: (375 + 8 * 1024) * 1024,
+  languagePack: 40 * 1024,
+  allLanguagePacks: 8 * 1024 * 1024,
+  helpDocument: 40 * 1024,
+  helpDocuments: 8 * 1024 * 1024,
 };
 
 function gzipSize(path) {
@@ -50,15 +54,27 @@ const initialAssets = [...new Set([...htmlAssets, ...startupAssets(manifest).map
 const initialJavaScript = initialAssets.filter((path) => path.endsWith(".js"));
 const initialCss = initialAssets.filter((path) => path.endsWith(".css"));
 const allAssets = collectAssets(distDirectory);
+const registry = JSON.parse(readFileSync(new URL("../../src/src/i18n/registry.json", import.meta.url), "utf8"));
+const languageAssets = registry.map(locale => {
+  const entry = manifest[`src/i18n/locales/${locale.code}.${locale.format}`];
+  if (!entry) throw new Error(`Missing lazy language pack: ${locale.code}`);
+  return assetPath(`/${entry.file}`);
+});
+const languageFiles = new Set(languageAssets);
+if (initialAssets.some(file => languageFiles.has(file))) throw new Error("Language packs must remain lazy, outside the shared startup graph");
 const helpDocuments = readdirSync(join(distDirectory, "assets"))
   .filter((file) => /^README-.*\.md$/.test(file))
   .map((file) => join(distDirectory, "assets", file));
-if (helpDocuments.length !== 2) throw new Error("Both local Help languages must be bundled");
+if (helpDocuments.length < new Set(registry.map(locale => locale.helpLocale)).size) throw new Error("Registered local Help assets are missing");
 if (!initialJavaScript.length) throw new Error("Production entry script is missing from index.html");
 const measurements = {
   initialJavaScript: initialJavaScript.reduce((total, path) => total + gzipSize(path), 0),
   initialCss: initialCss.reduce((total, path) => total + gzipSize(path), 0),
+  applicationAssets: allAssets.filter(path => !languageFiles.has(path)).reduce((total, path) => total + gzipSize(path), 0),
   totalAssets: allAssets.reduce((total, path) => total + gzipSize(path), 0),
+  languagePack: Math.max(...languageAssets.map(gzipSize)),
+  allLanguagePacks: languageAssets.reduce((total, path) => total + gzipSize(path), 0),
+  helpDocument: Math.max(...helpDocuments.map(gzipSize)),
   helpDocuments: helpDocuments.reduce((total, path) => total + gzipSize(path), 0),
 };
 

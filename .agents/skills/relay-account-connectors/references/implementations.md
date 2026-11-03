@@ -1,9 +1,9 @@
 # Account implementation references
 
 Default-branch references rechecked on **2026-10-23**. The listed source files
-and repository licenses were retrieved at these immutable revisions. This is
-an updated file index, not live OAuth acceptance or an adoption of upstream
-behavior. Read callers when a helper alone does not establish its lifecycle.
+and repository licenses were retrieved at these immutable revisions. Use this
+index for source comparison; qualify adopted behavior and live OAuth separately.
+Read each helper's callers to trace its full lifecycle.
 
 | Repository | Rechecked revision | License | Rechecked paths |
 | --- | --- | --- | --- |

@@ -1,7 +1,8 @@
 # Zenith Relay documentation
 
-Relay's current product is the local-first Desktop application. Hosted documents
-describe planned work; the independent web preview demonstrates its interface.
+Relay's working product is the local-first Desktop application. The independent
+web package previews Hosted screens; its service, authentication and billing are
+planned, not an available deployment.
 
 ## Find the right document
 
@@ -15,12 +16,22 @@ describe planned work; the independent web preview demonstrates its interface.
 | Current architecture and implementation contracts | [Architecture](project/PLANNING.md) |
 | Excel / Basis Points executor contract | [BPS](project/BASIS_POINTS.md) |
 | Open Desktop work and acceptance | [Desktop roadmap](project/ROADMAP.md) |
-| Future Hosted product contract | [Hosted architecture](hosted/HOSTED_RELAY_ARCHITECTURE.md) |
-| Future Hosted delivery and acceptance | [Hosted roadmap](hosted/HOSTED_RELAY_ROADMAP.md) |
-| Future Hosted presentation | [Hosted web design](hosted/HOSTED_RELAY_WEB_DESIGN.md) |
-| Independent Hosted UI preview | [Web preview](../web/README.md) |
 | Catalog policy and versioned export | [Catalog](../catalog/README.md) |
 | User-visible release history | [Changelog](releases/CHANGELOG.md) |
+
+`PLANNING.md` is the current architecture reference despite its historical
+filename. Start with its [contract map](project/PLANNING.md#contract-map).
+Help contains task instructions followed by an error reference; the application
+renders the reference separately. Both are maintained in each localized guide.
+
+### Hosted: preview and planned service
+
+| Subject | Owner |
+| --- | --- |
+| Existing web preview, launch commands and integration limits | [Web preview](../web/README.md) |
+| Target service contracts | [Hosted architecture](hosted/HOSTED_RELAY_ARCHITECTURE.md) |
+| Planned dependencies and acceptance | [Hosted roadmap](hosted/HOSTED_RELAY_ROADMAP.md) |
+| Target presentation and interaction | [Hosted web design](hosted/HOSTED_RELAY_WEB_DESIGN.md) |
 
 Update the owning document for each subject. Current code and focused tests
 define implemented behavior; roadmaps describe planned work and acceptance.
@@ -29,9 +40,8 @@ Legal terms remain in the [license](../LICENSE) and
 
 ## Repository tree
 
-Source directories:
 The [architecture ownership map](project/PLANNING.md#scope-and-ownership) describes
-the contracts behind these directories.
+each source directory's contracts.
 
 ```text
 zenith-relay/
@@ -71,24 +81,20 @@ zenith-relay/
     `-- screenshots/            Committed product screenshots
 ```
 
-`src/src/` is intentional: `src/` is the frontend package, while its nested
-`src/` contains application code. Moving either affects build, test, and Tauri
-paths; do not rename them just to make a local file listing shorter.
-
 ## Local artifacts and private data
 
 | Local paths | Treatment |
 | --- | --- |
-| `target/`, `src-tauri/target/`, `crates/relay-core/target/` | Rust build outputs, not source. Cleanup also removes a locally built executable. |
-| `src/node_modules/`, `web/node_modules/` | Installed frontend dependencies, not source. |
+| `target/`, `src-tauri/target/`, `crates/relay-core/target/` | Rust build outputs. Cleanup also removes the locally built executable. |
+| `src/node_modules/`, `web/node_modules/` | Installed frontend dependencies. |
 | `src/.build/`, `src/dist/`, `web/dist/` | Frontend build outputs. |
-| Test reports, browser captures, `output/` | Generated verification artifacts, not product documentation. |
-| Root `.build/` | May contain local build worktrees; the cleanup command deliberately leaves it alone. |
-| `.dev-data/` | Persistent private data if explicitly created; not a build cache and not used automatically by Dev. |
+| Test reports, browser captures, `output/` | Generated verification artifacts. |
+| Root `.build/` | Local build worktrees; preserved by cleanup. |
+| `.dev-data/` | Private profile data, used only when explicitly configured. |
 
-Use the [documented cleanup command](../CONTRIBUTING.md#build-artifacts), not a
-recursive removal of every ignored directory. Working profiles, credential data,
-installed applications, and committed screenshots are not build artifacts.
+Use the [documented cleanup command](../CONTRIBUTING.md#build-artifacts) to remove
+build outputs while preserving profiles, credentials, installed applications, and
+committed screenshots.
 
 ## Check documentation
 
@@ -98,6 +104,6 @@ From the repository root:
 bun run --cwd src check:docs
 ```
 
-The check covers owned Markdown documents, required files, local links, heading
-anchors, and filename case. It does not fetch external URLs or establish live
-provider, installed-application, or Hosted acceptance.
+The offline check validates owned Markdown documents, required files, local links,
+heading anchors, and filename case. Validate external URLs, providers, installed
+applications, and Hosted separately.

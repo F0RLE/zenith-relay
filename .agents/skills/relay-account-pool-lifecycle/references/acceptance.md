@@ -2,8 +2,8 @@
 
 Inspect existing coverage and select affected transitions. Use synthetic
 accounts, token generations, quota observations, and request ownership.
-Run or extend checks only within task and harness permissions. These cases
-define acceptance; they do not claim that live compatibility was established.
+Run or extend the affected acceptance checks within task and harness permissions.
+Record live qualification separately from synthetic results.
 
 ## Admission and observations
 
