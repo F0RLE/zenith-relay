@@ -223,7 +223,6 @@ fn model_summary(
         reasoning_supported_levels: Vec::new(),
         reasoning_allowed_levels: Vec::new(),
         reasoning_configurable: false,
-        reasoning_manual_fallback: false,
         speed_supported: false,
         speed_tiers: Vec::new(),
         speed_tier: DefaultServiceTier::Standard,

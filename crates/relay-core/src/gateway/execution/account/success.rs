@@ -81,6 +81,9 @@ pub(super) fn complete_account_response(
         None,
         started.elapsed().as_millis() as u64,
     );
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
     populate_tokens(&mut event, &bytes);
     let expected_model = runtime
         .block_degraded_routes_enabled()
@@ -177,6 +180,9 @@ pub(super) fn complete_account_response(
         );
     } else {
         lease.settle_rotation_terminal(now_ms());
+    }
+    if completed && let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     emit_usage(runtime, event);
     if let Some(stream_body) = basis_points_stream {

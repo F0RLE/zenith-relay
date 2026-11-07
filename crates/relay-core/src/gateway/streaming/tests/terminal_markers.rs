@@ -1,5 +1,46 @@
 use super::*;
 
+#[tokio::test]
+async fn session_budget_failure_stops_coalesced_and_fragmented_streams_with_known_usage() {
+    let before = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n",
+        "data: {\"type\":\"error\",\"error\":{\"code\":\"budget_reached\",\"retry_after\":1}}\n\n",
+    );
+    let after = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"late\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":999}}}\n\n";
+    for fragmented in [false, true] {
+        let frames = format!("{before}{after}");
+        let chunks = if fragmented {
+            frames
+                .as_bytes()
+                .chunks(13)
+                .map(Bytes::copy_from_slice)
+                .collect::<Vec<_>>()
+        } else {
+            vec![Bytes::from(frames)]
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let input = stream::iter(chunks.into_iter().map(Ok::<_, Infallible>));
+        let mut stream = usage_stream_with_events(input, events.clone());
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.unwrap());
+        }
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("budget_reached"), "{output}");
+        assert!(!output.contains("response.completed"), "{output}");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].success);
+        assert_eq!(events[0].http_status, 400);
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some(error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED)
+        );
+        assert_eq!(events[0].input_tokens, Some(7));
+        assert_eq!(events[0].output_tokens, Some(2));
+    }
+}
+
 #[test]
 fn response_incomplete_is_a_terminal_non_failure_outcome() {
     let event = parse_sse_event(

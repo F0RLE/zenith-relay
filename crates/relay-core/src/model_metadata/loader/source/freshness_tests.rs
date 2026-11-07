@@ -4,8 +4,12 @@ use serde_json::json;
 #[test]
 fn fresh_exact_scope_wins_over_stale_primary_and_retains_gap_provenance() {
     let sources = [
-        Some(json!({"maker/future":{"tool_call":false,"limit":{"context":1000,"output":100}}})),
-        Some(json!({"maker":{"models":{"future":{"tool_call":true,"limit":{"output":200}}}}})),
+        Some(
+            json!({"maker/future":{"tool_call":false,"interleaved_system":false,"limit":{"context":1000,"output":100}}}),
+        ),
+        Some(
+            json!({"maker":{"models":{"future":{"tool_call":true,"interleaved_system":true,"limit":{"output":200}}}}}),
+        ),
         None,
         None,
     ];
@@ -13,6 +17,11 @@ fn fresh_exact_scope_wins_over_stale_primary_and_retains_gap_provenance() {
     let catalog = ModelMetadataCatalog::from_metadata_payload(&payload, None, None, false).unwrap();
     let model = catalog.resolve("maker/future").unwrap();
     assert_eq!(model.capabilities.tool_call, Some(true));
+    assert_eq!(model.capabilities.interleaved_system, Some(true));
+    assert_eq!(
+        model.field_provenance["capabilities.interleavedSystem"].source,
+        "models_dev_details"
+    );
     assert_eq!(model.capabilities.output_limit, Some(200));
     assert_eq!(model.capabilities.context_limit, Some(1000));
     let origin = &model.field_provenance["capabilities.outputLimit"];
@@ -29,6 +38,7 @@ fn fresh_exact_scope_wins_over_stale_primary_and_retains_gap_provenance() {
     let restored = merge_payloads(sources, [false; 4]);
     assert_eq!(restored["maker/future"]["limit"]["output"], 100);
     assert_eq!(restored["maker/future"]["tool_call"], false);
+    assert_eq!(restored["maker/future"]["interleaved_system"], false);
 }
 
 #[test]

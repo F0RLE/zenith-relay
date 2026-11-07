@@ -33,6 +33,7 @@ pub(super) use super::super::super::turn_state::{
     CODEX_TURN_STATE_HEADER, relay_account_response_header, request_scope,
 };
 pub(super) use super::super::AttemptRepairs;
+pub(super) use super::super::bind_encrypted_context_repair_owner;
 pub(super) use super::super::bind_responses_turn;
 pub(super) use super::super::{CandidateRetryContext, wait_for_candidate_retry, wait_for_recovery};
 pub(super) use super::super::{ContinuationReset, reset_materialized_continuation};
@@ -40,10 +41,6 @@ pub(super) use super::super::{
     RequestFailureInput, attempt_error_response, finish_request_failure,
 };
 pub(super) use super::super::{ResponsesItemPrefixRepairs, repair_responses_item_prefixes};
-pub(super) use super::super::{
-    bind_encrypted_context_repair_owner, detach_encrypted_context_repair_owner,
-    release_encrypted_context_repair_owner,
-};
 pub(super) use crate::error_codes;
 pub(super) use crate::protocol::{
     AdapterError, AdapterRequestContext, AdapterResponse, PreparedAdapterRequest,

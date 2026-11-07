@@ -261,24 +261,26 @@ fn codex_tool_schema_normalization_preserves_unresolved_local_refs() {
 
 #[test]
 fn compact_normalization_removes_transport_fields_and_preserves_new_fields() {
-    let mut request = json!({
-        "store": false,
-        "stream": false,
-        "max_output_tokens": 4,
-        "model": "gpt-test",
-        "input": "compact this",
-        "reasoning": {"effort": "high"},
-        "future_compaction_option": {"enabled": true}
-    });
+    for responses_lite in [false, true] {
+        let mut request = json!({
+            "store": false,
+            "stream": false,
+            "max_output_tokens": 4,
+            "model": "gpt-test",
+            "input": "compact this",
+            "reasoning": {"effort": "high"},
+            "future_compaction_option": {"enabled": true}
+        });
 
-    normalize_compact_account_request(request.as_object_mut().unwrap(), false);
+        normalize_compact_account_request(request.as_object_mut().unwrap(), responses_lite);
 
-    assert!(request.get("store").is_none());
-    assert!(request.get("stream").is_none());
-    assert!(request.get("max_output_tokens").is_none());
-    assert_eq!(request["reasoning"]["effort"], "high");
-    assert_eq!(request["future_compaction_option"]["enabled"], true);
-    assert_eq!(request["input"][0]["content"][0]["text"], "compact this");
+        assert!(request.get("store").is_none());
+        assert!(request.get("stream").is_none());
+        assert!(request.get("max_output_tokens").is_none());
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["future_compaction_option"]["enabled"], true);
+        assert_eq!(request["input"][0]["content"][0]["text"], "compact this");
+    }
 }
 
 #[test]

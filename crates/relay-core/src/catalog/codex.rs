@@ -91,6 +91,11 @@ pub fn decode_codex_model_alias(alias: &str) -> Option<String> {
     valid_model_id(&model_id).then_some(model_id)
 }
 
+pub(crate) fn codex_model_uses_public_id(model: &str, has_native_account_route: bool) -> bool {
+    has_native_account_route
+        || (!model.contains('/') && crate::model_id_key(model).starts_with("gpt-"))
+}
+
 pub fn codex_model_is_picker_eligible(model: &str) -> bool {
     codex_model_is_picker_eligible_for(model, true)
 }

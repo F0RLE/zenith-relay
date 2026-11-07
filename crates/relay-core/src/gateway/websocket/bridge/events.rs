@@ -1,6 +1,6 @@
 use super::super::*;
-use super::BridgeState;
 use super::terminal::{finish_incomplete, finish_terminal};
+use super::{BridgeState, InFlight};
 
 enum UpstreamPayload {
     Delta(crate::gateway::streaming::FastResponseDelta),
@@ -37,21 +37,7 @@ impl UpstreamPayload {
     }
 }
 
-pub(super) async fn handle_initial_messages(
-    downstream: &mut WebSocket,
-    runtime: &GatewayRuntime,
-    state: &mut BridgeState,
-    initial_messages: Vec<UpstreamMessage>,
-) -> bool {
-    for message in initial_messages {
-        if !handle_upstream_message(downstream, runtime, state, message).await {
-            return false;
-        }
-    }
-    true
-}
-
-pub(super) async fn handle_upstream_message(
+pub(super) async fn forward_upstream_message(
     downstream: &mut WebSocket,
     runtime: &GatewayRuntime,
     state: &mut BridgeState,
@@ -332,6 +318,20 @@ fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> Event
         if event_type == Some("responsesapi.websocket_timing") {
             return EventTerminal::default();
         }
+        if let Some(transport) = in_flight
+            .event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport
+                .stream_response
+                .get_or_insert_default()
+                .observe_reasoning(
+                    event_payload,
+                    in_flight.started.elapsed().as_millis() as u64,
+                );
+        }
         in_flight.event.observe_response_metadata(event_payload);
         in_flight.native_replay_capture.observe(event_payload);
         in_flight
@@ -344,17 +344,33 @@ fn inspect_parsed_event(event_payload: &Value, state: &mut BridgeState) -> Event
         if has_output_delta(event_payload, event_type) && in_flight.event.ttft_ms.is_none() {
             in_flight.event.ttft_ms = Some(in_flight.started.elapsed().as_millis() as u64);
         }
-        if let Some(usage) = super::super::super::response::find_usage(event_payload) {
-            crate::protocol::merge_usage(&mut in_flight.usage_snapshot, usage);
-            if let Some(snapshot) = in_flight.usage_snapshot.as_ref() {
-                apply_usage(&mut in_flight.event, snapshot);
-            }
-        }
-        if let Some(response_id) = super::super::super::response::response_id(event_payload) {
+        observe_payload_usage(event_payload, in_flight);
+        if in_flight.response_id.is_none()
+            && event_type.is_some_and(|kind| kind.starts_with("response."))
+            && let Some(response_id) = super::super::super::response::response_id(event_payload)
+        {
             in_flight.response_id = Some(response_id.to_string());
         }
     }
     event_terminal(event_payload)
+}
+
+fn observe_payload_usage(payload: &Value, in_flight: &mut InFlight) {
+    if let Some(usage) = super::super::super::response::find_usage(payload) {
+        crate::protocol::merge_usage(&mut in_flight.usage_snapshot, usage);
+        if let Some(snapshot) = in_flight.usage_snapshot.as_ref() {
+            apply_usage(&mut in_flight.event, snapshot);
+        }
+    }
+}
+
+pub(super) fn observe_buffered_setup(bytes: &[u8], state: &mut BridgeState) {
+    if let Some(in_flight) = state.in_flight.as_mut()
+        && let Ok(payload) = serde_json::from_slice::<Value>(bytes)
+    {
+        observe_payload_usage(&payload, in_flight);
+        in_flight.event.observe_response_metadata(&payload);
+    }
 }
 
 #[cfg(test)]

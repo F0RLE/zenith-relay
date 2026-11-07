@@ -53,9 +53,9 @@ impl ModelTokenLimits {
         *self == Self::default()
     }
 
-    /// The first ingestion stage may fill unknown reference limits or narrow
-    /// them, but cannot enlarge a known maximum or mutate the shared catalog.
-    pub(crate) fn constrain(self, capabilities: &mut ModelCapabilities) {
+    /// Fill unknown numeric limits or narrow existing ceilings without granting
+    /// endpoint or feature support. The caller supplies the exact owning scope.
+    pub fn constrain(self, capabilities: &mut ModelCapabilities) {
         let limits = self.validated();
         let minimum = |left: Option<u64>, right: Option<u64>| {
             left.into_iter()

@@ -34,8 +34,6 @@ pub struct GatewaySummary {
     pub max_retry_candidates: u8,
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
-    pub image_base_model: Option<String>,
-    #[serde(default)]
     pub models: Vec<ModelSummary>,
     /// Advisory identities for the complete member inventory, including models
     /// excluded by member rules. This map never grants runtime eligibility.
@@ -178,9 +176,6 @@ pub struct ModelSummary {
     pub reasoning_allowed_levels: Vec<String>,
     #[serde(default)]
     pub reasoning_configurable: bool,
-    /// Legacy wire field; always false. Unknown reasoning enums are not guessed.
-    #[serde(default)]
-    pub reasoning_manual_fallback: bool,
     /// At least one configured route carries a faster reference mode.
     #[serde(default)]
     pub speed_supported: bool,
@@ -263,13 +258,6 @@ pub fn apply_pool_model_configuration_with_context(
     let block_degraded_routes = runtime.is_none_or(GatewayRuntime::block_degraded_routes_enabled);
     for model in models {
         let model_id = model.id.clone();
-        model.protocol_routes = routes.routes_for(&model_id);
-        model.codex_visible = model.enabled
-            && crate::codex_model_is_picker_eligible_for(&model_id, block_degraded_routes)
-            && model
-                .protocol_routes
-                .iter()
-                .any(|route| route.client_wire_api == crate::WireApi::Responses);
         let cache_write_route = routes.has_cache_write_pricing(&model_id);
         if let Some(price) = model_price_overrides.get(&crate::model_id_key(&model_id)) {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
@@ -292,6 +280,7 @@ pub fn apply_pool_model_configuration_with_context(
                     .clone()
                     .unwrap_or_else(|| crate::model_metadata::ModelCapabilities {
                         reasoning: model.catalog_reasoning,
+                        reasoning_effort_levels: model.catalog_reasoning_effort_levels.clone(),
                         tool_call: model.catalog_tool_call,
                         structured_output: model.catalog_structured_output,
                         attachment: model.catalog_attachment,
@@ -306,21 +295,13 @@ pub fn apply_pool_model_configuration_with_context(
         } else {
             model.catalog_reasoning_effort_levels.clone()
         });
-        for route in &mut model.protocol_routes {
-            route.features = capabilities.protocol_features();
-            route.reasoning_efforts.clear();
-            route.project_reasoning(reported_reasoning_levels.as_deref().unwrap_or_default());
-            route.reasoning_efforts.retain(|effort| {
-                crate::SourceAdapter::between(route.client_wire_api, route.upstream_wire_api)
-                    .is_some_and(|adapter| {
-                        adapter.supports_reasoning_effort_for_model(
-                            crate::MessagesReasoningMode::Adaptive,
-                            effort,
-                            &capabilities,
-                        )
-                    })
-            });
-        }
+        model.protocol_routes = routes.projected_routes_for(&model_id, &capabilities);
+        model.codex_visible = model.enabled
+            && crate::codex_model_is_picker_eligible_for(&model_id, block_degraded_routes)
+            && model
+                .protocol_routes
+                .iter()
+                .any(|route| route.client_wire_api == crate::WireApi::Responses);
         // Model Rules edits inventory, including offline or excluded members.
         // Keep declared modes intact here; each executable route above and the
         // request resolver apply their own protocol-specific restrictions.
@@ -407,7 +388,6 @@ pub fn apply_model_reasoning_summary(
     model.reasoning_supported_levels.clear();
     model.reasoning_allowed_levels.clear();
     model.reasoning_configurable = false;
-    model.reasoning_manual_fallback = false;
 
     let declared_levels = reported_levels.unwrap_or_default();
     model.reasoning_supported_levels = crate::canonicalize_reasoning_levels(declared_levels);

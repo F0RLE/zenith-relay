@@ -213,6 +213,7 @@ pub(super) async fn execute(
         .await
         .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;
     route.account_token_generation = upstream.account_token_generation;
+    route.account_token_revision = upstream.authorization_incarnation.token_revision().cloned();
     let upstream_response = upstream.response;
     let status = upstream_response.status();
     let mut headers = upstream_response.headers().clone();

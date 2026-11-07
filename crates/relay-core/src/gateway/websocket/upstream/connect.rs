@@ -1,10 +1,7 @@
-use std::collections::HashSet;
-
-use super::super::super::execution::AttemptRepairs;
 use super::super::*;
-use super::ConnectedTransport;
 use super::drive::{DriveCandidateInput, DrivenConnect, drive_selected_candidate};
 use super::selection_gap::{GapAction, SelectionGap, recover_without_candidate};
+use super::{ConnectPhase, ConnectRecovery, ConnectedTransport};
 
 pub(super) async fn connect_upstream(
     runtime: &GatewayRuntime,
@@ -13,16 +10,17 @@ pub(super) async fn connect_upstream(
     mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
+    recovery: Option<ConnectRecovery>,
 ) -> Result<ConnectedTransport, GatewayFailure> {
-    let mut tried = HashSet::new();
+    let mut recovery =
+        recovery.unwrap_or_else(|| ConnectRecovery::new(allow_previous_response_reset));
     let mut attempt = attempt_offset;
-    let mut confirmed_response_missing = false;
-    let mut repairs = AttemptRepairs::default();
-    let mut last_failure: Option<GatewayFailure> = None;
-    let mut websocket_http_fallback_origin = None;
     let mut retry_window_expired = false;
 
     loop {
+        if recovery.phase == ConnectPhase::Finish {
+            break;
+        }
         request.account_retained_input();
         request.budget.configure_retry_window(
             runtime.route_recovery_window_ms(),
@@ -34,15 +32,15 @@ pub(super) async fn connect_upstream(
         // Read the live setting on every retry cycle so disabling it wakes
         // an active persistent wait through the configuration event.
         let wait_for_candidate_availability = runtime.route_recovery_enabled();
-        if !repairs.quota_yield {
-            repairs.quota_yield = true;
+        if !recovery.repairs.quota_yield {
+            recovery.repairs.quota_yield = true;
             if let Some(affinity_key) = request.response_affinity_key.clone()
                 && runtime.automatic_response_owner_should_yield(
                     key,
                     &affinity_key,
                     &request.resolved_model,
                     WEBSOCKET_PROTOCOLS,
-                    &tried,
+                    &recovery.tried,
                     now_ms(),
                 )
             {
@@ -50,7 +48,7 @@ pub(super) async fn connect_upstream(
             }
         }
         let (incompatible, mut admitted) = request.compatible_routes(runtime, key)?;
-        let mut selection_exclusions = tried.clone();
+        let mut selection_exclusions = recovery.tried.clone();
         selection_exclusions.extend(incompatible.iter().cloned());
         let selected = runtime
             .select_and_reserve_with_budget(
@@ -71,12 +69,8 @@ pub(super) async fn connect_upstream(
                 runtime,
                 key,
                 client_request: &mut request,
-                tried: &mut tried,
                 incompatible: &incompatible,
-                last_failure: &last_failure,
-                http_fallback_origin: &websocket_http_fallback_origin,
-                allow_previous_response_reset,
-                repairs: &mut repairs,
+                recovery: &mut recovery,
                 retry_window_expired: &mut retry_window_expired,
                 wait_for_candidate_availability,
             };
@@ -98,11 +92,7 @@ pub(super) async fn connect_upstream(
             key,
             client_headers,
             attempt: &mut attempt,
-            tried: &mut tried,
-            repairs: &mut repairs,
-            confirmed_response_missing: &mut confirmed_response_missing,
-            last_failure: &mut last_failure,
-            http_fallback_origin: &mut websocket_http_fallback_origin,
+            recovery: &mut recovery,
         })
         .await?
         {
@@ -113,19 +103,28 @@ pub(super) async fn connect_upstream(
                 request = returned;
                 break;
             }
-            DrivenConnect::Ready(connected) => {
+            DrivenConnect::Ready(mut connected) => {
+                recovery.phase = ConnectPhase::Select;
+                connected.recovery = recovery;
                 return Ok(ConnectedTransport::Websocket(Box::new(connected)));
             }
-            DrivenConnect::Http(fallback) => return Ok(ConnectedTransport::Http(fallback)),
+            DrivenConnect::Http(mut fallback) => {
+                fallback.retain_recovery(recovery);
+                return Ok(ConnectedTransport::Http(fallback));
+            }
         }
     }
 
-    if allow_previous_response_reset
+    if recovery.allow_previous_response_reset
         && request.has_previous_response_id()
-        && confirmed_response_missing
+        && recovery.confirmed_response_missing
     {
-        let mut reset_request = request.clone();
+        let mut reset_request = request;
         if reset_request.drop_previous_response_id(runtime, &key.id) {
+            recovery.tried.clear();
+            recovery.confirmed_response_missing = false;
+            recovery.allow_previous_response_reset = false;
+            recovery.phase = ConnectPhase::Select;
             return Box::pin(connect_upstream(
                 runtime,
                 key,
@@ -133,6 +132,7 @@ pub(super) async fn connect_upstream(
                 reset_request,
                 false,
                 attempt,
+                Some(recovery),
             ))
             .await;
         }
@@ -149,8 +149,14 @@ pub(super) async fn connect_upstream(
             ErrorOrigin::Relay,
         ));
     }
-    if let Some(origin) = websocket_http_fallback_origin {
-        return Err(GatewayFailure::websocket_http_fallback(origin));
+    if let Some(origin) = recovery.http_fallback_origin {
+        let mut fallback = super::HttpFallback::new(
+            request,
+            crate::usage::TransportFallbackReason::WebsocketUnavailable,
+        );
+        fallback.origin = origin;
+        fallback.retain_recovery(recovery);
+        return Ok(ConnectedTransport::Http(Box::new(fallback)));
     }
     let incompatible = request.service_tier_exclusions(runtime, key)?;
     if let Some(retry_at_ms) = runtime.earliest_retry_at(
@@ -164,7 +170,9 @@ pub(super) async fn connect_upstream(
     ) {
         return Err(GatewayFailure::cooldown(retry_at_ms));
     }
-    Err(last_failure.unwrap_or_else(GatewayFailure::unavailable))
+    Err(recovery
+        .last_failure
+        .unwrap_or_else(GatewayFailure::unavailable))
 }
 
 pub(super) fn upstream_headers(

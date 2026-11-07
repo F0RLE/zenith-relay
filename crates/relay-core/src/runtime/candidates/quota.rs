@@ -13,13 +13,17 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
         token_generation: Option<u64>,
+        token_revision: Option<&crate::accounts::TokenDispatchRevision>,
         status: StatusCode,
         headers: &HeaderMap,
         observed_at_ms: u64,
     ) -> bool {
-        self.with_current_account_observation(candidate_id, token_generation, |_| {
-            self.merge_codex_quota_headers(candidate_id, status, headers, observed_at_ms)
-        })
+        self.with_current_account_observation(
+            candidate_id,
+            token_generation,
+            token_revision,
+            |_| self.merge_codex_quota_headers(candidate_id, status, headers, observed_at_ms),
+        )
         .unwrap_or(false)
     }
 
@@ -37,11 +41,11 @@ impl GatewayRuntime {
         if !(status.is_success()
             || status == StatusCode::SWITCHING_PROTOCOLS
             || status == StatusCode::TOO_MANY_REQUESTS)
-            || !self.chatgpt_accounts.contains_key(candidate_id)
+            || !self.account_state.executors.contains_key(candidate_id)
         {
             return false;
         }
-        let mut quotas = crate::poison::mutex(&self.passive_quotas);
+        let mut quotas = crate::poison::mutex(&self.account_state.passive_quotas);
         let Some(passive_quota_state) = quotas.get_mut(candidate_id) else {
             return false;
         };
@@ -93,10 +97,10 @@ impl GatewayRuntime {
         snapshot: &QuotaSnapshot,
         observed_at_ms: u64,
     ) -> bool {
-        if !self.chatgpt_accounts.contains_key(candidate_id) {
+        if !self.account_state.executors.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = crate::poison::mutex(&self.passive_quotas);
+        let mut quotas = crate::poison::mutex(&self.account_state.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
             .map(|passive_quota_state| {
@@ -168,10 +172,10 @@ impl GatewayRuntime {
         observed_at_ms: u64,
         preserve_live_block: bool,
     ) -> bool {
-        if !self.chatgpt_accounts.contains_key(candidate_id) {
+        if !self.account_state.executors.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = crate::poison::mutex(&self.passive_quotas);
+        let mut quotas = crate::poison::mutex(&self.account_state.passive_quotas);
         let effective = quotas
             .get_mut(candidate_id)
             .map(|passive_quota_state| {
@@ -211,7 +215,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> Option<QuotaSnapshot> {
-        let mut quotas = crate::poison::mutex(&self.passive_quotas);
+        let mut quotas = crate::poison::mutex(&self.account_state.passive_quotas);
         let passive_quota_state = quotas.get_mut(candidate_id)?;
         if !passive_quota_state.dirty
             || (!passive_quota_state.force_persist
@@ -230,9 +234,10 @@ impl GatewayRuntime {
         &self,
         candidate_id: &str,
         token_generation: Option<u64>,
+        token_revision: Option<&crate::accounts::TokenDispatchRevision>,
         observe: impl FnOnce(Option<AccountAuthState>) -> T,
     ) -> Option<T> {
-        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+        if let Some(account) = self.account_state.executors.get(candidate_id) {
             if !account.active.load(Ordering::Acquire) {
                 return None;
             }
@@ -240,8 +245,12 @@ impl GatewayRuntime {
                 return account.token_authority.with_usage_observation(
                     candidate_id,
                     generation,
+                    token_revision?,
                     |state| observe(Some(state)),
                 );
+            }
+            if account.agent_identity.read().ok()?.is_none() {
+                return None;
             }
         }
         Some(observe(None))
@@ -256,6 +265,7 @@ impl GatewayRuntime {
         self.with_current_account_observation(
             candidate_id,
             event.account_token_generation,
+            event.account_token_revision.as_ref(),
             |auth_state| {
                 self.apply_current_usage_event(event, observed_at_ms, auth_state);
                 // Consuming a pending quota observation belongs to the same
@@ -342,10 +352,10 @@ impl GatewayRuntime {
     }
 
     fn note_reported_primary_exhaustion(&self, candidate_id: &str, observed_at_ms: u64) -> bool {
-        if !self.chatgpt_accounts.contains_key(candidate_id) {
+        if !self.account_state.executors.contains_key(candidate_id) {
             return false;
         }
-        let mut quotas = crate::poison::mutex(&self.passive_quotas);
+        let mut quotas = crate::poison::mutex(&self.account_state.passive_quotas);
         let Some(passive_quota_state) = quotas.get_mut(candidate_id) else {
             return false;
         };

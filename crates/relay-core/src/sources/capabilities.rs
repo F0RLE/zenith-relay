@@ -40,10 +40,11 @@ pub enum ProtocolFeature {
     ToolChoice,
     StructuredOutput,
     Reasoning,
+    InterleavedSystem,
 }
 
 impl ProtocolFeature {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Text,
         Self::Streaming,
         Self::Images,
@@ -51,6 +52,7 @@ impl ProtocolFeature {
         Self::ToolChoice,
         Self::StructuredOutput,
         Self::Reasoning,
+        Self::InterleavedSystem,
     ];
 }
 

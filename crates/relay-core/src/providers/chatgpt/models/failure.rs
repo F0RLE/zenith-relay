@@ -4,9 +4,9 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelDiscoveryFailureCode {
     AgentTaskInvalid,
-    BasisPointsFreeAccountUnsupported,
     Forbidden,
     HttpStatus,
+    EndpointNotFound,
     InvalidAccessToken,
     InvalidAccountId,
     InvalidClientVersion,
@@ -25,11 +25,9 @@ impl ModelDiscoveryFailureCode {
     pub fn management_code(self) -> &'static str {
         match self {
             Self::AgentTaskInvalid => error_codes::MODELS_AGENT_TASK_INVALID,
-            Self::BasisPointsFreeAccountUnsupported => {
-                error_codes::BASIS_POINTS_FREE_ACCOUNT_UNSUPPORTED
-            }
             Self::Forbidden => error_codes::MODELS_FORBIDDEN,
             Self::HttpStatus => error_codes::MODELS_HTTP_STATUS,
+            Self::EndpointNotFound => error_codes::MODELS_ENDPOINT_NOT_FOUND,
             Self::InvalidAccessToken => error_codes::MODELS_INVALID_ACCESS_TOKEN,
             Self::InvalidAccountId => error_codes::MODELS_INVALID_ACCOUNT_ID,
             Self::InvalidClientVersion => error_codes::MODELS_INVALID_CLIENT_VERSION,
@@ -86,11 +84,11 @@ impl fmt::Display for ModelDiscoveryFailure {
             ModelDiscoveryFailureCode::AgentTaskInvalid => {
                 "Agent Identity task must be registered again"
             }
-            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported => {
-                super::super::BASIS_POINTS_FREE_ACCOUNT_MESSAGE
-            }
             ModelDiscoveryFailureCode::Forbidden => "model discovery is forbidden",
             ModelDiscoveryFailureCode::HttpStatus => "model discovery request was rejected",
+            ModelDiscoveryFailureCode::EndpointNotFound => {
+                "model catalog endpoint returned HTTP 404"
+            }
             ModelDiscoveryFailureCode::InvalidAccessToken => "model access token is invalid",
             ModelDiscoveryFailureCode::InvalidAccountId => "model account id is invalid",
             ModelDiscoveryFailureCode::InvalidClientVersion => "model client version is invalid",

@@ -100,11 +100,11 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         .authenticate(Some(&HeaderValue::from_static("Bearer synthetic-pool")))
         .unwrap();
     assert_eq!(
-        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses, false),
         ["low", "xhigh"]
     );
     assert_eq!(
-        runtime.client_reasoning_levels(&key, "test", WireApi::Messages),
+        runtime.client_reasoning_levels(&key, "test", WireApi::Messages, false),
         ["low", "xhigh"]
     );
     runtime.update_key_scope(
@@ -116,12 +116,12 @@ fn client_reasoning_projection_respects_source_scope_and_adapter_limits() {
         },
     );
     assert_eq!(
-        runtime.client_reasoning_levels(&key, "test", WireApi::Responses),
+        runtime.client_reasoning_levels(&key, "test", WireApi::Responses, false),
         ["low", "xhigh"]
     );
     assert!(
         runtime
-            .client_reasoning_levels(&key, "missing", WireApi::Responses)
+            .client_reasoning_levels(&key, "missing", WireApi::Responses, false)
             .is_empty()
     );
 }
@@ -328,6 +328,7 @@ async fn source_capability_failure_does_not_permanently_hide_a_declared_model() 
             candidate_id: Some("source-1".into()),
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),

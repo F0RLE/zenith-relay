@@ -25,7 +25,7 @@ impl CandidateLease {
     pub(crate) fn begin_rotation_dispatch(
         &self,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(false, || Some(()))
+        self.begin_rotation_dispatch_with_wire(false, None, || Some(()))
     }
 
     pub(crate) fn begin_rotation_dispatch_for(
@@ -33,7 +33,7 @@ impl CandidateLease {
         prepared: &PreparedAuthorization,
         runtime: &GatewayRuntime,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(false, || {
+        self.begin_rotation_dispatch_with_wire(false, prepared.token_revision.as_ref(), || {
             prepared.dispatch_guard(runtime, &self.candidate_id)
         })
     }
@@ -45,7 +45,7 @@ impl CandidateLease {
     pub(crate) fn begin_rotation_http_dispatch(
         &self,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(true, || Some(()))
+        self.begin_rotation_dispatch_with_wire(true, None, || Some(()))
     }
 
     pub(crate) fn begin_rotation_http_dispatch_for(
@@ -53,7 +53,7 @@ impl CandidateLease {
         prepared: &PreparedAuthorization,
         runtime: &GatewayRuntime,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(true, || {
+        self.begin_rotation_dispatch_with_wire(true, prepared.token_revision.as_ref(), || {
             prepared.dispatch_guard(runtime, &self.candidate_id)
         })
     }
@@ -61,6 +61,7 @@ impl CandidateLease {
     fn begin_rotation_dispatch_with_wire<G>(
         &self,
         charge_wire: bool,
+        token_revision: Option<&TokenDispatchRevision>,
         guard_authorization: impl FnOnce() -> Option<G>,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
         let budget = &self.rotation_budget;
@@ -123,6 +124,7 @@ impl CandidateLease {
                     .start_wire_attempt()
                     .expect("wire capacity was checked under the budget lock");
             }
+            *crate::poison::mutex(&self.dispatched_token_revision) = token_revision.cloned();
             Ok(rotation_attempt)
         });
         if dispatch_result.is_ok() {
@@ -168,6 +170,9 @@ impl CandidateLease {
                 return Ok(None);
             }
             request_budget.observe_execution(observation.execution);
+            let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+            let authorization = revision.as_ref().and_then(TokenDispatchRevision::guard);
+            let observation_owner_current = revision.is_none() || authorization.is_some();
             let mut scheduler = crate::poison::mutex(&self.scheduler);
             let settlement = scheduler.settle_rotation_with_latency(
                 self.reservation_id,
@@ -175,6 +180,7 @@ impl CandidateLease {
                 request_budget,
                 now_ms,
                 first_output_latency_ms,
+                observation_owner_current,
             )?;
             if settlement.observation_current {
                 apply(&mut scheduler);
@@ -283,6 +289,9 @@ impl CandidateLease {
             let budget = &self.rotation_budget;
             if !self.rotation_settled.swap(true, Ordering::AcqRel) {
                 budget.with_budget(|request_budget| {
+                    let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+                    let authorization = revision.as_ref().and_then(TokenDispatchRevision::guard);
+                    let observation_owner_current = revision.is_none() || authorization.is_some();
                     let mut scheduler = crate::poison::mutex(&self.scheduler);
                     if self.rotation_started.load(Ordering::Acquire) {
                         request_budget.observe_execution(RotationExecutionObservation::unknown());
@@ -290,6 +299,7 @@ impl CandidateLease {
                             self.reservation_id,
                             request_budget,
                             crate::unix_time_ms(),
+                            observation_owner_current,
                         );
                     } else {
                         let _ = scheduler.release_rotation_unstarted(self.reservation_id);

@@ -98,7 +98,12 @@ fn source_output_limits_filter_only_the_owning_route_before_execution() {
         r#"{"zhipuai/glm-test":{"name":"Synthetic model","family":"glm","reasoning":false}}"#,
     );
     let key = runtime.authenticate_secret("synthetic-secret").unwrap();
-    let projected = runtime.client_token_limits(&key, "glm-test", WireApi::Responses);
+    let projected = runtime.token_limits_for_routes(&runtime.configured_executor_routes(
+        &key,
+        "glm-test",
+        &[WireApi::Responses],
+        false,
+    ));
     assert_eq!(
         (projected.context, projected.input, projected.output),
         (Some(1000), Some(900), Some(100))
@@ -160,7 +165,7 @@ fn reasoning_conflicts_reject_controls_but_preserve_native_provider_defaults() {
     );
     assert!(
         runtime
-            .client_reasoning_levels(&key, "glm-test", WireApi::Responses)
+            .client_reasoning_levels(&key, "glm-test", WireApi::Responses, false)
             .is_empty()
     );
 }

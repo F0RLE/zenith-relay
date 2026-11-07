@@ -317,6 +317,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
             scope: "*",
             retry_at_ms: crate::unix_time_ms() + 60_000,
             reason: CooldownReason::Mandatory,
+            provider_not_before_ms: None,
         }),
         None,
         crate::unix_time_ms(),
@@ -327,7 +328,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
             "model-a",
             crate::unix_time_ms()
         ),
-        (0, None)
+        (0, None, None)
     );
     assert!(readded_candidate_lease.begin_rotation_dispatch().is_ok());
     readded_candidate_lease.settle_rotation_success(crate::unix_time_ms());

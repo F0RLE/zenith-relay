@@ -11,7 +11,9 @@ use super::super::request::{
     forwarded_codex_headers, forwarded_messages_headers, is_managed_codex_client,
     normalize_codex_reasoning_placeholder, request_id,
 };
+use super::compatibility::{RejectedRequest, record_continuation_rejection};
 use super::request::{RequestExecution, ReservedCandidate, execute_request};
+use super::state::{AttemptState, ContinuationRecovery};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -34,6 +36,7 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) transport: UsageTransport,
     pub(in crate::gateway) transport_fallback: Option<crate::usage::TransportFallbackReason>,
     pub(in crate::gateway) service_tier_policy: ServiceTierPolicy,
+    pub(in crate::gateway) recovery: Option<ContinuationRecovery>,
 }
 
 /// Internal compact-to-Responses dispatch is not an ordinary conversation turn.
@@ -92,6 +95,7 @@ async fn execute_client_request_inner(
     force_stream: bool,
     reserved_candidate: Option<ReservedCandidate>,
 ) -> Response<Body> {
+    let started = std::time::Instant::now();
     let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
@@ -191,6 +195,9 @@ async fn execute_client_request_inner(
         .then(|| codex_background_request_kind(&headers, &request_json))
         .flatten();
     let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let recovery = identity
+        .as_ref()
+        .and_then(|identity| identity.recovery.clone());
     let transport = identity
         .as_ref()
         .map(|identity| identity.transport)
@@ -281,6 +288,21 @@ async fn execute_client_request_inner(
     let continuation = match continuation {
         Ok(continuation) => continuation,
         Err(()) => {
+            record_continuation_rejection(
+                &runtime,
+                RejectedRequest {
+                    request_id: &request_id,
+                    attempt: 0,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: None,
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                started.elapsed().as_millis() as u64,
+            );
             return api_error(
                 StatusCode::CONFLICT,
                 RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
@@ -336,6 +358,20 @@ async fn execute_client_request_inner(
             super::super::request::forwarded_bridge_gemini_headers(&headers)
         }
     };
+    let (state, allow_previous_response_reset) = match recovery {
+        Some(recovery) => recovery.into_state(u16::from(budget.dispatches())),
+        None => (
+            AttemptState::new(
+                0,
+                continuation
+                    .as_ref()
+                    .and_then(|continuation| continuation.response_affinity_key.clone()),
+                continuation.is_some_and(|continuation| continuation.requires_affinity_owner),
+                &request_json,
+            ),
+            true,
+        ),
+    };
     execute_request(RequestExecution {
         tool_policy,
         runtime: runtime.clone(),
@@ -349,15 +385,10 @@ async fn execute_client_request_inner(
         forwarded_headers,
         client_context_id,
         client_affinity_id: client_identity.affinity_id,
-        response_affinity_key: continuation
-            .as_ref()
-            .and_then(|continuation| continuation.response_affinity_key.clone()),
-        requires_affinity_owner: continuation
-            .is_some_and(|continuation| continuation.requires_affinity_owner),
+        state,
         client_wire_api,
         responses_lite,
-        allow_previous_response_reset: true,
-        attempt_offset: 0,
+        allow_previous_response_reset,
         budget,
         transport,
         transport_fallback,

@@ -1,7 +1,14 @@
 use super::*;
 
+#[path = "policy/source_updates.rs"]
+mod source_updates;
+
 #[test]
 fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let reference = ModelMetadataCatalogHandle::new(ModelMetadataCatalog::empty());
+    let reference_snapshot = reference.snapshot();
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source-1",
@@ -12,14 +19,22 @@ fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
             "key-1",
             "synthetic-local-key",
         ))],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(reference),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap();
     let scheduler = runtime.scheduler.clone();
     let visibility = runtime.model_state.hidden_models.clone();
-    let adapters = runtime.adapter_continuation_store.clone();
-    let replay = runtime.native_responses_replay_store.clone();
+    let continuations = runtime.continuation_state.clone();
+    let catalog_callback =
+        crate::poison::mutex(&runtime.provider_metadata.catalog_hint_callback).clone();
+    let team_callback = runtime.account_state.team_breaker_callback.clone();
+    let native_card = serde_json::json!({"slug":"model-a","context_window":8192});
+    runtime
+        .set_official_codex_ultra_models(BTreeMap::from([("model-a".into(), native_card.clone())]));
 
     runtime.set_model_display_order(vec!["model-b".into(), "model-a".into()]);
     runtime.set_hidden_models(vec!["MODEL-B".into()]);
@@ -43,8 +58,43 @@ fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
     );
     assert!(Arc::ptr_eq(&scheduler, &runtime.scheduler));
     assert!(Arc::ptr_eq(&visibility, &runtime.model_state.hidden_models));
-    assert!(Arc::ptr_eq(&adapters, &runtime.adapter_continuation_store));
-    assert!(Arc::ptr_eq(&replay, &runtime.native_responses_replay_store));
+    assert!(Arc::ptr_eq(
+        &reference_snapshot,
+        &runtime
+            .provider_metadata
+            .reference_catalog
+            .as_ref()
+            .unwrap()
+            .snapshot()
+    ));
+    assert!(Arc::ptr_eq(
+        &catalog_callback,
+        &crate::poison::mutex(&runtime.provider_metadata.catalog_hint_callback)
+    ));
+    assert!(Arc::ptr_eq(
+        &team_callback,
+        &runtime.account_state.team_breaker_callback
+    ));
+    assert_eq!(
+        runtime.official_codex_ultra_model("model-a"),
+        Some(native_card)
+    );
+    assert!(Arc::ptr_eq(
+        &continuations.adapters,
+        &runtime.continuation_state.adapters
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.native_responses,
+        &runtime.continuation_state.native_responses
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.routes,
+        &runtime.continuation_state.routes
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.agent_messages,
+        &runtime.continuation_state.agent_messages
+    ));
 }
 
 #[test]
@@ -204,7 +254,7 @@ fn runtime_updates_key_scope_without_rebuild() {
     );
 }
 #[test]
-fn active_responses_scope_uses_live_candidate_policy() {
+fn active_pool_scope_uses_live_candidate_policy() {
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source-a",
@@ -230,7 +280,7 @@ fn active_responses_scope_uses_live_candidate_policy() {
     let source_ids = BTreeSet::from(["source-a".to_string()]);
     let account_ids = BTreeSet::from(["account-a".to_string()]);
     assert_eq!(
-        runtime.active_responses_scope(&source_ids, &account_ids),
+        runtime.active_pool_scope(&source_ids, &account_ids),
         CandidateScope {
             source_ids: Some(source_ids.clone()),
             account_ids: Some(account_ids.clone()),
@@ -261,7 +311,7 @@ fn active_responses_scope_uses_live_candidate_policy() {
             excluded_models: Vec::new(),
         },
     ));
-    let scope = runtime.active_responses_scope(&source_ids, &account_ids);
+    let scope = runtime.active_pool_scope(&source_ids, &account_ids);
     assert_eq!(scope.source_ids, Some(BTreeSet::new()));
     assert_eq!(scope.account_ids, Some(BTreeSet::new()));
 }

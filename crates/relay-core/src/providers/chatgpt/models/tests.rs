@@ -62,11 +62,6 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
             false,
         ),
         (
-            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
-            "basis_points_free_account_unsupported",
-            false,
-        ),
-        (
             ModelDiscoveryFailureCode::Forbidden,
             "models_forbidden",
             false,
@@ -74,6 +69,11 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
         (
             ModelDiscoveryFailureCode::HttpStatus,
             "models_http_status",
+            false,
+        ),
+        (
+            ModelDiscoveryFailureCode::EndpointNotFound,
+            "models_endpoint_not_found",
             false,
         ),
         (
@@ -131,6 +131,53 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
     for (code, management_code, authentication_failure) in cases {
         assert_eq!(code.management_code(), management_code);
         assert_eq!(code.is_authentication_failure(), authentication_failure);
+    }
+}
+
+#[tokio::test]
+async fn model_catalog_not_found_keeps_http_evidence_without_retry_or_auth_failure() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for kind in [
+        super::super::OAuthClientKind::Codex,
+        super::super::OAuthClientKind::ExcelBps,
+        super::super::OAuthClientKind::Siwc,
+    ] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (endpoint, server) = spawn(Router::new().route(
+            "/backend-api/codex/models",
+            get({
+                let requests = requests.clone();
+                move || {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    async { (StatusCode::NOT_FOUND, "synthetic-private-provider-body") }
+                }
+            }),
+        ))
+        .await;
+        let failure = AccountModelsClient::with_endpoint(endpoint)
+            .unwrap()
+            .with_oauth_client_kind(kind)
+            .discover(
+                "synthetic-access",
+                "synthetic-account",
+                super::super::CODEX_MODELS_CLIENT_VERSION,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, ModelDiscoveryFailureCode::EndpointNotFound);
+        assert_eq!(failure.http_status, Some(404));
+        assert_eq!(failure.code.management_code(), "models_endpoint_not_found");
+        assert!(!failure.retryable);
+        assert!(!failure.code.is_authentication_failure());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let diagnostic = format!("{failure:?} {failure}");
+        assert!(!diagnostic.contains("synthetic-private-provider-body"));
+        assert!(!diagnostic.contains("synthetic-access"));
+        server.abort();
     }
 }
 

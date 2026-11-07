@@ -1,6 +1,6 @@
-use super::super::super::errors::AttemptFailure;
 use super::super::super::now_ms;
 use super::super::request::should_wait_for_candidate_availability;
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::super::{
     CandidateRetryContext, ContinuationReset, reset_materialized_continuation,
     wait_for_candidate_retry, wait_for_recovery,
@@ -12,7 +12,6 @@ use crate::scheduler::rotation::SharedRequestBudget;
 use axum::body::Body;
 use axum::http::Response;
 use serde_json::Value;
-use std::collections::HashSet;
 
 pub(super) enum AccountSelectionMiss {
     Continue,
@@ -20,22 +19,15 @@ pub(super) enum AccountSelectionMiss {
     Respond(Response<Body>),
 }
 
-use super::super::AttemptRepairs;
-
 pub(super) struct AccountSelectionMissInput<'a> {
     pub(super) budget: &'a SharedRequestBudget,
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) request: &'a mut Value,
     pub(super) resolved_model: &'a str,
-    pub(super) response_affinity_key: &'a mut Option<String>,
-    pub(super) requires_affinity_owner: &'a mut bool,
+    pub(super) state: &'a mut AttemptState,
     pub(super) has_previous_response_id: bool,
-    pub(super) has_unpaired_tool_output: bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) tried: &'a mut HashSet<String>,
     pub(super) retry_context: &'a CandidateRetryContext<'a>,
-    pub(super) last_failure: &'a Option<AttemptFailure>,
     pub(super) has_preparation_error: bool,
     pub(super) wait_for_candidate_availability: bool,
 }
@@ -52,17 +44,27 @@ pub(super) async fn handle_account_selection_miss(
         key,
         request,
         resolved_model,
-        response_affinity_key,
-        requires_affinity_owner,
+        state,
         has_previous_response_id,
-        has_unpaired_tool_output,
-        repairs,
-        tried,
         retry_context,
-        last_failure,
         has_preparation_error,
         wait_for_candidate_availability,
     } = input;
+    let has_unpaired_tool_output = state.continuation.has_unpaired_tool_output;
+    let AttemptState {
+        retry: RetryState {
+            tried,
+            last_failure,
+            ..
+        },
+        continuation:
+            ContinuationState {
+                response_affinity_key,
+                requires_affinity_owner,
+                repairs,
+                ..
+            },
+    } = state;
     let model_switch_reset_attempted = &mut repairs.model_switch_reset;
     if let Some(error) = crate::gateway::errors::admission_error(budget) {
         return AccountSelectionMiss::Respond(error);

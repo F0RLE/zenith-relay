@@ -17,7 +17,7 @@ impl PoolScheduler {
                 .any(|retry_at_ms| *retry_at_ms > now_ms)
         };
         if let Some(candidate) = self.candidates.get(candidate_id) {
-            self.cooldown_reasons
+            self.cooldown_metadata
                 .retain(|(cooled_candidate, scope), _| {
                     cooled_candidate != candidate_id || candidate.cooldowns.contains_key(scope)
                 });
@@ -27,6 +27,37 @@ impl PoolScheduler {
 
     pub fn set_cooldown(&mut self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
         self.set_cooldown_with_reason(candidate_id, model, retry_at_ms, CooldownReason::Mandatory)
+    }
+
+    pub(crate) fn provider_backoff_for(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        now_ms: u64,
+    ) -> Option<ProviderBackoff> {
+        self.candidates
+            .get(candidate_id)?
+            .cooldowns
+            .iter()
+            .filter(|(scope, effective_deadline)| {
+                **effective_deadline > now_ms
+                    && (scope.as_str() == "*" || scope.eq_ignore_ascii_case(model))
+            })
+            .filter_map(|(scope, effective_deadline)| {
+                let clock = self
+                    .cooldown_metadata
+                    .get(&(candidate_id.to_string(), scope.clone()))?
+                    .provider_clock?;
+                if clock.not_before_ms <= now_ms || clock.not_before_ms > *effective_deadline {
+                    return None;
+                }
+                Some(ProviderBackoff {
+                    scope: scope.clone(),
+                    not_before_ms: clock.not_before_ms,
+                    observed_at_ms: clock.observed_at_ms,
+                })
+            })
+            .max_by_key(|backoff| (backoff.not_before_ms, backoff.scope == "*"))
     }
 
     pub(crate) fn set_cooldown_with_reason(
@@ -40,10 +71,11 @@ impl PoolScheduler {
             candidate_id,
             CooldownRequest {
                 scope: model,
-
                 retry_at_ms,
                 reason,
+                provider_not_before_ms: None,
             },
+            None,
         )
     }
 
@@ -51,14 +83,16 @@ impl PoolScheduler {
         &mut self,
         candidate_id: &str,
         request: CooldownRequest<'_>,
+        observed_at_ms: Option<u64>,
     ) -> bool {
-        self.set_cooldown_with_reason_inner(candidate_id, request)
+        self.set_cooldown_with_reason_inner(candidate_id, request, observed_at_ms)
     }
 
     fn set_cooldown_with_reason_inner(
         &mut self,
         candidate_id: &str,
         request: CooldownRequest<'_>,
+        observed_at_ms: Option<u64>,
     ) -> bool {
         // Transient health is reduced exactly once by the dispatched rotation
         // lease. This map stores only provider/mandatory rate deadlines.
@@ -74,14 +108,16 @@ impl PoolScheduler {
             .candidates
             .get(candidate_id)
             .and_then(|candidate| candidate.cooldowns.get(&scope).copied());
-        let previous_reason = self
-            .cooldown_reasons
+        let mut metadata = self
+            .cooldown_metadata
             .get(&(candidate_id.to_string(), scope.clone()))
-            .copied();
+            .copied()
+            .unwrap_or_default();
+        let previous_reason = metadata.reason;
         let should_store_reason = existing_deadline.is_none_or(|current_deadline| {
             request.retry_at_ms > current_deadline
                 || (request.retry_at_ms == current_deadline
-                    && request.reason == CooldownReason::RateLimit
+                    && request.reason.is_rate_limit()
                     && previous_reason != Some(CooldownReason::Mandatory))
                 || (request.reason == CooldownReason::Mandatory
                     && previous_reason != Some(CooldownReason::Mandatory))
@@ -99,8 +135,19 @@ impl PoolScheduler {
                 .or_insert(request.retry_at_ms);
         }
         if should_store_reason {
-            self.cooldown_reasons
-                .insert((candidate_id.to_string(), scope.clone()), request.reason);
+            metadata.reason = Some(request.reason);
+        }
+        metadata.provider_clock = ProviderClock::latest(
+            metadata.provider_clock.into_iter().chain(
+                request
+                    .provider_not_before_ms
+                    .filter(|deadline| *deadline <= request.retry_at_ms)
+                    .map(|deadline| ProviderClock::new(deadline, observed_at_ms)),
+            ),
+        );
+        if metadata.reason.is_some() || metadata.provider_clock.is_some() {
+            self.cooldown_metadata
+                .insert((candidate_id.to_string(), scope.clone()), metadata);
         }
         true
     }
@@ -118,7 +165,7 @@ impl PoolScheduler {
             })
             .unwrap_or(false);
         if removed {
-            self.cooldown_reasons
+            self.cooldown_metadata
                 .retain(|(cooled_candidate, scope), _| {
                     cooled_candidate != candidate_id || !scope.eq_ignore_ascii_case(model)
                 });

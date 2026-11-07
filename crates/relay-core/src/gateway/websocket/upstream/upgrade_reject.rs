@@ -47,7 +47,10 @@ pub(super) async fn handle_upgrade_rejection(
         GatewayFailure::upstream_status(status, error_body.as_deref(), source_error_origin)
             .with_retry_headers(response_headers)
             .apply_degraded_route_policy(runtime);
-    if failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+    if matches!(
+        failure.category,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+    ) {
         record_connect_returned_failure(&scope.trace(), &failure);
         return Ok(UpgradeAction::Fail(failure));
     }

@@ -158,6 +158,11 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
     } else {
         TRANSIENT_COOLDOWN_MS
     };
+    let provider_not_before_ms = header_retry_after_ms
+        .into_iter()
+        .chain(hint.retry_after_ms)
+        .max()
+        .map(|delay| now.saturating_add(delay));
     let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
     if basis_points_rate_limit {
         // Millisecond token-bucket hints must not recycle a saturated BPS route immediately.
@@ -176,6 +181,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         scope,
         retry_at_ms,
         reason,
+        provider_not_before_ms,
     })
 }
 
@@ -215,11 +221,13 @@ pub(crate) fn current_failure_state(
     candidate_id: &str,
     model: &str,
 ) -> FailureState {
-    let (consecutive_failures, cooldown) = runtime.failure_state_for(candidate_id, model, now_ms());
+    let (consecutive_failures, cooldown, provider_backoff) =
+        runtime.failure_state_for(candidate_id, model, now_ms());
     FailureState {
         consecutive_failures,
         retry_at_ms: cooldown.as_ref().map(|(_, at)| *at),
         cooldown_scope: cooldown.map(|(scope, _)| scope),
+        provider_backoff,
     }
 }
 
@@ -237,7 +245,11 @@ pub(crate) fn failure_cooldown_reason(
     explicit_retry_after: bool,
 ) -> CooldownReason {
     if status == StatusCode::TOO_MANY_REQUESTS {
-        return CooldownReason::RateLimit;
+        return if category == error_codes::UPSTREAM_QUOTA_EXHAUSTED {
+            CooldownReason::QuotaExhausted
+        } else {
+            CooldownReason::RateLimit
+        };
     }
     if explicit_retry_after
         || matches!(
@@ -305,6 +317,7 @@ pub(crate) fn settle_image_capability_failure(
             scope,
             retry_at_ms,
             reason: CooldownReason::Mandatory,
+            provider_not_before_ms: None,
         }),
         now,
     );
@@ -315,4 +328,7 @@ pub(crate) fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {
     event.cooldown_scope = state.cooldown_scope;
     event.retry_at_ms = state.retry_at_ms;
     event.consecutive_failures = Some(state.consecutive_failures);
+    if let Some(routing) = event.routing.as_mut() {
+        routing.provider_backoff = state.provider_backoff;
+    }
 }

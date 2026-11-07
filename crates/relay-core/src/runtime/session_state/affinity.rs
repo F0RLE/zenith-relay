@@ -112,13 +112,7 @@ impl GatewayRuntime {
         let mut scheduler = self.lock_scheduler();
         let owner = scheduler
             .candidate(&binding.candidate_id)
-            .map(|candidate| candidate.id.clone())
-            .or_else(|| {
-                self.legacy_source_candidate_ids
-                    .get(&binding.candidate_id)
-                    .cloned()
-                    .flatten()
-            });
+            .map(|candidate| candidate.id.clone());
         if let Some(owner) = owner {
             scheduler.restore_prompt_affinity(key, &owner, binding.expires_at_ms, now_ms);
         }

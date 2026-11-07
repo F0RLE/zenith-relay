@@ -129,6 +129,8 @@ pub(super) async fn run_selected_attempt(
     let upstream = match upstream_result {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
+            route.account_token_revision =
+                upstream.authorization_incarnation.token_revision().cloned();
             upstream.response
         }
         Err(error) => {

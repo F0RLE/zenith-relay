@@ -120,7 +120,7 @@ async fn siwc_native_catalog_continuation_rejects_replaced_authorization() {
         .into_iter()
         .find(|route| route.candidate_id == "synthetic-account-0")
         .unwrap();
-    runtime.chatgpt_accounts["synthetic-account-0"]
+    runtime.account_state.executors["synthetic-account-0"]
         .token_authority
         .register(
             "synthetic-account-0",

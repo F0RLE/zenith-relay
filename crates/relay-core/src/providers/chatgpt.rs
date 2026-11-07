@@ -39,9 +39,8 @@ pub use models::{
     basis_points_access_url, parse_basis_points_model_access,
 };
 pub use oauth::{
-    BASIS_POINTS_FREE_ACCOUNT_MESSAGE, BASIS_POINTS_OAUTH_CLIENT_ID,
-    BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID, OAuthClientKind,
-    SIWC_BOOTSTRAP_CLIENT_ID, SIWC_RESOURCE,
+    BASIS_POINTS_OAUTH_CLIENT_ID, BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID,
+    OAuthClientKind, SIWC_BOOTSTRAP_CLIENT_ID, SIWC_RESOURCE,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{

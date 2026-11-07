@@ -47,9 +47,10 @@ impl GatewayRuntime {
             .first()
             .copied()
             .unwrap_or(WireApi::Responses);
-        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+        if let Some(binding) = self.source_state.candidate_bindings.get(candidate_id) {
             let catalog = self
-                .model_metadata_catalog
+                .provider_metadata
+                .reference_catalog
                 .as_ref()
                 .map(|catalog| catalog.snapshot());
             let preferences = catalog
@@ -101,7 +102,7 @@ impl GatewayRuntime {
             });
             return routes;
         }
-        let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
+        let Some(account) = self.account_state.executors.get(candidate_id) else {
             return Vec::new();
         };
         if account.images_only {
@@ -127,7 +128,7 @@ impl GatewayRuntime {
         {
             return None;
         }
-        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+        if let Some(binding) = self.source_state.candidate_bindings.get(candidate_id) {
             return binding
                 .routes
                 .iter()
@@ -138,7 +139,7 @@ impl GatewayRuntime {
                     self.source_executor_route(candidate_id, binding, route, model, false)
                 });
         }
-        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let account = self.account_state.executors.get(candidate_id)?;
         if account.oauth_client_kind != crate::providers::chatgpt::OAuthClientKind::Codex {
             return None;
         }
@@ -156,7 +157,7 @@ impl GatewayRuntime {
         model: &str,
         upstream_stream: bool,
     ) -> Option<ExecutorRoute> {
-        let provider_source = self.sources.get(&binding.source_id)?;
+        let provider_source = self.source_state.connectors.get(&binding.source_id)?;
         let source_binding = provider_source.binding_for(source_route.binding_key)?;
         let source_model = provider_source.canonical_model_for(source_route.binding_key, model)?;
         // Resolution already projects upstreams onto each supported client API.
@@ -172,6 +173,7 @@ impl GatewayRuntime {
             source_id: binding.source_id.clone(),
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             client_wire_api: source_route.wire_api,
             adapter: source_route.adapter,
@@ -199,7 +201,7 @@ impl GatewayRuntime {
     /// Resolve the transport for the already selected binding. Compaction can
     /// change streaming, but cannot select another protocol mid-request.
     pub(crate) fn set_route_streaming(&self, route: &mut ExecutorRoute, stream: bool) {
-        if let Some(source) = self.sources.get(&route.source_id)
+        if let Some(source) = self.source_state.connectors.get(&route.source_id)
             && let Some(url) = source.endpoint(route.binding_key(), &route.source_model, stream)
         {
             route.upstream_url = url;
@@ -232,6 +234,7 @@ impl GatewayRuntime {
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             client_wire_api: wire_api,
             adapter,

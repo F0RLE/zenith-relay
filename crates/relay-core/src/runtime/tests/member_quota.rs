@@ -35,8 +35,8 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    assert_eq!(runtime.source_candidate_bindings.len(), 1);
-    let binding = &runtime.source_candidate_bindings["multi"];
+    assert_eq!(runtime.source_state.candidate_bindings.len(), 1);
+    let binding = &runtime.source_state.candidate_bindings["multi"];
     assert_eq!(binding.routes.len(), WireApi::ALL.len() * 2);
     let protocols = binding
         .routes
@@ -59,6 +59,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
 
                 retry_at_ms: 1000,
                 reason,
+                provider_not_before_ms: None,
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
@@ -81,7 +82,7 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
             (crate::PoolMemberKind::Source, "source-b".into(), 0, 1),
         ],
     );
-    policy.mode = crate::PoolRoutingMode::InOrder;
+    policy.mode = crate::PoolRoutingMode::RoundRobin;
     for member in &mut policy.members {
         member.max_concurrency = 1;
     }
@@ -363,7 +364,8 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &exhausted_headers,
         1_000,
@@ -389,7 +391,8 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &recovered_headers,
         3_000,
@@ -438,7 +441,8 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -485,7 +489,8 @@ fn passive_windows_keep_admission_and_visible_headroom_in_sync() {
         }
         assert!(runtime.observe_codex_quota_headers(
             "account-1",
-            None,
+            Some(1),
+            Some(&usage_revision(&runtime)),
             reqwest::StatusCode::OK,
             &headers,
             observed,
@@ -532,7 +537,8 @@ fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         now_ms,
@@ -554,7 +560,8 @@ fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_th
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000
@@ -603,7 +610,8 @@ fn newer_secondary_refresh_preserves_and_persists_live_primary_exhaustion() {
     headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -648,7 +656,8 @@ fn same_clock_refresh_cannot_replace_dirty_passive_quota() {
     headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -683,7 +692,8 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             source_id: "openai-codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
-            account_token_generation: None,
+            account_token_generation: Some(1),
+            account_token_revision: Some(usage_revision(&runtime)),
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -757,7 +767,8 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             source_id: "openai-codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
-            account_token_generation: None,
+            account_token_generation: Some(1),
+            account_token_revision: Some(usage_revision(&runtime)),
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),

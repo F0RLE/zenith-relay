@@ -11,6 +11,7 @@ use futures_util::future::BoxFuture;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 mod affinity;
+mod authorization_settlement;
 mod basis_points;
 mod catalog_hints;
 mod claude_desktop;
@@ -21,6 +22,26 @@ mod member_quota;
 mod native_protocol;
 mod policy;
 mod usage_observations;
+
+fn usage_revision(runtime: &GatewayRuntime) -> crate::accounts::TokenDispatchRevision {
+    use futures_util::FutureExt;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
+    authority
+        .register_if_absent(
+            "account-1",
+            TokenSet::new("synthetic-access", None, None, None, 1, 1).unwrap(),
+            AccountAuthState::Active,
+        )
+        .unwrap();
+    match authority
+        .prepare_and_persist_with_revision("account-1", 1_000, 0, &NeverRefresh, &NoopPersistence)
+        .now_or_never()
+        .expect("synthetic credentials are not contended")
+    {
+        Ok(prepared) => prepared.dispatch_revision,
+        Err(failure) => failure.revision.expect("registered synthetic credential"),
+    }
+}
 
 struct NeverRefresh;
 

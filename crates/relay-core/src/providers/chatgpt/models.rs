@@ -180,6 +180,7 @@ impl AccountModelsClient {
                 match status.as_u16() {
                     401 => (ModelDiscoveryFailureCode::Unauthorized, false),
                     403 => (ModelDiscoveryFailureCode::Forbidden, false),
+                    404 => (ModelDiscoveryFailureCode::EndpointNotFound, false),
                     429 => (ModelDiscoveryFailureCode::RateLimited, true),
                     _ if status.is_server_error() => (ModelDiscoveryFailureCode::Upstream, true),
                     _ => (ModelDiscoveryFailureCode::HttpStatus, false),

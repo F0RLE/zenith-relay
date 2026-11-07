@@ -25,6 +25,11 @@ async fn request(base: &str, model: &str) -> reqwest::Response {
 async fn codex_catalog_keeps_its_shape_and_recovers_after_bps_access_failure() {
     for (status, body, empty_access) in [
         (
+            StatusCode::NOT_FOUND,
+            json!({"error":"synthetic missing catalog"}),
+            false,
+        ),
+        (
             StatusCode::FORBIDDEN,
             json!({"error":"synthetic denial"}),
             false,
@@ -159,7 +164,7 @@ async fn claude_desktop_effort_is_separate_from_model_and_obeys_pool_policy() {
         }],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}
     });
     let mut runtime = runtime(&server).await;
-    runtime.model_metadata_catalog = Some(ModelMetadataCatalogHandle::new(
+    runtime.provider_metadata.reference_catalog = Some(ModelMetadataCatalogHandle::new(
         ModelMetadataCatalog::from_models_dev_json(
             r#"{"test/gpt-test":{"reasoning":true,"reasoning_effort_levels":["low","medium","high","xhigh","max"]}}"#,
         )
@@ -489,7 +494,11 @@ async fn bps_401_does_not_put_next_request_behind_a_global_authentication_pause(
     let refresh = Arc::new(RecoveryRefresh {
         calls: AtomicUsize::new(0),
     });
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.refresh_adapter = refresh.clone();
     account
         .token_authority
@@ -596,7 +605,8 @@ async fn bps_401_does_not_fallback_to_another_eligible_account() {
     )
     .unwrap();
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("account-1")
         .unwrap()
         .basis_points_url = bps.responses_url.clone();

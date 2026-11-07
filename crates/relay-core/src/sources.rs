@@ -24,10 +24,11 @@ pub use capabilities::{
 pub use connector::SourceConnector;
 pub(crate) use discovery::discover_models_with_client;
 pub use discovery::{
-    SourceCatalogEvidence, SourceCatalogRecord, SourceDiscovery, discover_source_models,
-    discover_source_models_and_protocol_bindings, discover_source_models_for_protocol_bindings,
-    discover_source_with_protocol_config, discover_source_with_protocol_config_with_scope,
-    read_source_models, read_source_models_with_scope, source_catalog_changed,
+    SourceCatalogEvidence, SourceCatalogFailure, SourceCatalogRecord, SourceDiscovery,
+    discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
+    discover_source_with_protocol_config_with_scope, read_source_models,
+    read_source_models_with_scope, source_catalog_changed,
 };
 pub use stats::{
     SourceBalanceKind, SourceProviderStats, SourceStatsAmount, SourceStatsCurrency,

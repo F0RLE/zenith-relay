@@ -23,7 +23,7 @@ async fn siwc_empty_catalog_withdraws_executor_routes_without_changing_other_acc
     assert!(runtime.update_account_models("synthetic-account-0", &[]));
 
     assert!(!has_siwc_route());
-    let account = &runtime.chatgpt_accounts["synthetic-account-0"];
+    let account = &runtime.account_state.executors["synthetic-account-0"];
     let inventory = crate::poison::read(&account.model_inventory);
     assert!(inventory.configured_models.is_empty());
     assert!(inventory.image_main_model.is_none());

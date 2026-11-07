@@ -258,7 +258,7 @@ impl RotationEngine {
         budget: &RequestBudget,
         now_ms: u64,
     ) -> Result<RotationSettlement, SettlementError> {
-        self.settle_with_latency(lease_id, observation, budget, now_ms, None)
+        self.settle_with_latency(lease_id, observation, budget, now_ms, None, true)
     }
 
     pub(crate) fn settle_with_latency(
@@ -268,6 +268,7 @@ impl RotationEngine {
         budget: &RequestBudget,
         now_ms: u64,
         first_output_latency_ms: Option<u64>,
+        observation_owner_current: bool,
     ) -> Result<RotationSettlement, SettlementError> {
         let Some(pending) = self.leases.get(&lease_id) else {
             return Err(SettlementError::UnknownLease);
@@ -288,7 +289,8 @@ impl RotationEngine {
             .remove(&lease_id)
             .ok_or(SettlementError::UnknownLease)?;
         let current_generation = self.candidate_generations.get(&lease.candidate_id).copied();
-        let observation_current = current_generation == Some(lease.candidate_generation)
+        let observation_current = observation_owner_current
+            && current_generation == Some(lease.candidate_generation)
             && self
                 .candidates
                 .get(&lease.candidate_id)
@@ -299,8 +301,8 @@ impl RotationEngine {
         let (circuit, health_counted) = if observation_current {
             self.update_circuit(&lease, health, now_ms)
         } else {
-            // A removed candidate may be re-added under the same display ID.
-            // Its old outcome can release only its own capacity lease.
+            // Replaced candidates and authorization incarnations retain their
+            // execution outcome while releasing only their own capacity lease.
             (self.circuit(&lease.candidate_id, &lease.route_key), false)
         };
         if health_counted

@@ -2,13 +2,26 @@ use super::*;
 
 #[tokio::test]
 async fn siwc_streams_native_and_converted_output_before_upstream_completion() {
+    incremental_stream(Some("text/event-stream")).await;
+}
+
+#[tokio::test]
+async fn siwc_streams_with_missing_or_mislabeled_sse_content_type() {
+    for content_type in [None, Some("application/json"), Some("text/plain")] {
+        incremental_stream(content_type).await;
+    }
+}
+
+async fn incremental_stream(content_type: Option<&str>) {
     for (chat, debug) in [(false, false), (true, false), (false, true), (true, true)] {
         let siwc = AccessServer::start(json!([]), false).await;
         let native = AccessServer::start(json!([]), false).await;
         siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        *crate::poison::mutex(&siwc.state.stream_content_type) = content_type.map(str::to_owned);
         *crate::poison::mutex(&siwc.state.generation_body) = json!({
             "id":"resp_synthetic_stream","model":"gpt-test","status":"completed",
-            "output":[{"id":"msg_synthetic_stream","type":"message","role":"assistant",
+            "output":[{"id":"rs_synthetic_stream","type":"reasoning","status":"completed","summary":[]},
+                {"id":"msg_synthetic_stream","type":"message","role":"assistant",
                 "status":"completed","content":[{"type":"output_text",
                     "text":"Synthetic incremental answer","annotations":[]}]}],
             "usage":{"input_tokens":41,"output_tokens":7,"total_tokens":48}
@@ -96,6 +109,25 @@ async fn siwc_streams_native_and_converted_output_before_upstream_completion() {
         let first = event.ttft_ms.expect("observed upstream output has TTFT");
         assert!(first <= event.latency_ms);
         assert_eq!(event.generation_ms, Some(event.latency_ms - first));
+        let transport = event
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.transport.as_ref());
+        if debug {
+            let reasoning = transport
+                .unwrap()
+                .stream_response
+                .as_ref()
+                .unwrap()
+                .upstream_reasoning_first_ms
+                .expect("typed empty reasoning establishes activity");
+            assert!(reasoning <= first);
+        } else {
+            assert!(
+                transport.is_none(),
+                "disabled diagnostics must not collect reasoning timing"
+            );
+        }
         assert_eq!(event.input_tokens, Some(41));
         assert_eq!(event.output_tokens, Some(7));
         assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);

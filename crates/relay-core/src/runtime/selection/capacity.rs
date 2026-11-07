@@ -112,7 +112,7 @@ impl GatewayRuntime {
             );
             reservation.map(|reservation_id| {
                 let image_bridge_revision = (operation == RotationOperation::Image)
-                    .then(|| self.chatgpt_accounts.get(&selection.candidate_id))
+                    .then(|| self.account_state.executors.get(&selection.candidate_id))
                     .flatten()
                     .map(|account| {
                         let revision = account.image_bridge_revision.clone();
@@ -148,6 +148,7 @@ impl GatewayRuntime {
                         }),
                     image_bridge_revision,
                     rotation_budget: budget.clone(),
+                    dispatched_token_revision: Mutex::new(None),
                     rotation_started: AtomicBool::new(false),
                     rotation_settled: AtomicBool::new(false),
                     activity_callback: self.activity_callback.clone(),

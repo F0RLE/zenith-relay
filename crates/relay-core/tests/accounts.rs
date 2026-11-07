@@ -76,10 +76,14 @@ mod compaction;
 mod long_requests;
 #[path = "support/memory_policy.rs"]
 mod memory_policy;
+#[path = "support/provider_backoff.rs"]
+mod provider_backoff;
 #[path = "support/request_timezone.rs"]
 mod request_timezone;
 #[path = "support/rotation_policy.rs"]
 mod rotation_policy;
+#[path = "support/runtime_policy.rs"]
+mod runtime_policy;
 
 #[path = "support/auth_refresh.rs"]
 mod auth_refresh;
@@ -109,6 +113,8 @@ mod route_fallback;
 mod transport_matrix;
 #[path = "support/websocket_fallback.rs"]
 mod websocket_fallback;
+#[path = "support/websocket_queue.rs"]
+mod websocket_queue;
 #[path = "support/websocket_retry.rs"]
 mod websocket_retry;
 #[path = "support/websocket_session.rs"]
@@ -381,17 +387,17 @@ async fn register_ready(authority: &TokenAuthority, account_id: &str, access_tok
         .unwrap();
 }
 
-async fn spawn_mixed_gateway(
+async fn spawn_mixed_gateway<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     spawn_mixed_gateway_with_options(
@@ -406,18 +412,18 @@ async fn spawn_mixed_gateway(
     .await
 }
 
-async fn spawn_mixed_gateway_with_options(
+async fn spawn_mixed_gateway_with_options<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
     options: GatewayRuntimeOptions,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     spawn_mixed_gateway_with_agent_identities_and_options(
@@ -461,19 +467,19 @@ async fn spawn_mixed_gateway_with_agent_identities(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spawn_mixed_gateway_with_agent_identities_and_options(
+async fn spawn_mixed_gateway_with_agent_identities_and_options<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
     options: GatewayRuntimeOptions,
     agent_identities: HashMap<String, AgentIdentityCredential>,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     let events = Arc::new(Mutex::new(Vec::new()));

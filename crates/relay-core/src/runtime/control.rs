@@ -141,6 +141,7 @@ impl RuntimeControl {
             candidate_id: None,
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             routing: None,
             requested_model: Some(requested_model.to_string()),

@@ -125,6 +125,9 @@ pub struct UsageEvent {
     /// from changing a different credential generation of the same account.
     #[serde(skip)]
     pub account_token_generation: Option<u64>,
+    /// Exact in-memory OAuth provenance; never persisted or exported.
+    #[serde(skip)]
+    pub account_token_revision: Option<crate::accounts::TokenDispatchRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
     #[serde(default)]

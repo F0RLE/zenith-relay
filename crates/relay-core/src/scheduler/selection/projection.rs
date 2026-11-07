@@ -11,11 +11,7 @@ impl PoolScheduler {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
                 crate::PoolRoutingMode::WeightedRoundRobin => RotationMode::WeightedRoundRobin,
                 crate::PoolRoutingMode::Failover => RotationMode::Failover,
-                // Both previously exposed manual choices now use one cycling
-                // mode. Their saved member order remains the manual priority.
-                crate::PoolRoutingMode::InOrder | crate::PoolRoutingMode::RoundRobin => {
-                    RotationMode::RoundRobin
-                }
+                crate::PoolRoutingMode::RoundRobin => RotationMode::RoundRobin,
                 // `set_pool_routing` validates activation before storing the
                 // policy. Smart is therefore a storage/import compatibility
                 // value only and must never silently select a runtime mode.
@@ -136,9 +132,10 @@ impl PoolScheduler {
                 ),
             };
             let global_not_before_ms = candidate.cooldowns.get("*").copied().filter(|_| {
-                self.cooldown_reasons
+                self.cooldown_metadata
                     .get(&(candidate_id.clone(), "*".into()))
-                    != Some(&CooldownReason::Transient)
+                    .and_then(|metadata| metadata.reason)
+                    != Some(CooldownReason::Transient)
             });
             let global_rate = global_not_before_ms
                 .map_or(RotationRateState::Ready, |not_before_ms| {
@@ -169,9 +166,10 @@ impl PoolScheduler {
                     .iter()
                     .filter(|(scope, _)| scope.as_str() == "*" || scope.eq_ignore_ascii_case(model))
                     .filter(|(scope, _)| {
-                        self.cooldown_reasons
+                        self.cooldown_metadata
                             .get(&(candidate_id.clone(), (*scope).clone()))
-                            != Some(&CooldownReason::Transient)
+                            .and_then(|metadata| metadata.reason)
+                            != Some(CooldownReason::Transient)
                     })
                     .map(|(_, not_before_ms)| *not_before_ms)
                     .max();

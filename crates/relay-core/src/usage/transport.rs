@@ -27,9 +27,29 @@ pub struct RequestPreparationDiagnostics {
     pub serialization_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<AttachmentPreparationDiagnostics>,
     /// Opt-in prepared-context accounting after attachment resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_accounting_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentPreparationDiagnostics {
+    /// Absent when no inline images require credential preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ms: Option<u64>,
+    pub staging_ms: u64,
+    /// Wall time for concurrent resolution, including coalesced-upload waits.
+    pub resolve_ms: u64,
+    pub image_count: u64,
+    pub file_references: u64,
+    /// Successful physical uploads performed by this request.
+    pub uploaded_images: u64,
+    pub uploaded_bytes: u64,
+    /// Inline images satisfied by cached or shared uploads.
+    pub reused_images: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,6 +70,9 @@ pub struct TransportDiagnostics {
     /// Native WS: false is selected-route setup before generation, true is reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_reused: Option<bool>,
+    /// New native WS attempt after authorization changed on the same candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reauth: Option<bool>,
     /// First HTTP response headers since the executor's dispatch clock started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers_ms: Option<u64>,
@@ -133,6 +156,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms: None,
                 connection_reused: None,
+                reauth: None,
                 response_headers_ms: None,
                 stream_response: None,
                 request_preparation_ms: None,
@@ -189,6 +213,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms,
                 connection_reused: Some(false),
+                reauth: None,
                 response_headers_ms: None,
                 stream_response: None,
                 request_preparation_ms: None,
@@ -202,8 +227,20 @@ impl ExecutorRoute {
         }
     }
 
-    pub(crate) fn observe_websocket_handshake(&mut self, elapsed_ms: u64, upgraded: bool) {
+    pub(crate) fn observe_websocket_handshake(
+        &mut self,
+        elapsed_ms: u64,
+        upgraded: bool,
+        reauth: bool,
+    ) {
         self.observe_websocket_dispatch(Some(elapsed_ms));
+        if let Some(transport) = self
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.reauth = Some(reauth);
+        }
         if upgraded {
             self.observe_websocket_response();
         }
@@ -331,15 +368,34 @@ mod tests {
                 assert_eq!(route.client_transport, client);
             }
         }
-        route.observe_websocket_handshake(12, true);
+        route.observe_websocket_handshake(12, true, false);
         let actual = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
         assert_eq!(actual.handshake_ms, Some(12));
         assert_eq!(actual.connection_reused, Some(false));
+        assert_eq!(actual.reauth, Some(false));
+        route.observe_websocket_handshake(15, false, true);
+        let failed = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(failed.reauth, Some(true));
+        assert_eq!(failed.handshake_ms, Some(15));
+        assert_eq!(failed.response_format, None);
+        route.observe_websocket_handshake(16, true, true);
+        let actual = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
         assert_eq!(
             actual.response_format,
             Some(TransportResponseFormat::WebsocketFrames)
         );
         route.observe_websocket_reuse();
+        assert_eq!(
+            route
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .reauth,
+            None
+        );
         assert_eq!(
             route
                 .routing
@@ -367,6 +423,7 @@ mod tests {
         assert_eq!(actual.response_format, None);
         assert_eq!(actual.handshake_ms, None);
         assert_eq!(actual.connection_reused, None);
+        assert_eq!(actual.reauth, None);
     }
 
     #[test]
@@ -374,7 +431,7 @@ mod tests {
         let mut route = route();
         let mut timing = json!({"type":"responsesapi.websocket_timing",
             "timing_metrics":{"engine_service_total_ms":42}});
-        route.observe_websocket_handshake(12, true);
+        route.observe_websocket_handshake(12, true, false);
         let transport = route.routing.as_mut().unwrap().transport.as_mut().unwrap();
         transport.observe_codex_server_timing(&timing, Some("first"));
         assert!(transport.codex_server_timing.is_some());
@@ -446,6 +503,7 @@ mod tests {
             catalog_ms: Some(0),
             serialization_ms: Some(0),
             attachments_ms: Some(0),
+            attachments: None,
             context_accounting_ms: None,
         };
         route.observe_request_preparation(0, preparation.clone());

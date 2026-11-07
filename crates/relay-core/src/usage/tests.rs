@@ -93,6 +93,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         candidate_id: Some("candidate".into()),
         account_id: account_id.map(str::to_owned),
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("model".into()),

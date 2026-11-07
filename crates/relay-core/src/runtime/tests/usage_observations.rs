@@ -10,6 +10,7 @@ fn account_event(success: bool, category: Option<&str>) -> UsageEvent {
         candidate_id: Some("account-1".into()),
         account_id: Some("account-1".into()),
         account_token_generation: Some(1),
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-test".into()),
@@ -44,7 +45,7 @@ fn account_event(success: bool, category: Option<&str>) -> UsageEvent {
 }
 
 fn register(runtime: &GatewayRuntime, generation: u64, state: AccountAuthState) {
-    runtime.chatgpt_accounts["account-1"]
+    runtime.account_state.executors["account-1"]
         .token_authority
         .register_if_absent(
             "account-1",
@@ -52,6 +53,16 @@ fn register(runtime: &GatewayRuntime, generation: u64, state: AccountAuthState) 
             state,
         )
         .unwrap();
+}
+
+fn current_account_event(
+    runtime: &GatewayRuntime,
+    success: bool,
+    category: Option<&str>,
+) -> UsageEvent {
+    let mut event = account_event(success, category);
+    event.account_token_revision = Some(usage_revision(runtime));
+    event
 }
 
 fn health(runtime: &GatewayRuntime) -> CandidateHealth {
@@ -78,10 +89,10 @@ fn stale_results_cannot_change_runtime_health_or_quota() {
             CandidateHealth::Healthy
         };
         runtime.set_candidate_health("account-1", original_health);
-        let before = crate::poison::mutex(&runtime.passive_quotas)["account-1"]
+        let before = crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
             .snapshot
             .clone();
-        let mut event = account_event(success, category);
+        let mut event = current_account_event(&runtime, success, category);
         event.quota_snapshot = Some(QuotaSnapshot {
             limit_reached: true,
             updated_at_ms: Some(2_000),
@@ -90,7 +101,7 @@ fn stale_results_cannot_change_runtime_health_or_quota() {
         assert!(runtime.apply_usage_event(&event, 2_000).is_none());
         assert_eq!(health(&runtime), original_health);
         assert_eq!(
-            crate::poison::mutex(&runtime.passive_quotas)["account-1"].snapshot,
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"].snapshot,
             before
         );
         assert!(
@@ -112,7 +123,8 @@ fn request_results_do_not_clear_terminal_runtime_authentication_state() {
             register(&runtime, 1, AccountAuthState::RequiresReauth(reason));
             runtime.set_candidate_health("account-1", CandidateHealth::ReauthRequired);
             let category = (!success).then_some(crate::error_codes::UPSTREAM_ACCOUNT_DISABLED);
-            let _ = runtime.apply_usage_event(&account_event(success, category), 2_000);
+            let _ = runtime
+                .apply_usage_event(&current_account_event(&runtime, success, category), 2_000);
             assert_eq!(health(&runtime), CandidateHealth::ReauthRequired);
         }
     }
@@ -127,7 +139,7 @@ fn current_generation_success_still_recovers_runtime_health() {
         let runtime = quota_runtime(QuotaSnapshot::default());
         register(&runtime, 1, state);
         runtime.set_candidate_health("account-1", CandidateHealth::Degraded);
-        let _ = runtime.apply_usage_event(&account_event(true, None), 2_000);
+        let _ = runtime.apply_usage_event(&current_account_event(&runtime, true, None), 2_000);
         assert_eq!(health(&runtime), CandidateHealth::Healthy);
     }
 }
@@ -146,15 +158,23 @@ fn stale_http_and_websocket_headers_cannot_exhaust_current_quota() {
         assert!(!runtime.observe_codex_quota_headers(
             "account-1",
             Some(1),
+            Some(&usage_revision(&runtime)),
             status,
             &headers,
             2_000
         ));
         assert_eq!(
-            crate::poison::mutex(&runtime.passive_quotas)["account-1"].snapshot,
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"].snapshot,
             QuotaSnapshot::default()
         );
-        assert!(runtime.observe_codex_quota_headers("account-1", Some(2), status, &headers, 2_000));
+        assert!(runtime.observe_codex_quota_headers(
+            "account-1",
+            Some(2),
+            Some(&usage_revision(&runtime)),
+            status,
+            &headers,
+            2_000
+        ));
         let current = runtime
             .take_passive_quota_snapshot("account-1", 2_001)
             .unwrap();
@@ -171,13 +191,14 @@ fn stale_completion_cannot_consume_pending_current_quota() {
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
         Some(2),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         2_000
     ));
     assert!(
         runtime
-            .apply_usage_event(&account_event(true, None), 2_001)
+            .apply_usage_event(&current_account_event(&runtime, true, None), 2_001)
             .is_none()
     );
     let current = runtime
@@ -191,15 +212,123 @@ fn removed_authority_cannot_be_recovered_by_a_late_success() {
     let runtime = quota_runtime(QuotaSnapshot::default());
     register(&runtime, 1, AccountAuthState::Active);
     runtime.set_candidate_health("account-1", CandidateHealth::Blocked);
+    let event = current_account_event(&runtime, true, None);
     assert!(
-        runtime.chatgpt_accounts["account-1"]
+        runtime.account_state.executors["account-1"]
             .token_authority
             .remove("account-1")
     );
-    assert!(
-        runtime
-            .apply_usage_event(&account_event(true, None), 2_000)
-            .is_none()
-    );
+    assert!(runtime.apply_usage_event(&event, 2_000).is_none());
     assert_eq!(health(&runtime), CandidateHealth::Blocked);
+}
+
+#[tokio::test]
+async fn reused_generation_results_cannot_change_a_new_login() {
+    for (success, category) in [
+        (true, None),
+        (false, Some(crate::error_codes::UPSTREAM_UNAUTHORIZED)),
+        (false, Some(crate::error_codes::UPSTREAM_ACCOUNT_DISABLED)),
+        (false, Some(crate::error_codes::UPSTREAM_QUOTA_EXHAUSTED)),
+    ] {
+        let runtime = quota_runtime(QuotaSnapshot::default());
+        register(&runtime, 1, AccountAuthState::Active);
+        let old_authorization = runtime
+            .prepare_authorization("account-1", 1_000)
+            .await
+            .unwrap();
+        let authority = &runtime.account_state.executors["account-1"].token_authority;
+        let tokens = authority.tokens("account-1").await.unwrap();
+        let mut event = account_event(success, category);
+        event.account_token_revision = old_authorization.token_revision;
+        event.quota_snapshot = Some(QuotaSnapshot {
+            limit_reached: true,
+            updated_at_ms: Some(2_000),
+            ..QuotaSnapshot::default()
+        });
+        assert!(authority.remove("account-1"));
+        authority
+            .register("account-1", tokens, AccountAuthState::Active)
+            .await
+            .unwrap();
+        let original_health = if success {
+            CandidateHealth::Blocked
+        } else {
+            CandidateHealth::Healthy
+        };
+        runtime.set_candidate_health("account-1", original_health);
+        let original_quota =
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
+                .snapshot
+                .clone();
+        assert!(runtime.apply_usage_event(&event, 2_000).is_none());
+        assert_eq!(health(&runtime), original_health);
+        assert_eq!(
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"].snapshot,
+            original_quota
+        );
+    }
+}
+
+#[tokio::test]
+async fn reused_generation_headers_cannot_consume_a_new_logins_pending_quota() {
+    for readd in [false, true] {
+        let runtime = quota_runtime(QuotaSnapshot::default());
+        register(&runtime, 1, AccountAuthState::Active);
+        let old = runtime
+            .prepare_authorization("account-1", 1_000)
+            .await
+            .unwrap();
+        let authority = &runtime.account_state.executors["account-1"].token_authority;
+        let tokens = authority.tokens("account-1").await.unwrap();
+        if readd {
+            assert!(authority.remove("account-1"));
+        }
+        authority
+            .register("account-1", tokens, AccountAuthState::Active)
+            .await
+            .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
+        assert!(!runtime.observe_codex_quota_headers(
+            "account-1",
+            Some(1),
+            old.token_revision.as_ref(),
+            reqwest::StatusCode::OK,
+            &headers,
+            2_000
+        ));
+        assert!(runtime.observe_codex_quota_headers(
+            "account-1",
+            Some(1),
+            Some(&usage_revision(&runtime)),
+            reqwest::StatusCode::OK,
+            &headers,
+            2_000
+        ));
+        let mut late = account_event(true, None);
+        late.account_token_revision = old.token_revision;
+        assert!(runtime.apply_usage_event(&late, 2_001).is_none());
+        assert_eq!(
+            runtime
+                .take_passive_quota_snapshot("account-1", 2_001)
+                .unwrap()
+                .primary
+                .unwrap()
+                .available_basis_points,
+            Some(0)
+        );
+    }
+}
+
+#[test]
+fn unproven_oauth_results_do_not_change_account_state() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    register(&runtime, 1, AccountAuthState::Active);
+    runtime.set_candidate_health("account-1", CandidateHealth::Blocked);
+    for generation in [None, Some(1)] {
+        let mut event = account_event(true, None);
+        event.account_token_generation = generation;
+        assert!(runtime.apply_usage_event(&event, 2_000).is_none());
+        assert_eq!(health(&runtime), CandidateHealth::Blocked);
+    }
 }

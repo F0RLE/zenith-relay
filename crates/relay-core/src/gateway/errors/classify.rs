@@ -40,6 +40,12 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
+    if status == StatusCode::BAD_REQUEST && session_budget_exceeded(error_payload) {
+        return UpstreamErrorClassification {
+            category: error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED,
+            message: upstream_failure_message(error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED),
+        };
+    }
     if let Some(category) = siwc::category(status, error_payload) {
         return UpstreamErrorClassification {
             category,
@@ -143,6 +149,22 @@ pub(in crate::gateway) fn classify_upstream_error_value(
         };
     }
     classification
+}
+
+pub(super) fn session_budget_exceeded(error_payload: &Value) -> bool {
+    [
+        "/code",
+        "/error_code",
+        "/error/code",
+        "/detail/code",
+        "/body/code",
+        "/body/error/code",
+        "/response/code",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .find_map(|path| error_payload.pointer(path).and_then(Value::as_str))
+        == Some("budget_reached")
 }
 
 pub(crate) fn is_deactivated_workspace_value(error_payload: &Value) -> bool {

@@ -92,7 +92,7 @@ async fn host_membership_and_key_scope_update_revoke_pending_dispatch_together()
     let key = key(&runtime);
     let old_scope = key.scope_snapshot();
     let mut policy = PoolRoutingPolicy {
-        mode: PoolRoutingMode::InOrder,
+        mode: PoolRoutingMode::RoundRobin,
         members: vec![PoolRoutingMember {
             kind: PoolMemberKind::Source,
             id: "source-b".into(),

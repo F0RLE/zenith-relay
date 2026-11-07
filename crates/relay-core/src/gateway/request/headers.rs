@@ -1,35 +1,9 @@
 use crate::providers::chatgpt::valid_codex_client_version;
 use crate::runtime::DefaultServiceTier;
+use crate::transport::{is_connection_header, is_credential_header};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 
 pub(in crate::gateway) const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
-
-/// Credentials supplied by a Relay client authenticate only the local
-/// gateway. They must never be forwarded to a configured upstream source,
-/// which authenticates with its own stored credential.
-fn is_client_auth_header(header_name: &str) -> bool {
-    matches!(
-        header_name,
-        "authorization"
-            | "proxy-authorization"
-            | "cookie"
-            | "set-cookie"
-            | "x-auth-token"
-            | "x-api-token"
-    ) || header_name.ends_with("-api-key")
-}
-
-// Connection options are hop-by-hop even when they name an otherwise allowed
-// protocol extension. Never restore them on the next upstream connection.
-fn is_connection_header(client_headers: &HeaderMap, header_name: &str) -> bool {
-    client_headers.get_all("connection").iter().any(|value| {
-        value.to_str().is_ok_and(|value| {
-            value
-                .split(',')
-                .any(|option| option.trim().eq_ignore_ascii_case(header_name))
-        })
-    })
-}
 
 const FORWARDED_RESPONSES_HEADERS: &[&str] = &[
     "openai-beta",
@@ -283,7 +257,7 @@ pub(in crate::gateway) fn forwarded_messages_headers(client_headers: &HeaderMap)
             || header_name.starts_with("x-claude-")
             || header_name.starts_with("x-stainless-");
         if is_messages_metadata
-            && !is_client_auth_header(header_name)
+            && !is_credential_header(header_name)
             && !is_connection_header(client_headers, header_name)
             && (header_name != CLAUDE_CODE_SESSION_HEADER
                 || client_headers.get_all(header_name).iter().count() == 1)

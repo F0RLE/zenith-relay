@@ -6,13 +6,13 @@ use super::telemetry::{
 };
 use super::{ConnectProgress, ConnectScope};
 
-pub(super) enum TerminalAction {
+pub(in crate::gateway::websocket) enum TerminalAction {
     Continue,
     Break,
     Proceed,
 }
 
-pub(super) fn handle_initial_terminal(
+pub(in crate::gateway::websocket) fn handle_initial_terminal(
     initial_messages: &[UpstreamMessage],
     scope: &mut ConnectScope<'_>,
     progress: &mut ConnectProgress<'_>,
@@ -37,9 +37,12 @@ pub(super) fn handle_initial_terminal(
         _ => None,
     });
     let (status, category) = resolved_terminal_failure(&terminal);
-    if category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+    if matches!(
+        category,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+    ) {
         // Forward the original terminal frame and let the bridge settle it.
-        // A turn limit must not enter any history repair or candidate retry.
+        // Request-scoped limits must not enter history repair or candidate retry.
         return Ok(TerminalAction::Proceed);
     }
     if continue_after_item_prefix_repair(terminal_body, scope, progress) {

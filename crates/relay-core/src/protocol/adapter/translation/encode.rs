@@ -21,7 +21,7 @@ pub(super) fn request(
         request_fields.insert("model".into(), model.into());
         request_fields.insert("stream".into(), stream.into());
     }
-    let (history, system) = conversation(request, protocol, native_turns)?;
+    let (history, system) = conversation(request, protocol, native_turns, capabilities)?;
     request_fields.insert(
         match protocol {
             WireApi::Responses => "input",
@@ -79,10 +79,13 @@ fn conversation(
     request: &Request,
     protocol: WireApi,
     native_turns: &BTreeMap<usize, Vec<Value>>,
+    capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
     let mut history: Vec<Value> = Vec::new();
     let mut system = Vec::new();
     let mut assistant_started = false;
+    let mut last_conversation_role = None;
+    let mut inline_system_pending = false;
     let mut gemini_call_ids = BTreeMap::new();
     let portable_messages_end = request
         .messages
@@ -98,6 +101,13 @@ fn conversation(
                 })
         })
         .map(|index| index + usize::from(request.instructions.is_some()));
+    let interleaved_system = protocol == WireApi::Messages
+        && capabilities.is_some_and(|capability| capability.interleaved_system == Some(true));
+    let instruction_parameter = match request.origin {
+        Some(WireApi::Responses) => "input[].role",
+        Some(WireApi::Gemini) => "contents[].role",
+        _ => "messages[].role",
+    };
     for (position, message) in request
         .instructions
         .iter()
@@ -107,29 +117,43 @@ fn conversation(
         if matches!(message.role, Role::System | Role::Developer)
             && matches!(protocol, WireApi::Messages | WireApi::Gemini)
         {
-            if assistant_started {
-                // Initial client attachments can follow a user message, but
-                // later instructions must not govern earlier assistant turns.
+            let inline = interleaved_system && !history.is_empty();
+            let invalid_inline = inline
+                && (message.role != Role::System
+                    || message.blocks.is_empty()
+                    || last_conversation_role != Some(Role::User));
+            if invalid_inline || (!inline && assistant_started) {
+                // Hoisting an unrepresentable instruction changes earlier turns.
                 return Err(AdapterError::parameter_unsupported_for(
-                    match request.origin {
-                        Some(WireApi::Responses) => "input[].role",
-                        Some(WireApi::Gemini) => "contents[].role",
-                        _ => "messages[].role",
-                    },
+                    instruction_parameter,
                 ));
             }
+            let mut content = Vec::new();
             for block in &message.blocks {
                 let Block::Text(text) = block else {
                     return Err(AdapterError::parameter_unsupported());
                 };
-                system.push(if protocol == WireApi::Messages {
+                content.push(if protocol == WireApi::Messages {
                     json!({"type": "text", "text": text})
                 } else {
                     json!({"text": text})
                 });
             }
+            if inline {
+                history.push(json!({"role":"system", "content":content}));
+                inline_system_pending = true;
+            } else {
+                system.extend(content);
+            }
             continue;
         }
+        if inline_system_pending && message.role != Role::Assistant {
+            return Err(AdapterError::parameter_unsupported_for(
+                instruction_parameter,
+            ));
+        }
+        inline_system_pending = false;
+        last_conversation_role = Some(message.role);
         assistant_started |= message.role == Role::Assistant;
         let native = position
             .checked_sub(usize::from(request.instructions.is_some()))
@@ -410,17 +434,34 @@ fn write_reasoning(
     mode: MessagesReasoningMode,
     capabilities: Option<&crate::model_metadata::ModelCapabilities>,
 ) -> AdapterResult<()> {
-    let Some(reasoning) = &request.reasoning else {
+    if let Some(reasoning) = &request.reasoning {
+        parts::thinking(
+            request_fields,
+            generation,
+            reasoning,
+            protocol,
+            mode,
+            request.max_tokens.is_some(),
+            capabilities,
+        )?;
+    }
+    // An availability-only display request never enables a disabled or known
+    // non-reasoning model, nor creates an unsupported control for it.
+    if matches!(&request.reasoning, Some(Reasoning::Effort(effort)) if crate::catalog::canonical_reasoning_level(effort) == "none")
+        || capabilities.is_some_and(|capabilities| capabilities.reasoning == Some(false))
+    {
         return Ok(());
-    };
-    parts::thinking(
+    }
+    parts::thinking_display(
         request_fields,
         generation,
-        reasoning,
+        request.reasoning_display,
         protocol,
-        mode,
-        request.max_tokens.is_some(),
-        capabilities,
+        if request.origin == Some(WireApi::Gemini) {
+            "generationConfig.thinkingConfig.includeThoughts"
+        } else {
+            "thinking.display"
+        },
     )
 }
 

@@ -19,7 +19,7 @@ use super::candidate::{
     CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope, RuntimeCandidate,
 };
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
-use super::cooldown::CooldownReason;
+use super::cooldown::{CooldownMetadata, CooldownReason, ProviderBackoff, ProviderClock};
 use super::rotation::{
     AttemptId as RotationAttemptId, AttemptObservation as RotationAttemptObservation,
     AuthState as RotationAuthState, QuotaState as RotationQuotaState,
@@ -59,6 +59,8 @@ pub(crate) struct CooldownRequest<'a> {
     pub(crate) scope: &'a str,
     pub(crate) retry_at_ms: u64,
     pub(crate) reason: CooldownReason,
+    /// Explicit provider clock evidence, separate from inferred/policy delays.
+    pub(crate) provider_not_before_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +76,7 @@ pub struct Selection {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
-    cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
+    cooldown_metadata: BTreeMap<(String, String), CooldownMetadata>,
     shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
@@ -111,7 +113,7 @@ impl PoolScheduler {
         Self {
             candidates: BTreeMap::new(),
             quota_references: BTreeMap::new(),
-            cooldown_reasons: BTreeMap::new(),
+            cooldown_metadata: BTreeMap::new(),
             shared_rate_limits: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,

@@ -119,7 +119,7 @@ pub(super) async fn execute_prepared(
         return cooldown_error(
             retry_at,
             Some(&failure),
-            reason == crate::scheduler::CooldownReason::RateLimit,
+            reason.is_rate_limit(),
             last_failure_origin,
         );
     }

@@ -22,7 +22,7 @@ impl GatewayRuntime {
         }
         let model_id = crate::model_id_key(model);
         let mut windows = ModelContextWindows::default();
-        let manifests = crate::poison::mutex(&self.model_metadata.codex_manifests);
+        let manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
         for candidate_id in candidate_ids {
             let Some(manifest) = manifests.get(candidate_id) else {
                 continue;
@@ -60,11 +60,11 @@ impl GatewayRuntime {
     }
 
     pub fn set_official_codex_ultra_models(&self, models: BTreeMap<String, Value>) {
-        *crate::poison::mutex(&self.official_codex_ultra) = models;
+        *crate::poison::mutex(&self.provider_metadata.official_codex_ultra) = models;
     }
 
     pub(crate) fn official_codex_ultra_model(&self, model: &str) -> Option<Value> {
-        crate::poison::mutex(&self.official_codex_ultra)
+        crate::poison::mutex(&self.provider_metadata.official_codex_ultra)
             .get(&crate::model_id_key(model))
             .cloned()
     }
@@ -79,7 +79,7 @@ impl GatewayRuntime {
         if scheduler.candidate(candidate_id).is_none() {
             return;
         }
-        crate::poison::mutex(&self.model_metadata.codex_manifests).insert(
+        crate::poison::mutex(&self.provider_metadata.codex_manifests).insert(
             candidate_id.to_string(),
             CachedModelManifest { manifest_payload },
         );
@@ -89,7 +89,7 @@ impl GatewayRuntime {
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
     ) -> Vec<(String, Value)> {
-        let manifests = crate::poison::mutex(&self.model_metadata.codex_manifests);
+        let manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
         candidate_ids
             .into_iter()
             .filter_map(|candidate_id| {

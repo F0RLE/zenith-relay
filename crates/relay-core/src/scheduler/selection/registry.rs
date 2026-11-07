@@ -70,7 +70,7 @@ impl PoolScheduler {
             self.response_affinity.invalidate_candidate(&candidate_id);
         }
         self.retired_candidates.remove(&candidate_id);
-        self.cooldown_reasons.retain(|(id, model), _| {
+        self.cooldown_metadata.retain(|(id, model), _| {
             id != &candidate_id || candidate.cooldowns.contains_key(model)
         });
         self.candidates.insert(candidate.id.clone(), candidate);
@@ -116,7 +116,7 @@ impl PoolScheduler {
         self.candidate_permission_revisions.remove(candidate_id);
         self.capability_blocks
             .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
-        self.cooldown_reasons
+        self.cooldown_metadata
             .retain(|(cooled_candidate, _), _| cooled_candidate != candidate_id);
         if self
             .protected_candidate

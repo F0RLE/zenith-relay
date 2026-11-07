@@ -1,6 +1,6 @@
 use super::super::super::request::ServiceTierPolicy;
+use super::super::state::RetryState;
 use super::prelude::*;
-use super::recovery::adapter_error_response;
 use crate::protocol::BridgedCompaction;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
 use crate::scheduler::RoutingDiagnostics;
@@ -8,6 +8,7 @@ use crate::usage::{RequestPreparationDiagnostics, ToolUseDiagnostics};
 
 pub(super) enum RequestPrepare {
     Continue,
+    Reject(AdapterError),
     Respond(Response<Body>),
     Ready(Box<PreparedRequestAttempt>),
 }
@@ -50,7 +51,7 @@ pub(super) struct RequestPrepareInput<'a> {
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
     pub(super) client_transport: crate::UsageTransport,
-    pub(super) last_adapter_error: &'a mut Option<AdapterError>,
+    pub(super) retry: &'a mut RetryState,
 }
 
 /// Build the upstream body for one reserved route. An incompatible route
@@ -75,8 +76,11 @@ pub(super) fn prepare_request_attempt(
         diagnostics,
         client_context_id,
         client_transport,
-        last_adapter_error,
+        retry,
     } = request_prepare_input;
+    let RetryState {
+        last_adapter_error, ..
+    } = retry;
     let selected_service_tier = service_tier_policy.selected_tier();
     if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
         *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));
@@ -131,22 +135,17 @@ pub(super) fn prepare_request_attempt(
             error_codes::INVALID_REQUEST,
         ));
     }
-    let previous_continuation =
-        match load_prepared_continuation(runtime, &route, &key.id, request, request_id) {
-            Ok(previous_continuation) => previous_continuation,
-            Err(response) => return RequestPrepare::Respond(response),
-        };
-    let client_stream = stream;
-    let compaction_plan = match prepare_attempt_compaction(
-        client_wire_api,
-        &route,
-        request,
-        request_id,
-        last_adapter_error,
-    ) {
-        Ok(compaction_plan) => compaction_plan,
-        Err(step) => return step,
+    let previous_continuation = match load_prepared_continuation(runtime, &route, &key.id, request)
+    {
+        Ok(previous_continuation) => previous_continuation,
+        Err(error) => return RequestPrepare::Reject(error),
     };
+    let client_stream = stream;
+    let compaction_plan =
+        match prepare_attempt_compaction(client_wire_api, &route, request, last_adapter_error) {
+            Ok(compaction_plan) => compaction_plan,
+            Err(step) => return step,
+        };
     let should_summarize = compaction_plan.summarize();
     let upstream_stream = if should_summarize { false } else { stream };
     if should_summarize && client_stream {
@@ -177,9 +176,7 @@ pub(super) fn prepare_request_attempt(
         );
         runtime.apply_request_timezone(candidate_id, adapter_request.upstream_body_mut());
     }
-    if let Some(step) = apply_prepared_tool_policy(tool_policy, &mut adapter_request) {
-        return step;
-    }
+    tool_policy.capture_forwarded_catalog(adapter_request.upstream_body());
     let siwc_catalog_request = (siwc_route
         && !should_summarize
         && super::super::basis_points::discovery::native::eligible(
@@ -190,7 +187,7 @@ pub(super) fn prepare_request_attempt(
         if let Err(error) =
             crate::providers::chatgpt::prepare_siwc_request(adapter_request.upstream_body_mut())
         {
-            return RequestPrepare::Respond(super::adapter_error_response(error, Some(request_id)));
+            return RequestPrepare::Reject(error);
         }
         // SIWC skips Codex normalization, not the shared account cache-key policy.
         crate::gateway::request::apply_account_prompt_cache_key(
@@ -213,7 +210,7 @@ pub(super) fn prepare_request_attempt(
             Ok(original) => {
                 Some(original.with_agent_messages(runtime.agent_message_context(&key.id)))
             }
-            Err(error) => return stop_for_adapter_error(error, request_id, last_adapter_error),
+            Err(error) => return stop_for_adapter_error(error, last_adapter_error),
         }
     } else {
         None
@@ -311,14 +308,11 @@ fn load_prepared_continuation(
     route: &ExecutorRoute,
     key_id: &str,
     request: &Value,
-    request_id: &str,
-) -> Result<Option<crate::AdapterContinuationState>, Response<Body>> {
+) -> Result<Option<crate::AdapterContinuationState>, AdapterError> {
     if !route.adapter.uses_local_continuation_state() {
         return Ok(None);
     }
-    runtime
-        .load_adapter_continuation(route, key_id, request, now_ms())
-        .map_err(|error| adapter_error_response(error, Some(request_id)))
+    runtime.load_adapter_continuation(route, key_id, request, now_ms())
 }
 
 #[allow(clippy::result_large_err)]
@@ -326,7 +320,6 @@ fn prepare_attempt_compaction(
     client_wire_api: WireApi,
     route: &ExecutorRoute,
     request: &Value,
-    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> Result<BridgedCompaction, RequestPrepare> {
     let siwc_route = route.account_transport == AccountTransport::Siwc;
@@ -335,15 +328,8 @@ fn prepare_attempt_compaction(
     }
     match crate::protocol::prepare_bridged_compaction(request) {
         Ok(compaction) => Ok(compaction),
-        Err(error) if siwc_route => Err(RequestPrepare::Respond(adapter_error_response(
-            error,
-            Some(request_id),
-        ))),
-        Err(error) => Err(stop_for_adapter_error(
-            error,
-            request_id,
-            last_adapter_error,
-        )),
+        Err(error) if siwc_route => Err(RequestPrepare::Reject(error)),
+        Err(error) => Err(stop_for_adapter_error(error, last_adapter_error)),
     }
 }
 
@@ -379,11 +365,7 @@ fn translate_prepared_request(
     );
     match prepared {
         Ok(request) => Ok(request),
-        Err(error) => Err(stop_for_adapter_error(
-            error,
-            request_id,
-            last_adapter_error,
-        )),
+        Err(error) => Err(stop_for_adapter_error(error, last_adapter_error)),
     }
 }
 
@@ -407,22 +389,6 @@ fn normalize_prepared_account_body(
     );
 }
 
-fn apply_prepared_tool_policy(
-    tool_policy: &mut RequestToolPolicy,
-    adapter_request: &mut PreparedAdapterRequest,
-) -> Option<RequestPrepare> {
-    tool_policy
-        .apply_adapter(adapter_request)
-        .err()
-        .map(|message| {
-            RequestPrepare::Respond(api_error(
-                StatusCode::BAD_REQUEST,
-                message,
-                error_codes::INVALID_REQUEST,
-            ))
-        })
-}
-
 fn rewrite_basis_points_body(
     adapter_request: &mut PreparedAdapterRequest,
     schema_validation_ms: &mut Option<u64>,
@@ -441,13 +407,12 @@ fn rewrite_basis_points_body(
 
 fn stop_for_adapter_error(
     error: AdapterError,
-    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
 ) -> RequestPrepare {
     if error.is_route_incompatible() {
         *last_adapter_error = Some(error);
         RequestPrepare::Continue
     } else {
-        RequestPrepare::Respond(adapter_error_response(error, Some(request_id)))
+        RequestPrepare::Reject(error)
     }
 }

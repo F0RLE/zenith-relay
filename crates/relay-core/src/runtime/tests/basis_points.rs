@@ -42,6 +42,7 @@ struct AccessState {
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
     stream_generations: AtomicBool,
+    stream_content_type: Mutex<Option<String>>,
     stream_bodies: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_prefixes: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
@@ -86,6 +87,7 @@ impl AccessServer {
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
             stream_generations: AtomicBool::new(false),
+            stream_content_type: Mutex::new(Some("text/event-stream".into())),
             stream_bodies: Mutex::new(Default::default()),
             stream_prefixes: Mutex::new(Default::default()),
             stream_gates: Mutex::new(Default::default()),
@@ -274,9 +276,11 @@ fn generation_reply(
             }
             Ok(axum::body::Bytes::new())
         }));
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/event-stream")
+    let mut response = Response::builder().status(status);
+    if let Some(content_type) = crate::poison::mutex(&state.stream_content_type).as_deref() {
+        response = response.header("content-type", content_type);
+    }
+    response
         .body(axum::body::Body::from_stream(stream))
         .unwrap()
 }
@@ -314,7 +318,11 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
     let refresh = Arc::new(RecoveryRefresh {
         calls: AtomicUsize::new(0),
     });
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.refresh_adapter = refresh.clone();
     account
         .token_authority
@@ -355,7 +363,7 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
             .unwrap();
         assert_eq!(response.response.status(), status);
         assert_eq!(budget.dispatches(), 1);
-        let tokens = runtime.chatgpt_accounts["account-1"]
+        let tokens = runtime.account_state.executors["account-1"]
             .token_authority
             .tokens("account-1")
             .await
@@ -374,7 +382,11 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
 async fn runtime(server: &AccessServer) -> GatewayRuntime {
     let mut runtime = quota_runtime(QuotaSnapshot::default());
     runtime.diagnostics_enabled = || true;
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.oauth_client_kind = OAuthClientKind::ExcelBps;
     account.basis_points_url = server.responses_url.clone();
     account
@@ -393,7 +405,7 @@ async fn runtime(server: &AccessServer) -> GatewayRuntime {
 }
 
 fn expire_access(runtime: &GatewayRuntime) {
-    crate::poison::write(&runtime.chatgpt_accounts["account-1"].basis_points_access)
+    crate::poison::write(&runtime.account_state.executors["account-1"].basis_points_access)
         .as_mut()
         .unwrap()
         .expire();
@@ -521,7 +533,11 @@ async fn refreshed_free_id_token_keeps_bps_provider_access_checks() {
     let refresh = Arc::new(FreePlanRefresh {
         calls: AtomicUsize::new(0),
     });
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.refresh_adapter = refresh.clone();
     account
         .token_authority
@@ -709,7 +725,8 @@ async fn native_free_account_keeps_its_route_and_never_uses_bps_access() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let mut runtime = runtime(&server).await;
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("account-1")
         .unwrap()
         .oauth_client_kind = OAuthClientKind::Codex;
@@ -785,7 +802,7 @@ async fn token_replacement_invalidates_access_even_with_identical_visible_fields
         .await
         .unwrap();
     let key = runtime.authenticate_secret("local-secret").unwrap();
-    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
     let original = authority.tokens("account-1").await.unwrap();
     authority
         .register("account-1", original, AccountAuthState::Active)
@@ -823,7 +840,7 @@ async fn delayed_old_credential_response_cannot_publish_access_or_inventory() {
     )
     .await
     .unwrap();
-    runtime.chatgpt_accounts["account-1"]
+    runtime.account_state.executors["account-1"]
         .token_authority
         .register(
             "account-1",

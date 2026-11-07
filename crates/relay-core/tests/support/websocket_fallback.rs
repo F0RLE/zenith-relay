@@ -1,5 +1,104 @@
 use super::*;
 
+#[path = "websocket_fallback/recovery.rs"]
+mod recovery;
+
+#[tokio::test]
+async fn http_fallback_rejects_interrupt_without_cancelling_generation() {
+    for stream_id in [None, Some("main")] {
+        let headers_release = Arc::new(Notify::new());
+        let body_release = Arc::new(Notify::new());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let upstream = spawn(Router::new().route(
+            "/v1/responses",
+            post({
+                let headers_release = headers_release.clone();
+                let body_release = body_release.clone();
+                let requests = requests.clone();
+                move || {
+                    let headers_release = headers_release.clone();
+                    let body_release = body_release.clone();
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        headers_release.notified().await;
+                        held_stream_response(body_release)
+                    }
+                }
+            }),
+        ))
+        .await;
+        let (gateway, events, _, _) = spawn_mixed_gateway(
+            vec![source("interrupt-source", &upstream, "synthetic-key", 10)],
+            vec![],
+            vec![mixed_key(None, None)],
+            Arc::new(TokenAuthority::new(4).unwrap()),
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap();
+        let mut socket = reqwest::Client::new()
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        let mut create = json!({"type":"response.create","model":MODEL,"input":"synthetic input"});
+        let mut interrupt = json!({"type":"response.interrupt","response_id":"held-response","mode":"discard_partial_items"});
+        if let Some(stream_id) = stream_id {
+            create["stream_id"] = json!(stream_id);
+            interrupt["stream_id"] = json!(stream_id);
+        }
+        socket
+            .send(ClientWsMessage::Text(create.to_string()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while requests.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("HTTP fallback did not dispatch");
+        for after_headers in [false, true] {
+            let control = if after_headers {
+                ClientWsMessage::Binary(serde_json::to_vec(&interrupt).unwrap().into())
+            } else {
+                ClientWsMessage::Text(interrupt.to_string())
+            };
+            socket.send(control).await.unwrap();
+            let failed = receive_websocket_json(&mut socket).await;
+            assert_eq!(failed["type"], "response.interrupt.failed");
+            assert_eq!(failed["response_id"], "held-response");
+            assert_eq!(failed.get("stream_id").and_then(Value::as_str), stream_id);
+            assert_eq!(runtime.candidate_runtime_order()[0].in_flight, 1);
+            assert!(events.lock().unwrap().is_empty());
+            if !after_headers {
+                headers_release.notify_one();
+                assert_eq!(
+                    receive_websocket_json(&mut socket).await["type"],
+                    "response.output_text.delta"
+                );
+            }
+        }
+        body_release.notify_one();
+        let terminal = receive_websocket_completion(&mut socket).await;
+        assert_eq!(terminal["response"]["id"], "held-response");
+        assert_eq!(terminal["response"]["usage"]["input_tokens"], 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].success);
+        assert_eq!(events[0].input_tokens, Some(1));
+        assert_eq!(events[0].output_tokens, Some(1));
+        assert_eq!(runtime.candidate_runtime_order()[0].in_flight, 0);
+    }
+}
+
 #[tokio::test]
 async fn slow_optional_handshake_falls_back_once_without_disabling_native_websocket() {
     check_slow_handshake_fallback(1, &["safe-http-fallback", "native-after-slow"], 2).await;

@@ -35,6 +35,7 @@ const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 pub(super) type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
 mod basis_points;
+pub(in crate::gateway) use basis_points::guard_progress;
 mod bridge;
 mod completion;
 mod diagnostics;
@@ -151,7 +152,8 @@ impl StreamExecution {
             || discovery.is_some())
         .then(|| {
             let mut capture =
-                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone());
+                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone())
+                    .with_observations(started);
             if basis_points_request.is_some() || discovery.is_some() {
                 capture = capture.with_timing(started);
             }

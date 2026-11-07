@@ -8,6 +8,7 @@
 use super::super::super::errors::AttemptFailure;
 use crate::GatewayRuntime;
 use crate::runtime::{AuthorizationIdentityPolicy, AuthorizationIncarnation};
+use crate::usage::AttachmentPreparationDiagnostics;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, stream};
 use reqwest::StatusCode;
@@ -15,7 +16,9 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Instant;
 
 const MAX_UPLOAD_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_FILE_ID_LEN: usize = 512;
@@ -87,6 +90,7 @@ pub(in crate::gateway::execution) async fn attach_input_images(
     responses_url: &url::Url,
     headers: &HeaderMap,
     request_fields: &mut Value,
+    mut diagnostics: Option<&mut AttachmentPreparationDiagnostics>,
 ) -> Result<Option<AuthorizationIncarnation>, AttachmentFailure> {
     // Work on the already prepared body. Encoding inline images here and
     // reparsing them both for uploads and discovery needlessly copies history.
@@ -99,11 +103,17 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         &endpoint,
         candidate_id,
         prepare_attachment_credential(runtime, candidate_id),
+        diagnostics.as_deref_mut(),
     )
     .await?;
+    let resolve_started = diagnostics.as_ref().map(|_| Instant::now());
+    let uploaded_images = AtomicU64::new(0);
+    let uploaded_bytes = AtomicU64::new(0);
     resolve_input_images(request_fields, jobs, |image| {
         let endpoint = &endpoint;
         let credential = credential.as_ref();
+        let uploaded_images = &uploaded_images;
+        let uploaded_bytes = &uploaded_bytes;
         async move {
             let credential = credential.ok_or_else(upload_failed)?;
             let key = attachment_key(
@@ -113,8 +123,8 @@ pub(in crate::gateway::execution) async fn attach_input_images(
                 image.media_type,
                 &image.bytes,
             );
-            let file_id = cached_upload(key, || {
-                upload_image(
+            let file_id = cached_upload(key, || async {
+                let file_id = upload_image(
                     runtime,
                     candidate_id,
                     endpoint,
@@ -122,6 +132,12 @@ pub(in crate::gateway::execution) async fn attach_input_images(
                     &image,
                     &credential.owner,
                 )
+                .await?;
+                if resolve_started.is_some() {
+                    uploaded_images.fetch_add(1, Ordering::Relaxed);
+                    uploaded_bytes.fetch_add(image.bytes.len() as u64, Ordering::Relaxed);
+                }
+                Ok(file_id)
             })
             .await?;
             // Only a validated, successfully uploaded image can seed this shortcut.
@@ -133,6 +149,16 @@ pub(in crate::gateway::execution) async fn attach_input_images(
         }
     })
     .await?;
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.resolve_ms =
+            resolve_started.map_or(0, |start| start.elapsed().as_millis() as u64);
+        diagnostics.uploaded_images = uploaded_images.load(Ordering::Relaxed);
+        diagnostics.uploaded_bytes = uploaded_bytes.load(Ordering::Relaxed);
+        diagnostics.reused_images = diagnostics
+            .image_count
+            .saturating_sub(diagnostics.file_references)
+            .saturating_sub(diagnostics.uploaded_images);
+    }
     Ok(credential.map(|credential| credential.owner))
 }
 
@@ -209,6 +235,7 @@ async fn stage_input_images_with_credentials(
     endpoint: &str,
     candidate_id: &str,
     credential: impl std::future::Future<Output = Result<AttachmentCredential, AttachmentFailure>>,
+    mut diagnostics: Option<&mut AttachmentPreparationDiagnostics>,
 ) -> Result<(Vec<LocatedJob>, Option<AttachmentCredential>), AttachmentFailure> {
     // Existing file IDs are still validated and normalized, but do not use
     // the upload cache or require a credential lookup. Inline cache hits must
@@ -216,16 +243,30 @@ async fn stage_input_images_with_credentials(
     let needs_credential = input_image_parts(request_fields)
         .any(|(_, _, fields)| fields.get("image_url").is_some_and(|url| !url.is_null()));
     let credential = if needs_credential {
-        Some(credential.await?)
+        let started = diagnostics.as_ref().map(|_| Instant::now());
+        let credential = credential.await?;
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.credential_ms = started.map(|start| start.elapsed().as_millis() as u64);
+        }
+        Some(credential)
     } else {
         None
     };
+    let staging_started = diagnostics.as_ref().map(|_| Instant::now());
     let scope = credential.as_ref().map(|credential| AttachmentScope {
         endpoint,
         candidate_id,
         credential: &credential.fingerprint,
     });
     let jobs = stage_input_images_with_cache(request_fields, scope.as_ref())?;
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.image_count = jobs.len() as u64;
+        diagnostics.file_references = input_image_parts(request_fields)
+            .filter(|(_, _, fields)| fields.get("file_id").is_some_and(Value::is_string))
+            .count() as u64;
+        diagnostics.staging_ms =
+            staging_started.map_or(0, |start| start.elapsed().as_millis() as u64);
+    }
     Ok((jobs, credential))
 }
 

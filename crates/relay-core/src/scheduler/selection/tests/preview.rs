@@ -92,7 +92,6 @@ fn eager_preview(mut scheduler: PoolScheduler, now_ms: u64) -> Vec<String> {
 fn lazy_preview_matches_eager_admission_across_modes_and_live_state_changes() {
     for mode in [
         PoolRoutingMode::Automatic,
-        PoolRoutingMode::InOrder,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,
@@ -248,7 +247,6 @@ fn one_sync_preview_matches_per_route_sync_after_member_changes() {
 fn preview_matches_dispatch_in_every_mode_without_advancing_rotation() {
     for mode in [
         PoolRoutingMode::Automatic,
-        PoolRoutingMode::InOrder,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,
@@ -271,7 +269,6 @@ fn preview_matches_dispatch_in_every_mode_without_advancing_rotation() {
 fn display_preference_matches_fallback_selection_in_every_mode() {
     for mode in [
         PoolRoutingMode::Automatic,
-        PoolRoutingMode::InOrder,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,
@@ -380,7 +377,7 @@ fn display_preference_omits_blocked_members_and_stops_at_ambiguous_fallbacks() {
 
 #[test]
 fn preview_keeps_a_busy_primary_until_its_member_capacity_is_full() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let lease = scheduler
         .reserve_request("account", "gpt-5", 100, false)
         .unwrap();
@@ -411,7 +408,7 @@ fn preview_keeps_a_busy_primary_until_its_member_capacity_is_full() {
 
 #[test]
 fn preview_does_not_guess_a_single_candidate_for_different_model_routes() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     scheduler
         .candidates
         .get_mut("api-b")
@@ -441,7 +438,7 @@ fn preview_does_not_guess_a_single_candidate_for_different_model_routes() {
 
 #[test]
 fn preview_agrees_across_bindings_of_the_same_member_but_not_other_providers() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     scheduler.remove("account");
     let mut chat = candidate("api-a::chat");
     chat.source_id = "api-a".into();

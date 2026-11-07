@@ -7,6 +7,7 @@ mod capacity;
 mod live_order;
 mod policy;
 mod preview;
+mod provider_backoff;
 mod rate_limits;
 mod recovery;
 mod rotation;

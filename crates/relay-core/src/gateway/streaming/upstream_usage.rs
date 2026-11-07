@@ -9,6 +9,7 @@ pub(super) struct UpstreamUsage {
     rejection: Option<&'static str>,
     finished: bool,
     timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
+    observed_started: Option<Instant>,
 }
 
 impl UpstreamUsage {
@@ -21,14 +22,21 @@ impl UpstreamUsage {
             rejection: None,
             finished: false,
             timing: None,
+            observed_started: None,
         }
     }
 
     pub(super) fn with_timing(mut self, started: Instant) -> Self {
+        self.observed_started = Some(started);
         self.timing = Some((
             started,
             super::super::response::BufferedResponseTiming::default(),
         ));
+        self
+    }
+
+    pub(super) fn with_observations(mut self, started: Instant) -> Self {
+        self.observed_started = Some(started);
         self
     }
 
@@ -49,6 +57,16 @@ impl UpstreamUsage {
         self.event.applied_service_tier = None;
         if let Some(routing) = self.event.routing.as_mut() {
             routing.upstream_response_model = None;
+            if let Some(timing) = routing
+                .transport
+                .as_mut()
+                .and_then(|transport| transport.stream_response.as_mut())
+            {
+                timing.upstream_reasoning_first_ms = None;
+                timing.upstream_text_first_ms = None;
+                timing.upstream_tool_first_ms = None;
+                timing.upstream_tool_first_complete_ms = None;
+            }
             if let Some(cache) = routing.cache_context.as_mut() {
                 cache.provider = None;
                 cache.provider_response_id = None;
@@ -102,7 +120,10 @@ impl UpstreamUsage {
     }
 
     pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let bytes = if self.pending.is_empty() && self.timing.is_none() {
+        let bytes = if self.pending.is_empty()
+            && self.timing.is_none()
+            && self.observed_started.is_none()
+        {
             skip_aligned_response_deltas(bytes)
         } else {
             bytes
@@ -139,6 +160,23 @@ impl UpstreamUsage {
             return;
         }
         if let Some(delta) = super::fast_delta::fast_response_delta(frame) {
+            if let Some(started) = self.observed_started
+                && let Some(transport) = self
+                    .event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+            {
+                transport
+                    .stream_response
+                    .get_or_insert_default()
+                    .observe_delta(
+                        delta.output_text,
+                        delta.tool_arguments,
+                        delta.nonempty_text,
+                        started.elapsed().as_millis() as u64,
+                    );
+            }
             if delta.nonempty_text
                 && let Some((started, timing)) = &mut self.timing
             {
@@ -154,6 +192,18 @@ impl UpstreamUsage {
         if let Some(payload) = parsed.event_payload.as_ref() {
             self.event.observe_response_metadata(payload);
             self.event.tool_use.observe_provider_usage(payload);
+            if let Some(started) = self.observed_started
+                && let Some(transport) = self
+                    .event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+            {
+                let timing = transport.stream_response.get_or_insert_default();
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                timing.observe_reasoning(payload, elapsed_ms);
+                timing.observe_output(payload, elapsed_ms);
+            }
         }
         if parsed.outcome.is_some() {
             // Gemini can report final candidate status before a separate usage chunk.
@@ -201,6 +251,18 @@ impl UpstreamUsage {
             target
                 .upstream_response_model
                 .clone_from(&source.upstream_response_model);
+            if self.observed_started.is_some()
+                && let (Some(source), Some(target)) =
+                    (source.transport.as_ref(), target.transport.as_mut())
+                && (source.stream_response.is_some() || target.stream_response.is_some())
+            {
+                let source = source.stream_response.clone().unwrap_or_default();
+                let target = target.stream_response.get_or_insert_default();
+                target.upstream_reasoning_first_ms = source.upstream_reasoning_first_ms;
+                target.upstream_text_first_ms = source.upstream_text_first_ms;
+                target.upstream_tool_first_ms = source.upstream_tool_first_ms;
+                target.upstream_tool_first_complete_ms = source.upstream_tool_first_complete_ms;
+            }
             if let (Some(source), Some(target)) =
                 (source.cache_context.as_ref(), target.cache_context.as_mut())
             {
@@ -608,6 +670,48 @@ mod tests {
         assert_eq!(event.output_tokens, None);
         assert_eq!(event.tool_use.upstream_tool_call_count, None);
         assert_eq!(event.tool_use.tool_calls_ready_ms, None);
+    }
+
+    #[test]
+    fn native_tool_boundaries_survive_fast_deltas_and_reset_without_client_readiness() {
+        let mut initial = crate::gateway::test_support::test_usage_event();
+        initial.routing = Some(
+            serde_json::from_value(json!({
+                "reason":"only_eligible", "eligibleCandidates":1,
+                "inFlightBefore":0, "dispatchesBefore":0,
+                "transport":{"upstream":"http", "mode":"basis_points"}
+            }))
+            .unwrap(),
+        );
+        let mut capture = UpstreamUsage::new(initial.clone(), None)
+            .with_observations(Instant::now() - Duration::from_millis(100));
+        capture.observe(
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+        );
+        capture.observe(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        );
+        capture.observe(b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_test\",\"call_id\":\"call_test\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n");
+        let mut event = initial;
+        capture.apply_to(&mut event);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        let timing = transport.stream_response.as_ref().unwrap();
+        assert!(timing.upstream_tool_first_ms.is_some_and(|ms| ms >= 100));
+        assert!(timing.upstream_text_first_ms.is_some_and(|ms| ms >= 100));
+        assert!(
+            timing
+                .upstream_tool_first_complete_ms
+                .is_some_and(|complete| complete >= timing.upstream_tool_first_ms.unwrap())
+        );
+        assert_eq!(event.tool_use.tool_calls_ready_ms, None);
+        assert_eq!(transport.client_first_output_ms, None);
+        capture.reset_generation();
+        capture.apply_to(&mut event);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        let timing = transport.stream_response.as_ref().unwrap();
+        assert_eq!(timing.upstream_text_first_ms, None);
+        assert_eq!(timing.upstream_tool_first_ms, None);
+        assert_eq!(timing.upstream_tool_first_complete_ms, None);
     }
 
     #[test]

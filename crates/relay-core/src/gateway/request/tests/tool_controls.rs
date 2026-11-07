@@ -12,22 +12,20 @@ fn tool_policy_snapshot_survives_hot_updates_and_retry_clones() {
     let snapshot = RequestToolPolicy::new(&runtime, &original);
     runtime.set_tool_policy(crate::ToolPolicy::default());
     for mut attempt in [snapshot.clone(), snapshot] {
-        let mut body = original.clone();
-        attempt.apply(&mut body).unwrap();
+        let body = original.clone();
+        attempt.capture_forwarded_catalog(&body);
         assert_eq!(body["tools"].as_array().unwrap().len(), 2);
         assert_eq!(attempt.diagnostics.client_tool_count, 2);
         assert_eq!(attempt.diagnostics.filtered_tool_count, 0);
-        attempt.apply(&mut body).unwrap();
+        attempt.capture_forwarded_catalog(&body);
         assert_eq!(attempt.diagnostics.filtered_tool_count, 0);
         assert_eq!(
             attempt.diagnostics.policy_outcome,
             Some(crate::ToolPolicyOutcome::PassThrough)
         );
     }
-    let mut normalized_body = original.clone();
-    RequestToolPolicy::new(&runtime, &original)
-        .apply(&mut normalized_body)
-        .unwrap();
+    let normalized_body = original.clone();
+    RequestToolPolicy::new(&runtime, &original).capture_forwarded_catalog(&normalized_body);
     assert_eq!(normalized_body, original);
 }
 #[test]
@@ -37,7 +35,7 @@ fn saved_automatic_policy_does_not_defer_native_responses() {
     let mut policy = RequestToolPolicy::new(&runtime, &original);
 
     let body = original.clone();
-    policy.apply_value(&body).unwrap();
+    policy.capture_forwarded_catalog(&body);
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
     assert_eq!(
@@ -46,13 +44,38 @@ fn saved_automatic_policy_does_not_defer_native_responses() {
     );
     assert!(!policy.diagnostics.policy_fallback);
 }
+
+#[test]
+fn catalog_recapture_reports_each_attempt_without_reviving_name_filtering() {
+    let runtime = automatic_tool_policy_test_runtime();
+    let original = two_function_tools();
+    let mut policy = RequestToolPolicy::new(&runtime, &original);
+    for (body, expected_count) in [(json!({"tools": []}), 0), (original.clone(), 2)] {
+        let before = body.clone();
+        policy.capture_forwarded_catalog(&body);
+        assert_eq!(body, before);
+        assert_eq!(policy.diagnostics.client_tool_count, 2);
+        assert_eq!(policy.diagnostics.forwarded_tool_count, expected_count);
+        assert_eq!(policy.diagnostics.filtered_tool_count, 0);
+        assert_eq!(
+            policy.diagnostics.policy_mode,
+            Some(crate::ToolPolicyMode::PassThrough)
+        );
+        assert_eq!(
+            policy.diagnostics.policy_outcome,
+            Some(crate::ToolPolicyOutcome::PassThrough)
+        );
+        assert!(!policy.diagnostics.policy_fallback);
+    }
+}
+
 #[test]
 fn direct_non_responses_account_endpoint_keeps_the_catalog_unchanged() {
     let runtime = automatic_tool_policy_test_runtime();
     let original = two_function_tools();
     let mut policy = RequestToolPolicy::new(&runtime, &original);
     let body = original.clone();
-    policy.apply_value(&body).unwrap();
+    policy.capture_forwarded_catalog(&body);
     assert_eq!(body, original);
     assert!(!policy.diagnostics.deferred_tool_search);
 }
@@ -79,7 +102,7 @@ fn tool_diagnostics_count_codex_tool_definitions_without_names() {
     let diagnostics = tool_use_diagnostics(&request, true);
     let runtime = capability_test_runtime(&["synthetic"], GatewayRuntimeOptions::default());
     let mut policy = RequestToolPolicy::new(&runtime, &request);
-    policy.apply(&mut request.clone()).unwrap();
+    policy.capture_forwarded_catalog(&request);
     let forwarded = policy.diagnostics;
 
     assert_eq!(diagnostics.client_tool_count, 5);
@@ -212,8 +235,8 @@ fn detailed_capture_follows_debug_setting_without_changing_admitted_requests() {
     ENABLED.store(true, Ordering::Relaxed);
     let mut debug = RequestToolPolicy::new(&runtime, &request);
     for (policy, enabled) in [(&mut admitted, false), (&mut debug, true)] {
-        let mut upstream = request.clone();
-        policy.apply(&mut upstream).unwrap();
+        let upstream = request.clone();
+        policy.capture_forwarded_catalog(&upstream);
         policy.diagnostics.capture_upstream_context(&upstream);
         assert_eq!(upstream, request);
         assert_eq!(policy.diagnostics.client_tool_count, 1);

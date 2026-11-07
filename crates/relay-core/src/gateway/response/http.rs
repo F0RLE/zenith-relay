@@ -2,6 +2,7 @@ use super::super::errors::RateLimitBodyHint;
 use super::emit_usage;
 use crate::error_codes;
 use crate::runtime::ExecutorRoute;
+use crate::transport::{is_connection_header, is_credential_header, single_header};
 use crate::{ErrorOrigin, GatewayRuntime, UsageEvent};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
@@ -158,11 +159,11 @@ fn copy_safe_upstream_headers(
     upstream_headers: &reqwest::header::HeaderMap,
     include_content_type: bool,
 ) {
-    for (header_name, header_value) in upstream_headers {
-        let header_name = header_name.as_str();
-        let allowed = (include_content_type && header_name == CONTENT_TYPE.as_str())
+    for header_name in upstream_headers.keys() {
+        let name = header_name.as_str();
+        let allowed = (include_content_type && name == CONTENT_TYPE.as_str())
             || matches!(
-                header_name,
+                name,
                 "cache-control"
                     | "retry-after"
                     | "request-id"
@@ -170,15 +171,25 @@ fn copy_safe_upstream_headers(
                     | "x-should-retry"
                     | "openai-processing-ms"
             )
-            || header_name.starts_with("anthropic-ratelimit-")
-            || header_name.starts_with("x-ratelimit-");
-        if allowed {
-            target.insert(
-                axum::http::HeaderName::from_bytes(header_name.as_bytes())
-                    .expect("upstream header name is valid"),
-                HeaderValue::from_bytes(header_value.as_bytes())
-                    .expect("upstream header value is valid"),
-            );
+            || name.starts_with("anthropic-ratelimit-")
+            || name.starts_with("x-ratelimit-");
+        if !allowed || is_credential_header(name) || is_connection_header(upstream_headers, name) {
+            continue;
+        }
+        let singleton = matches!(
+            name,
+            "content-type"
+                | "retry-after"
+                | "request-id"
+                | "x-request-id"
+                | "x-should-retry"
+                | "openai-processing-ms"
+        );
+        if singleton && single_header(upstream_headers, name).is_none() {
+            continue;
+        }
+        for value in upstream_headers.get_all(header_name) {
+            target.append(header_name.clone(), value.clone());
         }
     }
 }

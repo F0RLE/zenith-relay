@@ -55,7 +55,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> crate::AdapterResult<crate::AdapterContinuationState> {
-        crate::poison::mutex(&self.adapter_continuation_store).get(
+        crate::poison::mutex(&self.continuation_state.adapters).get(
             local_key_id,
             response_id,
             candidate_id,
@@ -77,7 +77,7 @@ impl GatewayRuntime {
             return;
         }
         let storage_key = response.continuation.storage_key(&response.response_id);
-        let stored = crate::poison::mutex(&self.adapter_continuation_store).insert_if_stored(
+        let stored = crate::poison::mutex(&self.continuation_state.adapters).insert_if_stored(
             local_key_id,
             storage_key,
             candidate_id,
@@ -96,7 +96,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> Option<NativeResponsesReplayState> {
-        crate::poison::mutex(&self.native_responses_replay_store).get(
+        crate::poison::mutex(&self.continuation_state.native_responses).get(
             local_key_id,
             response_id,
             candidate_id,
@@ -153,7 +153,7 @@ impl GatewayRuntime {
         {
             return;
         }
-        crate::poison::mutex(&self.native_responses_replay_store).insert(
+        crate::poison::mutex(&self.continuation_state.native_responses).insert(
             local_key_id,
             &response_id,
             candidate_id,
@@ -350,7 +350,7 @@ impl GatewayRuntime {
             let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
             if invalidated {
                 let route_key = format!("route:{key}");
-                crate::poison::mutex(&self.response_route_affinity).invalidate(&route_key);
+                crate::poison::mutex(&self.continuation_state.routes).invalidate(&route_key);
                 if let Some(store) = self.response_affinity_store.as_ref() {
                     let _ = store.delete(key);
                     let _ = store.delete(&route_key);

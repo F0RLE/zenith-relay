@@ -497,4 +497,27 @@ async fn responses_websocket_fallback_locks_the_first_later_stream_id() {
             .contains("only one WebSocket stream_id is supported per connection")
     );
     assert_eq!(state.requests.lock().unwrap().len(), 2);
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create", "stream_id":"stream-a", "model":"gpt-test", "input":"terminal-fragmented"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let ClientWsMessage::Text(text) = message {
+            let event: Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(event["type"], "error");
+            if event["type"] == "response.completed" {
+                assert_eq!(event["stream_id"], "stream-a");
+                break;
+            }
+        }
+    }
+    assert_eq!(state.requests.lock().unwrap().len(), 3);
 }

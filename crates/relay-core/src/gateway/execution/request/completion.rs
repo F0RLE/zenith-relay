@@ -1,3 +1,4 @@
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::prelude::*;
 use super::recovery::mark_adapter_failure;
 use super::recovery::{
@@ -33,17 +34,11 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
     pub(super) has_previous_response_id: bool,
     pub(super) basis_points_request: &'a Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) tried: &'a mut HashSet<String>,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
@@ -76,17 +71,11 @@ pub(super) async fn complete_buffered_response(
         client_wire_api,
         request,
         adapter_is_passthrough,
-        repairs,
-        requires_affinity_owner,
-        has_unpaired_tool_output,
-        last_failure,
-        last_failure_origin,
-        last_preserved_upstream_error,
+        state,
         has_previous_response_id,
         basis_points_request,
         stream,
         adapter_request,
-        tried,
         selected_error_origin,
         response_affinity_hit,
         prompt_affinity_key,
@@ -94,6 +83,23 @@ pub(super) async fn complete_buffered_response(
         client_stream,
         forwarded_headers,
     } = input;
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                requires_affinity_owner,
+                has_unpaired_tool_output,
+                ..
+            },
+    } = state;
     let native_replay_attempted = &mut repairs.native_replay;
     let usage = |success, http_status, error_category| {
         usage_event(
@@ -543,6 +549,11 @@ async fn read_completed_body(
                         )));
                     }
                 }
+            }
+            if failure_category_is_request_terminal(failure.category)
+                && let Some(routing) = event.routing.as_mut()
+            {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
             }
             apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);

@@ -2,6 +2,15 @@ use crate::{Error, Result};
 use futures_util::StreamExt;
 use std::time::Duration;
 
+mod headers;
+
+pub(crate) use headers::{
+    is_connection_header, is_credential_header, retry_after_ms, single_header,
+};
+
+#[cfg(test)]
+mod header_tests;
+
 pub(crate) const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Optional native HTTP deadline from connect through response headers.
@@ -173,27 +182,6 @@ pub(crate) async fn collect_with_progress_limit(
             });
         }
     }
-}
-
-/// A relative floor measured at receipt. Consumers must preserve the floor
-/// when converting it to a monotonic deadline; do not cap a long provider hint
-/// to a shorter polling interval.
-pub(crate) fn retry_after_ms(
-    headers: &reqwest::header::HeaderMap,
-    now: std::time::SystemTime,
-) -> Option<u64> {
-    let retry_after_header = headers.get("retry-after")?.to_str().ok()?.trim();
-    if let Ok(seconds) = retry_after_header.parse::<u64>() {
-        return Some(seconds.saturating_mul(1_000));
-    }
-    Some(
-        httpdate::parse_http_date(retry_after_header)
-            .ok()?
-            .duration_since(now)
-            .ok()?
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64,
-    )
 }
 
 pub(crate) async fn collect(response: reqwest::Response) -> Result<Vec<u8>> {

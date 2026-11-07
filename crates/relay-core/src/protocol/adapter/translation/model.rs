@@ -84,6 +84,12 @@ pub(super) enum Reasoning {
     DynamicBudget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReasoningDisplay {
+    Summarized,
+    Omitted,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Request {
     pub(super) origin: Option<WireApi>,
@@ -106,6 +112,7 @@ pub(super) struct Request {
     pub(super) stop: Vec<String>,
     pub(super) output_format: Option<OutputFormat>,
     pub(super) reasoning: Option<Reasoning>,
+    pub(super) reasoning_display: Option<ReasoningDisplay>,
 }
 
 #[derive(Clone, Debug, Default)]

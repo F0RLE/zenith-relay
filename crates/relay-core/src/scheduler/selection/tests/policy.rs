@@ -94,7 +94,7 @@ fn strategy_changes_keep_active_owners_and_existing_cooldowns() {
 
 #[test]
 fn saved_order_skips_unavailable_accounts_and_falls_back_between_apis() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     assert_eq!(dispatch(&mut scheduler), "account");
     scheduler.candidates.get_mut("account").unwrap().health = CandidateHealth::ReauthRequired;
     assert_eq!(dispatch(&mut scheduler), "api-a");
@@ -113,7 +113,7 @@ fn saved_order_skips_unavailable_accounts_and_falls_back_between_apis() {
 
 #[test]
 fn saved_order_can_place_apis_before_accounts_without_type_gates() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy.members.rotate_left(1);
     scheduler.set_pool_routing(policy).unwrap();
@@ -136,7 +136,7 @@ fn saved_order_can_place_apis_before_accounts_without_type_gates() {
 }
 
 #[test]
-fn legacy_round_robin_cycles_saved_members_and_ignores_weights() {
+fn round_robin_cycles_saved_members_and_ignores_weights() {
     let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let mut alias = candidate("api-a::chat");
     alias.source_id = "api-a".into();
@@ -163,7 +163,7 @@ fn legacy_round_robin_cycles_saved_members_and_ignores_weights() {
 
 #[test]
 fn previews_do_not_advance_manual_cursor_and_hot_updates_keep_active_leases() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     for _ in 0..10 {
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
@@ -176,7 +176,7 @@ fn previews_do_not_advance_manual_cursor_and_hot_updates_keep_active_leases() {
     assert_eq!(dispatch(&mut scheduler), "api-a");
     assert!(scheduler.reserve_for("api-a", "gpt-5", 100));
     let mut policy = scheduler.pool_routing.clone().unwrap();
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     policy.members.rotate_left(1);
     policy.members[0].max_concurrency = 1;
     scheduler.set_pool_routing(policy).unwrap();
@@ -188,7 +188,7 @@ fn previews_do_not_advance_manual_cursor_and_hot_updates_keep_active_leases() {
 
 #[test]
 fn member_capacity_covers_protocols_and_lanes_and_survives_removal() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     let mut alias = candidate("api-a::chat");
     alias.source_id = "api-a".into();
     alias.models.insert("gpt-image-2".into());
@@ -211,7 +211,7 @@ fn member_capacity_covers_protocols_and_lanes_and_survives_removal() {
 
 #[test]
 fn ownership_overrides_rotation_but_soft_affinity_does_not_override_order() {
-    let mut scheduler = mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = mixed(PoolRoutingMode::RoundRobin);
     scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
     scheduler.bind_response_affinity("response", "api-b", 100);
     let request = SelectionRequest {

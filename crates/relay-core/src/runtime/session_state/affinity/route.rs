@@ -50,7 +50,7 @@ impl GatewayRuntime {
             .filter(|id| !id.trim().is_empty() && id.len() <= 256)
             .take(1_024)
             .collect();
-        let mut ownership = crate::poison::mutex(&self.response_route_affinity);
+        let mut ownership = crate::poison::mutex(&self.continuation_state.routes);
         if calls.is_empty() && ownership.get(&scope, now_ms).is_none() {
             return;
         }
@@ -72,11 +72,10 @@ impl GatewayRuntime {
     fn continuation_route_fingerprint(&self, route: &ExecutorRoute) -> Option<String> {
         let mut digest = Sha256::new();
         let url = if route.account_id.is_none() {
-            self.sources.get(&route.source_id)?.endpoint(
-                route.binding_key(),
-                &route.source_model,
-                false,
-            )?
+            self.source_state
+                .connectors
+                .get(&route.source_id)?
+                .endpoint(route.binding_key(), &route.source_model, false)?
         } else {
             route.upstream_url.clone()
         };
@@ -104,7 +103,7 @@ impl GatewayRuntime {
             return;
         };
         let route_key = format!("route:{key}");
-        crate::poison::mutex(&self.response_route_affinity).bind(
+        crate::poison::mutex(&self.continuation_state.routes).bind(
             route_key.clone(),
             fingerprint.clone(),
             now_ms,
@@ -120,7 +119,7 @@ impl GatewayRuntime {
 
     fn route_affinity(&self, key: &str, now_ms: u64) -> Option<String> {
         let key = format!("route:{key}");
-        let cached = crate::poison::mutex(&self.response_route_affinity)
+        let cached = crate::poison::mutex(&self.continuation_state.routes)
             .get(&key, now_ms)
             .map(str::to_owned);
         if cached.is_some() {
@@ -132,7 +131,7 @@ impl GatewayRuntime {
             .find(&key, now_ms)
             .ok()??;
         let fingerprint = binding.candidate_id.clone();
-        crate::poison::mutex(&self.response_route_affinity).restore(
+        crate::poison::mutex(&self.continuation_state.routes).restore(
             key,
             binding.candidate_id,
             binding.expires_at_ms,
@@ -268,7 +267,8 @@ impl GatewayRuntime {
                     return Err(AdapterError::continuation_mismatch());
                 }
             } else if self
-                .source_candidate_bindings
+                .source_state
+                .candidate_bindings
                 .get(&route.candidate_id)
                 .is_some_and(|binding| {
                     binding.routes.iter().any(|other| {
@@ -317,7 +317,8 @@ impl GatewayRuntime {
                             )
                         })
                         .is_some_and(|scope| {
-                            let mut ownership = crate::poison::mutex(&self.response_route_affinity);
+                            let mut ownership =
+                                crate::poison::mutex(&self.continuation_state.routes);
                             let key = ownership.get(&scope, now_ms).map(|generation| {
                                 response_tool_ownership_key(&scope, generation, call_id)
                             });

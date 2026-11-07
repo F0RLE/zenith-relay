@@ -32,8 +32,6 @@ pub const MODELS_DEV_DETAILS_SOURCE_URL: &str = "https://models.dev/api.json";
 pub const OPENROUTER_MODELS_SOURCE_URL: &str = "https://openrouter.ai/api/v1/models";
 pub const LITELLM_MODELS_SOURCE_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-const LEGACY_CACHE_FORMAT: &str = "zenith-relay-model-metadata-cache";
-const CACHE_SCHEMA_VERSION: u32 = 1;
 const MAX_RECORDS: usize = 100_000;
 const MAX_STRING_LENGTH: usize = 1_024;
 
@@ -83,6 +81,9 @@ pub struct ModelCapabilities {
     pub tool_choice: Option<bool>,
     #[serde(default)]
     pub streaming: Option<bool>,
+    /// Text-only system messages retained at their position in Messages history.
+    #[serde(default)]
+    pub interleaved_system: Option<bool>,
     /// Explicit service modes in a trusted reference. Prices and model names
     /// never populate this list; a transport may narrow it further.
     #[serde(default)]
@@ -211,61 +212,6 @@ impl ModelMetadataCatalogHandle {
             .active_catalog
             .write()
             .expect("model metadata catalog lock poisoned") = Arc::new(catalog);
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MetadataCacheEnvelope {
-    pub(crate) format: String,
-    pub(crate) schema_version: u32,
-    pub(crate) source_url: String,
-    pub(crate) revision: String,
-    pub(crate) etag: Option<String>,
-    pub(crate) last_modified: Option<String>,
-    pub(crate) fetched_at_ms: u64,
-    pub(crate) payload_sha256: String,
-    pub(crate) stale: bool,
-    pub(crate) payload: Value,
-}
-
-impl MetadataCacheEnvelope {
-    #[cfg(test)]
-    pub(crate) fn new(
-        metadata_payload: Value,
-        fetched_at_ms: u64,
-    ) -> Result<Self, ModelMetadataError> {
-        let revision = parsing::metadata_payload_hash(&metadata_payload)?;
-        let envelope = Self {
-            format: LEGACY_CACHE_FORMAT.to_string(),
-            schema_version: CACHE_SCHEMA_VERSION,
-            source_url: MODELS_DEV_SOURCE_URL.to_string(),
-            revision: revision.clone(),
-            etag: None,
-            last_modified: None,
-            fetched_at_ms,
-            payload_sha256: revision,
-            stale: false,
-            payload: metadata_payload,
-        };
-        envelope.validate()?;
-        ModelMetadataCatalog::from_metadata_payload(&envelope.payload, None, None, false)?;
-        Ok(envelope)
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), ModelMetadataError> {
-        if self.format != LEGACY_CACHE_FORMAT
-            || self.schema_version != CACHE_SCHEMA_VERSION
-            || self.source_url != MODELS_DEV_SOURCE_URL
-            || self.fetched_at_ms == 0
-            || self.revision != self.payload_sha256
-            || self.revision != parsing::metadata_payload_hash(&self.payload)?
-        {
-            return Err(ModelMetadataError::InvalidCache);
-        }
-        parsing::validate_metadata_payload(&self.payload)
-            .map_err(|_| ModelMetadataError::InvalidCache)?;
-        Ok(())
     }
 }
 

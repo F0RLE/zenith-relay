@@ -105,6 +105,14 @@ pub struct PreparedToken {
     pub(crate) dispatch_revision: TokenDispatchRevision,
 }
 
+/// Preparation failures carry the credential revision that produced them.
+/// Callers may update runtime health only while that revision is current.
+#[derive(Debug)]
+pub(crate) struct TokenPreparationFailure {
+    pub(crate) error: TokenAuthorityError,
+    pub(crate) revision: Option<TokenDispatchRevision>,
+}
+
 impl PreparedToken {
     /// Identifies the exact credential incarnation used by an upstream request.
     pub fn dispatch_revision(&self) -> &TokenDispatchRevision {

@@ -84,6 +84,19 @@ impl super::ClientRequest {
         if *attempted || !self.requires_affinity_owner {
             return Ok(false);
         }
+        if !self.materialize_connection_continuation(runtime, local_key_id, route)? {
+            return Ok(false);
+        }
+        *attempted = true;
+        Ok(true)
+    }
+
+    pub(in crate::gateway::websocket) fn materialize_connection_continuation(
+        &mut self,
+        runtime: &GatewayRuntime,
+        local_key_id: &str,
+        route: &ExecutorRoute,
+    ) -> Result<bool, GatewayFailure> {
         let owner_key = self.response_affinity_key.clone();
         if !self.replay_native_continuation(
             runtime,
@@ -93,15 +106,13 @@ impl super::ClientRequest {
         )? {
             return Ok(false);
         }
-        // The provider rejected only its opaque id. Keep the same owner for
-        // the repaired request; Manual rotation must not turn this repair
-        // into an unrelated pool hop.
+        // Materialized history on a fresh socket retains the original owner,
+        // including under Manual rotation.
         self.response_affinity_key = owner_key;
         continuation::retain_materialized_continuation_owner(
             &mut self.requires_affinity_owner,
             &mut self.has_unpaired_tool_output,
         );
-        *attempted = true;
         Ok(true)
     }
 

@@ -290,7 +290,7 @@ impl GatewayRuntime {
         request_id: &str,
         client_context: Option<&str>,
     ) -> CacheContextObservation {
-        self.cache_context_store.begin(
+        self.session_state.cache_context.begin(
             request,
             local_key_id,
             request_id,
@@ -318,7 +318,7 @@ impl GatewayRuntime {
         }
         if let Some(routing) = route.routing.as_mut() {
             let now_ms = super::runtime_now_ms();
-            let diagnostics = self.cache_context_store.prepare(
+            let diagnostics = self.session_state.cache_context.prepare(
                 observation,
                 upstream,
                 &route.candidate_id,
@@ -333,7 +333,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn finish_cache_context(&self, event: &mut UsageEvent, now_ms: u64) {
-        self.cache_context_store.finish(event, now_ms);
+        self.session_state.cache_context.finish(event, now_ms);
     }
 
     /// Discovery preloads and attachment resolution can change the prepared
@@ -347,7 +347,7 @@ impl GatewayRuntime {
             return;
         }
         if let Some(observation) = route.cache_context_observation.as_ref() {
-            self.cache_context_store.prepare(
+            self.session_state.cache_context.prepare(
                 observation,
                 upstream,
                 &route.candidate_id,

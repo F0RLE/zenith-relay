@@ -1,4 +1,5 @@
 mod completion;
+mod format;
 mod http;
 mod usage;
 
@@ -9,6 +10,7 @@ pub(in crate::gateway) use completion::{
 pub(super) use completion::{
     collect_upstream_response, completed_upstream_response, validate_upstream_response,
 };
+pub(in crate::gateway) use format::normalize_event_stream;
 pub(super) use http::{
     CompletionCallback, attach_error_diagnostics, attach_stream_diagnostics, proxy_error_response,
     proxy_json_response, proxy_response, proxy_sse_response, route_error_origin,

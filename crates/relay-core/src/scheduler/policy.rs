@@ -9,8 +9,7 @@ pub enum PoolRoutingMode {
     Smart,
     #[default]
     Automatic,
-    /// Legacy equal-cycling alias; priority failover must be explicit.
-    InOrder,
+    #[serde(alias = "in_order")]
     RoundRobin,
     /// Opt into saved request shares without changing equal-cycling imports.
     WeightedRoundRobin,
@@ -200,13 +199,8 @@ impl PoolRoutingPolicy {
     pub(crate) fn upgrade_legacy_format(&mut self) {
         let supported = matches!(
             (self.version, self.mode),
-            (
-                1,
-                PoolRoutingMode::Smart | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
-            ) | (
-                2,
-                PoolRoutingMode::Automatic | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
-            )
+            (1, PoolRoutingMode::Smart | PoolRoutingMode::RoundRobin)
+                | (2, PoolRoutingMode::Automatic | PoolRoutingMode::RoundRobin)
         );
         if supported {
             self.version = 3;

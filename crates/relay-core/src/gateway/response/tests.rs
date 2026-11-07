@@ -1,3 +1,5 @@
+mod headers;
+
 use super::*;
 use crate::gateway::test_support::test_usage_event;
 use serde_json::Value;

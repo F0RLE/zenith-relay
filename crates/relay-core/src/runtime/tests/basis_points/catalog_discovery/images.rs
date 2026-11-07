@@ -2,6 +2,58 @@ use super::*;
 
 mod authorization;
 
+#[tokio::test]
+async fn attachment_diagnostics_count_physical_uploads_and_remain_opt_in() {
+    for debug in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        *crate::poison::mutex(&server.state.attachment_file_id) =
+            Some("file-synthetic-diagnostic".to_string());
+        *crate::poison::mutex(&server.state.generation_body) = final_response();
+        let mut request = catalog_request(false);
+        request["relay_bps_tool_catalog"] = json!("compact");
+        let image = json!({"type":"input_image","image_url":
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="});
+        request["input"] = json!([{"role":"user","content":[
+            image.clone(),image,{"type":"input_image","file_id":"file-synthetic-existing"}
+        ]}]);
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let mut runtime = runtime(&server).await;
+        runtime.diagnostics_enabled = if debug { || true } else { || false };
+        runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+        let response = retry_admission::bounded_client()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["output"][0]["content"][0]["text"], "Ready");
+        assert_eq!(server.state.attachment_requests.load(Ordering::SeqCst), 1);
+        let recorded = crate::poison::mutex(&events);
+        assert_eq!(recorded.len(), 1);
+        let preparation = recorded[0]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.transport.as_ref())
+            .and_then(|transport| transport.request_preparation.as_ref());
+        if debug {
+            let attachments = preparation.unwrap().attachments.as_ref().unwrap();
+            assert_eq!(attachments.image_count, 3);
+            assert_eq!(attachments.file_references, 1);
+            assert_eq!(attachments.uploaded_images, 1);
+            assert_eq!(attachments.reused_images, 1);
+            assert!(attachments.uploaded_bytes > 0);
+        } else {
+            assert!(preparation.is_none());
+        }
+        task.abort();
+    }
+}
+
 async fn assert_attachment_throttle(
     stream: bool,
     retry_after: Option<&str>,
@@ -182,6 +234,37 @@ async fn resolved_images_survive_json_sse_discovery_and_warm_requests() {
             }
             let recorded = crate::poison::mutex(&events);
             assert_eq!(recorded.len(), bodies.len());
+            for (event, uploaded, reused) in [
+                (recorded.first().unwrap(), 1, 0),
+                (recorded.last().unwrap(), 0, 1),
+            ] {
+                let preparation = event
+                    .routing
+                    .as_ref()
+                    .unwrap()
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .request_preparation
+                    .as_ref()
+                    .unwrap();
+                let attachments = preparation.attachments.as_ref().unwrap();
+                assert_eq!(attachments.image_count, 1);
+                assert_eq!(attachments.file_references, 0);
+                assert_eq!(attachments.uploaded_images, uploaded);
+                assert_eq!(attachments.reused_images, reused);
+                assert_eq!(attachments.uploaded_bytes > 0, uploaded > 0);
+                assert!(attachments.credential_ms.is_some());
+                assert!(
+                    attachments.credential_ms.unwrap()
+                        + attachments.staging_ms
+                        + attachments.resolve_ms
+                        <= preparation.attachments_ms.unwrap()
+                );
+                let encoded = serde_json::to_string(attachments).unwrap();
+                assert!(!encoded.contains("file-synthetic"));
+                assert!(!encoded.contains("data:image"));
+            }
             for (event, body) in recorded.iter().zip(bodies.iter()) {
                 let context = event.tool_use.upstream_context.as_ref().unwrap();
                 assert_eq!(

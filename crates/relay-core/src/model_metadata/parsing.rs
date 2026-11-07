@@ -153,6 +153,7 @@ pub(super) fn parse_metadata(
             parallel_tool_call: direct_or_supported("parallel_tool_call", "parallel_tool_calls"),
             tool_choice: direct_or_supported("tool_choice", "tool_choice"),
             streaming: boolean("streaming"),
+            interleaved_system: boolean("interleaved_system"),
             service_tiers: crate::catalog::reference_service_tiers(metadata_value),
             reasoning_modes: metadata_value
                 .pointer("/experimental/modes")

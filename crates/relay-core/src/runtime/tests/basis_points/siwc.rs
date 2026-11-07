@@ -14,13 +14,15 @@ mod warmup;
 async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
     let mut runtime = retry_admission::pool_runtime(siwc, 1, true).await;
     let account = runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-0")
         .unwrap();
     account.oauth_client_kind = OAuthClientKind::Siwc;
     account.responses_url = siwc.responses_url.clone();
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .responses_url = native.responses_url.clone();
@@ -210,7 +212,11 @@ async fn siwc_compaction_rejects_foreign_state_and_never_falls_back_after_dispat
             *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::NOT_FOUND;
             *crate::poison::mutex(&siwc.state.generation_body) =
                 json!({"error":{"code":"route_not_found","message":"Synthetic rejection"}});
-            let runtime = runtime(&siwc, &native).await;
+            let usage = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+            let captured = usage.clone();
+            let mut runtime = runtime(&siwc, &native).await;
+            Arc::get_mut(&mut runtime).unwrap().usage =
+                Arc::new(move |event| crate::poison::mutex(&captured).push(event));
             runtime.set_route_recovery_enabled(true);
             let (base, task) = recovery::gateway(runtime).await;
             let mut input = vec![json!({"type":"compaction_trigger"})];
@@ -239,6 +245,22 @@ async fn siwc_compaction_rejects_foreign_state_and_never_falls_back_after_dispat
                 "{endpoint}"
             );
             assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+            if foreign_checkpoint {
+                let usage = crate::poison::mutex(&usage);
+                assert_eq!(usage.len(), 1, "{endpoint}");
+                let event = &usage[0];
+                assert_eq!(event.http_status, 400);
+                assert_eq!(event.source_id, "relay");
+                assert_eq!(event.attempt, 0);
+                assert!(event.candidate_id.is_none());
+                assert!(event.total_tokens.is_none());
+                assert!(event.cooldown_scope.is_none());
+                assert!(
+                    !serde_json::to_string(event)
+                        .unwrap()
+                        .contains("foreign-synthetic")
+                );
+            }
             task.abort();
         }
     }
@@ -285,7 +307,8 @@ async fn siwc_quota_rejection_before_output_rotates_to_the_next_pool_account() {
             let mut runtime = runtime(&exhausted, &next).await;
             Arc::get_mut(&mut runtime)
                 .unwrap()
-                .chatgpt_accounts
+                .account_state
+                .executors
                 .get_mut("synthetic-account-1")
                 .unwrap()
                 .oauth_client_kind = OAuthClientKind::Siwc;
@@ -457,7 +480,8 @@ async fn siwc_eligibility_refusal_does_not_block_a_later_client_request() {
     }});
     let mut runtime = retry_admission::pool_runtime(&siwc, 1, false).await;
     let account = runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-0")
         .unwrap();
     account.oauth_client_kind = OAuthClientKind::Siwc;

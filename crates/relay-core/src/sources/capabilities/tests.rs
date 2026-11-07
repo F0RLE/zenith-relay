@@ -2,6 +2,230 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn explicit_endpoint_exclusions_survive_refresh_reload_and_timestamp_order() {
+    let model = "synthetic-model";
+    for (manual_status, catalog_status) in [
+        (CapabilityStatus::Unsupported, CapabilityStatus::Declared),
+        (CapabilityStatus::Declared, CapabilityStatus::Unsupported),
+    ] {
+        for manual_time in [1, 100, 200] {
+            for pin in [None, Some(WireApi::Messages)] {
+                let manual: ModelEndpointCapability = serde_json::from_value(json!({
+                    "modelId": model,
+                    "upstreamWireApi": "messages",
+                    "status": manual_status,
+                    "origin": "manual",
+                    "checkedAtMs": manual_time
+                }))
+                .unwrap();
+                let mut config = SourceProtocolConfig {
+                    endpoint_hint: pin,
+                    capabilities: vec![manual],
+                    ..Default::default()
+                };
+                let endpoints = if catalog_status.available() {
+                    vec!["responses", "messages"]
+                } else {
+                    vec!["responses"]
+                };
+                config.merge_catalog(catalog_capabilities(
+                    &json!({
+                        "data": [{"id": model, "supported_endpoint_types": endpoints}]
+                    }),
+                    100,
+                ));
+                let mut restored: SourceProtocolConfig =
+                    serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+                let effective = restored
+                    .effective_capabilities("https://source.example.test/v1", &[model.into()]);
+                let denied = effective
+                    .iter()
+                    .find(|row| row.upstream_wire_api == WireApi::Messages)
+                    .unwrap();
+                assert_eq!(denied.status, CapabilityStatus::Unsupported);
+                assert_eq!(
+                    denied.origin,
+                    if manual_status == CapabilityStatus::Unsupported {
+                        CapabilityOrigin::Manual
+                    } else {
+                        CapabilityOrigin::Catalog
+                    }
+                );
+                let routes = restored
+                    .resolve(
+                        "https://source.example.test/v1",
+                        &[model.into()],
+                        &[],
+                        WireApi::Responses,
+                    )
+                    .unwrap();
+                assert_eq!(routes.is_empty(), pin.is_some());
+                assert!(routes.iter().all(|route| {
+                    route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Responses
+                }));
+                // Complete new discovery may replace an old catalog denial,
+                // while a retained manual exclusion still applies.
+                restored.merge_catalog(catalog_capabilities(
+                    &json!({
+                        "data": [{"id": model, "supported_endpoint_types": ["responses", "messages"]}]
+                    }),
+                    300,
+                ));
+                let updated = restored
+                    .effective_capabilities("https://source.example.test/v1", &[model.into()]);
+                let messages = updated
+                    .iter()
+                    .find(|row| row.upstream_wire_api == WireApi::Messages)
+                    .unwrap();
+                assert_eq!(
+                    messages.status,
+                    if manual_status == CapabilityStatus::Unsupported {
+                        CapabilityStatus::Unsupported
+                    } else {
+                        CapabilityStatus::Declared
+                    }
+                );
+                restored
+                    .capabilities
+                    .retain(|row| row.origin != CapabilityOrigin::Manual);
+                let routes = restored
+                    .resolve(
+                        "https://source.example.test/v1",
+                        &[model.into()],
+                        &[],
+                        WireApi::Responses,
+                    )
+                    .unwrap();
+                assert!(upstreams(&routes, model).contains(&WireApi::Messages));
+            }
+        }
+    }
+}
+
+#[test]
+fn feature_only_observations_do_not_grant_an_endpoint() {
+    for feature in ProtocolFeature::ALL {
+        for origin in [CapabilityOrigin::Catalog, CapabilityOrigin::Manual] {
+            for status in [
+                CapabilityStatus::Declared,
+                CapabilityStatus::Confirmed,
+                CapabilityStatus::Unsupported,
+            ] {
+                let mut observation: ModelEndpointCapability = serde_json::from_value(json!({
+                    "modelId": "synthetic-model",
+                    "upstreamWireApi": "messages",
+                    "status": "unknown",
+                    "origin": origin,
+                    "checkedAtMs": 1
+                }))
+                .unwrap();
+                observation.features.insert(feature, status);
+                let config = SourceProtocolConfig {
+                    capabilities: vec![observation],
+                    ..Default::default()
+                };
+                let effective = config.effective_capabilities(
+                    "https://source.example.test/v1",
+                    &["synthetic-model".into()],
+                );
+                assert_eq!(effective.len(), 1);
+                assert_eq!(effective[0].status, CapabilityStatus::Unknown);
+                assert_eq!(effective[0].features.get(&feature), Some(&status));
+                let routes = config
+                    .resolve(
+                        "https://source.example.test/v1",
+                        &["synthetic-model".into()],
+                        &[],
+                        WireApi::Responses,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    upstreams(&routes, "synthetic-model"),
+                    BTreeSet::from([WireApi::Responses])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_feature_exclusions_survive_discovery_and_reload() {
+    for feature in ProtocolFeature::ALL {
+        for manual_endpoint_status in [CapabilityStatus::Declared, CapabilityStatus::Unknown] {
+            for manual_feature_status in
+                [CapabilityStatus::Confirmed, CapabilityStatus::Unsupported]
+            {
+                for manual_time in [1, 100, 200] {
+                    let mut manual: ModelEndpointCapability = serde_json::from_value(json!({
+                        "modelId": "synthetic-model",
+                        "upstreamWireApi": "messages",
+                        "status": manual_endpoint_status,
+                        "origin": "manual",
+                        "checkedAtMs": manual_time
+                    }))
+                    .unwrap();
+                    manual.features.insert(feature, manual_feature_status);
+                    let mut catalog = manual.clone();
+                    catalog.origin = CapabilityOrigin::Catalog;
+                    catalog.status = CapabilityStatus::Declared;
+                    catalog.checked_at_ms = 100;
+                    let catalog_feature_status = if manual_feature_status.available() {
+                        CapabilityStatus::Unsupported
+                    } else {
+                        CapabilityStatus::Confirmed
+                    };
+                    catalog.features.insert(feature, catalog_feature_status);
+                    let mut config = SourceProtocolConfig {
+                        capabilities: vec![manual],
+                        ..Default::default()
+                    };
+                    config.merge_catalog(vec![catalog.clone()]);
+                    let mut restored: SourceProtocolConfig =
+                        serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+                    let effective = restored.effective_capabilities(
+                        "https://source.example.test/v1",
+                        &["synthetic-model".into()],
+                    );
+                    let messages = effective
+                        .iter()
+                        .find(|row| row.upstream_wire_api == WireApi::Messages)
+                        .unwrap();
+                    assert!(messages.status.available());
+                    assert_eq!(
+                        messages.features.get(&feature),
+                        Some(&CapabilityStatus::Unsupported)
+                    );
+                    assert_eq!(
+                        crate::model_metadata::ModelCapabilities::default()
+                            .protocol_features_for_route(Some(messages))
+                            .get(&feature),
+                        Some(&CapabilityStatus::Unsupported)
+                    );
+                    if manual_feature_status == CapabilityStatus::Unsupported {
+                        restored
+                            .capabilities
+                            .retain(|row| row.origin != CapabilityOrigin::Manual);
+                    }
+                    catalog.checked_at_ms = 300;
+                    catalog
+                        .features
+                        .insert(feature, CapabilityStatus::Confirmed);
+                    restored.merge_catalog(vec![catalog]);
+                    let effective = restored.effective_capabilities(
+                        "https://source.example.test/v1",
+                        &["synthetic-model".into()],
+                    );
+                    assert_eq!(
+                        effective[0].features.get(&feature),
+                        Some(&CapabilityStatus::Confirmed)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn interactions_is_an_explicit_native_contract_not_a_generate_content_alias() {
     let models = vec!["synthetic-model".into()];
     let generate_url = "https://example.test/v1beta/models/synthetic-model:generateContent";

@@ -51,7 +51,8 @@ async fn assert_no_replay(error: &str, client_stream: bool, upstream_stream: boo
     let mut runtime = runtime(&siwc, &next).await;
     Arc::get_mut(&mut runtime)
         .unwrap()
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .oauth_client_kind = OAuthClientKind::Siwc;

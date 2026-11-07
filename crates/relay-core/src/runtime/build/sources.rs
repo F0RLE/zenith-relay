@@ -10,7 +10,6 @@ pub(super) fn build_sources(
     let mut executors = BTreeMap::new();
     let mut candidate_bindings = BTreeMap::new();
     let mut recovery_delays_ms = BTreeMap::new();
-    let mut legacy_candidate_ids = BTreeMap::<String, Option<String>>::new();
     for source in sources {
         source.source.validate()?;
         if source.weight == 0 {
@@ -46,15 +45,6 @@ pub(super) fn build_sources(
             if models.is_empty() {
                 continue;
             }
-            let legacy_id = source_candidate_id(&source_id, binding, source.source.wire_api);
-            legacy_candidate_ids
-                .entry(legacy_id)
-                .and_modify(|owner| {
-                    if owner.as_ref() != Some(&source_id) {
-                        *owner = None;
-                    }
-                })
-                .or_insert_with(|| Some(source_id.clone()));
             for model in &models {
                 model_protocols
                     .entry(crate::model_id_key(model))
@@ -148,6 +138,5 @@ pub(super) fn build_sources(
         executors,
         candidate_bindings,
         recovery_delays_ms,
-        legacy_candidate_ids,
     })
 }

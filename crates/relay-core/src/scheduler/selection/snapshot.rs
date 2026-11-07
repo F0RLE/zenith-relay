@@ -115,6 +115,9 @@ pub struct RoutingDiagnostics {
     pub request_timing: Option<RequestTiming>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_latency: Option<super::super::rotation::RouteLatencyDiagnostics>,
+    /// Explicit normalized provider deadline; local recovery delays stay separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_backoff: Option<super::super::ProviderBackoff>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -230,7 +233,7 @@ impl PoolScheduler {
                                 || (reason
                                     == super::super::rotation::CandidateBlockReason::RateLimited
                                     && self.cooldown_reason_for(candidate, model, now_ms)
-                                        == CooldownReason::RateLimit);
+                                        == CooldownReason::QuotaExhausted);
                             retries
                                 .entry(model.clone())
                                 .and_modify(|at| *at = (*at).max(at_ms))
@@ -414,6 +417,7 @@ impl PoolScheduler {
             attempt_outcome: None,
             request_timing: None,
             route_latency: None,
+            provider_backoff: None,
         })
     }
 }

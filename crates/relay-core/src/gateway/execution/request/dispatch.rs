@@ -1,3 +1,4 @@
+use super::super::state::RetryState;
 use super::prelude::*;
 use crate::runtime::ExecutorRoute;
 use crate::usage::{RequestPreparationDiagnostics, ToolUseDiagnostics};
@@ -42,9 +43,7 @@ pub(super) struct RequestDispatchInput<'a> {
     pub(super) requested_model: &'a str,
     pub(super) forwarded_headers: &'a HeaderMap,
     pub(super) selected_error_origin: ErrorOrigin,
-    pub(super) attempt: &'a mut u16,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
+    pub(super) retry: &'a mut RetryState,
 }
 
 /// Send one prepared attempt. A transport failure stays retryable until the
@@ -75,10 +74,14 @@ pub(super) async fn dispatch_request_attempt(
         requested_model,
         forwarded_headers,
         selected_error_origin,
+        retry,
+    } = request_dispatch_input;
+    let RetryState {
         attempt,
         last_failure,
         last_failure_origin,
-    } = request_dispatch_input;
+        ..
+    } = retry;
     let catalog_started = preparation_started.map(|_| Instant::now());
     preparation.body_ms = preparation_started
         .zip(catalog_started)
@@ -140,12 +143,14 @@ pub(super) async fn dispatch_request_attempt(
     let mut attachment_owner = None;
     let request_body = if let Some(body) = discovery_body.as_mut() {
         if basis_points_route {
+            preparation.attachments = attachments_started.map(|_| Default::default());
             match super::super::basis_points::attach_input_images(
                 runtime,
                 &route.candidate_id,
                 &route.upstream_url,
                 &route.upstream_headers,
                 body,
+                preparation.attachments.as_mut(),
             )
             .await
             {
@@ -290,13 +295,31 @@ pub(super) async fn dispatch_request_attempt(
     *attempt = u16::from(budget.dispatches());
     let mut discovery = None;
     let upstream = match upstream {
-        Ok(upstream) => {
+        Ok(mut upstream) => {
             route.observe_http_payload(&upstream.response);
             route.account_token_generation = upstream.account_token_generation;
+            route.account_token_revision =
+                upstream.authorization_incarnation.token_revision().cloned();
             route.observe_http_response(
                 upstream.response.headers(),
                 started.elapsed().as_millis() as u64,
             );
+            if stream || account_route {
+                upstream.response = crate::gateway::response::normalize_event_stream(
+                    upstream.response,
+                    started,
+                    route
+                        .routing
+                        .as_mut()
+                        .and_then(|routing| routing.transport.as_mut()),
+                    if basis_points_route {
+                        crate::transport::basis_points_progress_timeout()
+                    } else {
+                        None
+                    },
+                )
+                .await;
+            }
             if let (Some(original), Some(body)) = (
                 basis_points_request
                     .map(|request| &**request)

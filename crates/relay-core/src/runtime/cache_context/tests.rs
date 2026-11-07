@@ -40,6 +40,7 @@ fn event(
         candidate_id: Some(candidate.into()),
         account_id: None,
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: Some(RoutingDiagnostics {
             reason: SelectionReason::OnlyEligible,
@@ -55,6 +56,7 @@ fn event(
             attempt_outcome: None,
             request_timing: None,
             route_latency: None,
+            provider_backoff: None,
         }),
         requested_model: Some("synthetic".into()),
         resolved_model: Some("synthetic".into()),

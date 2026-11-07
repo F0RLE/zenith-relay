@@ -191,6 +191,48 @@ pub(super) fn thinking(
     }
 }
 
+pub(super) fn thinking_display(
+    request_fields: &mut Map<String, Value>,
+    generation: &mut Map<String, Value>,
+    display: Option<ReasoningDisplay>,
+    protocol: WireApi,
+    parameter: &'static str,
+) -> AdapterResult<()> {
+    let Some(display) = display else {
+        return Ok(());
+    };
+    match protocol {
+        WireApi::Responses if display == ReasoningDisplay::Summarized => {
+            request_fields
+                .entry("reasoning")
+                .or_insert_with(|| json!({}))["summary"] = json!("auto");
+        }
+        WireApi::Gemini if display == ReasoningDisplay::Summarized => {
+            generation
+                .entry("thinkingConfig")
+                .or_insert_with(|| json!({}))["includeThoughts"] = json!(true);
+        }
+        WireApi::Messages => match request_fields.get_mut("thinking") {
+            Some(thinking) if matches!(thinking["type"].as_str(), Some("enabled" | "adaptive")) => {
+                thinking["display"] = json!(match display {
+                    ReasoningDisplay::Summarized => "summarized",
+                    ReasoningDisplay::Omitted => "omitted",
+                });
+            }
+            Some(thinking) if thinking["type"] == "disabled" => {}
+            None if display == ReasoningDisplay::Omitted => {}
+            _ => return Err(AdapterError::parameter_unsupported_for(parameter)),
+        },
+        WireApi::ChatCompletions if display == ReasoningDisplay::Summarized => {
+            return Err(AdapterError::parameter_unsupported_for(parameter));
+        }
+        // Omission is enforced on client output without changing model effort
+        // or discarding provider-owned continuation from any upstream.
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(super) fn message_value(message: &Message, protocol: WireApi) -> AdapterResult<Vec<Value>> {
     let role = match message.role {
         Role::User => "user",

@@ -8,6 +8,7 @@ fn observe(scheduler: &mut PoolScheduler, member: &str, bucket: u8, model: &str,
             scope: model,
             retry_at_ms: now + 2,
             reason: CooldownReason::RateLimit,
+            provider_not_before_ms: None,
         },
         now,
     );
@@ -81,6 +82,7 @@ fn shared_rate_limit_preserves_long_provider_deadlines() {
             scope: "gpt-5",
             retry_at_ms: 120_200,
             reason: CooldownReason::RateLimit,
+            provider_not_before_ms: None,
         },
         200,
     );

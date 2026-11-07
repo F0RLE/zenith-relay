@@ -41,16 +41,6 @@ impl GatewayRuntime {
         }
     }
 
-    /// Backward-compatible name for callers that historically built a pool
-    /// scope for the Responses-only desktop profile.
-    pub fn active_responses_scope(
-        &self,
-        allowed_source_ids: &BTreeSet<String>,
-        allowed_account_ids: &BTreeSet<String>,
-    ) -> CandidateScope {
-        self.active_pool_scope(allowed_source_ids, allowed_account_ids)
-    }
-
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
         let updated = self
             .lock_scheduler()
@@ -65,7 +55,8 @@ impl GatewayRuntime {
         self.invalidate_account_quota_reference_source(candidate_id);
         let candidate_ids = {
             let source_routes = self
-                .source_candidate_bindings
+                .source_state
+                .candidate_bindings
                 .iter()
                 .filter(|(_, binding)| binding.source_id == candidate_id)
                 .map(|(route_id, _)| route_id.clone())
@@ -91,14 +82,14 @@ impl GatewayRuntime {
             (removed, deferred)
         };
         {
-            let mut manifests = crate::poison::mutex(&self.model_metadata.codex_manifests);
+            let mut manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
             for route_id in &candidate_ids {
                 manifests.remove(route_id);
             }
         }
         if !deferred.contains(candidate_id) {
-            crate::poison::mutex(&self.passive_quotas).remove(candidate_id);
-            if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+            crate::poison::mutex(&self.account_state.passive_quotas).remove(candidate_id);
+            if let Some(account) = self.account_state.executors.get(candidate_id) {
                 account.active.store(false, Ordering::Release);
                 *crate::poison::write(&account.agent_identity) = None;
             }
@@ -134,6 +125,87 @@ impl GatewayRuntime {
             candidate.activity_revision = revision;
         }
         order
+    }
+
+    /// Read-only reserve policy: positive ordinary quota on a compatible pool
+    /// member, independent of saved reset credits and paid-credit fallback.
+    pub fn ordinary_quota_alternative_available(
+        &self,
+        account_id: &str,
+        now_ms: u64,
+    ) -> Option<bool> {
+        let projection = self.lock_scheduler().clone();
+        let target = projection.candidates().find(|candidate| {
+            candidate.id == account_id
+                && candidate.kind == CandidateKind::OAuthAccount
+                && candidate.enabled
+                && !candidate.draining
+                && candidate.secret_available
+                && candidate.health.is_eligible()
+        })?;
+        let models = crate::ModelRules {
+            allowed: target
+                .models
+                .iter()
+                .filter(|model| {
+                    target.model_rules.allows(model) && !super::super::is_image_model_id(model)
+                })
+                .cloned()
+                .collect(),
+            ..Default::default()
+        };
+        if models.allowed.is_empty() {
+            return None;
+        }
+        let protocol = target.protocol;
+        let confirmed_credit_fallbacks = {
+            let quotas = crate::poison::mutex(&self.account_state.passive_quotas);
+            quotas
+                .iter()
+                .filter(|(_, state)| {
+                    [
+                        state.snapshot.primary.as_ref(),
+                        state.snapshot.secondary.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|window| {
+                        window.available_basis_points == Some(0)
+                            && now_ms
+                                .checked_sub(window.observed_at_ms)
+                                .is_some_and(|age| age <= crate::scheduler::QUOTA_STALE_AFTER_MS)
+                    })
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        let order =
+            projection.into_runtime_order(&CandidateScope::default(), &models, &[protocol], now_ms);
+        let mut unknown = false;
+        for candidate in order {
+            if candidate.kind != CandidateKind::OAuthAccount
+                || candidate.candidate_id == account_id
+                || !(candidate.available || candidate.capacity_wait)
+            {
+                continue;
+            }
+            let Some(headroom) = candidate.resource_headroom else {
+                unknown = true;
+                continue;
+            };
+            if headroom
+                .quota_remaining_basis_points
+                .is_some_and(|remaining| remaining > 0)
+            {
+                return Some(true);
+            }
+            if headroom.quota_remaining_basis_points.is_none()
+                && !confirmed_credit_fallbacks.contains(&candidate.candidate_id)
+            {
+                unknown = true;
+            }
+        }
+        (!unknown).then_some(false)
     }
 
     pub fn candidate_runtime_order_for_key(
@@ -175,7 +247,8 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .get(candidate_id)
             .is_some_and(|account| account.active.load(Ordering::Acquire))
     }

@@ -42,9 +42,10 @@ pub use tools::{
     ToolChoiceMode, ToolUseDiagnostics,
 };
 pub use transport::{
-    CodexServerTiming, FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics,
-    RequestPayloadMode, RequestPreparationDiagnostics, StreamResponseDiagnostics,
-    TransportDiagnostics, TransportFallbackReason, TransportMode, TransportResponseFormat,
+    AttachmentPreparationDiagnostics, CodexServerTiming, FullRequestReason, RequestContentEncoding,
+    RequestPayloadDiagnostics, RequestPayloadMode, RequestPreparationDiagnostics,
+    StreamResponseDiagnostics, TransportDiagnostics, TransportFallbackReason, TransportMode,
+    TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

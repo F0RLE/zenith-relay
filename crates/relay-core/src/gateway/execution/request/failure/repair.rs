@@ -1,3 +1,4 @@
+use super::super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::super::prelude::*;
 use super::super::recovery::{
     LegacyCallIdRepair, adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
@@ -26,22 +27,14 @@ pub(super) fn repair_collected_rejection(
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
-                repairs,
-                tried,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-                last_failure,
-                last_failure_origin,
-                last_preserved_upstream_error,
+                state,
                 tool_policy,
                 stream,
-                response_affinity_key,
                 resolved_model,
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
                 prompt_affinity_key,
-                confirmed_response_missing,
                 account_route,
                 forwarded_headers,
             },
@@ -49,6 +42,24 @@ pub(super) fn repair_collected_rejection(
         bytes,
     }: super::CollectedRejection<'_>,
 ) -> AfterRepair<'_> {
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                has_unpaired_tool_output,
+                requires_affinity_owner,
+                response_affinity_key,
+                ..
+            },
+    } = state;
     let AttemptRepairs {
         legacy_call_id: legacy_call_id_repair_attempted,
         function_item_id: function_item_id_repair_attempted,
@@ -75,7 +86,10 @@ pub(super) fn repair_collected_rejection(
     event.error_category = Some(failure.category.to_string());
     if (route.account_transport == crate::runtime::AccountTransport::Siwc
         && route_forbids_fallback(route, failure.status, &failure))
-        || failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED
+        || matches!(
+            failure.category,
+            error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+        )
     {
         let state = settle_route_failure(runtime, lease, route, &failure, response_headers);
         apply_failure_state(event, state);
@@ -279,22 +293,14 @@ pub(super) fn repair_collected_rejection(
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
-                repairs,
-                tried,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-                last_failure,
-                last_failure_origin,
-                last_preserved_upstream_error,
+                state,
                 tool_policy,
                 stream,
-                response_affinity_key,
                 resolved_model,
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
                 prompt_affinity_key,
-                confirmed_response_missing,
                 account_route,
                 forwarded_headers,
             },

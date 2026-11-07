@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn session_budget_is_structured_request_terminal_without_account_penalty() {
+    let category = error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED;
+    for body in [
+        serde_json::json!({"code":"budget_reached"}),
+        serde_json::json!({"error":{"code":"budget_reached","retry_after":1}}),
+        serde_json::json!({"body":{"error":{"code":"budget_reached"}}}),
+        serde_json::json!({"response":{"status":"failed","error":{"code":"budget_reached"}}}),
+    ] {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::BAD_REQUEST,
+            Some(&serde_json::to_vec(&body).unwrap()),
+        );
+        assert_eq!(failure.category, category);
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+        assert!(!retryable_failure(failure.status, category, false));
+        assert!(!retryable_failure(failure.status, category, true));
+        assert!(!failure_category_requires_cooldown(category));
+        assert!(!failure_category_affects_account_state(category));
+        assert_eq!(
+            upstream_event_failure_category(Some("error"), &body),
+            Some(category)
+        );
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert_ne!(
+                classify_upstream_error_value(status, &body).category,
+                category
+            );
+            let mut event = body.clone();
+            event["status"] = serde_json::json!(status.as_u16());
+            assert_ne!(
+                upstream_event_failure_category(Some("error"), &event),
+                Some(category)
+            );
+        }
+    }
+    for body in [
+        serde_json::json!({"error":{"message":"budget_reached"}}),
+        serde_json::json!({"input":{"code":"budget_reached"}}),
+        serde_json::json!({"code":"other_error","error":{"code":"budget_reached"}}),
+    ] {
+        assert_ne!(
+            classify_upstream_error_value(StatusCode::BAD_REQUEST, &body).category,
+            category
+        );
+        assert_ne!(
+            upstream_event_failure_category(Some("error"), &body),
+            Some(category)
+        );
+    }
+}
+
+#[test]
 fn siwc_eligibility_is_terminal_without_cooling_or_penalizing_the_account() {
     for (status, body) in [
         (

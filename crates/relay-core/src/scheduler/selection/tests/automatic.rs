@@ -251,7 +251,7 @@ fn undated_or_future_observations_do_not_win_automatic_ranking() {
 
 #[test]
 fn credit_only_admission_expires_without_another_snapshot() {
-    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::InOrder] {
+    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::RoundRobin] {
         for unlimited in [false, true] {
             let mut scheduler = policy::mixed(mode);
             scheduler.set_quota_stale_after_ms(10);
@@ -353,7 +353,11 @@ fn quota_refresh_changes_admission_without_rebuilding_or_reweighting() {
 
 #[test]
 fn explicit_modes_ignore_quota_percentages() {
-    for mode in [PoolRoutingMode::InOrder, PoolRoutingMode::RoundRobin] {
+    for mode in [
+        PoolRoutingMode::RoundRobin,
+        PoolRoutingMode::WeightedRoundRobin,
+        PoolRoutingMode::Failover,
+    ] {
         let mut scheduler = policy::mixed(mode);
         for (id, quota) in [("account", 1_u64), ("api-a", 9_900), ("api-b", 8_000)] {
             let member = scheduler.candidates.get_mut(id).unwrap();
@@ -361,7 +365,7 @@ fn explicit_modes_ignore_quota_percentages() {
             member.quota_updated_at_ms = Some(100);
         }
         let first = rotation::dispatch(&mut scheduler, 100, None);
-        if mode == PoolRoutingMode::InOrder {
+        if mode == PoolRoutingMode::Failover {
             assert_eq!(first, "account");
         } else {
             let mut counts = BTreeMap::new();
@@ -434,7 +438,7 @@ fn prompt_affinity_has_a_bounded_load_margin_and_never_overrides_explicit_order(
     assert!(scheduler.release_for("api-b", Some("gpt-5")));
     assert!(scheduler.release_for("api-b", Some("gpt-5")));
     let mut policy = scheduler.pool_routing.clone().unwrap();
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     scheduler.set_pool_routing(policy).unwrap();
     assert_eq!(
         rotation::dispatch(&mut scheduler, 100, Some("cache:test")),
@@ -479,7 +483,7 @@ fn automatic_owner_yields_for_a_larger_fresh_quota_remainder() {
         "response", "gpt-5", &protocols, &scope, &tried, 100,
     ));
     let mut policy = scheduler.pool_routing.clone().unwrap();
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     scheduler.set_pool_routing(policy).unwrap();
     scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(9_800);
     assert!(!scheduler.automatic_response_owner_should_yield(

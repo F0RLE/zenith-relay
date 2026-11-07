@@ -1,133 +1,5 @@
-use super::super::upstream::first_message_terminal;
 use super::super::*;
-use super::{BridgeState, InFlight};
-
-fn has_output_evidence(in_flight: &InFlight) -> bool {
-    in_flight.client_visible_output
-        || in_flight.event.ttft_ms.is_some()
-        || in_flight.event.output_tokens.is_some()
-        || in_flight.event.tool_use.tool_call_count > 0
-        || in_flight.event.tool_use.text_output
-}
-
-fn failed_terminal_before_generation(
-    state: &BridgeState,
-    message: &UpstreamMessage,
-) -> Option<EventTerminal> {
-    if has_output_evidence(state.in_flight.as_ref()?) {
-        return None;
-    }
-    let terminal = first_message_terminal(message)?;
-    if terminal.outcome != Some(EventTerminalOutcome::Failure) || terminal.generation_evidence {
-        return None;
-    }
-    Some(terminal)
-}
-
-pub(super) fn retryable_disconnect_request(
-    runtime: &GatewayRuntime,
-    state: &BridgeState,
-) -> Option<ClientRequest> {
-    let in_flight = state.in_flight.as_ref()?;
-    if in_flight.request.budget.dispatches() > 0 {
-        // A disconnect after response.create has no pre-execution proof.
-        return None;
-    }
-    if has_output_evidence(in_flight) {
-        return None;
-    }
-    if in_flight.request.has_previous_response_id() {
-        return replay_in_flight_continuation(runtime, state, false);
-    }
-    if in_flight.request.has_unpaired_tool_output() {
-        return None;
-    }
-    Some(in_flight.request.clone())
-}
-
-fn replay_in_flight_continuation(
-    runtime: &GatewayRuntime,
-    state: &BridgeState,
-    retain_owner: bool,
-) -> Option<ClientRequest> {
-    let in_flight = state.in_flight.as_ref()?;
-    let mut replay_request = in_flight.request.clone();
-    let owner_key = replay_request.response_affinity_key.clone();
-    replay_request
-        .replay_native_continuation(
-            runtime,
-            &state.local_key_id,
-            &in_flight.route.candidate_id,
-            &in_flight.route.source_model,
-        )
-        .ok()?
-        .then_some(replay_request)
-        .map(|mut replay_request| {
-            if retain_owner {
-                replay_request.response_affinity_key = owner_key;
-                crate::gateway::continuation::retain_materialized_continuation_owner(
-                    &mut replay_request.requires_affinity_owner,
-                    &mut replay_request.has_unpaired_tool_output,
-                );
-            }
-            replay_request
-        })
-}
-
-pub(super) fn retryable_terminal_request(
-    runtime: &GatewayRuntime,
-    state: &BridgeState,
-    message: &UpstreamMessage,
-) -> Option<ClientRequest> {
-    let in_flight = state.in_flight.as_ref()?;
-    let terminal = failed_terminal_before_generation(state, message)?;
-    let (status, category) = resolved_terminal_failure(&terminal);
-    let status = super::super::super::errors::canonical_upstream_status(status, category);
-    if in_flight.request.has_previous_response_id() {
-        return super::super::super::errors::retryable_failure(status, category, true)
-            .then(|| replay_in_flight_continuation(runtime, state, false))
-            .flatten();
-    }
-    if in_flight.request.has_unpaired_tool_output()
-        || !super::super::super::errors::retryable_failure(status, category, false)
-    {
-        return None;
-    }
-    Some(in_flight.request.clone())
-}
-
-pub(super) fn repairable_terminal_request(
-    runtime: &GatewayRuntime,
-    state: &mut BridgeState,
-    message: &UpstreamMessage,
-) -> Option<ClientRequest> {
-    let terminal = failed_terminal_before_generation(state, message)?;
-    if terminal.error_category == Some(error_codes::UPSTREAM_TURN_RATE_LIMITED) {
-        return None;
-    }
-    if terminal.previous_response_not_found {
-        let repaired_continuation = replay_in_flight_continuation(runtime, state, true)?;
-        return Some(repaired_continuation);
-    }
-    let upstream_message_bytes = match message {
-        UpstreamMessage::Text(text) => Some(text.as_bytes()),
-        UpstreamMessage::Binary(bytes) => Some(bytes.as_ref()),
-        _ => None,
-    }?;
-    if !super::super::super::errors::responses_tool_call_links_rejected(upstream_message_bytes) {
-        return None;
-    }
-    let in_flight = state.in_flight.as_mut()?;
-    if in_flight.legacy_call_id_repair_attempted {
-        return None;
-    }
-    let mut repair_request = in_flight.request.clone();
-    if !repair_request.repair_legacy_call_ids() {
-        return None;
-    }
-    in_flight.legacy_call_id_repair_attempted = true;
-    Some(repair_request)
-}
+use super::BridgeState;
 
 pub(super) fn finish_terminal(
     runtime: &GatewayRuntime,
@@ -140,12 +12,10 @@ pub(super) fn finish_terminal(
     let Some(mut in_flight) = state.in_flight.take() else {
         return true;
     };
-    // `response.incomplete` is a terminal event for this request, so the
-    // client WebSocket may carry its next independent request. It is not a
-    // successful response: do not persist affinity or reset slot health.
-    // An owner binding below is limited to this live connection.
+    // A scoped terminal settles only this owner, including the default lane.
+    // Incomplete responses retain only a live-connection owner binding;
+    // durable affinity and successful health still require completion.
     let terminal_success = matches!(outcome, EventTerminalOutcome::Success);
-    let keep_client_socket = !matches!(outcome, EventTerminalOutcome::Failure);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.generation_ms = in_flight
         .event
@@ -173,6 +43,7 @@ pub(super) fn finish_terminal(
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
         in_flight.route.account_token_generation,
+        in_flight.route.account_token_revision.as_ref(),
         match outcome {
             EventTerminalOutcome::Success => terminal.status.unwrap_or(StatusCode::OK),
             EventTerminalOutcome::Incomplete => StatusCode::OK,
@@ -184,20 +55,32 @@ pub(super) fn finish_terminal(
     // A continuation may legitimately reference an incomplete response (for
     // example after max_output_tokens). Keep that id only for this live
     // WebSocket; durable response/prompt affinity still requires success.
-    if terminal_success {
-        clear_transient_response_affinity(runtime, state);
-        state.last_response_id = in_flight.response_id.clone();
-    } else if matches!(outcome, EventTerminalOutcome::Incomplete) {
-        clear_transient_response_affinity(runtime, state);
-        state.last_response_id = in_flight.response_id.clone();
-        state.transient_response_affinity_key = runtime.bind_volatile_response_affinity(
+    if terminal_success || matches!(outcome, EventTerminalOutcome::Incomplete) {
+        let transient_affinity = (!terminal_success)
+            .then(|| {
+                runtime.bind_volatile_response_affinity(
+                    in_flight.response_id.as_deref(),
+                    &in_flight.route.candidate_id,
+                    &in_flight.request.request_id,
+                    now_ms(),
+                )
+            })
+            .flatten();
+        let retired = state.responses.record(
+            in_flight.request.stream_id.as_deref(),
             in_flight.response_id.as_deref(),
-            &in_flight.route.candidate_id,
-            &in_flight.request.request_id,
-            now_ms(),
+            transient_affinity,
         );
+        runtime.invalidate_response_affinity(retired.as_deref());
+    } else {
+        let retired = state.responses.retire_failed_continuation(
+            in_flight.request.stream_id.as_deref(),
+            in_flight.request.previous_response_id(),
+        );
+        runtime.invalidate_response_affinity(retired.as_deref());
     }
-    if let Some(lease) = state.lease.take() {
+    {
+        let lease = in_flight.lease;
         if terminal_success {
             let recovered =
                 lease.settle_rotation_success_with_latency(now_ms(), in_flight.event.ttft_ms);
@@ -269,18 +152,23 @@ pub(super) fn finish_terminal(
         }
     }
     emit_usage(runtime, in_flight.event);
-    keep_client_socket
+    true
 }
 
 pub(super) fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
-    if let Some(lease) = state.lease.take() {
-        lease.settle_rotation_unknown(now_ms());
+    state.pending_admission.take();
+    clear_connection_responses(runtime, state);
+    while state.focus_remaining_request() {
+        finish_incomplete_request(runtime, state, category);
     }
-    clear_transient_response_affinity(runtime, state);
+}
+
+fn finish_incomplete_request(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
     let Some(mut in_flight) = state.in_flight.take() else {
-        state.lease.take();
         return;
     };
+    in_flight.lease.settle_rotation_unknown(now_ms());
+    drop(in_flight.lease);
     in_flight.event.success = false;
     in_flight.event.error_category = Some(category.to_string());
     if let Some(routing) = in_flight.event.routing.as_mut() {
@@ -318,11 +206,10 @@ pub(super) fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeStat
         apply_failure_state(&mut in_flight.event, failure_state);
     }
     emit_usage(runtime, in_flight.event);
-    state.lease.take();
 }
 
-pub(super) fn clear_transient_response_affinity(runtime: &GatewayRuntime, state: &mut BridgeState) {
-    if let Some(key) = state.transient_response_affinity_key.take() {
+pub(super) fn clear_connection_responses(runtime: &GatewayRuntime, state: &mut BridgeState) {
+    for key in state.responses.clear() {
         runtime.invalidate_response_affinity(Some(&key));
     }
 }

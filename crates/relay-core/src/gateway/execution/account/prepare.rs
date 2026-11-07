@@ -4,6 +4,7 @@ use super::super::super::request::{
     responses_lite_parallel_tool_calls_valid,
 };
 use super::super::super::response::route_error_origin;
+use super::super::state::RetryState;
 use crate::error_codes;
 use crate::protocol::AdapterError;
 use crate::runtime::{AccountTransport, AuthenticatedKey, DefaultServiceTier, ExecutorRoute};
@@ -17,6 +18,7 @@ use std::borrow::Cow;
 
 pub(super) enum AccountPrepare {
     Continue,
+    Reject(AdapterError),
     Respond(Response<Body>),
     Ready(Box<PreparedAccountAttempt>),
 }
@@ -50,9 +52,7 @@ pub(super) struct AccountPrepareInput<'a> {
     pub(super) half_open_probe: bool,
     pub(super) diagnostics: RoutingDiagnostics,
     pub(super) client_context_id: &'a Option<String>,
-    pub(super) request_id: &'a str,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_adapter_error: &'a mut Option<crate::protocol::AdapterError>,
+    pub(super) retry: &'a mut RetryState,
 }
 
 /// Turn one reserved account into a serialized upstream attempt. A route that
@@ -75,11 +75,14 @@ pub(super) fn prepare_account_attempt(
         half_open_probe,
         diagnostics,
         client_context_id,
-        request_id,
+        retry,
+        ..
+    } = account_prepare_input;
+    let RetryState {
         last_failure,
         last_adapter_error,
         ..
-    } = account_prepare_input;
+    } = retry;
     let Some(mut route) = runtime.executor_route(
         candidate_id,
         resolved_model,
@@ -113,10 +116,7 @@ pub(super) fn prepare_account_attempt(
     let basis_points_route = route.account_transport == AccountTransport::ExcelBasisPoints;
     let siwc_route = route.account_transport == AccountTransport::Siwc;
     if siwc_route && endpoint == AccountEndpoint::AlphaSearch {
-        return AccountPrepare::Respond(super::super::request::adapter_error_response(
-            AdapterError::parameter_unsupported_for("endpoint"),
-            Some(request_id),
-        ));
+        return AccountPrepare::Reject(AdapterError::parameter_unsupported_for("endpoint"));
     }
     if basis_points_route
         && let Some(step) = reject_account_basis_points(
@@ -164,34 +164,23 @@ pub(super) fn prepare_account_attempt(
             .as_object_mut()
             .expect("validated account request");
         if !super::super::super::compaction::prepare_routed_compaction_request(fields) {
-            return AccountPrepare::Respond(super::super::request::adapter_error_response(
-                AdapterError::invalid_request(),
-                Some(request_id),
-            ));
+            return AccountPrepare::Reject(AdapterError::invalid_request());
         }
         match crate::protocol::prepare_bridged_compaction(&upstream_body) {
             Ok(compaction) => {
                 upstream_body = Cow::Owned(compaction.request(&upstream_body).clone())
             }
             Err(error) => {
-                return AccountPrepare::Respond(super::super::request::adapter_error_response(
-                    error,
-                    Some(request_id),
-                ));
+                return AccountPrepare::Reject(error);
             }
         }
     }
     // Only a text-summary bridge omits tools; ordinary account requests keep them.
-    if let Some(step) = apply_account_tool_policy(tool_policy, &upstream_body) {
-        return step;
-    }
+    tool_policy.capture_forwarded_catalog(&upstream_body);
     if siwc_route {
         if let Err(error) = crate::providers::chatgpt::prepare_siwc_request(upstream_body.to_mut())
         {
-            return AccountPrepare::Respond(super::super::request::adapter_error_response(
-                error,
-                Some(request_id),
-            ));
+            return AccountPrepare::Reject(error);
         }
         crate::gateway::request::apply_account_prompt_cache_key(
             upstream_body
@@ -208,7 +197,6 @@ pub(super) fn prepare_account_attempt(
     if basis_points_route {
         match rewrite_account_basis_points_body(
             &upstream_body,
-            request_id,
             last_adapter_error,
             &mut preparation.schema_validation_ms,
             tool_policy.diagnostics.client_context.is_some(),
@@ -343,23 +331,9 @@ fn prepare_account_upstream_body<'a>(
     Ok(upstream_body)
 }
 
-fn apply_account_tool_policy(
-    tool_policy: &mut RequestToolPolicy,
-    upstream_body: &Value,
-) -> Option<AccountPrepare> {
-    tool_policy.apply_value(upstream_body).err().map(|message| {
-        AccountPrepare::Respond(api_error(
-            StatusCode::BAD_REQUEST,
-            message,
-            error_codes::INVALID_REQUEST,
-        ))
-    })
-}
-
 #[allow(clippy::result_large_err)]
 fn rewrite_account_basis_points_body(
     upstream_body: &Value,
-    request_id: &str,
     last_adapter_error: &mut Option<AdapterError>,
     schema_validation_ms: &mut Option<u64>,
     diagnostics_enabled: bool,
@@ -376,9 +350,7 @@ fn rewrite_account_basis_points_body(
             *last_adapter_error = Some(error);
             Err(AccountPrepare::Continue)
         }
-        Err(error) => Err(AccountPrepare::Respond(
-            super::super::request::adapter_error_response(error, Some(request_id)),
-        )),
+        Err(error) => Err(AccountPrepare::Reject(error)),
     }
 }
 

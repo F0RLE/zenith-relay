@@ -63,7 +63,7 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(String, u64) -> bool + Send + Sync + 'static,
     ) {
-        *crate::poison::mutex(&self.codex_catalog_hint_callback) = Arc::new(callback);
+        *crate::poison::mutex(&self.provider_metadata.catalog_hint_callback) = Arc::new(callback);
     }
 
     pub(crate) fn observe_codex_models_etag(
@@ -73,7 +73,7 @@ impl GatewayRuntime {
         headers: &HeaderMap,
         prepared: &PreparedAuthorization,
     ) {
-        let Some(account) = self.chatgpt_accounts.get(candidate_id) else {
+        let Some(account) = self.account_state.executors.get(candidate_id) else {
             return;
         };
         if account.oauth_client_kind != crate::providers::chatgpt::OAuthClientKind::Codex
@@ -86,7 +86,7 @@ impl GatewayRuntime {
             return;
         };
         let (hint, delay_ms, previous) = {
-            let mut hints = crate::poison::mutex(&self.codex_catalog_hints);
+            let mut hints = crate::poison::mutex(&self.provider_metadata.catalog_hints);
             let Some((hint, delay_ms)) = next_hint(
                 hints.get(candidate_id),
                 prepared.credential_fingerprint(),
@@ -99,9 +99,9 @@ impl GatewayRuntime {
             let previous = hints.insert(candidate_id.to_string(), hint.clone());
             (hint, delay_ms, previous)
         };
-        let callback = crate::poison::mutex(&self.codex_catalog_hint_callback).clone();
+        let callback = crate::poison::mutex(&self.provider_metadata.catalog_hint_callback).clone();
         if !callback(account.id.clone(), delay_ms) {
-            let mut hints = crate::poison::mutex(&self.codex_catalog_hints);
+            let mut hints = crate::poison::mutex(&self.provider_metadata.catalog_hints);
             if hints.get(candidate_id) == Some(&hint) {
                 if let Some(previous) = previous {
                     hints.insert(candidate_id.to_string(), previous);

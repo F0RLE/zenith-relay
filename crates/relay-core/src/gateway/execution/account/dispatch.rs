@@ -10,6 +10,7 @@ use super::super::super::response::{
     UsageAttempt, emit_usage, populate_tokens, stop_basis_points_event, usage_event,
 };
 use super::super::super::turn_state::request_scope;
+use super::super::state::{ContinuationState, RetryState};
 use super::super::{RequestFailureInput, attempt_error_response, finish_request_failure};
 use crate::runtime::{
     AuthenticatedKey, AuthorizationIdentityPolicy, AuthorizedRequestError, CandidateLease,
@@ -71,9 +72,8 @@ pub(super) struct AccountDispatchInput<'a> {
     pub(super) client_headers: &'a HeaderMap,
     pub(super) operation: RotationOperation,
     pub(super) account_only_exclusions: &'a HashSet<String>,
-    pub(super) response_affinity_key: Option<&'a str>,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
+    pub(super) continuation: &'a ContinuationState,
+    pub(super) retry: &'a mut RetryState,
 }
 
 /// Send one prepared account attempt and collect its body. Transport failures
@@ -106,10 +106,15 @@ pub(super) async fn dispatch_account_attempt(
         client_headers,
         operation,
         account_only_exclusions,
-        response_affinity_key,
+        continuation,
+        retry,
+    } = account_attempt_input;
+    let response_affinity_key = continuation.response_affinity_key.as_deref();
+    let RetryState {
         last_failure,
         last_failure_origin,
-    } = account_attempt_input;
+        ..
+    } = retry;
     let catalog_started = preparation_started.map(|_| Instant::now());
     preparation.body_ms = preparation_started
         .zip(catalog_started)
@@ -146,12 +151,14 @@ pub(super) async fn dispatch_account_attempt(
     let attachments_started = preparation_started.map(|_| Instant::now());
     let mut attachment_owner = None;
     let request_body = if basis_points_route {
+        preparation.attachments = attachments_started.map(|_| Default::default());
         match super::super::basis_points::attach_input_images(
             runtime,
             &route.candidate_id,
             &upstream_url,
             &route.upstream_headers,
             &mut upstream_body,
+            preparation.attachments.as_mut(),
         )
         .await
         {
@@ -191,7 +198,7 @@ pub(super) async fn dispatch_account_attempt(
     let started = Instant::now();
     let failure_tool_use = tool_use.clone();
     let failed_usage = |route: &ExecutorRoute, attempt, failure: AttemptFailure| {
-        usage_event(
+        let mut event = usage_event(
             UsageAttempt {
                 request_id,
                 attempt,
@@ -205,7 +212,17 @@ pub(super) async fn dispatch_account_attempt(
             failure.status.as_u16(),
             Some(failure.category.to_string()),
             started.elapsed().as_millis() as u64,
-        )
+        );
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(
+                if failure.execution.certainty == ExecutionCertainty::Unknown {
+                    crate::AttemptOutcome::ExecutionUncertain
+                } else {
+                    crate::AttemptOutcome::ReturnedFailure
+                },
+            );
+        }
+        event
     };
     let mut request_headers = if basis_points_route {
         route.upstream_headers.clone()
@@ -295,6 +312,8 @@ pub(super) async fn dispatch_account_attempt(
         Ok(upstream) => {
             route.observe_http_payload(&upstream.response);
             route.account_token_generation = upstream.account_token_generation;
+            route.account_token_revision =
+                upstream.authorization_incarnation.token_revision().cloned();
             route.observe_http_response(
                 upstream.response.headers(),
                 started.elapsed().as_millis() as u64,
@@ -465,6 +484,9 @@ fn reject_authorized_dispatch(
     }
     let failure_state = settle_route_failure(runtime, lease, route, &failure, &HeaderMap::new());
     apply_failure_state(&mut event, failure_state);
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+    }
     emit_usage(runtime, event);
     *last_failure = Some(failure);
     *last_failure_origin = selected_error_origin;
@@ -492,6 +514,9 @@ fn reject_unreadable_body(
     let mut event = failed_usage(route, attempt, failure);
     populate_tokens(&mut event, &error.bytes);
     apply_failure_state(&mut event, failure_state);
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
+    }
     emit_usage(runtime, event);
     AccountDispatch::Respond(attempt_error_response(
         failure,

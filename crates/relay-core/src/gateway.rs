@@ -295,6 +295,7 @@ pub(crate) mod test_support {
             candidate_id: Some("source".into()),
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),

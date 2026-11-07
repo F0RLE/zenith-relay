@@ -8,7 +8,7 @@ fn options(ids: &[&str]) -> GatewayRuntimeOptions {
             .map(|id| (PoolMemberKind::Source, (*id).into(), 0, 1))
             .collect(),
     );
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     GatewayRuntimeOptions {
         pool_routing: Some(policy),
         // Every recovery and compatibility dispatch shares this exact limit.

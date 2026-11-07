@@ -46,6 +46,29 @@ async fn reserve(runtime: &GatewayRuntime) -> crate::runtime::CandidateLease {
 }
 
 #[tokio::test]
+async fn repeated_retry_fields_cannot_shorten_the_selected_model_cooldown() {
+    for values in [["1", "120"], ["120", "1"]] {
+        let runtime = runtime(5);
+        let mut headers = reqwest::header::HeaderMap::new();
+        for value in values {
+            headers.append(RETRY_AFTER, value.parse().unwrap());
+        }
+        let started = now_ms();
+        let lease = reserve(&runtime).await;
+        let failure = settle_classified_failure(
+            &runtime,
+            &lease,
+            "model-a",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_overloaded",
+            &headers,
+            RateLimitBodyHint::default(),
+        );
+        assert!(failure.retry_at_ms.unwrap() >= started + 120_000);
+    }
+}
+
+#[tokio::test]
 async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay() {
     for category in [
         "upstream_overloaded",
@@ -144,6 +167,15 @@ fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
         .unwrap();
         assert_eq!(result.scope, "model-a");
         assert_eq!(result.retry_at_ms, 1_700_000_000_000 + expected_ms);
+        let provider_delay = explicit
+            .map(|seconds| seconds * 1_000)
+            .into_iter()
+            .chain(header.map(|seconds| seconds.parse::<u64>().unwrap() * 1_000))
+            .max();
+        assert_eq!(
+            result.provider_not_before_ms,
+            provider_delay.map(|delay| 1_700_000_000_000 + delay)
+        );
     }
     let hint = cooldown::rate_limit_body_hint_at(
         br#"{"error":{"code":"insufficient_quota","resets_at":1700518400}}"#,
@@ -162,6 +194,7 @@ fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
     .unwrap();
     assert_eq!(result.scope, "*");
     assert_eq!(result.retry_at_ms, 1_700_518_400_000);
+    assert_eq!(result.provider_not_before_ms, Some(1_700_518_400_000));
 }
 
 #[test]

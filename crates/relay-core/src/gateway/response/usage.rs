@@ -52,6 +52,7 @@ pub(in crate::gateway) fn usage_event(
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
         account_token_generation: route.account_token_generation,
+        account_token_revision: route.account_token_revision.clone(),
         client_context_id: route.client_context_id.clone(),
         routing,
         requested_model: Some(requested_model.to_string()),

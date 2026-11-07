@@ -1,21 +1,19 @@
 use super::super::super::continuation::{
     RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
-    clear_materialized_continuation,
 };
 use super::super::super::errors::{
-    AttemptFailure, PreservedUpstreamError, api_error, apply_failure_state,
-    is_deactivated_workspace, preserved_upstream_error, previous_response_not_found,
-    prompt_cache_write_rejected, recoverable_response_affinity_miss,
-    recoverable_response_model_switch, retryable_route_failure, route_forbids_fallback,
-    settle_route_failure,
+    AttemptFailure, api_error, apply_failure_state, is_deactivated_workspace,
+    preserved_upstream_error, previous_response_not_found, prompt_cache_write_rejected,
+    recoverable_response_affinity_miss, recoverable_response_model_switch, retryable_route_failure,
+    route_forbids_fallback, settle_route_failure,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
     UsageAttempt, emit_repair, emit_usage, populate_tokens, proxy_error_response, usage_event,
 };
 use super::super::super::turn_state::relay_account_response_header;
-use super::super::AttemptRepairs;
 use super::super::request::recover_stale_tool_history;
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::super::{
     ContinuationReset, ResponsesItemPrefixRepairs, bind_encrypted_context_repair_owner,
     repair_once, repair_responses_item_prefixes, reset_materialized_continuation,
@@ -29,7 +27,6 @@ use crate::{ErrorOrigin, GatewayRuntime};
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::time::Instant;
 
 pub(super) enum AccountStatusFailure {
@@ -59,14 +56,7 @@ pub(super) struct AccountStatusFailureInput<'a> {
     pub(super) response_affinity_hit: bool,
     pub(super) has_previous_response_id: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) response_affinity_key: &'a mut Option<String>,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
 }
 
 struct ClassifiedAccountFailure {
@@ -78,11 +68,13 @@ struct ClassifiedAccountFailure {
 /// Classify one unsuccessful account response. Repairs continue the attempt
 /// loop; a terminal upstream error leaves it.
 pub(super) fn handle_account_status_failure(
-    mut account_failure_input: AccountStatusFailureInput<'_>,
+    mut input: AccountStatusFailureInput<'_>,
 ) -> AccountStatusFailure {
-    let mut classified = classify_account_failure(&mut account_failure_input);
-    if classified.failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
-        let input = &account_failure_input;
+    let mut classified = classify_account_failure(&mut input);
+    if matches!(
+        classified.failure.category,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+    ) {
         let state = settle_route_failure(
             input.runtime,
             input.lease,
@@ -94,24 +86,22 @@ pub(super) fn handle_account_status_failure(
         emit_usage(input.runtime, classified.event);
         return AccountStatusFailure::Respond(super::super::attempt_error_response(
             classified.failure,
-            input.last_preserved_upstream_error.as_ref(),
+            input.state.retry.last_preserved_upstream_error.as_ref(),
             input.selected_error_origin,
             input.request_id,
         ));
     }
-    if let Some(step) = repair_account_body(&mut account_failure_input, &mut classified) {
+    if let Some(step) = repair_account_body(&mut input, &mut classified) {
         return step;
     }
-    if let Some(step) =
-        repair_classified_account_failure(&mut account_failure_input, &mut classified)
-    {
+    if let Some(step) = repair_classified_account_failure(&mut input, &mut classified) {
         return step;
     }
-    settle_account_failure(account_failure_input, classified)
+    settle_account_failure(input, classified)
 }
 
 fn repair_account_body(
-    account_failure_input: &mut AccountStatusFailureInput<'_>,
+    input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
     if classified.failure.execution.certainty
@@ -120,109 +110,102 @@ fn repair_account_body(
         return None;
     }
     {
-        let request_body = &mut *account_failure_input.request;
-        let tried = &mut *account_failure_input.tried;
-        let candidate_id = account_failure_input.route.candidate_id.as_str();
+        let request_body = &mut *input.request;
+        let tried = &mut input.state.retry.tried;
+        let candidate_id = input.route.candidate_id.as_str();
         if repair_once(
-            &mut account_failure_input.repairs.legacy_call_id,
-            crate::gateway::errors::responses_tool_call_links_rejected(
-                &account_failure_input.bytes,
-            ),
+            &mut input.state.continuation.repairs.legacy_call_id,
+            crate::gateway::errors::responses_tool_call_links_rejected(&input.bytes),
             tried,
             candidate_id,
-            account_failure_input.lease,
+            input.lease,
             || repair_legacy_call_ids(request_body),
         ) {
-            *account_failure_input.has_unpaired_tool_output =
+            input.state.continuation.has_unpaired_tool_output =
                 !super::super::super::request::unpaired_tool_output_ids(request_body).is_empty();
-            *account_failure_input.requires_affinity_owner =
+            input.state.continuation.requires_affinity_owner =
                 super::request_has_previous_response_id(request_body)
-                    || *account_failure_input.has_unpaired_tool_output;
+                    || input.state.continuation.has_unpaired_tool_output;
             // The provider rejected the body before doing the work. Close that
             // attempt as not sent so the repaired request can use the same
             // account without a cooldown or an unknown cancellation.
-            account_failure_input.lease.settle_rotation_repair(now_ms());
-            record_account_repair(account_failure_input, classified);
+            input.lease.settle_rotation_repair(now_ms());
+            record_account_repair(input, classified);
             return Some(AccountStatusFailure::Continue);
         }
     }
-    let request_body = &mut *account_failure_input.request;
-    let tried = &mut *account_failure_input.tried;
-    let candidate_id = account_failure_input.route.candidate_id.as_str();
+    let request_body = &mut *input.request;
+    let tried = &mut input.state.retry.tried;
+    let candidate_id = input.route.candidate_id.as_str();
     if repair_responses_item_prefixes(
         request_body,
-        &account_failure_input.bytes,
+        &input.bytes,
         true,
         &mut ResponsesItemPrefixRepairs {
-            function_ids: &mut account_failure_input.repairs.function_item_id,
-            custom_tool_ids: &mut account_failure_input.repairs.custom_tool_item_id,
-            tool_search_ids: &mut account_failure_input.repairs.tool_search_item_id,
-            message_ids: &mut account_failure_input.repairs.message_item_id,
+            function_ids: &mut input.state.continuation.repairs.function_item_id,
+            custom_tool_ids: &mut input.state.continuation.repairs.custom_tool_item_id,
+            tool_search_ids: &mut input.state.continuation.repairs.tool_search_item_id,
+            message_ids: &mut input.state.continuation.repairs.message_item_id,
         },
         tried,
         candidate_id,
-        account_failure_input.lease,
+        input.lease,
     ) {
-        account_failure_input.lease.settle_rotation_repair(now_ms());
-        record_account_repair(account_failure_input, classified);
+        input.lease.settle_rotation_repair(now_ms());
+        record_account_repair(input, classified);
         return Some(AccountStatusFailure::Continue);
     }
     None
 }
 
-fn classify_account_failure(
-    account_failure_input: &mut AccountStatusFailureInput<'_>,
-) -> ClassifiedAccountFailure {
-    let mut failure = AttemptFailure::status_with_body(
-        account_failure_input.status,
-        Some(&account_failure_input.bytes),
-    )
-    .with_retry_headers(account_failure_input.response_headers);
-    super::super::super::errors::apply_degraded_route_policy(
-        account_failure_input.runtime,
-        &mut failure,
-    );
-    if account_failure_input.status == StatusCode::PAYMENT_REQUIRED
-        && account_failure_input.route.account_id.is_some()
-        && is_deactivated_workspace(&account_failure_input.bytes)
+fn classify_account_failure(input: &mut AccountStatusFailureInput<'_>) -> ClassifiedAccountFailure {
+    let mut failure = AttemptFailure::status_with_body(input.status, Some(&input.bytes))
+        .with_retry_headers(input.response_headers);
+    super::super::super::errors::apply_degraded_route_policy(input.runtime, &mut failure);
+    if input.status == StatusCode::PAYMENT_REQUIRED
+        && input.route.account_id.is_some()
+        && is_deactivated_workspace(&input.bytes)
     {
-        account_failure_input
+        input
             .runtime
-            .trip_chatgpt_team_breaker(&account_failure_input.route.candidate_id, now_ms());
+            .trip_chatgpt_team_breaker(&input.route.candidate_id, now_ms());
     }
-    *account_failure_input.last_preserved_upstream_error =
-        preserved_upstream_error(&failure, &account_failure_input.bytes);
+    input.state.retry.last_preserved_upstream_error =
+        preserved_upstream_error(&failure, &input.bytes);
     let upstream_error = crate::usage::UpstreamErrorDetails::from_response(
-        Some(account_failure_input.status.as_u16()),
-        &account_failure_input.bytes,
-        account_failure_input.response_headers,
+        Some(input.status.as_u16()),
+        &input.bytes,
+        input.response_headers,
     );
     let mut event = usage_event(
         UsageAttempt {
-            request_id: account_failure_input.request_id,
-            attempt: account_failure_input.attempt,
-            local_key_id: &account_failure_input.key.id,
-            route: account_failure_input.route,
-            reasoning_effort: Some(account_failure_input.reasoning_effort),
-            requested_model: account_failure_input.requested_model,
-            tool_use: account_failure_input.tool_use.clone(),
+            request_id: input.request_id,
+            attempt: input.attempt,
+            local_key_id: &input.key.id,
+            route: input.route,
+            reasoning_effort: Some(input.reasoning_effort),
+            requested_model: input.requested_model,
+            tool_use: input.tool_use.clone(),
         },
         false,
-        account_failure_input.status.as_u16(),
+        input.status.as_u16(),
         Some(failure.category.to_string()),
-        account_failure_input.started.elapsed().as_millis() as u64,
+        input.started.elapsed().as_millis() as u64,
     );
-    populate_tokens(&mut event, &account_failure_input.bytes);
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
+    populate_tokens(&mut event, &input.bytes);
     event.upstream_error = Some(upstream_error.clone());
     ClassifiedAccountFailure {
-        cache_write_rejected: prompt_cache_write_rejected(&account_failure_input.bytes),
+        cache_write_rejected: prompt_cache_write_rejected(&input.bytes),
         failure,
         event,
     }
 }
 
 fn repair_classified_account_failure(
-    account_failure_input: &mut AccountStatusFailureInput<'_>,
+    input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) -> Option<AccountStatusFailure> {
     if classified.failure.execution.certainty
@@ -231,92 +214,81 @@ fn repair_classified_account_failure(
         return None;
     }
     {
-        let request_body = &mut *account_failure_input.request;
-        let tried = &mut *account_failure_input.tried;
-        let candidate_id = account_failure_input.route.candidate_id.as_str();
+        let request_body = &mut *input.request;
+        let tried = &mut input.state.retry.tried;
+        let candidate_id = input.route.candidate_id.as_str();
         let supports_responses_history = matches!(
-            account_failure_input.endpoint,
+            input.endpoint,
             AccountEndpoint::Compact | AccountEndpoint::Wake
         );
         if supports_responses_history
             && repair_once(
-                &mut account_failure_input.repairs.encrypted_context,
+                &mut input.state.continuation.repairs.encrypted_context,
                 classified.failure.category == error_codes::UPSTREAM_ENCRYPTED_CONTENT_INVALID,
                 tried,
                 candidate_id,
-                account_failure_input.lease,
-                || {
-                    super::drop_rejected_encrypted_context(
-                        request_body,
-                        &account_failure_input.bytes,
-                    )
-                },
+                input.lease,
+                || super::drop_rejected_encrypted_context(request_body, &input.bytes),
             )
         {
             bind_encrypted_context_repair_owner(
-                account_failure_input.repairs,
-                account_failure_input.response_affinity_key,
-                account_failure_input.requires_affinity_owner,
-                account_failure_input.runtime,
-                account_failure_input.request_id,
+                &mut input.state.continuation.repairs,
+                &mut input.state.continuation.response_affinity_key,
+                &mut input.state.continuation.requires_affinity_owner,
+                input.runtime,
+                input.request_id,
                 candidate_id,
             );
-            account_failure_input.lease.settle_rotation_repair(now_ms());
-            record_account_repair(account_failure_input, classified);
+            input.lease.settle_rotation_repair(now_ms());
+            record_account_repair(input, classified);
             return Some(AccountStatusFailure::Continue);
         }
     }
-    if account_failure_input.has_previous_response_id
+    if input.has_previous_response_id
         && recover_stale_tool_history(
-            account_failure_input.runtime,
-            &account_failure_input.key.id,
-            account_failure_input.request,
-            account_failure_input.resolved_model,
-            &account_failure_input.bytes,
-            &mut account_failure_input.repairs.stale_tool_history,
+            input.runtime,
+            &input.key.id,
+            input.request,
+            input.resolved_model,
+            &input.bytes,
+            &mut input.state.continuation.repairs.stale_tool_history,
         )
     {
-        clear_materialized_continuation(
-            account_failure_input.response_affinity_key,
-            account_failure_input.requires_affinity_owner,
-            account_failure_input.has_unpaired_tool_output,
-        );
-        account_failure_input
-            .tried
-            .remove(&account_failure_input.route.candidate_id);
-        account_failure_input.lease.settle_rotation_repair(now_ms());
-        record_account_repair(account_failure_input, classified);
+        input.state.continuation.clear_materialized();
+        input.state.retry.tried.remove(&input.route.candidate_id);
+        input.lease.settle_rotation_repair(now_ms());
+        record_account_repair(input, classified);
         return Some(AccountStatusFailure::Continue);
     }
-    if !account_failure_input.repairs.model_switch_reset
+    if !input.state.continuation.repairs.model_switch_reset
         && reset_materialized_continuation(
             &mut ContinuationReset {
-                attempted: &mut account_failure_input.repairs.model_switch_reset,
-                response_affinity_key: account_failure_input.response_affinity_key,
-                requires_affinity_owner: account_failure_input.requires_affinity_owner,
+                attempted: &mut input.state.continuation.repairs.model_switch_reset,
+                response_affinity_key: &mut input.state.continuation.response_affinity_key,
+                requires_affinity_owner: &mut input.state.continuation.requires_affinity_owner,
             },
             recoverable_response_model_switch(
-                account_failure_input.status,
+                input.status,
                 classified.failure.category,
-                account_failure_input.has_previous_response_id,
-                *account_failure_input.has_unpaired_tool_output,
-                &account_failure_input.bytes,
+                input.has_previous_response_id,
+                input.state.continuation.has_unpaired_tool_output,
+                &input.bytes,
             ),
-            account_failure_input.runtime,
-            &account_failure_input.key.id,
-            account_failure_input.request,
-            account_failure_input.resolved_model,
+            input.runtime,
+            &input.key.id,
+            input.request,
+            input.resolved_model,
         )
     {
-        account_failure_input.lease.settle_rotation_repair(now_ms());
-        record_account_repair(account_failure_input, classified);
+        input.lease.settle_rotation_repair(now_ms());
+        record_account_repair(input, classified);
         return Some(AccountStatusFailure::Continue);
     }
     None
 }
 
 fn settle_account_failure(
-    account_failure_input: AccountStatusFailureInput<'_>,
+    input: AccountStatusFailureInput<'_>,
     classified: ClassifiedAccountFailure,
 ) -> AccountStatusFailure {
     let AccountStatusFailureInput {
@@ -335,14 +307,25 @@ fn settle_account_failure(
         response_affinity_hit,
         has_previous_response_id,
         prompt_affinity_key,
-        repairs,
-        tried,
-        requires_affinity_owner,
-        response_affinity_key,
-        last_failure,
-        last_failure_origin,
+        state,
         ..
-    } = account_failure_input;
+    } = input;
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                requires_affinity_owner,
+                response_affinity_key,
+                ..
+            },
+    } = state;
     let failure = classified.failure;
     let mut event = classified.event;
     let not_sent =
@@ -393,6 +376,9 @@ fn settle_account_failure(
         }
         let rejection_state = rejection_state.clone();
         apply_failure_state(&mut event, rejection_state);
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+        }
         emit_usage(runtime, event);
         *last_failure = Some(failure);
         *last_failure_origin = selected_error_origin;
@@ -415,12 +401,12 @@ fn settle_account_failure(
 }
 
 fn record_account_repair(
-    account_failure_input: &mut AccountStatusFailureInput<'_>,
+    input: &mut AccountStatusFailureInput<'_>,
     classified: &mut ClassifiedAccountFailure,
 ) {
-    emit_repair(account_failure_input.runtime, &mut classified.event);
-    *account_failure_input.last_failure = Some(classified.failure);
-    *account_failure_input.last_failure_origin = account_failure_input.selected_error_origin;
+    emit_repair(input.runtime, &mut classified.event);
+    input.state.retry.last_failure = Some(classified.failure);
+    input.state.retry.last_failure_origin = input.selected_error_origin;
 }
 
 fn repair_legacy_call_ids(request: &mut Value) -> bool {

@@ -8,8 +8,7 @@ pub(super) async fn send_gateway_error(
     request_id: Option<&str>,
     stream_id: Option<&str>,
 ) {
-    let event = gateway_error_event(failure, request_id, stream_id);
-    if send_message(downstream, Message::Text(event.to_string().into()))
+    if send_request_error(downstream, failure, request_id, stream_id)
         .await
         .is_err()
     {
@@ -27,6 +26,16 @@ pub(super) async fn send_gateway_error(
         })),
     )
     .await;
+}
+
+pub(super) async fn send_request_error(
+    downstream: &mut WebSocket,
+    failure: &GatewayFailure,
+    request_id: Option<&str>,
+    stream_id: Option<&str>,
+) -> Result<(), ()> {
+    let event = gateway_error_event(failure, request_id, stream_id);
+    send_message(downstream, Message::Text(event.to_string().into())).await
 }
 
 pub(super) fn gateway_error_event(

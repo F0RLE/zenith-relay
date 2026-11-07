@@ -11,11 +11,20 @@ use std::time::Instant;
 
 mod continuation;
 mod parse;
+pub(super) use parse::valid_stream_id;
+
+#[derive(Clone)]
+pub(super) struct WebsocketAuthorization {
+    pub(super) candidate_id: String,
+    pub(super) credential_fingerprint: [u8; 32],
+    pub(super) incarnation: crate::runtime::AuthorizationIncarnation,
+}
 
 pub(super) struct PreparedPayload {
     pub(super) payload: String,
     pub(super) reasoning_effort: ReasoningEffortDiagnostics,
     pub(super) tool_use: ToolUseDiagnostics,
+    pub(super) native_search_declared: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -36,9 +45,36 @@ pub(super) struct ClientRequest {
     pub(super) prompt_affinity_key: Option<String>,
     pub(super) client_context_id: Option<String>,
     pub(super) background_kind: Option<&'static str>,
+    pub(super) websocket_authorization: Option<WebsocketAuthorization>,
 }
 
 impl ClientRequest {
+    pub(super) fn websocket_reauth(
+        &self,
+        candidate_id: &str,
+        prepared: &crate::runtime::PreparedAuthorization,
+    ) -> bool {
+        self.websocket_authorization
+            .as_ref()
+            .is_some_and(|previous| {
+                previous.candidate_id == candidate_id
+                    && (previous.credential_fingerprint != prepared.credential_fingerprint()
+                        || previous.incarnation != prepared.incarnation())
+            })
+    }
+
+    pub(super) fn observe_websocket_authorization(
+        &mut self,
+        candidate_id: &str,
+        prepared: &crate::runtime::PreparedAuthorization,
+    ) {
+        self.websocket_authorization = Some(WebsocketAuthorization {
+            candidate_id: candidate_id.to_owned(),
+            credential_fingerprint: prepared.credential_fingerprint(),
+            incarnation: prepared.incarnation(),
+        });
+    }
+
     pub(super) fn account_retained_input(&self) {
         self.budget
             .retain_input_bytes(crate::gateway::request_body::retained_request_bytes(
@@ -110,18 +146,16 @@ impl ClientRequest {
         error: crate::AdapterError,
         started: Instant,
     ) -> GatewayFailure {
-        use crate::gateway::execution::compatibility::{
-            AdapterRejection, record_adapter_rejection,
-        };
+        use crate::gateway::execution::compatibility::{RejectedRequest, record_adapter_rejection};
 
         record_adapter_rejection(
             runtime,
-            AdapterRejection {
+            RejectedRequest {
                 request_id: &self.request_id,
                 attempt: 0,
                 local_key_id: &self.local_key_id,
                 requested_model: &self.requested_model,
-                resolved_model: &self.resolved_model,
+                resolved_model: Some(&self.resolved_model),
                 client_context_id: self.client_context_id.as_deref(),
                 wire_api: WireApi::Responses,
                 transport: crate::UsageTransport::Websocket,
@@ -135,8 +169,8 @@ impl ClientRequest {
 
     #[cfg(test)]
     pub(super) fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
-        let (filtered_request, _) = self.filtered_value_for(route)?;
-        serde_json::to_string(&filtered_request)
+        let (routed_request, _) = self.routed_value_for(route)?;
+        serde_json::to_string(&routed_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
 
@@ -161,8 +195,8 @@ impl ClientRequest {
         if !GatewayRuntime::route_supports_service_tier(route, self.service_tier()) {
             return Err(GatewayFailure::unsupported_service_tier());
         }
-        let (mut filtered_request, mut tool_use) = self.filtered_value_for(route)?;
-        runtime.apply_request_timezone(&route.candidate_id, &mut filtered_request);
+        let (mut routed_request, mut tool_use) = self.routed_value_for(route)?;
+        runtime.apply_request_timezone(&route.candidate_id, &mut routed_request);
         let turn_scope = request_scope(
             &self.local_key_id,
             client_headers,
@@ -170,27 +204,32 @@ impl ClientRequest {
             &route.source_model,
             route.upstream_url.as_str(),
         );
-        runtime.guard_codex_payload(&mut filtered_request, turn_scope.as_ref(), prepared);
+        runtime.guard_codex_payload(&mut routed_request, turn_scope.as_ref(), prepared);
         let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
             &self.request_body,
-            &filtered_request,
+            &routed_request,
             WireApi::Responses,
             WireApi::Responses,
         );
         self.tool_policy
-            .observe_cache_context(runtime, route, &mut filtered_request);
-        let payload = serde_json::to_string(&filtered_request)
+            .observe_cache_context(runtime, route, &mut routed_request);
+        let payload = serde_json::to_string(&routed_request)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))?;
         route.observe_websocket_payload(&payload);
-        tool_use.capture_upstream_context(&filtered_request);
+        tool_use.capture_upstream_context(&routed_request);
         Ok(PreparedPayload {
             payload,
             reasoning_effort,
             tool_use,
+            native_search_declared: native_search_declared(route, &routed_request),
         })
     }
 
-    fn filtered_value_for(
+    pub(super) fn native_search_declared_for(&self, route: &ExecutorRoute) -> Option<bool> {
+        native_search_declared(route, &self.request_body)
+    }
+
+    fn routed_value_for(
         &self,
         route: &ExecutorRoute,
     ) -> Result<(Value, ToolUseDiagnostics), GatewayFailure> {
@@ -203,12 +242,10 @@ impl ClientRequest {
                 "selected Responses Lite transport does not support parallel_tool_calls: true",
             ));
         }
-        let mut filtered_request = self.request_for_route(route);
+        let routed_request = self.request_for_route(route);
         let mut policy = self.tool_policy.clone();
-        policy
-            .apply(&mut filtered_request)
-            .map_err(GatewayFailure::invalid_request)?;
-        Ok((filtered_request, policy.diagnostics))
+        policy.capture_forwarded_catalog(&routed_request);
+        Ok((routed_request, policy.diagnostics))
     }
 
     pub(super) fn http_payload(&self) -> Result<Vec<u8>, GatewayFailure> {
@@ -261,8 +298,72 @@ impl ClientRequest {
     }
 
     pub(super) fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {
-        self.filtered_value_for(route)
+        self.routed_value_for(route)
             .map(|(_, diagnostics)| diagnostics)
             .unwrap_or_else(|_| self.tool_policy.diagnostics.clone())
+    }
+}
+
+fn native_search_declared(route: &ExecutorRoute, request: &Value) -> Option<bool> {
+    (route.account_id.is_some()
+        && route.account_transport == crate::runtime::AccountTransport::NativeResponses)
+        .then(|| declares_hosted_search(request))
+}
+
+fn declares_hosted_search(request: &Value) -> bool {
+    let tools_declare_search = |tools: &Value| {
+        tools.as_array().is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| {
+                        kind == "web_search" || kind.starts_with("web_search_preview")
+                    })
+            })
+        })
+    };
+    if let Some(tools) = request.get("tools").filter(|tools| !tools.is_null()) {
+        return tools_declare_search(tools);
+    }
+    request
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("additional_tools" | "tool_search_output")
+                ) && item.get("tools").is_some_and(tools_declare_search)
+            })
+        })
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hosted_search_uses_current_declarations_including_native_discovery() {
+        for request in [
+            json!({"tools":[{"type":"web_search"}]}),
+            json!({"tools":[{"type":"web_search_preview"}]}),
+            json!({"tools":[{"type":"web_search_preview_2025_03_11"}]}),
+            json!({"input":[{"type":"additional_tools","tools":[{"type":"web_search"}]}]}),
+            json!({"input":[{"type":"tool_search_output","tools":[{"type":"web_search"}]}]}),
+        ] {
+            assert!(declares_hosted_search(&request), "{request}");
+        }
+        for request in [
+            json!({}),
+            json!({"tools":[{"type":"function","name":"web_search"}]}),
+            json!({"tools":[{"type":"tool_search"}]}),
+            json!({"input":[{"type":"web_search_call"}]}),
+            json!({"input":[{"role":"assistant","content":"web_search"}]}),
+            json!({"tools":[],"input":[{"type":"additional_tools","tools":[{"type":"web_search"}]}]}),
+            json!({"tools":[{"type":"function","name":"lookup"}],"input":[{"type":"tool_search_output","tools":[{"type":"web_search"}]}]}),
+        ] {
+            assert!(!declares_hosted_search(&request), "{request}");
+        }
     }
 }

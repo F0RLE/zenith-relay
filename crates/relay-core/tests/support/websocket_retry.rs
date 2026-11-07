@@ -584,6 +584,80 @@ async fn websocket_unknown_terminal_transport_error_is_not_replayed() {
 }
 
 #[tokio::test]
+async fn session_budget_websocket_failure_keeps_usage_and_never_rotates_or_refreshes() {
+    let refusal = Arc::new(vec![
+        json!({"type":"response.created", "response":{"id":"synthetic-budget", "usage":{"input_tokens":7,"output_tokens":2}}}),
+        json!({"type":"error", "error":{"code":"budget_reached","retry_after":1,"message":"previous_response_id not found"}}),
+        json!({"type":"response.completed", "response":{"id":"late","status":"completed","output":[],"usage":{"input_tokens":999}}}),
+    ]);
+    let (first, first_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(refusal.clone())).await;
+    let (second, second_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(refusal)).await;
+    let authority = ready_authority("ws-budget-first", "synthetic-first").await;
+    register_ready(&authority, "ws-budget-second", "synthetic-second").await;
+    let (gateway, events, refresh, _) = spawn_mixed_gateway(
+        vec![],
+        vec![
+            account("ws-budget-first", "synthetic-first", &first, 10),
+            account("ws-budget-second", "synthetic-second", &second, 20),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create", "model":MODEL,"input":"synthetic budget request"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let event = receive_websocket_json_with_timeout(&mut socket, Duration::from_secs(2)).await;
+        assert_ne!(event["type"], "response.completed");
+        if event["type"] == "error" {
+            assert_eq!(event["error"]["code"], "budget_reached");
+            break;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        first_state.requests.lock().unwrap().len() + second_state.requests.lock().unwrap().len(),
+        1
+    );
+    assert_eq!(refresh.calls.load(Ordering::SeqCst), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(events[0].http_status, 400);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_session_budget_exceeded")
+    );
+    assert_eq!(events[0].input_tokens, Some(7));
+    assert_eq!(events[0].output_tokens, Some(2));
+}
+
+#[tokio::test]
 async fn websocket_http_fallback_releases_its_lease_on_client_disconnect() {
     for after_output in [false, true] {
         let (upstream, requests) = if after_output {

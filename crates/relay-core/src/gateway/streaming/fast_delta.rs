@@ -10,6 +10,8 @@ pub(in crate::gateway) struct FastResponseDelta {
     pub(in crate::gateway) output_index: Option<u64>,
     pub(in crate::gateway) sequence_number: Option<u64>,
     pub(in crate::gateway) nonempty_text: bool,
+    pub(in crate::gateway) output_text: bool,
+    pub(in crate::gateway) tool_arguments: bool,
 }
 
 /// Classifies one complete JSON payload without building a `serde_json::Value`.
@@ -41,6 +43,11 @@ pub(in crate::gateway) fn fast_response_delta_json(
         output_index: parsed.output_index,
         sequence_number: parsed.sequence_number,
         nonempty_text: parsed.delta_text.is_some_and(|delta| !delta.0.is_empty()),
+        output_text: event_type == "response.output_text.delta",
+        tool_arguments: matches!(
+            event_type,
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta"
+        ),
     })
 }
 

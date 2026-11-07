@@ -153,3 +153,23 @@ fn organization_rate_limit_requires_explicit_model_and_quota_identity() {
     assert!(hint(&other).shared_bucket.is_none());
     assert!(hint(&other).global);
 }
+#[test]
+fn quota_rejection_and_rate_throttling_keep_distinct_wait_reasons() {
+    use crate::scheduler::CooldownReason;
+
+    for (category, expected) in [
+        (
+            crate::error_codes::UPSTREAM_QUOTA_EXHAUSTED,
+            CooldownReason::QuotaExhausted,
+        ),
+        ("upstream_rate_limited", CooldownReason::RateLimit),
+    ] {
+        let reason = super::super::cooldown::failure_cooldown_reason(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            category,
+            true,
+        );
+        assert_eq!(reason, expected);
+        assert!(reason.is_rate_limit());
+    }
+}

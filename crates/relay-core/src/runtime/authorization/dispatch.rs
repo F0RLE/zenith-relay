@@ -155,12 +155,9 @@ impl GatewayRuntime {
             return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
         if self.is_basis_points_account(candidate_id) {
-            let account =
-                self.chatgpt_accounts
-                    .get(candidate_id)
-                    .ok_or(AuthorizedRequestError::Prepare(
-                        ExecutorPrepareError::Authentication,
-                    ))?;
+            let account = self.account_state.executors.get(candidate_id).ok_or(
+                AuthorizedRequestError::Prepare(ExecutorPrepareError::Authentication),
+            )?;
             let revision =
                 prepared
                     .token_revision
@@ -219,6 +216,7 @@ impl GatewayRuntime {
         self.observe_codex_quota_headers(
             candidate_id,
             prepared.token_generation,
+            prepared.token_revision.as_ref(),
             response.status(),
             response.headers(),
             runtime_now_ms(),
@@ -273,11 +271,14 @@ impl GatewayRuntime {
         candidate_id: &str,
         prepared: &PreparedAuthorization,
     ) -> Option<std::sync::Arc<super::super::routing_cookies::RoutingCookieJar>> {
-        self.chatgpt_accounts.get(candidate_id).map(|account| {
-            account
-                .routing_cookies
-                .for_credential(prepared.turn_state_credential())
-        })
+        self.account_state
+            .executors
+            .get(candidate_id)
+            .map(|account| {
+                account
+                    .routing_cookies
+                    .for_credential(prepared.turn_state_credential())
+            })
     }
 
     pub(crate) fn guard_turn_state(
@@ -394,7 +395,7 @@ impl GatewayRuntime {
                 }
             }
         }
-        let native_codex_account = self.chatgpt_accounts.contains_key(candidate_id)
+        let native_codex_account = self.account_state.executors.contains_key(candidate_id)
             && !self.is_siwc_account(candidate_id)
             && !self.is_basis_points_account(candidate_id)
             && identity_policy == AuthorizationIdentityPolicy::RelayCodex
@@ -555,8 +556,8 @@ impl GatewayRuntime {
                 .extensions_mut()
                 .insert(payload_diagnostics);
         }
+        self.observe_turn_state(upstream_response.headers(), scope, prepared);
         if upstream_response.status().is_success() {
-            self.observe_turn_state(upstream_response.headers(), scope, prepared);
             self.observe_codex_models_etag(
                 candidate_id,
                 &url,

@@ -104,7 +104,7 @@ async fn prepared_oauth_replacement_cannot_dispatch_an_old_lease() {
     use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
 
     let runtime = quota_runtime(QuotaSnapshot::default());
-    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
     let first = TokenSet::access_only("synthetic-first", None, 1).unwrap();
     authority
         .register("account-1", first.clone(), AccountAuthState::Active)
@@ -157,7 +157,7 @@ async fn removed_and_readded_oauth_slot_rejects_pending_http_and_websocket_dispa
     use crate::scheduler::rotation::{DispatchStartError, SharedRequestBudget};
 
     let runtime = quota_runtime(QuotaSnapshot::default());
-    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
     let token = TokenSet::access_only("synthetic-access", None, 1).unwrap();
     authority
         .register("account-1", token.clone(), AccountAuthState::Active)
@@ -230,7 +230,7 @@ async fn agent_task_replacement_and_aba_revoke_prepared_dispatch() {
         .prepare_authorization("account-1", crate::unix_time_ms())
         .await
         .unwrap();
-    let account = &runtime.chatgpt_accounts["account-1"];
+    let account = &runtime.account_state.executors["account-1"];
     let key = runtime
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
@@ -324,7 +324,7 @@ async fn model_inventory_refresh_keeps_live_capacity_health_and_exact_dispatch_o
     runtime
         .lock_scheduler()
         .set_pool_routing(PoolRoutingPolicy {
-            mode: PoolRoutingMode::InOrder,
+            mode: PoolRoutingMode::RoundRobin,
             members: vec![PoolRoutingMember {
                 kind: PoolMemberKind::Account,
                 id: "account-1".into(),

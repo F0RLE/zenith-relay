@@ -543,6 +543,7 @@ fn latency_is_only_used_as_a_soft_tie_breaker_in_automatic_mode() {
                 &budget,
                 0,
                 Some(latency_ms),
+                true,
             )
             .unwrap();
     }
@@ -690,7 +691,7 @@ fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations()
         health: HealthObservation::Success,
     };
     engine
-        .settle_with_latency(lease.lease_id, observation, &budget, 10, Some(100))
+        .settle_with_latency(lease.lease_id, observation, &budget, 10, Some(100), true)
         .unwrap();
 
     assert_eq!(
@@ -703,7 +704,7 @@ fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations()
             .contains_key(&("a".to_owned(), "responses:gpt".to_owned()))
     );
     assert_eq!(
-        engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500)),
+        engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500), true),
         Err(SettlementError::UnknownLease)
     );
     assert_eq!(
@@ -729,6 +730,7 @@ fn late_success_latency_cannot_update_a_readded_candidate() {
             &budget,
             10,
             Some(100),
+            true,
         )
         .unwrap();
 
@@ -1135,6 +1137,7 @@ fn late_success_does_not_clear_a_newer_failure() {
             &previous_budget,
             2,
             Some(100),
+            true,
         )
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:gpt"), before);

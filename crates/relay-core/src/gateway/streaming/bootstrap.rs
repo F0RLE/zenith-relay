@@ -35,14 +35,15 @@ impl StreamBootstrapObservation<'_> {
 
     fn event(&mut self, event: &super::events::TerminalEvent) {
         match self {
-            Self::Transport { started, transport } if event.event_payload.is_some() => transport
-                .stream_response
-                .get_or_insert_default()
-                .observe_event(
-                    true,
-                    event.semantic_output,
-                    started.elapsed().as_millis() as u64,
-                ),
+            Self::Transport { started, transport } if event.event_payload.is_some() => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let timing = transport.stream_response.get_or_insert_default();
+                timing.observe_event(true, event.semantic_output, elapsed_ms);
+                if let Some(payload) = &event.event_payload {
+                    timing.observe_reasoning(payload, elapsed_ms);
+                    timing.observe_output(payload, elapsed_ms);
+                }
+            }
             Self::Buffered { started, timing } => {
                 timing.observe(event, started.elapsed().as_millis() as u64);
             }
@@ -204,6 +205,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                         }));
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
+                        buffered.truncate(absolute_end);
                         let category = event
                             .error_category
                             .unwrap_or(error_codes::UPSTREAM_TERMINAL);

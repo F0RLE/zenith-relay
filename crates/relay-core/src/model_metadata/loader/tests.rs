@@ -1,6 +1,5 @@
 use super::source::valid_source_payload;
 use super::*;
-use crate::model_metadata::MetadataCacheEnvelope;
 use crate::pricing::CatalogRefreshKind;
 use axum::{
     Router,
@@ -495,27 +494,84 @@ async fn cold_304_is_rejected_and_cache_write_failure_keeps_previous_snapshot() 
     assert_ne!(loader.status(), CatalogStatus::Updating);
 }
 
-#[test]
-fn legacy_cache_migrates_and_corrupt_cache_does_not_block_startup() {
-    let cache = CacheDir::new();
-    let envelope =
-        MetadataCacheEnvelope::new(serde_json::json!({"vendor/model":{"reasoning":true}}), 1)
+#[tokio::test]
+async fn unsupported_and_corrupt_caches_rebuild_without_reading_retired_sidecars() {
+    let primary = SourceEnvelope::new(
+        0,
+        serde_json::json!({"retired/cache-only": {"reasoning": true}}),
+        1,
+    )
+    .unwrap();
+    let mut retired = serde_json::to_value(&primary).unwrap();
+    retired["format"] = "zenith-relay-model-metadata-cache".into();
+    retired["schemaVersion"] = 1.into();
+    retired["payloadSha256"] = primary.revision.clone().into();
+    let unsupported = serde_json::json!({
+        "format": CACHE_FORMAT, "schemaVersion": 1,
+        "sources": { "models_dev": primary },
+    });
+    for content in [
+        retired.to_string(),
+        unsupported.to_string(),
+        "broken".into(),
+    ] {
+        let cache = CacheDir::new();
+        std::fs::write(cache.path(), content).unwrap();
+        for (index, file, payload) in [
+            (
+                2,
+                "openrouter-models.json",
+                serde_json::json!({"data": [{"id": "retired/sidecar"}]}),
+            ),
+            (
+                3,
+                "litellm-models.json",
+                serde_json::json!({"retired-sidecar": {"litellm_provider": "vendor"}}),
+            ),
+        ] {
+            let envelope = SourceEnvelope::new(index, payload, 1).unwrap();
+            catalog_io::write_json_if_changed(
+                &cache.path().with_file_name(file),
+                &envelope,
+                MAX_CACHE_BYTES,
+            )
             .unwrap();
-    catalog_io::write_json_if_changed(&cache.path(), &envelope, MAX_CACHE_BYTES).unwrap();
-    let loader = ModelMetadataCatalogLoader::open(cache.path()).unwrap();
-    assert_eq!(loader.status(), CatalogStatus::Stale);
-    assert_eq!(
-        loader.snapshot().capabilities_for("model").reasoning,
-        Some(true)
-    );
-    assert!(loader.snapshot().reasoning_levels_for("model").is_empty());
-    std::fs::write(cache.path(), "broken").unwrap();
-    assert_eq!(
-        ModelMetadataCatalogLoader::open(cache.path())
-            .unwrap()
-            .status(),
-        CatalogStatus::Error
-    );
+        }
+        let server = Server::start().await;
+        let loader = server.loader(&cache);
+        assert_eq!(loader.status(), CatalogStatus::Error);
+        assert!(loader.snapshot().entries.is_empty());
+        loader.refresh(false).await.unwrap();
+        assert_eq!(loader.status(), CatalogStatus::Current);
+        assert_eq!(
+            loader.snapshot().reasoning_levels_for("vendor/model"),
+            ["low", "high"]
+        );
+        assert!(loader.snapshot().resolve("retired/cache-only").is_none());
+        assert!(loader.snapshot().resolve("retired/sidecar").is_none());
+        assert!(loader.snapshot().resolve("retired-sidecar").is_none());
+        assert_eq!(
+            std::array::from_fn::<_, 4, _>(|i| server.requests(i)),
+            [1; 4]
+        );
+        assert_eq!(*loader.snapshot(), *server.loader(&cache).snapshot());
+    }
+}
+
+#[test]
+fn source_cache_hash_rejects_modified_payload() {
+    let mut envelope = SourceEnvelope::new(
+        0,
+        serde_json::json!({"openai/test": {"name": "Test", "family": "gpt"}}),
+        1,
+    )
+    .unwrap();
+    envelope.payload = serde_json::value::to_raw_value(
+        &serde_json::json!({"openai/other": {"name": "Other", "family": "gpt"}}),
+    )
+    .unwrap()
+    .into();
+    assert_eq!(envelope.validate(0), Err(ModelMetadataError::InvalidCache));
 }
 
 #[tokio::test]

@@ -229,15 +229,38 @@ impl TranslationStream {
         {
             return false;
         }
-        self.event(
-            "content_block_stop",
-            json!({"type":"content_block_stop","index":block_index}),
-        );
+        if !self.hidden_reasoning_block(block_index) {
+            self.event(
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":self.message_block_index(block_index)}),
+            );
+        }
         self.finished_message_blocks += 1;
         true
     }
 
+    fn hidden_reasoning_block(&self, block_index: usize) -> bool {
+        self.translation_request.omits_reasoning()
+            && matches!(
+                self.decoded_response.blocks[block_index],
+                Block::Reasoning(_)
+            )
+    }
+
+    fn message_block_index(&self, block_index: usize) -> usize {
+        if !self.translation_request.omits_reasoning() {
+            return block_index;
+        }
+        self.decoded_response.blocks[..block_index]
+            .iter()
+            .filter(|block| !matches!(block, Block::Reasoning(_)))
+            .count()
+    }
+
     fn block_start(&mut self, output_index: usize, block: &Block) -> AdapterResult<()> {
+        if self.hidden_reasoning_block(output_index) {
+            return Ok(());
+        }
         match self.translation_request.client {
             WireApi::GeminiInteractions => {
                 return Err(AdapterError::parameter_unsupported_for(
@@ -301,6 +324,7 @@ impl TranslationStream {
                 }
             }
             WireApi::Messages => {
+                let output_index = self.message_block_index(output_index);
                 let content = match block {
                     Block::Text(_) | Block::Refusal(_) => json!({"type":"text","text":""}),
                     // No invented Anthropic signature: native state is replayed
@@ -358,9 +382,14 @@ impl TranslationStream {
         text: &str,
         reasoning: bool,
     ) -> AdapterResult<()> {
-        if text.is_empty() {
+        if text.is_empty() || (reasoning && self.translation_request.omits_reasoning()) {
             return Ok(());
         }
+        let output_index = if self.translation_request.client == WireApi::Messages {
+            self.message_block_index(output_index)
+        } else {
+            output_index
+        };
         match self.translation_request.client {
             WireApi::Responses if reasoning => self.event("response.reasoning_summary_text.delta", json!({"type":"response.reasoning_summary_text.delta","output_index":output_index,"item_id":format!("rs_{}_{output_index}",self.decoded_response.id),"summary_index":0,"delta":text})),
             WireApi::Responses => self.event("response.output_text.delta", json!({"type":"response.output_text.delta","output_index":output_index,"item_id":format!("msg_{}_{output_index}",self.decoded_response.id),"content_index":0,"delta":text})),
@@ -395,7 +424,7 @@ impl TranslationStream {
         }
         match self.translation_request.client {
             WireApi::Responses => self.event("response.function_call_arguments.delta", json!({"type":"response.function_call_arguments.delta","output_index":output_index,"item_id":format!("fc_{}_{output_index}",self.decoded_response.id),"delta":arguments})),
-            WireApi::Messages => self.event("content_block_delta", json!({"type":"content_block_delta","index":output_index,"delta":{"type":"input_json_delta","partial_json":arguments}})),
+            WireApi::Messages => self.event("content_block_delta", json!({"type":"content_block_delta","index":self.message_block_index(output_index),"delta":{"type":"input_json_delta","partial_json":arguments}})),
             WireApi::ChatCompletions => self.chat_chunk(json!({"tool_calls":[{"index":self.tool_index(output_index),"function":{"arguments":arguments}}]}), None),
             WireApi::Gemini | WireApi::GeminiInteractions => {}
         }

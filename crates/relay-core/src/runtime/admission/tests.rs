@@ -94,6 +94,7 @@ async fn settled_attempt_waits_for_physical_reservation_release() {
                     budget,
                     now,
                     None,
+                    true,
                 )
             })
             .unwrap();
@@ -419,6 +420,7 @@ async fn due_timer_and_release_before_await_are_not_lost() {
             scope: "model-a",
             retry_at_ms: now + 2_000,
             reason: crate::scheduler::CooldownReason::RateLimit,
+            provider_not_before_ms: None,
         }
     ));
     let mut waiting = Box::pin(recovery(&runtime, &request, false));

@@ -207,9 +207,9 @@ impl PoolScheduler {
                 continue;
             }
             let candidate_reason = self
-                .cooldown_reasons
+                .cooldown_metadata
                 .get(&(candidate.id.clone(), candidate_model.clone()))
-                .copied()
+                .and_then(|metadata| metadata.reason)
                 .unwrap_or(CooldownReason::Transient);
             reason = Some(Self::aggregate_cooldown_reason(
                 reason.unwrap_or(CooldownReason::RateLimit),
@@ -229,6 +229,9 @@ impl PoolScheduler {
             }
             (CooldownReason::Transient, _) | (_, CooldownReason::Transient) => {
                 CooldownReason::Transient
+            }
+            (CooldownReason::QuotaExhausted, _) | (_, CooldownReason::QuotaExhausted) => {
+                CooldownReason::QuotaExhausted
             }
             _ => CooldownReason::RateLimit,
         }

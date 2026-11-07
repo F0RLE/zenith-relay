@@ -54,11 +54,20 @@ pub(in crate::gateway) fn has_complete_rejection_body(bytes: &[u8]) -> bool {
 #[derive(Clone, Copy, Default)]
 pub(in crate::gateway) struct BufferedResponseTiming {
     first_output_ms: Option<u64>,
+    first_reasoning_ms: Option<u64>,
     finished_ms: Option<u64>,
 }
 
 impl BufferedResponseTiming {
     pub(in crate::gateway) fn observe(&mut self, event: &TerminalEvent, elapsed_ms: u64) {
+        if event.valid
+            && self.first_reasoning_ms.is_none()
+            && let Some(payload) = &event.event_payload
+        {
+            let mut observation = crate::usage::StreamResponseDiagnostics::default();
+            observation.observe_reasoning(payload, elapsed_ms);
+            self.first_reasoning_ms = observation.upstream_reasoning_first_ms;
+        }
         // A completed snapshot is not evidence of when its first token arrived.
         if event.valid && event.has_output_delta && !event.is_compaction {
             self.observe_first_output(elapsed_ms);
@@ -75,6 +84,17 @@ impl BufferedResponseTiming {
     }
 
     pub(in crate::gateway) fn apply(&self, event: &mut crate::usage::UsageEvent) {
+        if let Some(reasoning) = self.first_reasoning_ms
+            && let Some(transport) = event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+        {
+            transport
+                .stream_response
+                .get_or_insert_default()
+                .upstream_reasoning_first_ms = Some(reasoning);
+        }
         if self.finished_ms.is_none() && self.first_output_ms.is_none() {
             // A default recorder is also used by transports it does not observe.
             // Do not erase those transports' own timing evidence.

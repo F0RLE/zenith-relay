@@ -87,10 +87,10 @@ pub(in crate::gateway::execution) fn prepare_dispatch_with_catalog(
     }
     let model = original["model"].as_str().unwrap_or_default();
     let prefix_scope = runtime
-        .basis_points_catalog_store
+        .basis_points_catalog()
         .prefix_scope(original, client_context_id);
     if let Some(session) = &mut session {
-        session.preload_checkpoint = runtime.basis_points_catalog_store.checkpoint_for_history(
+        session.preload_checkpoint = runtime.basis_points_catalog().checkpoint_for_history(
             local_key_id,
             model,
             &upstream["input"],
@@ -99,7 +99,7 @@ pub(in crate::gateway::execution) fn prepare_dispatch_with_catalog(
             super::super::prepare::prepared_tool_instructions(original, &upstream)
                 .map(|text| (scope, text.to_owned()))
         });
-        let loaded = runtime.basis_points_catalog_store.load(
+        let loaded = runtime.basis_points_catalog().load(
             local_key_id,
             model,
             &upstream["input"],
@@ -109,7 +109,7 @@ pub(in crate::gateway::execution) fn prepare_dispatch_with_catalog(
         session.record(tool_use);
     } else if original["tools"].as_array().is_none_or(Vec::is_empty)
         && let Some(prefix) = prefix_scope.and_then(|scope| {
-            runtime.basis_points_catalog_store.load_prefix(
+            runtime.basis_points_catalog().load_prefix(
                 local_key_id,
                 model,
                 &upstream["input"],
@@ -394,6 +394,19 @@ pub(in crate::gateway) async fn dispatch_continuation(
             owner,
         )
         .await?;
+    if upstream["stream"] == true {
+        response.response = crate::gateway::response::normalize_event_stream(
+            response.response,
+            Instant::now(),
+            None,
+            if basis_points {
+                crate::transport::basis_points_progress_timeout()
+            } else {
+                None
+            },
+        )
+        .await;
+    }
     // Catalog continuations are not compressed or rewritten by Codex guards.
     if let Some(payload) = payload {
         response.response.extensions_mut().insert(payload);
@@ -426,7 +439,7 @@ pub(in crate::gateway) fn record_lookup(
     event.tool_use.tool_call_count = 0;
     event.tool_use.finish();
     if let Some(checkpoint) = session.preload_checkpoint {
-        runtime.basis_points_catalog_store.remember_checkpoint(
+        runtime.basis_points_catalog().remember_checkpoint(
             checkpoint,
             &session.loaded,
             session

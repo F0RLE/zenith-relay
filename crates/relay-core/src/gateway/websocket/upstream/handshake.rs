@@ -83,6 +83,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
             .headers(headers)
             .upgrade();
         let handshake_started = Instant::now();
+        let reauth = request.websocket_reauth(&route.candidate_id, prepared);
         route.observe_websocket_dispatch(None);
         let connect_budget = if fast_path {
             fast_deadline.saturating_duration_since(Instant::now())
@@ -95,7 +96,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
             // Only GET/Upgrade was attempted, never response.create. Dropping
             // the handshake cancels it; do not penalize the account/circuit or
             // mark the endpoint permanently HTTP-only for being slow once.
-            route.observe_websocket_handshake(elapsed_ms, false);
+            route.observe_websocket_handshake(elapsed_ms, false, reauth);
             runtime.observe_slow_websocket_handshake(
                 &GatewayRuntime::websocket_capability_scope(route, prepared),
                 &request.resolved_model,
@@ -105,7 +106,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
             return AuthorizationUpgrade::FastPathMissed;
         }
         let Ok(Ok(upgrade)) = upgrade else {
-            route.observe_websocket_handshake(elapsed_ms, false);
+            route.observe_websocket_handshake(elapsed_ms, false, reauth);
             return continue_candidate(
                 runtime,
                 lease,
@@ -121,10 +122,19 @@ pub(super) async fn upgrade_with_authorization_refresh(
         route.observe_websocket_handshake(
             elapsed_ms,
             upgrade.status() == StatusCode::SWITCHING_PROTOCOLS,
+            reauth,
         );
         if let Some(cookies) = cookies {
             cookies.observe(&route.upstream_url, upgrade.headers());
         }
+        let response_scope = request_scope(
+            &key.id,
+            client_headers,
+            route.account_id.as_deref(),
+            &route.source_model,
+            route.upstream_url.as_str(),
+        );
+        runtime.observe_turn_state(upgrade.headers(), response_scope.as_ref(), prepared);
         if upgrade.status() != StatusCode::UNAUTHORIZED
             || prepared.token_generation.is_none()
             || refresh_fence.is_some()
@@ -169,6 +179,7 @@ fn continue_candidate(
 ) -> AuthorizationUpgrade {
     record_connect_failure(
         &ConnectTrace {
+            event: None,
             runtime,
             lease,
             key,

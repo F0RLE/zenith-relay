@@ -1,3 +1,4 @@
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::prelude::*;
 use super::recovery::{
     LegacyCallIdRepair, adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
@@ -52,14 +53,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) stream: bool,
     pub(super) resolved_model: &'a str,
     pub(super) selected_error_origin: ErrorOrigin,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) response_affinity_key: &'a mut Option<String>,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
 }
 
 /// Open a client SSE response, or repair a bootstrap failure before any output
@@ -93,15 +87,26 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         stream,
         resolved_model,
         selected_error_origin,
-        repairs,
-        tried,
-        has_unpaired_tool_output,
-        requires_affinity_owner,
-        response_affinity_key,
-        last_failure,
-        last_failure_origin,
-        last_preserved_upstream_error,
+        state,
     } = stream_input;
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                has_unpaired_tool_output,
+                requires_affinity_owner,
+                response_affinity_key,
+                ..
+            },
+    } = state;
     let legacy_call_id_repair_attempted = &mut repairs.legacy_call_id;
     let native_replay_attempted = &mut repairs.native_replay;
     let stale_tool_history_recovered = &mut repairs.stale_tool_history;

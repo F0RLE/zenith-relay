@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use super::super::super::execution::AttemptRepairs;
 use super::super::*;
+use super::ConnectRecovery;
 
 pub(super) enum GapAction {
     Continue,
@@ -13,12 +13,8 @@ pub(super) struct SelectionGap<'a> {
     pub(super) runtime: &'a GatewayRuntime,
     pub(super) key: &'a AuthenticatedKey,
     pub(super) client_request: &'a mut ClientRequest,
-    pub(super) tried: &'a mut HashSet<String>,
     pub(super) incompatible: &'a HashSet<String>,
-    pub(super) last_failure: &'a Option<GatewayFailure>,
-    pub(super) http_fallback_origin: &'a Option<ErrorOrigin>,
-    pub(super) allow_previous_response_reset: bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
+    pub(super) recovery: &'a mut ConnectRecovery,
     pub(super) retry_window_expired: &'a mut bool,
     pub(super) wait_for_candidate_availability: bool,
 }
@@ -26,13 +22,16 @@ pub(super) struct SelectionGap<'a> {
 pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> GapAction {
     let runtime = gap.runtime;
     let key = gap.key;
-    let last_failure = gap.last_failure;
-    let websocket_http_fallback_origin = gap.http_fallback_origin;
-    let allow_previous_response_reset = gap.allow_previous_response_reset;
+    let ConnectRecovery {
+        tried,
+        repairs,
+        last_failure,
+        http_fallback_origin: websocket_http_fallback_origin,
+        allow_previous_response_reset,
+        ..
+    } = &mut *gap.recovery;
     let wait_for_candidate_availability = gap.wait_for_candidate_availability;
     let client_request = &mut *gap.client_request;
-    let tried = &mut *gap.tried;
-    let repairs = &mut *gap.repairs;
     let retry_window_expired = &mut *gap.retry_window_expired;
     let model_switch_reset_attempted = &mut repairs.model_switch_reset;
     let native_replay_attempted = &mut repairs.native_replay;
@@ -56,7 +55,7 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
     // before an upstream request is attempted.  Clear the opaque
     // continuation once so the new model can use a compatible owner;
     // temporary health, quota, and cooldown misses remain retryable.
-    if allow_previous_response_reset
+    if *allow_previous_response_reset
         && client_request.has_previous_response_id()
         && !client_request.has_unpaired_tool_output()
         && !*model_switch_reset_attempted

@@ -238,6 +238,7 @@ pub(super) struct FailureState {
     pub(super) cooldown_scope: Option<String>,
     pub(super) retry_at_ms: Option<u64>,
     pub(super) consecutive_failures: u32,
+    pub(super) provider_backoff: Option<crate::scheduler::ProviderBackoff>,
 }
 
 pub(super) fn upstream_failure_message(category: &str) -> &'static str {
@@ -333,7 +334,13 @@ pub(super) fn upstream_event_failure_category(
         Some("response.cancelled" | "response.canceled") => Some(error_codes::UPSTREAM_CANCELLED),
         Some("response.failed" | "error") => {
             let classification = classify_upstream_error_value(
-                upstream_status_from_value(event_payload).unwrap_or(StatusCode::BAD_GATEWAY),
+                upstream_status_from_value(event_payload).unwrap_or_else(|| {
+                    if classify::session_budget_exceeded(event_payload) {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    }
+                }),
                 event_payload,
             );
             Some(
