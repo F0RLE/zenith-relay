@@ -187,9 +187,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -435,15 +435,6 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
-name = "basic-toml"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "bech32"
@@ -2435,14 +2426,12 @@ dependencies = [
 [[package]]
 name = "i18n-config"
 version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e06b90c8a0d252e203c94344b21e35a30f3a3a85dc7db5af8f8df9f3e0c63ef"
+source = "git+https://github.com/kellpossible/cargo-i18n?rev=2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4#2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4"
 dependencies = [
- "basic-toml",
  "log",
  "serde",
- "serde_derive",
- "thiserror 1.0.69",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
  "unic-langid",
 ]
 
@@ -4184,8 +4173,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error-attr2"
 version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+source = "git+https://github.com/GnomedDev/proc-macro-error-2?rev=53ff94b61c678593158db1a3d50269c6f0de0db7#53ff94b61c678593158db1a3d50269c6f0de0db7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4194,8 +4182,7 @@ dependencies = [
 [[package]]
 name = "proc-macro-error2"
 version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+source = "git+https://github.com/GnomedDev/proc-macro-error-2?rev=53ff94b61c678593158db1a3d50269c6f0de0db7#53ff94b61c678593158db1a3d50269c6f0de0db7"
 dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",
