@@ -138,7 +138,10 @@ fn script(
         email,
     })
     .ok()?;
-    Some(format!("({DRIVER})({input})"))
+    Some(format!(
+        "({DRIVER})({},{input})",
+        crate::local_pool::auth_page_patterns::JSON
+    ))
 }
 
 async fn evaluate(window: &WebviewWindow, script: String) -> Option<Stage> {

@@ -55,30 +55,13 @@ impl AuthPageSnapshot {
     }
 }
 
-const AUTH_SNAPSHOT_SCRIPT: &str = r#"
-(() => {
-  const normalize = (value) => String(value || "")
-    .replace(/^#/, "").split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
-  const path = normalize(location.pathname);
-  const hash = normalize(location.hash);
-  const route = hash !== "/" ? hash : path;
-  const textOf = (selector) => Array.from(document.querySelectorAll(selector))
-    .map((node) => String(node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160))
-    .filter(Boolean);
-  const headings = textOf("h1,h2").join(" ");
-  const controls = textOf("button,a").join(" ");
-  const markers = [];
-  if (/sign in to chatgpt|войти в chatgpt|войдите в chatgpt/i.test(headings)) markers.push("login_title");
-  if (/continue to sign in|sign in with chatgpt|продолжить вход|войти с помощью chatgpt/i.test(controls)) {
-    markers.push("login_primary_action");
-  }
-  return {
-    route: route.slice(0, 160),
-    loginUiSignal: markers.length > 0,
-    loginUiMarkers: markers,
-  };
-})()
-"#;
+fn auth_snapshot_script() -> String {
+    format!(
+        "({})({})",
+        include_str!("auth_snapshot.js"),
+        crate::local_pool::auth_page_patterns::JSON
+    )
+}
 
 pub(super) fn remote_debugging_port() -> Option<u16> {
     let mut system = System::new().ok()?;
@@ -185,7 +168,7 @@ pub(super) async fn query_snapshot(target: &CdpTarget) -> Option<AuthPageSnapsho
             json!({
                 "id": 1,
                 "method": "Runtime.evaluate",
-                "params": {"expression": AUTH_SNAPSHOT_SCRIPT, "returnByValue": true}
+                "params": {"expression": auth_snapshot_script(), "returnByValue": true}
             })
             .to_string()
             .into(),
@@ -364,10 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_snapshot_includes_russian_login_markers() {
-        assert!(AUTH_SNAPSHOT_SCRIPT.contains("войти в chatgpt"));
-        assert!(AUTH_SNAPSHOT_SCRIPT.contains("продолжить вход"));
-        assert!(!AUTH_SNAPSHOT_SCRIPT.contains("登录"));
+    fn watchdog_snapshot_embeds_all_supported_language_patterns() {
+        let script = auth_snapshot_script();
+        assert!(script.contains(include_str!("auth_snapshot.js")));
+        assert!(script.ends_with(&format!(
+            "({})",
+            crate::local_pool::auth_page_patterns::JSON
+        )));
     }
 
     #[test]

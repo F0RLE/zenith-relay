@@ -1,5 +1,6 @@
 pub(crate) mod accounts;
 pub(crate) mod applications;
+mod auth_page_patterns;
 pub(crate) mod background;
 mod client_auth_watchdog;
 pub mod commands;
