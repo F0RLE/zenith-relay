@@ -1244,7 +1244,7 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .request-technical-grid > .request-detail-section {
@@ -1403,7 +1403,7 @@
 .request-preparation-total > div {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: 4px;
   border: 0;
 }
@@ -1433,11 +1433,29 @@
   border-top: 1px solid var(--relay-border);
 }
 
-.request-response-timings > h4 {
-  margin: 0 0 10px;
-  color: var(--relay-secondary);
-  font-size: 11px;
-  font-weight: 400;
+.request-timing-group + .request-timing-group,
+.request-tool-intervals {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.request-timing-group > h4 {
+  margin: 16px 0;
+  color: var(--relay-text);
+  font-size: 16px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.request-tool-intervals > div {
+  border: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.request-tool-intervals dd {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .request-details-list > .request-route-reason {
@@ -1465,9 +1483,21 @@
 .request-route-stats > div {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 6px;
+  border: 0;
+  text-align: center;
+}
+
+.request-route-latency {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.request-route-latency > div {
+  padding-block: 4px;
   border: 0;
 }
 
@@ -1643,10 +1673,11 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   gap: 4px;
   padding: 4px 0;
   border: 0;
+  text-align: center;
 }
 
 .request-tools-list dt,
@@ -1662,24 +1693,23 @@
 }
 
 .request-timing-metrics {
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 14px 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px 0;
 }
 
 .request-timing-metrics > div {
   padding-inline: 16px;
-  border-inline-start: 1px solid var(--relay-border);
-}
-
-.request-timing-metrics > div:first-child {
-  padding-inline-start: 0;
-  border-inline-start: 0;
+  border-inline: 1px solid var(--relay-border);
+  margin-inline-start: -1px;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .request-timing-metrics dd {
   font-size: 18px;
   font-weight: 600;
   letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 .request-tools-list > div:last-child {
@@ -1690,6 +1720,7 @@
   gap: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--relay-border);
+  text-align: start;
 }
 
 .request-tools-list > div:last-child dd {
@@ -1870,7 +1901,7 @@
   .request-preparation-total > div { flex-direction: row; justify-content: space-between; align-items: baseline; }
   .request-preparation-details > .request-technical-fields { padding-inline-start: 0; border-inline-start: 0; column-gap: 14px; }
   .request-timing-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .request-timing-metrics > div { padding-inline: 0; border-inline-start: 0; }
+  .request-timing-metrics > div { padding-inline: 8px; }
   .request-timing-metrics > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .request-timing-metrics dd { font-size: 16px; }
   .request-route-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

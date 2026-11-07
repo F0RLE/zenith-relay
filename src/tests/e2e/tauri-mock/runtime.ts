@@ -1,4 +1,4 @@
-import type { AccountSummary, ProxyPoolEntry, SourceStats, SourceProtocolBinding, SourceProtocolConfig, ToolPolicy, UsageQuery, UsageTotals } from "../../../src/features/relay/api/types";
+import type { AccountSummary, PoolRoutingPolicy, ProxyPoolEntry, SourceStats, SourceProtocolBinding, SourceProtocolConfig, ToolPolicy, UsageQuery, UsageTotals } from "../../../src/features/relay/api/types";
 import type { MockOptions } from "./options";
 
 // Playwright serializes this function into a fresh browser context. Keep its
@@ -12,7 +12,6 @@ export function initializeTauriMock(input: MockOptions) {
       throw { code: "gateway_unavailable", message: "Synthetic context save failure" };
     };
     const locale = input.locale ?? "en";
-    const rotationVersion = input.rotationVersion ?? 3;
     const populated = input.populated ?? true;
     const usagePresent = populated && input.usagePresent !== false;
     let sourceStatsIndex = 0;
@@ -241,7 +240,7 @@ export function initializeTauriMock(input: MockOptions) {
     });
       const systemCredentialId = "key_system";
       const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogProvider?: string | null; catalogFamily?: string | null; catalogName?: string | null; catalogReleaseDate?: string | null; catalogLastUpdated?: string | null; catalogStatus?: string | null; catalogContextLimit?: number | null; contextPolicy?: { mode: "short" } | { mode: "extended" } | { mode: "custom"; tokens: number }; contextConfigurable?: boolean; catalogInputLimit?: number | null; catalogOutputLimit?: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; reasoningManualFallback?: boolean; speedTiers?: Array<"standard" | "fast" | "ultrafast">; speedSupported?: boolean; speedTier?: "standard" | "fast" | "ultrafast"; speedConfigurable?: boolean };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogProvider?: string | null; catalogFamily?: string | null; catalogName?: string | null; catalogReleaseDate?: string | null; catalogLastUpdated?: string | null; catalogStatus?: string | null; catalogContextLimit?: number | null; contextPolicy?: { mode: "short" } | { mode: "extended" } | { mode: "custom"; tokens: number }; contextConfigurable?: boolean; catalogInputLimit?: number | null; catalogOutputLimit?: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; imageRequestPrices: Array<{ operation: "generation" | "edit"; quality: string; size: string; microUsd: number }>; customPrice: boolean; reasoningLevels: string[]; reasoningSupportedLevels: string[]; reasoningAllowedLevels: string[]; reasoningConfigurable: boolean; speedTiers?: Array<"standard" | "fast" | "ultrafast">; speedSupported?: boolean; speedTier?: "standard" | "fast" | "ultrafast"; speedConfigurable?: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; nextForNewRequest?: boolean; resourceHeadroom?: import("../../src/features/relay/api/types").CandidateRuntimeSnapshot["resourceHeadroom"]; activityRevision?: number; runtimeId?: number; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; modelRetries?: Array<{ model: string; retryAtMs: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "cacheWrite5mMicroUsdPerMillion" | "cacheWrite1hMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -303,9 +302,9 @@ export function initializeTauriMock(input: MockOptions) {
     const savedAccountModels = new Map(accounts.map((account) => [account.id, [...account.models]]));
     const localRuntime = {
       schemaVersion: 14,
-      gateway: { codexTextModelsEnabled: input.codexTextModelsEnabled ?? false, toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: rotationVersion, mode: rotationVersion === 1 ? "smart" : "automatic", members: [] } as import("../../src/features/relay/api/types").PoolRoutingSnapshot, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { codexTextModelsEnabled: input.codexTextModelsEnabled ?? false, toolPolicy: defaultToolPolicy, modelCatalog: modelMetadata, poolRouting: { version: 3, mode: "automatic", members: [] } as PoolRoutingPolicy, running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, defaultServiceTier: "standard" as "standard" | "fast" | "ultrafast", models: [] as MockModelSummary[], commonProxyConfigured: input.commonProxyConfigured ?? true, commonProxyAvailable: input.commonProxyConfigured ?? true, commonProxyId: input.commonProxyId ?? null, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, codexBackgroundTasksEnabled: input.codexBackgroundTasksEnabled ?? true, codexMemoryExtractionEnabled: input.codexMemoryExtractionEnabled ?? true, codexMemoryConsolidationEnabled: input.codexMemoryConsolidationEnabled ?? true, codexWebsocketsEnabled: input.codexWebsocketsEnabled ?? true, chatgptRetryUntilAvailable: input.chatgptRetryUntilAvailable ?? false, blockDegradedRoutesEnabled: input.blockDegradedRoutesEnabled ?? true, routingOrder: [] as MockCandidateRuntime[] },
       platform: input.platform ?? "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", rotationVersion === 3 ? "rotation_v3" : "rotation_v2", "source_protocols_v1", ...(!input.codexTextModelsUnavailable ? ["codex_text_models"] : [])] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "rotation_v3", "source_protocols_v1", ...(!input.codexTextModelsUnavailable ? ["codex_text_models"] : [])] },
       sources: populated ? sources : [],
       accounts: populated ? accounts : [],
       automations: populated ? [automation] : [],
@@ -460,7 +459,7 @@ export function initializeTauriMock(input: MockOptions) {
     }
 
     const sourceUsage = input.usageCandidateKind === "source";
-    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null, cacheContext: input.usageCacheContext, cacheAffinity: input.usageCacheAffinity, upstreamResponseModel: input.usageUpstreamResponseModel,
+    const routing = { reason: sourceUsage ? "fair_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null, cacheContext: input.usageCacheContext, cacheAffinity: input.usageCacheAffinity, upstreamResponseModel: input.usageUpstreamResponseModel,
       attemptOutcome: input.usageAttemptOutcome !== undefined ? input.usageAttemptOutcome : input.usageAttempts ? input.usageFailure ? "returned_failure" : "completed" : undefined };
     const localUnpricedTokens = Math.min(28, Math.max(0, input.usageUnpricedTokens ?? 0));
     const requestedUsageModel = input.usageRequestedModel ?? "gpt-5.4";
@@ -945,7 +944,7 @@ export function initializeTauriMock(input: MockOptions) {
             return null;
           }
         case "update_local_routing": {
-            const request = args.input as { poolRouting?: import("../../src/features/relay/api/types").PoolRoutingPolicy; expectedPoolRouting?: import("../../src/features/relay/api/types").PoolRoutingSnapshot; maxRetryCandidates: number; defaultServiceTier: "standard" | "fast" | "ultrafast" };
+            const request = args.input as { poolRouting?: PoolRoutingPolicy; expectedPoolRouting?: PoolRoutingPolicy; maxRetryCandidates: number; defaultServiceTier: "standard" | "fast" | "ultrafast" };
             if (request.poolRouting) {
               if (JSON.stringify(request.expectedPoolRouting) !== JSON.stringify(localRuntime.gateway.poolRouting)) throw { code: "conflict", message: "pool routing changed" };
               localRuntime.gateway.poolRouting = structuredClone(request.poolRouting);
@@ -1420,9 +1419,6 @@ export function initializeTauriMock(input: MockOptions) {
           reasoningSupportedLevels: current?.reasoningSupportedLevels ?? reportedReasoning,
           reasoningAllowedLevels: manualReasoning,
           reasoningConfigurable: reportedReasoning.length > 0,
-          reasoningManualFallback: current?.reasoningManualFallback
-            ?? input.manualReasoningFallbackModels?.some((model) => model.toLowerCase() === id.toLowerCase())
-            ?? false,
           speedTiers: Object.prototype.hasOwnProperty.call(input.modelSpeed ?? {}, id.toLowerCase())
             ? ["standard", "fast", "ultrafast"]
             : ["standard"],

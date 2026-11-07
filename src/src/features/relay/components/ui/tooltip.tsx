@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { isTooltipFocusSuppressed } from "./focus";
+import { hasTooltipKeyboardFocus, isTooltipFocusSuppressed } from "./focus";
 import { positionTooltip } from "./tooltipPosition";
 import type { TooltipPosition } from "./tooltipPosition";
 
@@ -55,6 +55,25 @@ export function useTooltip<T extends HTMLElement>(label: string) {
 
   useEffect(() => {
     if (!visible) return;
+    const onScroll = (event: Event) => {
+      const anchor = anchorRef.current;
+      if (!anchor || !hasTooltipKeyboardFocus(anchor)) {
+        hide();
+        return;
+      }
+      const rect = anchor.getBoundingClientRect();
+      const container = event.target instanceof Element && event.target.contains(anchor)
+        ? event.target.getBoundingClientRect() : null;
+      if (rect.bottom <= Math.max(0, container?.top ?? 0)
+        || rect.top >= Math.min(window.innerHeight, container?.bottom ?? window.innerHeight)
+        || rect.right <= Math.max(0, container?.left ?? 0)
+        || rect.left >= Math.min(window.innerWidth, container?.right ?? window.innerWidth)) {
+        hide();
+        return;
+      }
+      // Keyboard navigation scrolls its focused trigger into view after focusin.
+      setActivation((activation) => activation + 1);
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || dismissActiveTooltip !== hide) return;
       // A hint must not swallow an editor's Escape-to-cancel shortcut.
@@ -75,7 +94,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
     };
     window.addEventListener("resize", hide);
     window.addEventListener("blur", hide);
-    window.addEventListener("scroll", hide, true);
+    window.addEventListener("scroll", onScroll, true);
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("pointerdown", hide, true);
     const observer = new MutationObserver(() => {
@@ -86,7 +105,7 @@ export function useTooltip<T extends HTMLElement>(label: string) {
       observer.disconnect();
       window.removeEventListener("resize", hide);
       window.removeEventListener("blur", hide);
-      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("scroll", onScroll, true);
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("pointerdown", hide, true);
     };

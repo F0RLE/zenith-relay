@@ -39,8 +39,17 @@ test("theme reveal starts at the button and covers the viewport in both directio
   for (const route of routes) {
     await page.goto(route);
     for (let step = 0; step < 2; step++) {
-      const box = (await toggle(page).boundingBox())!;
+      // Measure at the click, after Playwright's actionability and layout waits.
+      await toggle(page).evaluate(button => {
+        button.addEventListener("click", () => {
+          const { x, y, width, height } = button.getBoundingClientRect();
+          button.setAttribute("data-test-click-box", JSON.stringify({ x, y, width, height }));
+        }, { once: true });
+      });
       await toggle(page).click();
+      const box = await toggle(page).evaluate(button => JSON.parse(button.getAttribute("data-test-click-box")!) as {
+        x: number; y: number; width: number; height: number;
+      });
       await expect.poll(() => page.evaluate(() => document.getAnimations().some(animation =>
         (animation.effect as KeyframeEffect | null)?.pseudoElement === "::view-transition-new(root)"
       ))).toBe(true);

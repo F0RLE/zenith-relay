@@ -82,11 +82,8 @@ export type {
 
 export type {
   PoolRoutingMode,
-  LegacyPoolRoutingMode,
   PoolRoutingMember,
   PoolRoutingPolicy,
-  LegacyPoolRoutingPolicy,
-  PoolRoutingSnapshot,
 } from "./types/pool";
 
 export type {

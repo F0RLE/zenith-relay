@@ -170,7 +170,6 @@ export type PoolMockOptions = {
   nextCandidateId?: string | null;
   routingHeadroom?: Record<string, NonNullable<CandidateRuntimeSnapshot["resourceHeadroom"]>>;
   gatewayRunning?: boolean;
-  rotationVersion?: 1 | 2 | 3;
   chatgptRetryUntilAvailable?: boolean;
   blockDegradedRoutesEnabled?: boolean;
   poolMembers?: boolean;
@@ -195,7 +194,6 @@ export type PoolMockOptions = {
     inputLimit?: number;
     outputLimit?: number;
   }>;
-  manualReasoningFallbackModels?: string[];
 };
 
 export type ProxyMockOptions = {

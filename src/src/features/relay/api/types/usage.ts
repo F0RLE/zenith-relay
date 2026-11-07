@@ -100,7 +100,7 @@ export type RouteLatencyDiagnostics = {
 };
 
 export type RoutingDiagnostics = {
-  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  reason: "response_affinity" | "prompt_cache_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "subscription_expiry" | "subscription_plan" | "fair_rotation" | "fallback_attempt" | "manual_priority" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
@@ -115,12 +115,18 @@ export type RoutingDiagnostics = {
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
     connectionReused?: boolean | null;
+    reauth?: boolean | null;
     responseHeadersMs?: number | null;
-    /** HTTP decoded body/parser offsets; not raw wire or CPU measurements. */
+    /** Stream parser/reasoning offsets; not raw wire or CPU measurements. */
     streamResponse?: {
       decodedBodyFirstMs?: number | null;
       sseJsonFirstMs?: number | null;
+      upstreamReasoningFirstMs?: number | null;
       upstreamOutputFirstMs?: number | null;
+      upstreamTextFirstMs?: number | null;
+      upstreamToolFirstMs?: number | null;
+      /** First complete native item, before client-call validation. */
+      upstreamToolFirstCompleteMs?: number | null;
     } | null;
     requestPreparationMs?: number | null;
     requestPayload?: {
@@ -143,6 +149,17 @@ export type RoutingDiagnostics = {
       catalogMs?: number | null;
       serializationMs?: number | null;
       attachmentsMs?: number | null;
+      /** Substages of attachmentsMs; concurrent waits are wall time, not summed uploads. */
+      attachments?: {
+        credentialMs?: number | null;
+        stagingMs: number;
+        resolveMs: number;
+        imageCount: number;
+        fileReferences: number;
+        uploadedImages: number;
+        uploadedBytes: number;
+        reusedImages: number;
+      } | null;
       /** Prepared-context accounting after attachments; not all diagnostic overhead. */
       contextAccountingMs?: number | null;
     } | null;
@@ -164,6 +181,12 @@ export type RoutingDiagnostics = {
   cacheAffinity?: CacheAffinityDiagnostics | null;
   /** Successful attempts for this candidate/route, captured before selection. */
   routeLatency?: RouteLatencyDiagnostics | null;
+  /** Normalized provider clock evidence, separate from local recovery delays. */
+  providerBackoff?: {
+    scope: string;
+    notBeforeMs: number;
+    observedAtMs?: number | null;
+  } | null;
   requestTiming?: {
     durationMs: number;
     ttftMs: number | null;

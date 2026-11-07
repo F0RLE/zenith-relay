@@ -3,6 +3,7 @@ import { expect, test, type Page } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 
 const driver = readFileSync(new URL("../../../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.js", import.meta.url), "utf8");
+const locales = ["en", "ru"].map((locale) => JSON.parse(readFileSync(new URL(`../../../../src-tauri/src/local_pool/auth_page_patterns/${locale}.json`, import.meta.url), "utf8")));
 const email = "synthetic@example.test";
 const password = "synthetic-\"\\-password";
 
@@ -18,7 +19,11 @@ async function formPage(page: Page, html: string, path = "/log-in") {
 }
 
 function runDriver(page: Page, input: Record<string, unknown> = {}) {
-  return page.evaluate(`(${driver})(${JSON.stringify({ url: page.url(), expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, ...input })})`);
+  return page.evaluate(driverScript({ url: page.url(), ...input }));
+}
+
+function driverScript(input: Record<string, unknown>) {
+  return `(${driver})(${JSON.stringify(locales)},${JSON.stringify({ expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, ...input })})`;
 }
 
 test("a hydrating login form waits within the bounded loading grace", async ({ page }) => {
@@ -80,6 +85,21 @@ test("authenticator code is limited to explicit TOTP challenge pages", async ({ 
   }
 });
 
+test("safe input submitters preserve the saved email and submit once", async ({ page }) => {
+  await formPage(page, '<form method="post"><input type="email" required><input type="submit" value="Continue" aria-label="Continue" aria-labelledby="submit-label"></form><span id="submit-label">Continue</span>');
+  expect(await runDriver(page)).toBe("email");
+  expect(await runDriver(page, { stage: "email", value: email })).toBe("submitted");
+  await expect(page.locator('input[type="email"]')).toHaveValue(email);
+  await expect(page.locator("form")).toHaveAttribute("data-submissions", "1");
+});
+
+test("submitter labels changed during filling are rechecked before submission", async ({ page }) => {
+  await formPage(page, '<form method="post"><input type="email"><button aria-labelledby="submit-label">Continue</button></form><span id="submit-label">Continue</span>');
+  await page.locator("input").evaluate((input) => input.addEventListener("input", () => { document.getElementById("submit-label")!.textContent = "Authorize"; }));
+  expect(await runDriver(page, { stage: "email", value: email })).toBe("manual");
+  await expect(page.locator("form")).not.toHaveAttribute("data-submissions", /./);
+});
+
 test("combined login form fills the saved email and password before one submission", async ({ page }) => {
   await formPage(page, '<form method="post"><input type="email" name="email" value="old@example.test" required><input type="password" required><button>Continue</button></form>');
   expect(await runDriver(page)).toBe("password");
@@ -124,13 +144,16 @@ const unsafeForms = [
   '<div data-sitekey="synthetic"></div><form method="post"><input type="email"><button>Continue</button></form>',
   '<div role="alert">Synthetic login error</div><form method="post"><input type="email"><button>Continue</button></form>',
   '<form method="post"><input type="email" aria-invalid="true"><button>Continue</button></form>',
+  '<form method="post"><input type="email"><input type="submit" value="Create account"></form>',
+  '<form method="post"><input type="email"><button aria-label="Authorize">Continue</button></form>',
+  '<form method="post"><input type="email"><button aria-labelledby="submit-label">Continue</button></form><span id="submit-label">Reset password</span>',
 ];
 
 for (const [index, html] of unsafeForms.entries()) {
   test(`unsafe or ambiguous form ${index + 1} requires manual continuation without filling`, async ({ page }) => {
     await formPage(page, html);
     expect(await runDriver(page, { stage: "email", value: email })).toBe("manual");
-    expect(await page.locator("input").evaluateAll((fields) => fields.every((field) => !field.value))).toBe(true);
+    expect(await page.locator('input:not([type="submit"])').evaluateAll((fields) => fields.every((field) => !field.value))).toBe(true);
     await expect(page.locator("form")).not.toHaveAttribute("data-submissions", /./);
   });
 }
@@ -148,7 +171,7 @@ test("navigation races, foreign origins and subframes cannot receive notes", asy
   await expect.poll(() => page.frames().length).toBe(2);
   const frame = page.frames()[1];
   await frame.waitForLoadState();
-  expect(await frame.evaluate(`(${driver})(${JSON.stringify({ url: "https://auth.openai.com/log-in", expiresAtMs: Date.now() + 2_000, stage: "email", value: email })})`)).toBe("manual");
+  expect(await frame.evaluate(driverScript({ url: "https://auth.openai.com/log-in", stage: "email", value: email }))).toBe("manual");
 });
 
 test("detector rechecks the stage immediately before filling", async ({ page }) => {

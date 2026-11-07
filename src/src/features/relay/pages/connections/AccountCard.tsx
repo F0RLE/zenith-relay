@@ -19,7 +19,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
-import { accountQuotaRefreshState, accountSurfaceTone, canLaunchCodexAccount, currentAccountErrorCode, transientCandidateTone } from "../../accountStatus";
+import { accountDisplayStatus, accountQuotaRefreshState, accountSurfaceTone, canLaunchCodexAccount, currentAccountErrorCode, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
 import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import {
@@ -88,8 +88,8 @@ export function AccountCard({
   const recoveryRequired = Boolean(account.recoveryRequired);
   const showNotes = mode === "local" && !recoveryRequired && account.secretAvailable;
   const errorCode = recoveryRequired ? null : currentAccountErrorCode(account);
-  const operationalStatus = account.operationalStatus;
-  const operationalLabel = recoveryRequired ? t("accounts.recoveryRequiredHint") : t(`connections.status.${operationalStatus}`);
+  const operationalStatus = accountDisplayStatus(account, runtimeState);
+  const operationalLabel = recoveryRequired ? t("accounts.recoveryRequiredHint") : t(`pool.memberStatus.${operationalStatus}`);
   const modelRetries = upcomingModelRetries(runtimeState, nowMs);
   const firstModelRetry = modelRetries[0];
   const modelRetryHint = firstModelRetry
@@ -103,7 +103,9 @@ export function AccountCard({
     : null;
   const runtimeHint = runtimeState?.halfOpen
     ? t("pool.recoveryProbe")
-    : modelRetryHint;
+    : modelRetryHint ?? (runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
+      ? t("pool.retryAt", { time: formatDetailedRemainingTime(runtimeState.nextRetryAtMs, nowMs, t) })
+      : null);
   const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
   const poolActionLabel = participates ? t("accounts.excludeFromPool") : t(account.oauthClientKind === "codex" && !runtime?.gateway.codexTextModelsEnabled ? "accounts.includeImagesInPool" : "accounts.includeInPool");
   const quotaStatus = accountQuotaRefreshState(account);
@@ -114,6 +116,12 @@ export function AccountCard({
   const indicatorTone = surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone;
   const statusIndicatorLabel = quotaStatus === "updated" || quotaStatus === "not_available" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
+  const errorLabel = displayedErrorCode ? accountErrorLabel(displayedErrorCode, t) : null;
+  const errorIndicatorLabel = [
+    operationalStatus === "rotation" || operationalStatus === "unavailable" ? null : operationalLabel,
+    errorLabel,
+    runtimeHint,
+  ].filter(Boolean).join(" · ");
 
   const updateParticipation = async (participate: boolean) => {
     if (membershipPending.current || participation.saving || (participate && !canAccountJoinPool(account))) return;
@@ -162,7 +170,7 @@ export function AccountCard({
             <IconButton
               className="account-kind-icon account-status-button"
               data-status={indicatorTone}
-              label={[accountErrorLabel(displayedErrorCode, t), runtimeHint].filter(Boolean).join(" · ")}
+              label={errorIndicatorLabel}
               icon={<UserRound aria-hidden />}
               onClick={() => onShowError(account)}
             />

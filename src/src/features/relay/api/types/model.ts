@@ -18,6 +18,11 @@ export type ModelSummary = {
     upstreamWireApi: SourceWireApi;
     features: Partial<Record<ProtocolFeature, CapabilityStatus>>;
     reasoningEfforts: string[];
+    tokenLimits?: {
+      context?: number | null;
+      input?: number | null;
+      output?: number | null;
+    };
   }[];
   enabled: boolean;
   memberCount: number;
@@ -65,7 +70,6 @@ export type ModelSummary = {
   reasoningSupportedLevels?: string[];
   reasoningAllowedLevels?: string[];
   reasoningConfigurable?: boolean;
-  reasoningManualFallback?: boolean;
   speedSupported?: boolean;
   /** Reference speed tiers narrowed by configured routes, including standard. */
   speedTiers?: DefaultServiceTier[];
@@ -100,6 +104,7 @@ export type ModelCapabilities = {
   parallelToolCall?: boolean | null;
   toolChoice?: boolean | null;
   streaming?: boolean | null;
+  interleavedSystem?: boolean | null;
   serviceTiers: DefaultServiceTier[];
   inputModalities: string[];
   outputModalities: string[];

@@ -205,9 +205,7 @@ describe("model rules model", () => {
   });
 
   test("does not invent candidates when an automatic catalog has no levels", () => {
-    expect(supportedReasoningLevels(model("claude-fable-5-1", {
-      reasoningManualFallback: true,
-    }))).toEqual([]);
+    expect(supportedReasoningLevels(model("claude-fable-5-1"))).toEqual([]);
     expect(supportedReasoningLevels(model("known-non-reasoning", {
       reasoningSupportedLevels: [],
       reasoningLevels: [],

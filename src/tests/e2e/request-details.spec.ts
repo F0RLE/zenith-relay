@@ -60,7 +60,7 @@ for (const locale of ["en", "ru"] as const) {
       const ready = dialog.locator("dl > div").filter({ has: page.locator("dt", {
         hasText: locale === "en" ? "Validated calls ready after dispatch" : "Готовность проверенных вызовов после отправки",
       }) });
-      if (policy === true) await expect(ready.locator("dd")).toHaveText(locale === "en" ? "0 ms" : "0 мс");
+      if (policy === true) await expect(ready.locator("dd")).toHaveText(locale === "en" ? "+0 ms" : "+0 мс");
       else await expect(ready).toHaveCount(0);
       for (const [english, russian, milliseconds, prefix] of [
         ["Preparation before dispatch", "Подготовка до отправки", 125, ""],

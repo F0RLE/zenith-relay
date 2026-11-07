@@ -65,18 +65,16 @@ describe("rotation modes and presets", () => {
     expect(weighted.members).toEqual(saved.members);
     expect(rotationModeName(weighted.mode)).toBe("roundRobin");
     expect(rotationModeName("failover")).toBe("failover");
-    expect(rotationModeName("in_order")).toBe("roundRobin");
   });
 
-  test("only the current local policy is editable; legacy input is not upgraded by the editor", () => {
-    const old = { ...policy(), version: 2 as const };
-    expect(supportsRotationEditing(old, ["rotation_v2"])).toBe(false);
-    expect(supportsRotationEditing({ ...old, mode: "failover" }, ["rotation_v2"])).toBe(false);
-    expect(supportsRotationEditing({ ...old, mode: "weighted_round_robin" }, ["rotation_v2"])).toBe(false);
+  test("editing requires the current native policy and capability", () => {
+    for (const version of [1, 2, 4]) {
+      const invalidSnapshot = { ...policy(), version } as unknown as PoolRoutingPolicy;
+      expect(supportsRotationEditing(invalidSnapshot, ["rotation_v3"])).toBe(false);
+    }
     expect(supportsRotationEditing(policy(), ["rotation_v2"])).toBe(false);
     expect(supportsRotationEditing(policy(), ["rotation_v3"])).toBe(true);
     expect(supportsRotationEditing(undefined, ["rotation_v3"])).toBe(false);
-    expect(applyRotationPreset(old, "accounts_first")).toBe(old);
   });
 
   test("custom limits and shares are not disguised as a default preset", () => {

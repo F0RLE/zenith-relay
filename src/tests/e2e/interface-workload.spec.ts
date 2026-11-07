@@ -119,6 +119,66 @@ test("opening a folder and exporting usage do not reload runtime state", async (
   expect(await reads(page, "get_local_runtime_state")).toBe(beforeExport);
 });
 
+for (const [command, success] of [
+  ["export_local_accounts", "Account export saved."],
+  ["export_usage", "Redacted export created."],
+] as const) {
+  test(`${command} cancellation stays silent, preserves the form and permits retry without runtime reads`, async ({ page }) => {
+    await page.clock.install();
+    await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+    await page.addInitScript((cancelledCommand) => {
+      const target = window as unknown as WorkloadWindow;
+      const invoke = target.__TAURI_INTERNALS__.invoke.bind(target.__TAURI_INTERNALS__);
+      let cancelFirst = true;
+      target.__TAURI_INTERNALS__.invoke = async (name, args, options) => {
+        const value = await invoke(name, args, options);
+        if (name !== cancelledCommand || !cancelFirst) return value;
+        cancelFirst = false;
+        if (name === "export_usage") return null;
+        const cancelled = { ...(value as Record<string, unknown>) };
+        delete cancelled.path;
+        return cancelled;
+      };
+    }, command);
+    await page.goto("/");
+    const accountExport = command === "export_local_accounts";
+    const dialog = page.getByRole("dialog", { name: "Export accounts" });
+    if (accountExport) {
+      await page.getByRole("button", { name: "Connections", exact: true }).click();
+      await page.locator(".account-bulk-menu summary").click();
+      await page.getByRole("menuitem", { name: "Export all" }).click();
+      await dialog.getByLabel("Markdown description").fill("Synthetic package description");
+    } else {
+      await page.getByRole("button", { name: "Usage", exact: true }).click();
+      await expect(page.locator(".usage-page")).toBeVisible();
+    }
+    const startExport = async () => {
+      if (accountExport) await dialog.getByRole("button", { name: "Download JSON" }).click();
+      else {
+        await page.getByLabel("Actions", { exact: true }).click();
+        await page.getByRole("menuitem", { name: "Export", exact: true }).click();
+      }
+    };
+    const before = await reads(page, "get_local_runtime_state");
+    await startExport();
+    await expect.poll(() => reads(page, command)).toBe(1);
+    if (accountExport) {
+      await expect(dialog.getByRole("button", { name: "Download JSON" })).toBeEnabled();
+      await expect(dialog.getByLabel("Markdown description")).toHaveValue("Synthetic package description");
+    }
+    await page.clock.runFor(600);
+    await expect(page.getByText(success, { exact: true })).toHaveCount(0);
+    expect(await reads(page, "get_local_runtime_state")).toBe(before);
+    expect(await reads(page, "record_frontend_diagnostic")).toBe(0);
+    await startExport();
+    await expect(page.getByText(success, { exact: true })).toBeVisible();
+    expect(await reads(page, command)).toBe(2);
+    if (accountExport) await expect(dialog).toHaveCount(0);
+    await page.clock.runFor(600);
+    expect(await reads(page, "get_local_runtime_state")).toBe(before);
+  });
+}
+
 for (const holdRead of [false, true]) {
   test(`moving between Pool and Connections preserves one routing observer (${holdRead ? "pending" : "settled"})`, async ({ page }) => {
     await page.clock.install();

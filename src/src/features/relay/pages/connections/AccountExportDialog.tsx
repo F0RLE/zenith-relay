@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountExportFormat } from "../../api/types";
 import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { OPERATION_CANCELLED } from "../../state/relayOperationModel";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
 import { expandAccountRouteIds } from "../../accountRoutes";
 
@@ -64,11 +65,13 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
         ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
       const exportResult = await relayCommands.exportLocalAccounts(exportRequest);
+      if (destination === "download" && !exportResult.path) return OPERATION_CANCELLED;
       if (destination === "copy") {
         if (!exportResult.content) throw new Error("account export content is missing");
         await copyText(exportResult.content);
       }
-    }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded", { backgroundRefresh: true });
+      return undefined;
+    }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded", { skipRefresh: true });
     if (ok) onClose();
   };
   return <Dialog

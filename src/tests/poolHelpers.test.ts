@@ -172,6 +172,46 @@ describe("pool helpers", () => {
     expect(snapshot.gateway.models).toEqual(before);
   });
 
+  test("preserves scoped protocol token limits while filling sparse catalog data", () => {
+    for (const initial of [null, { context: 1000, input: null }]) {
+      const snapshot = runtime({});
+      const model = {
+        id: "gpt-test", enabled: true, memberCount: 1, codexVisible: true,
+        codexDisplayName: "Synthetic", customPrice: false,
+        inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null,
+      };
+      snapshot.gateway.models = [
+        { ...model, protocolRoutes: [{
+          clientWireApi: "responses", upstreamWireApi: "responses",
+          features: {}, reasoningEfforts: [],
+          ...(initial ? { tokenLimits: initial } : {}),
+        }] },
+        { ...model, id: "GPT-TEST", protocolRoutes: [{
+          clientWireApi: "responses", upstreamWireApi: "responses",
+          features: {}, reasoningEfforts: [],
+          tokenLimits: { context: 2000, input: 1800, output: 200 },
+        }, {
+          clientWireApi: "messages", upstreamWireApi: "responses",
+          features: {}, reasoningEfforts: [],
+          tokenLimits: { context: 64000, input: 60000, output: 4000 },
+        }] },
+      ];
+      const before = structuredClone(snapshot.gateway.models);
+      const result = modelSummaries(snapshot)[0];
+      expect(result.protocolRoutes).toMatchObject([{
+        clientWireApi: "responses", upstreamWireApi: "responses",
+        tokenLimits: { context: initial?.context ?? 2000, input: 1800, output: 200 },
+      }, {
+        clientWireApi: "messages", upstreamWireApi: "responses",
+        tokenLimits: { context: 64000, input: 60000, output: 4000 },
+      }]);
+      const limits = result.protocolRoutes?.[0].tokenLimits;
+      if (!limits) throw new Error("Expected scoped limits in the merged fixture");
+      limits.context = 7;
+      expect(snapshot.gateway.models).toEqual(before);
+    }
+  });
+
   test("merges protocol routes, reasoning levels, and both Claude cache write prices", () => {
     const snapshot = runtime({
       gateway: {

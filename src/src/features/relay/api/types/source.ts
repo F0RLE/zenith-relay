@@ -26,7 +26,7 @@ export type CapabilityStatus = "declared" | "confirmed" | "unsupported" | "unkno
 /** Refresh evidence only; does not determine whether inference can be routed. */
 export type RefreshStatus = "unknown" | "fresh" | "stale" | "unsupported";
 export type CapabilityOrigin = "catalog" | "service_profile" | "endpoint_url" | "manual" | "generation_probe";
-export type ProtocolFeature = "text" | "streaming" | "images" | "function_tools" | "tool_choice" | "structured_output" | "reasoning";
+export type ProtocolFeature = "text" | "streaming" | "images" | "function_tools" | "tool_choice" | "structured_output" | "reasoning" | "interleaved_system";
 export type ModelEndpointCapability = {
   modelId: string;
   upstreamWireApi: SourceWireApi;

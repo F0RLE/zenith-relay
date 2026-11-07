@@ -129,6 +129,10 @@ export function orderedPoolMembers(
   const savedOrder = savedMemberPositions(savedMembers);
   const orderByMember = savedOrder.size > 0 ? savedOrder : routingOrderPositions(runtimeOrder);
   const resourceRanks = new Map<string, ResourceRank>();
+  const quotaWaitRanks = new Map(members.map((member) => [member.id,
+    member.kind === "account" && member.quota.secondary?.availableBasisPoints === 0
+      && !accountMetadataIsStale(member, "quota", nowMs) ? 1 : 0,
+  ]));
   if (mode === "automatic") {
     for (const member of members) {
       const headroom = runtimeByMember.get(member.id)?.resourceHeadroom;
@@ -137,7 +141,7 @@ export function orderedPoolMembers(
         credits === "unlimited" ? Infinity : credits ?? 0]);
     }
   }
-  return [...members].sort((left, right) => compareDisplayedPoolMembers(left, right, orderByMember, mode, runtimeByMember, resourceRanks));
+  return [...members].sort((left, right) => compareDisplayedPoolMembers(left, right, orderByMember, mode, runtimeByMember, resourceRanks, quotaWaitRanks));
 }
 
 function compareDisplayedPoolMembers(
@@ -147,6 +151,7 @@ function compareDisplayedPoolMembers(
   mode: PoolRoutingMode | null | undefined,
   runtimeByMember: ReadonlyMap<string, CandidateRuntimeSnapshot | undefined>,
   resourceRanks: ReadonlyMap<string, ResourceRank>,
+  quotaWaitRanks: ReadonlyMap<string, number>,
 ) {
   const leftRuntime = runtimeByMember.get(left.id);
   const rightRuntime = runtimeByMember.get(right.id);
@@ -170,6 +175,9 @@ function compareDisplayedPoolMembers(
       if (resources) return resources;
     }
   } else if (DISPLAY_STATUS_ORDER[leftStatus] < DISPLAY_STATUS_ORDER.disabled) {
+    const exhaustedWindow = (leftStatus === "quotaWait" ? quotaWaitRanks.get(left.id) ?? 0 : 0)
+      - (rightStatus === "quotaWait" ? quotaWaitRanks.get(right.id) ?? 0 : 0);
+    if (exhaustedWindow) return exhaustedWindow;
     const retry = (leftRuntime?.nextRetryAtMs ?? Number.MAX_SAFE_INTEGER)
       - (rightRuntime?.nextRetryAtMs ?? Number.MAX_SAFE_INTEGER);
     if (retry) return retry;

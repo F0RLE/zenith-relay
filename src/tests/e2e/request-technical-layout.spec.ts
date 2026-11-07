@@ -2,6 +2,28 @@ import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 import { completedUsage, setUsageEventOverrides } from "./request-details-fixture";
 
+for (const locale of ["en", "ru"] as const) {
+  test(`technical WebSocket details identify reauthentication in ${locale}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 900 });
+    await installTauriMock(page, { mode: "local", locale, populated: true, diagnosticDebug: true });
+    await page.goto("/");
+    await setUsageEventOverrides(page, {
+      ...completedUsage,
+      routing: {
+        reason: "only_eligible", eligibleCandidates: 1, inFlightBefore: 0, dispatchesBefore: 0,
+        transport: { upstream: "websocket", mode: "native", handshakeMs: 25, connectionReused: false, reauth: true },
+      },
+    });
+    await page.getByRole("button", { name: locale === "ru" ? "Использование" : "Usage", exact: true }).click();
+    await page.getByRole("button", { name: locale === "ru" ? "Сведения о запросе: req_synthetic_local" : "Request details: req_synthetic_local", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.locator(".request-technical-details > summary").click();
+    const route = dialog.locator(".request-route-section");
+    await expect(route.getByText(locale === "ru" ? "Открыто после смены авторизации" : "Opened after authorization changed", { exact: true })).toBeVisible();
+    expect(await route.locator("dd").evaluateAll((fields) => fields.every((field) => field.scrollWidth <= field.clientWidth + 1))).toBe(true);
+  });
+}
+
 for (const continuation of [false, true]) {
   test(`technical payload details show ${continuation ? "response continuation" : "compression"}`, async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 900 });
@@ -59,7 +81,8 @@ for (const locale of ["ru", "en"] as const) {
             transport: {
               upstream: "http", mode: "basis_points", fallbackReason: "basis_points_http", responseFormat: "sse",
               responseHeadersMs: 240, requestPreparationMs: 125,
-              streamResponse: { decodedBodyFirstMs: 300, sseJsonFirstMs: 420, upstreamOutputFirstMs: 610 },
+              streamResponse: { decodedBodyFirstMs: 300, sseJsonFirstMs: 420, upstreamReasoningFirstMs: 500, upstreamOutputFirstMs: 610,
+                upstreamTextFirstMs: 620, upstreamToolFirstMs: 510, upstreamToolFirstCompleteMs: 6900 },
               requestPayload: { mode: "full", fullRequestReason: "basis_points_transport",
                 jsonBytes: 59000, bodyBytes: 59000, contentEncoding: "identity", httpSendToHeadersMs: 200 },
               requestPreparation: { bodyMs: 65, schemaValidationMs: 0, catalogMs: 25, attachmentsMs: 30 },
@@ -89,12 +112,25 @@ for (const locale of ["ru", "en"] as const) {
 
         const timings = technical.getByRole("region", { name: locale === "ru" ? "Время выполнения" : "Timing", exact: true });
         await expect(timings).toBeVisible();
+        await expect(timings.locator(".request-response-timings > h4")).toHaveCount(0);
+        for (const heading of await timings.locator(".request-timing-group > h4").all()) {
+          await expect(heading).toHaveCSS("text-align", "center");
+          await expect(heading).toHaveCSS("font-size", "16px");
+          await expect(heading).toHaveAttribute("data-relay-tooltip", locale === "ru" ? "С момента отправки" : "Since dispatch");
+        }
+        if (locale === "ru" && theme === "dark" && width === 1160) {
+          await timings.locator(".request-timing-group > h4").first().hover();
+          await expect(page.getByRole("tooltip")).toHaveText("С момента отправки");
+          await page.mouse.move(0, 0);
+          await expect(page.getByRole("tooltip")).toHaveCount(0);
+        }
         await expect(timings.locator(".request-preparation-total dd")).toHaveText(locale === "ru" ? "125 мс" : "125 ms");
         await expect(timings.locator(".request-timing-metrics dt")).toHaveText(locale === "ru"
-          ? ["Заголовки ответа", "Первые декодированные байты", "Первый JSON SSE", "Первый вывод источника", "Первый вывод Relay", "Ответ источника собран", "Ответ Relay готов"]
-          : ["Response headers", "First decoded bytes", "First SSE JSON", "First upstream output", "First Relay output", "Upstream response collected", "Relay response ready"]);
+          ? ["Заголовки ответа", "Первые декодированные байты", "Первый JSON SSE", "Начало размышления источника", "Начало вызова у источника", "Первое событие вывода", "Первый текст источника", "Первый вызов источника собран", "Ответ источника собран", "Первый вывод Relay", "Готовность проверенных вызовов после отправки", "Ответ Relay готов"]
+          : ["Response headers", "First decoded bytes", "First SSE JSON", "First upstream reasoning activity", "Upstream tool call started", "First output event", "First upstream text", "First upstream tool item complete", "Upstream response collected", "First Relay output", "Validated calls ready after dispatch", "Relay response ready"]);
         await expect(timings.locator(".request-timing-metrics dd")).toHaveText(locale === "ru"
-          ? ["+240 мс", "+300 мс", "+420 мс", "+610 мс", "+640 мс", "+7 с", "+7,2 с"] : ["+240 ms", "+300 ms", "+420 ms", "+610 ms", "+640 ms", "+7 s", "+7.2 s"]);
+          ? ["+240 мс", "+300 мс", "+420 мс", "+500 мс", "+510 мс", "+610 мс", "+620 мс", "+6,9 с", "+7 с", "+640 мс", "+7,2 с", "+7,2 с"] : ["+240 ms", "+300 ms", "+420 ms", "+500 ms", "+510 ms", "+610 ms", "+620 ms", "+6.9 s", "+7 s", "+640 ms", "+7.2 s", "+7.2 s"]);
+        await expect(timings.locator(".request-tool-intervals dd")).toHaveText(locale === "ru" ? ["140 мс", "160 мс"] : ["140 ms", "160 ms"]);
         await expect(timings.locator(".request-preparation-details .request-technical-fields dd")).toHaveText(
           locale === "ru" ? ["65 мс", "0 мс", "25 мс", "30 мс"] : ["65 ms", "0 ms", "25 ms", "30 ms"],
         );
@@ -105,15 +141,16 @@ for (const locale of ["ru", "en"] as const) {
         const preparation = await timings.locator(".request-preparation-details").boundingBox();
         const response = await timings.locator(".request-response-timings").boundingBox();
         expect(preparation!.y + preparation!.height).toBeLessThan(response!.y);
-        const metrics = await timings.locator(".request-timing-metrics > div").evaluateAll((elements) =>
+        const sourceMetrics = timings.locator(".request-timing-group").first().locator(".request-timing-metrics");
+        const metrics = await sourceMetrics.locator(":scope > div").evaluateAll((elements) =>
           elements.map((element) => {
             const { left, right, top } = element.getBoundingClientRect();
             return { left, right, top };
           }));
         const rows = [...new Set(metrics.map((metric) => metric.top))];
-        const columns = await timings.locator(".request-timing-metrics").evaluate((element) =>
+        const columns = await sourceMetrics.evaluate((element) =>
           getComputedStyle(element).gridTemplateColumns.split(" ").length);
-        expect(columns).toBeGreaterThanOrEqual(width < 620 ? 2 : 4);
+        expect(columns).toBeGreaterThanOrEqual(width < 620 ? 2 : 3);
         expect(rows).toHaveLength(Math.ceil(metrics.length / columns));
         for (const top of rows) {
           const row = metrics.filter((metric) => metric.top === top);
@@ -178,13 +215,14 @@ for (const scenario of [
     const dialog = page.getByRole("dialog");
     await dialog.locator(".request-technical-details > summary").click();
     const timings = dialog.locator(".request-timings-section");
+    await expect(dialog.locator(".request-attachment-details")).toHaveCount(0);
     await expect(timings.locator(".request-preparation-total dd")).toHaveText([...scenario.preparation]);
     await expect(timings.locator(".request-timing-metrics dd")).toHaveText([...scenario.response]);
     await expect(timings.locator(".request-response-timings")).toHaveCount(scenario.response.length ? 1 : 0);
     if (scenario.response.length) {
-      const metrics = await timings.locator(".request-timing-metrics").boundingBox();
-      const last = await timings.locator(".request-timing-metrics > div").last().boundingBox();
-      expect(last!.width).toBeCloseTo(metrics!.width, 0);
+      const metrics = await timings.locator(".request-timing-metrics").last().boundingBox();
+      const last = await timings.locator(".request-timing-metrics").last().locator(":scope > div").last().boundingBox();
+      expect(last!.x + last!.width).toBeCloseTo(metrics!.x + metrics!.width, 0);
     }
   });
 }

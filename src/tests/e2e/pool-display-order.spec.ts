@@ -55,7 +55,69 @@ test("pool fallback sorts linked quota without a runtime and expires it while id
   expect(mutations).toHaveLength(0);
 });
 
-for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] satisfies PoolRoutingMode[]) {
+test("quota waits place weekly exhaustion after temporary five-hour waits", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", populated: true, accountCount: 6 });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: {
+      invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown>;
+    } }).__TAURI_INTERNALS__;
+    const invoke = native.invoke.bind(native);
+    const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+    const now = Date.now();
+    const names = ["Weekly exhausted", "Primary wait late", "Both exhausted", "Ready", "Primary wait soon", "Disabled"];
+    runtime.sources = [];
+    runtime.accounts.forEach((account, index) => {
+      account.label = account.identityHint = names[index]!;
+      account.inPool = true;
+      account.enabled = index !== 5;
+      account.draining = false;
+      account.secretAvailable = account.proxyAvailable = true;
+      account.authState = { state: "active" };
+      account.health = "healthy";
+      account.lastErrorCode = null;
+      account.oauthClientKind = "excel_bps";
+      account.routeInactive = false;
+      account.operationalStatus = index === 5 ? "disabled" : index === 3 ? "rotation" : "quotaWait";
+      account.refreshState = { ...account.refreshState!, quota: "fresh" };
+      account.quotaRefreshStatus = "updated";
+      account.subscription.activeUntilMs = now + 10 * 86_400_000;
+      account.quota = { ...account.quota, error: null, supplemental: [], limitReached: index !== 3,
+        updatedAtMs: now,
+        primary: { ...account.quota.primary!, observedAtMs: now, resetAtMs: now + 3_600_000,
+          availableBasisPoints: [10_000, 0, 0, 8_000, 0, 8_000][index]! },
+        secondary: { ...account.quota.secondary!, observedAtMs: now, resetAtMs: now + 4 * 86_400_000,
+          availableBasisPoints: [0, 6_900, 0, 6_000, 8_400, 8_000][index]! } };
+    });
+    runtime.gateway.poolRouting = { ...runtime.gateway.poolRouting!, version: 3, mode: "automatic",
+      members: runtime.accounts.map((account) => ({ kind: "account", id: account.id, weight: 1, maxConcurrency: 0 })) };
+    runtime.gateway.routingOrder = runtime.accounts.map((account, index) => ({
+      candidateId: account.id, kind: "oauth_account", available: index === 3,
+      quotaWait: index !== 3 && index !== 5, inFlight: 0, activeRequestCount: 0,
+      dispatches: 0, halfOpen: false, lastUsedAtMs: null,
+      nextRetryAtMs: now + [60_000, 180_000, 240_000, 60_000, 120_000, 60_000][index]!,
+    }));
+    native.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") return structuredClone(runtime);
+      if (command === "get_local_runtime_order") return structuredClone(runtime.gateway.routingOrder);
+      return invoke(command, args, options);
+    };
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const cards = page.locator(".pool-member-card");
+  await expect(cards.locator(".pool-member-name")).toHaveText([
+    "Ready", "Primary wait soon", "Primary wait late", "Weekly exhausted", "Both exhausted", "Disabled",
+  ]);
+  await expect(cards.nth(1).locator(".pool-member-kind-icon")).toHaveAttribute("data-status", "warning");
+  await expect(cards.nth(3).locator(".pool-member-kind-icon")).toHaveAttribute("data-status", "warning");
+  const saves = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: { command: string }[];
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "update_local_routing"));
+  expect(saves).toHaveLength(0);
+});
+
+for (const mode of ["automatic", "round_robin", "weighted_round_robin", "failover"] satisfies PoolRoutingMode[]) {
   for (const width of [2451, 1160, 390]) {
     test(`pool cards follow ${mode} preference and highlight only active work at ${width}px`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 844 });

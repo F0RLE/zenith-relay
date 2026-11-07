@@ -502,7 +502,7 @@ function ImportPreview({
                 <span className="import-account-identity">{row.identity}</span>
                 <AccountPlanBadge planType={row.plan ?? null} unknown={t("common.unknown")} />
               </span>
-              {row.error ? <small className="import-account-note error-text">{row.error.code === "basis_points_free_account_unsupported" ? t("accounts.errors.basisPointsFreeUnsupported") : t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
+              {row.error ? <small className="import-account-note error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
             </span>
           </label>
         </li>;
@@ -534,12 +534,12 @@ function collectImportFailures(response: ConfirmAccountImportResponse | null, se
 }
 
 function importFailureReason(code: string, t: TFunction) {
-  if (code === "basis_points_free_account_unsupported") return t("accounts.errors.basisPointsFreeUnsupported");
   if (code === "provider_account_id_missing") return t("accounts.importFailureReasons.providerAccountIdMissing");
   if (code === "provider_account_lookup_failed") return t("accounts.importFailureReasons.providerAccountLookupFailed");
   if (code === "access_token_rejected") return t("accounts.importFailureReasons.accessTokenRejected");
   if (code === "account_profile_rate_limited") return t("accounts.importFailureReasons.accountProfileRateLimited");
   if (code === "models_http_status") return t("accounts.importFailureReasons.modelsHttpStatus");
+  if (code === "models_endpoint_not_found") return t("accounts.errors.modelsEndpointNotFound");
   if (code === "models_forbidden") return t("accounts.importFailureReasons.modelsForbidden");
   return t("accounts.importFailureReasons.unknown");
 }

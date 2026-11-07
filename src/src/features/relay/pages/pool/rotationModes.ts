@@ -1,4 +1,4 @@
-import type { PoolRoutingMode, PoolRoutingPolicy, PoolRoutingSnapshot } from "../../api/types";
+import type { PoolRoutingMode, PoolRoutingPolicy } from "../../api/types";
 
 export type RotationPreset = "recommended" | "even" | "accounts_first";
 
@@ -10,12 +10,11 @@ export function usesRequestShares(mode: PoolRoutingMode) {
   return mode === "automatic" || mode === "weighted_round_robin";
 }
 
-export function supportsRotationEditing(policy: PoolRoutingSnapshot | undefined, features: readonly string[]): policy is PoolRoutingPolicy {
+export function supportsRotationEditing(policy: PoolRoutingPolicy | undefined, features: readonly string[]): policy is PoolRoutingPolicy {
   return policy != null && policy.version === 3 && features.includes("rotation_v3");
 }
 
 export function applyRotationPreset(policy: PoolRoutingPolicy, preset: RotationPreset): PoolRoutingPolicy {
-  if (policy.version !== 3) return policy;
   const mode = preset === "recommended" ? "automatic" : preset === "even" ? "round_robin" : "failover";
   const defaults = policy.members.map((member) => ({ ...member, weight: 1, maxConcurrency: 0 }));
   const members = preset === "accounts_first"
@@ -27,7 +26,7 @@ export function applyRotationPreset(policy: PoolRoutingPolicy, preset: RotationP
 export function currentRotationPreset(policy: PoolRoutingPolicy): RotationPreset | "custom" {
   if (policy.members.some((member) => member.maxConcurrency !== 0)) return "custom";
   if (policy.mode === "automatic") return policy.members.every((member) => member.weight === policy.members[0]?.weight) ? "recommended" : "custom";
-  if (policy.mode === "round_robin" || policy.mode === "in_order") return "even";
+  if (policy.mode === "round_robin") return "even";
   if (policy.mode === "failover") {
     let sourceSeen = false;
     for (const member of policy.members) {

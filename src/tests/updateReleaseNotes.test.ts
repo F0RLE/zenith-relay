@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { buildReleaseNotes, readChangelogs } from "../../scripts/lib/release-notes.mjs";
 import { localizeReleaseNotes, prepareReleaseNotes } from "../src/features/relay/shell/updateReleaseNotes";
 
 const changelog = readFileSync(new URL("../../docs/releases/CHANGELOG.md", import.meta.url), "utf8");
+const changelogs = readChangelogs(fileURLToPath(new URL("../../docs/releases/", import.meta.url)));
 
 function releaseSection(version: string): string {
-  const section = changelog.split(/(?=^## \[)/m).find((entry) => entry.startsWith(`## [${version}]`));
-  if (!section) throw new Error(`Missing changelog section: ${version}`);
-  return section.trim();
+  return buildReleaseNotes(changelogs, version);
 }
 
 function releaseNotesLayout(notes: string): string[] {
@@ -56,7 +57,7 @@ describe("update release notes", () => {
     expect(prepareReleaseNotes("## Important changes\n\n- Fixed updates", "en", "1.1.2")).toBe("## Important changes\n\n- Fixed updates");
   });
 
-  test("keeps complete notes inside locale blocks in the changelog", () => {
+  test("assembles complete locale blocks from separate changelog files", () => {
     for (const version of ["Unreleased", "1.1.5", "1.1.4", "1.1.3"]) {
       const section = releaseSection(version);
       const markers = [...section.matchAll(/<!--\s*relay-notes:([a-z0-9-]+)\s*-->/gi)];

@@ -7,6 +7,7 @@ import type { UsageQuery, UsageTotals } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, IconButton, OptionMenu, PageHeader, Tabs, useConfirm } from "../../components/Ui";
 import { orderModelIdsBySnapshot } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { OPERATION_CANCELLED } from "../../state/relayOperationModel";
 import { useRelayUsageContext } from "../../state/relayStateContext";
 import { formatTokenSpeed, observedTokensPerSecond } from "../../usageSpeed";
 import { AggregateView } from "./AggregateView";
@@ -195,7 +196,7 @@ export function UsagePage() {
     errorOrigin: row.errorOrigin,
     ...(row.serviceTier ? { serviceTier: row.serviceTier } : {}),
     appliedServiceTier: row.appliedServiceTier,
-  }))), "feedback.exported", { skipRefresh: true });
+  }))).then((path) => path ?? OPERATION_CANCELLED), "feedback.exported", { skipRefresh: true });
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);

@@ -49,7 +49,6 @@ export function modelSignature(models: ModelSummary[]) {
     model.reasoningSupportedLevels?.join(","),
     model.reasoningAllowedLevels?.join(","),
     model.reasoningConfigurable,
-    model.reasoningManualFallback,
   ].join(":" )).join("\u0000");
 }
 
@@ -89,7 +88,7 @@ export function completeModelDisplayOrder(
   return order;
 }
 
-export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels" | "reasoningManualFallback">) {
+export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSupportedLevels" | "reasoningLevels">) {
   const levels = model.reasoningSupportedLevels ?? model.reasoningLevels ?? [];
   const seen = new Set<string>();
   return levels
@@ -98,10 +97,9 @@ export function supportedReasoningLevels(model: Pick<ModelSummary, "reasoningSup
 }
 
 /** Image generation has no effort selector. Other models show one only when levels exist. */
-export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "reasoningLevels" | "reasoningSupportedLevels" | "reasoningManualFallback">) {
+export function modelShowsReasoningControl(model: Pick<ModelSummary, "id" | "catalogFamily" | "catalogOutputModalities" | "reasoningLevels" | "reasoningSupportedLevels">) {
   if (isImageGenerationModel(model)) return false;
-  return supportedReasoningLevels(model).length > 0
-    || model.reasoningManualFallback === true;
+  return supportedReasoningLevels(model).length > 0;
 }
 
 /** Context windows apply only to models that produce text output. */

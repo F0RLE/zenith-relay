@@ -247,7 +247,7 @@ describe("pool members model", () => {
       "empty-lower",
       "api",
     ]);
-    expect(orderedPoolMembers(members, live, saved, "in_order").map((item) => item.id)).toEqual([
+    expect(orderedPoolMembers(members, live, saved, "round_robin").map((item) => item.id)).toEqual([
       "lower",
       "api",
       "empty",
@@ -262,7 +262,7 @@ describe("pool members model", () => {
     }));
     const order = [candidate("a", { selectionRank: 2, activeRequestCount: 1 }),
       candidate("b", { selectionRank: 0, nextForNewRequest: true }), candidate("c", { selectionRank: 1 })];
-    for (const mode of ["automatic", "in_order", "round_robin", "weighted_round_robin", "failover"] as const) {
+    for (const mode of ["automatic", "round_robin", "weighted_round_robin", "failover"] as const) {
       expect(orderedPoolMembers(members, order, members, mode).map((item) => item.id)).toEqual(["a", "b", "c"]);
     }
     expect(members.map((item) => item.id)).toEqual(["a", "b", "c"]);
@@ -286,6 +286,37 @@ describe("pool members model", () => {
     }
     expect(poolMemberDisplayStatus(members[0]!, states.get("disabled"))).toBe("disabled");
     expect(poolMemberStatusCounts(members, states)).toMatchObject({ rotation: 1, quotaWait: 2, disabled: 2 });
+  });
+
+  test("weekly exhaustion follows temporary quota waits in every display mode", () => {
+    const now = Date.now();
+    const window = (availableBasisPoints: number) => ({ availableBasisPoints,
+      observedAtMs: now, resetAtMs: now + 60_000 });
+    const members = [
+      member("account", "weekly", { subscription: {}, operationalStatus: "quotaWait", refreshState: { quota: "fresh" },
+        quota: { primary: window(10_000), secondary: window(0), updatedAtMs: now } }),
+      member("account", "temporary", { subscription: {}, operationalStatus: "quotaWait", refreshState: { quota: "fresh" },
+        quota: { primary: window(0), secondary: window(6_900), updatedAtMs: now } }),
+      member("account", "both", { subscription: {}, operationalStatus: "quotaWait", refreshState: { quota: "fresh" },
+        quota: { primary: window(0), secondary: window(0), updatedAtMs: now } }),
+      member("account", "ready"),
+    ];
+    const order = members.map((item) => candidate(item.id, { available: item.id === "ready",
+      quotaWait: item.id !== "ready", nextRetryAtMs: item.id === "temporary" ? now + 5_000 : now + 1_000 }));
+    for (const mode of ["automatic", "round_robin", "weighted_round_robin", "failover"] as const) {
+      expect(orderedPoolMembers(members, order, members, mode, undefined, [], now).map((item) => item.id))
+        .toEqual(["ready", "temporary", "weekly", "both"]);
+      expect(orderedPoolMembers(members, [], members, mode, undefined, [], now).map((item) => item.id))
+        .toEqual(["ready", "temporary", "weekly", "both"]);
+    }
+    expect(members.map((item) => item.id)).toEqual(["weekly", "temporary", "both", "ready"]);
+    const activeOrder = order.map((item) => ({ ...item, activeRequestCount: item.candidateId === "weekly" ? 1 : 0 }));
+    expect(orderedPoolMembers(members, activeOrder, members, "automatic", undefined, [], now).map((item) => item.id))
+      .toEqual(["weekly", "ready", "temporary", "both"]);
+    const staleMembers = members.map((item) => item.id === "weekly"
+      ? { ...item, refreshState: { quota: "stale" } } as PoolMember : item);
+    expect(orderedPoolMembers(staleMembers, order, members, "automatic", undefined, [], now).map((item) => item.id))
+      .toEqual(["ready", "weekly", "temporary", "both"]);
   });
 
   test("source aliases preserve preference and only wait when no binding is ready", () => {
@@ -430,7 +461,7 @@ describe("pool members model", () => {
       expect(orderedPoolMembers(members, [], members, "automatic", undefined, accounts).at(-1)?.id).toBe("siwc");
     }
     const { members, accounts } = linkedQuotaPool();
-    for (const mode of ["in_order", "round_robin", "weighted_round_robin", "failover"] as const) {
+    for (const mode of ["round_robin", "weighted_round_robin", "failover"] as const) {
       expect(orderedPoolMembers(members, [], members, mode, undefined, accounts).map((item) => item.id))
         .toEqual(members.map((item) => item.id));
     }

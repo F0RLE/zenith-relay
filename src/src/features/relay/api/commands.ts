@@ -42,7 +42,6 @@ import type {
   RevealedAccountIdentity,
   UsageQuery,
   PoolRoutingPolicy,
-  PoolRoutingSnapshot,
   RuntimeActivitySnapshot,
   RuntimeSnapshot,
   SourceStats,
@@ -52,6 +51,7 @@ import type {
 } from "./types";
 import { sanitizeFeedbackError } from "../state/feedback";
 import { createUsagePageReader } from "./usagePage";
+import { measureCommand } from "./commandPerformance";
 import type { WeeklyCapacityReport } from "./types/weeklyCapacity";
 
 export type LocalNetworkAccess = {
@@ -65,7 +65,11 @@ export type LocalNetworkAccess = {
  * invoke function to avoid an error-reporting loop.
  */
 function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Promise<T> {
-  return tauriInvoke<T>(command, commandArgs).catch((cause) => {
+  return measureCommand(
+    command,
+    () => tauriInvoke<T>(command, commandArgs),
+    sample => tauriInvoke<void>("record_local_performance_sample", sample),
+  ).catch((cause) => {
     if (command !== "record_frontend_diagnostic") {
       const error = sanitizeFeedbackError(cause, "ipc_failed", "Relay command failed");
       void tauriInvoke<void>("record_frontend_diagnostic", {
@@ -179,7 +183,7 @@ export const relayCommands = {
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   previewLocalConfigurationPreset: () => invoke<ConfigurationPresetPreview | null>("preview_local_configuration_preset"),
   applyLocalConfigurationPreset: (preview: ConfigurationPresetPreview) => invoke<ConfigurationPresetApplyResult>("apply_local_configuration_preset", { input: { baseRevision: preview.baseRevision, preset: preview.preset } }),
-  updateRouting: (maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, poolRouting?: PoolRoutingPolicy, expectedPoolRouting?: PoolRoutingSnapshot) => invoke("update_local_routing", { input: { maxRetryCandidates, defaultServiceTier, poolRouting, expectedPoolRouting } }),
+  updateRouting: (maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, poolRouting?: PoolRoutingPolicy, expectedPoolRouting?: PoolRoutingPolicy) => invoke("update_local_routing", { input: { maxRetryCandidates, defaultServiceTier, poolRouting, expectedPoolRouting } }),
 
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),

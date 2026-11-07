@@ -1,9 +1,9 @@
 import { relayCommands } from "./api/commands";
-import type { DefaultServiceTier, PoolRoutingPolicy, PoolRoutingSnapshot, RelayMode } from "./api/types";
+import type { DefaultServiceTier, PoolRoutingPolicy, RelayMode } from "./api/types";
 
 export type RoutingPolicy = {
   poolRouting?: PoolRoutingPolicy;
-  expectedPoolRouting?: PoolRoutingSnapshot;
+  expectedPoolRouting?: PoolRoutingPolicy;
   maxRetryCandidates: number;
   defaultServiceTier: DefaultServiceTier;
 };

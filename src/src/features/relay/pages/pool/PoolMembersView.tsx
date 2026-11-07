@@ -65,7 +65,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
     [poolMembers, runtimeActivity, runtimeOrder],
   );
   const savedRoutingMembers = runtime?.gateway.poolRouting?.members;
-  const rotationMode = runtime?.gateway.poolRouting && runtime.gateway.poolRouting.version !== 1 ? runtime.gateway.poolRouting.mode : null;
+  const rotationMode = runtime?.gateway.poolRouting?.mode ?? null;
   const routingTitle = t(rotationMode === "automatic" ? "pool.distributionTitle" : rotationMode === "failover" ? "pool.failoverTitle" : "pool.priorityTitle");
   const memberTimestamps = useMemo(() => poolMembers.flatMap((member) => [
     member.kind === "account" && !member.recoveryRequired ? member.credentialDiagnostics?.expiresAtMs : null,
