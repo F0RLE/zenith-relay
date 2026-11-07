@@ -1,4 +1,4 @@
-use super::{LEGACY_PROVIDER_ID, PROVIDER_ID};
+use super::PROVIDER_ID;
 use toml_edit::{DocumentMut, Item};
 
 pub(super) fn config_uses_zenith_provider(config_text: &str) -> bool {
@@ -10,7 +10,7 @@ pub(super) fn config_uses_zenith_provider(config_text: &str) -> bool {
                 .and_then(Item::as_str)
                 .map(str::to_owned)
         })
-        .is_some_and(|provider_id| provider_id == PROVIDER_ID || provider_id == LEGACY_PROVIDER_ID)
+        .is_some_and(|provider_id| provider_id == PROVIDER_ID)
 }
 
 pub(super) fn is_zenith_customer_key(key: &str) -> bool {

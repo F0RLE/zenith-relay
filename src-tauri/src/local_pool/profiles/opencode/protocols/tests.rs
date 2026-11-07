@@ -1,6 +1,97 @@
 use super::*;
 use zenith_relay_core::protocol::ModelProtocolRoute;
 
+mod pooled_capabilities;
+
+#[test]
+fn sdk_selection_and_refresh_omit_nonstreaming_and_interactions_only_models() {
+    let mut buffered = model("buffered-only", WireApi::Responses);
+    for route in &mut buffered.protocol_routes {
+        route.features.insert(
+            zenith_relay_core::ProtocolFeature::Streaming,
+            zenith_relay_core::CapabilityStatus::Unsupported,
+        );
+    }
+    let interactions = model("interactions-only", WireApi::GeminiInteractions);
+    let supported = model("supported", WireApi::Messages);
+    let models = [buffered, interactions, supported];
+    let selected = super::super::model_ids(&models);
+    assert_eq!(
+        selected
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["supported"]
+    );
+    let mut config = Map::new();
+    apply(
+        &mut config,
+        "http://127.0.0.1:14998/v1",
+        "synthetic",
+        &models,
+    )
+    .unwrap();
+    for (_, id, _) in GROUPS {
+        let Some(provider) = config["provider"].get(id) else {
+            continue;
+        };
+        let configured = provider["models"].as_object().unwrap();
+        assert!(!configured.contains_key("buffered-only"));
+        assert!(!configured.contains_key("interactions-only"));
+    }
+    assert!(
+        config["provider"]["zenith-relay-messages"]["models"]
+            .get("supported")
+            .is_some()
+    );
+}
+
+#[test]
+fn direct_connection_chooses_a_streaming_native_protocol_and_rejects_an_empty_selection() {
+    use zenith_relay_core::SourceProtocolBinding;
+    let ids = ["opaque-model".to_owned()];
+    let mut source = super::super::tests::source(vec![
+        SourceProtocolBinding::legacy(WireApi::Responses, &ids),
+        SourceProtocolBinding::legacy(WireApi::Messages, &ids),
+    ]);
+    source.models = ids.to_vec();
+    let metadata =
+        ModelMetadataCatalog::from_models_dev_json(r#"{"test/opaque-model":{}}"#).unwrap();
+    source.protocol_config.capabilities = [
+        (WireApi::Responses, "unsupported"),
+        (WireApi::Messages, "declared"),
+    ]
+    .map(|(protocol, status)| {
+        serde_json::from_value(json!({
+            "modelId":"opaque-model","upstreamWireApi":protocol,"status":"declared",
+            "origin":"catalog","checkedAtMs":1,"features":{"streaming":status}
+        }))
+        .unwrap()
+    })
+    .to_vec();
+    let mut config = Map::new();
+    apply_source(&mut config, &source, "synthetic", &metadata, true).unwrap();
+    assert!(
+        config["provider"][PROVIDER_ID]["models"]
+            .get("opaque-model")
+            .is_none()
+    );
+    assert!(
+        config["provider"]["zenith-relay-messages"]["models"]
+            .get("opaque-model")
+            .is_some()
+    );
+    for endpoint in &mut source.protocol_config.capabilities {
+        endpoint.features.insert(
+            zenith_relay_core::ProtocolFeature::Streaming,
+            zenith_relay_core::CapabilityStatus::Unsupported,
+        );
+    }
+    let original = config.clone();
+    assert!(apply_source(&mut config, &source, "synthetic", &metadata, true).is_err());
+    assert_eq!(config, original);
+}
+
 fn model(id: &str, native: WireApi) -> ModelSummary {
     let mut model = super::super::tests::model(id, true);
     model.protocol_routes = WireApi::ALL
@@ -10,9 +101,211 @@ fn model(id: &str, native: WireApi) -> ModelSummary {
             upstream_wire_api: native,
             features: BTreeMap::new(),
             reasoning_efforts: vec!["high".into()],
+            token_limits: Default::default(),
         })
         .collect();
     model
+}
+
+#[test]
+fn direct_profile_variants_follow_exact_endpoint_denials_and_effort_intersections() {
+    use zenith_relay_core::{ModelEndpointCapability, SourceProtocolBinding};
+
+    let metadata = ModelMetadataCatalog::from_models_dev_json(r#"{
+        "test/opaque-model":{"reasoning":true,"reasoning_effort_levels":["low","medium","high"],"tool_call":true},
+        "test/other-model":{"reasoning":true,"reasoning_effort_levels":["low","high"],"tool_call":true}
+    }"#).unwrap();
+    let ids = vec!["opaque-model".into(), "other-model".into()];
+    for protocol in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+        let mut source =
+            super::super::tests::source(vec![SourceProtocolBinding::legacy(protocol, &ids)]);
+        source.models = ids.clone();
+        source.protocol_config.endpoint_hint = Some(protocol);
+        let endpoint = |features, efforts| -> ModelEndpointCapability {
+            serde_json::from_value(json!({
+                "modelId":"opaque-model","upstreamWireApi":protocol,"status":"declared",
+                "origin":"catalog","checkedAtMs":1,"features":features,"reasoningEfforts":efforts
+            }))
+            .unwrap()
+        };
+        let provider_id = GROUPS
+            .iter()
+            .find(|(wire, _, _)| *wire == protocol)
+            .unwrap()
+            .1;
+        source.protocol_config.capabilities = vec![endpoint(
+            json!({"function_tools":"unsupported"}),
+            json!(["high", "max"]),
+        )];
+        let mut config = Map::new();
+        apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+        let models = &config["provider"][provider_id]["models"];
+        assert_eq!(models["opaque-model"]["tool_call"], false);
+        assert_eq!(models["opaque-model"]["reasoning"], true);
+        assert_eq!(models["opaque-model"]["variants"]["low"]["disabled"], true);
+        assert!(
+            models["opaque-model"]["variants"]["high"]
+                .get("disabled")
+                .is_none()
+        );
+        assert_eq!(models["other-model"]["tool_call"], true);
+        assert!(
+            models["other-model"]["variants"]["low"]
+                .get("disabled")
+                .is_none()
+        );
+
+        source.protocol_config.capabilities = vec![endpoint(
+            json!({"reasoning":"unsupported"}),
+            json!(["high"]),
+        )];
+        apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+        let model = &config["provider"][provider_id]["models"]["opaque-model"];
+        assert_eq!(model["tool_call"], true);
+        assert_eq!(model["reasoning"], false);
+        assert_eq!(model["variants"]["high"]["disabled"], true);
+        assert_eq!(
+            metadata.capabilities_for("opaque-model").reasoning,
+            Some(true)
+        );
+    }
+}
+
+#[test]
+fn direct_profiles_keep_numeric_limits_scoped_to_the_selected_source_endpoint() {
+    use zenith_relay_core::{ModelEndpointCapability, SourceProtocolBinding};
+
+    let metadata = ModelMetadataCatalog::from_models_dev_json(
+        r#"{
+        "test/opaque-model":{
+            "reasoning":true,"reasoning_effort_levels":["low","high"],"tool_call":true,
+            "limit":{"context":128000,"input":96000,"output":32000}
+        },
+        "test/other-model":{"limit":{"context":64000,"input":48000,"output":16000}}
+    }"#,
+    )
+    .unwrap();
+    for protocol in [WireApi::Responses, WireApi::Messages] {
+        let ids = vec!["opaque-model".into(), "other-model".into()];
+        let mut source =
+            super::super::tests::source(vec![SourceProtocolBinding::legacy(protocol, &ids)]);
+        source.models = ids;
+        source.wire_api = protocol;
+        source.protocol_config.endpoint_hint = Some(protocol);
+        let capability = |upstream, limits| -> ModelEndpointCapability {
+            serde_json::from_value(json!({
+                "modelId":"opaque-model","upstreamWireApi":upstream,
+                "status":"unknown","origin":"catalog","checkedAtMs":1,
+                "tokenLimits":limits
+            }))
+            .unwrap()
+        };
+        source.protocol_config.capabilities = vec![
+            capability(
+                protocol,
+                json!({"context":32000,"input":24000,"output":8000}),
+            ),
+            capability(
+                if protocol == WireApi::Responses {
+                    WireApi::Messages
+                } else {
+                    WireApi::Responses
+                },
+                json!({"context":1000,"input":800,"output":200}),
+            ),
+        ];
+        let provider_id = GROUPS
+            .iter()
+            .find(|(wire, _, _)| *wire == protocol)
+            .unwrap()
+            .1;
+        let mut config = Map::new();
+        apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+        let models = &config["provider"][provider_id]["models"];
+        let restricted = json!({"context":32000,"input":24000,"output":8000});
+        let reference = json!({"context":128000,"input":96000,"output":32000});
+        assert_eq!(models["opaque-model"]["limit"], restricted);
+        assert_eq!(
+            models["other-model"]["limit"],
+            json!({"context":64000,"input":48000,"output":16000})
+        );
+        assert_eq!(models["opaque-model"]["reasoning"], true);
+        assert_eq!(models["opaque-model"]["tool_call"], true);
+        assert_eq!(
+            metadata.capabilities_for("opaque-model").context_limit,
+            Some(128000)
+        );
+
+        source.protocol_config.capabilities = vec![capability(
+            protocol,
+            json!({"context":256000,"input":192000,"output":64000}),
+        )];
+        apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+        // Existing smaller windows are user-editable preferences, not proof
+        // that a fresh profile must retain the old source ceiling.
+        assert_eq!(
+            config["provider"][provider_id]["models"]["opaque-model"]["limit"],
+            restricted
+        );
+        let mut fresh = Map::new();
+        apply_source(&mut fresh, &source, "synthetic", &metadata, false).unwrap();
+        assert_eq!(
+            fresh["provider"][provider_id]["models"]["opaque-model"]["limit"],
+            reference
+        );
+
+        source.protocol_config.capabilities.clear();
+        fresh.clear();
+        apply_source(&mut fresh, &source, "synthetic", &metadata, false).unwrap();
+        assert_eq!(
+            fresh["provider"][provider_id]["models"]["opaque-model"]["limit"],
+            reference
+        );
+    }
+}
+
+#[test]
+fn direct_interactions_sources_require_an_sdk_supported_native_route() {
+    use zenith_relay_core::SourceProtocolBinding;
+
+    let mut source = super::super::tests::source(vec![
+        SourceProtocolBinding::legacy(WireApi::GeminiInteractions, &["interactions-only".into()]),
+        SourceProtocolBinding::legacy(WireApi::Responses, &["supported".into()]),
+    ]);
+    source.models = vec!["interactions-only".into(), "supported".into()];
+    assert_eq!(
+        super::super::source_opencode_models(&source).unwrap(),
+        vec!["supported"]
+    );
+    let mut config = Map::new();
+    let metadata = ModelMetadataCatalog::empty();
+    apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+    assert!(
+        config["provider"][PROVIDER_ID]["models"]
+            .get("supported")
+            .is_some()
+    );
+    for (_, provider_id, _) in GROUPS {
+        assert!(
+            config["provider"][provider_id]["models"]
+                .get("interactions-only")
+                .is_none()
+        );
+    }
+
+    source.models = vec!["interactions-only".into()];
+    source.protocol_bindings.truncate(1);
+    config.insert("model".into(), format!("{PROVIDER_ID}/supported").into());
+    assert!(super::super::source_opencode_models(&source).is_err());
+    apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
+    assert!(!config.contains_key("model"));
+    for (_, provider_id, _) in GROUPS {
+        assert!(config["provider"].get(provider_id).is_none_or(|provider| {
+            provider["models"]
+                .as_object()
+                .is_some_and(|models| models.is_empty())
+        }));
+    }
 }
 
 #[test]
@@ -23,6 +316,7 @@ fn interactions_only_models_are_not_advertised_to_an_unsupported_sdk() {
         upstream_wire_api: WireApi::GeminiInteractions,
         features: BTreeMap::new(),
         reasoning_efforts: Vec::new(),
+        token_limits: Default::default(),
     }];
     let supported = model("supported", WireApi::Gemini);
     let selected = super::super::models::model_ids(&[native, supported]);
@@ -120,6 +414,26 @@ fn converted_only_models_keep_their_existing_provider() {
 }
 
 #[test]
+fn sdk_reasoning_denial_cannot_retain_or_reintroduce_generated_efforts() {
+    for protocol in [WireApi::Responses, WireApi::Messages, WireApi::Gemini] {
+        for mut configured in [
+            json!({"reasoning":false}),
+            json!({"reasoning":false,"variants":{"high":{"reasoningEffort":"high"}}}),
+        ] {
+            set_variants(&mut configured, protocol);
+            for effort in [
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ] {
+                assert_eq!(configured["variants"][effort], json!({"disabled":true}));
+            }
+            let stable = configured.clone();
+            set_variants(&mut configured, protocol);
+            assert_eq!(configured, stable);
+        }
+    }
+}
+
+#[test]
 fn sdk_defaults_cannot_reintroduce_unsupported_reasoning_variants() {
     for protocol in WireApi::ALL {
         let mut configured = json!({"reasoning":true,"variants":{"high":{}}});
@@ -174,7 +488,7 @@ fn sdk_variants_disable_thinking_without_forwarding_invalid_effort_names() {
 }
 
 #[test]
-fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
+fn direct_refresh_preserves_selection_and_narrows_reference_capabilities() {
     use zenith_relay_core::{
         CapabilityOrigin, CapabilityStatus, ModelEndpointCapability, ProtocolFeature,
         SourceProtocolBinding,
@@ -216,13 +530,13 @@ fn direct_refresh_preserves_selection_and_uses_reference_capabilities() {
     let models = &config["provider"]["zenith-relay-messages"]["models"];
     // Refresh keeps the user's selection, while moving GPT to its native SDK.
     assert!(models.get("gpt-test").is_none());
-    assert_eq!(models["claude"]["tool_call"], true);
+    assert_eq!(models["claude"]["tool_call"], false);
     assert_eq!(
         models["claude"]["variants"],
         json!({
             "none":{"thinking":{"type":"disabled"}},
             "minimal":{"disabled":true},
-            "low":{"thinking":{"type":"adaptive"},"effort":"low"},
+            "low":{"disabled":true},
             "medium":{"disabled":true},
             "high":{"thinking":{"type":"adaptive"},"effort":"high"},
             "xhigh":{"disabled":true},

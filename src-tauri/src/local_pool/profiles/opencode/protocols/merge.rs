@@ -1,19 +1,23 @@
 use super::*;
 
+mod limits;
+
 const KNOWN_REASONING_VARIANTS: [&str; 8] = [
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
 pub(super) fn set_variants(model_config: &mut Value, protocol: WireApi) {
-    if model_config.get("reasoning").and_then(Value::as_bool) == Some(true)
-        && model_config.get("variants").is_none()
-    {
+    let reasoning = model_config.get("reasoning").and_then(Value::as_bool);
+    if reasoning.is_some() && model_config.get("variants").is_none() {
         model_config["variants"] = json!({});
     }
     if let Some(variants) = model_config
         .get_mut("variants")
         .and_then(Value::as_object_mut)
     {
+        if reasoning == Some(false) {
+            variants.clear();
+        }
         variants.retain(|effort, variant_config| {
             if variant_config.get("disabled").and_then(Value::as_bool) == Some(true) {
                 return true;
@@ -91,10 +95,10 @@ pub(super) fn merge_provider(previous_provider: Option<&Value>, mut generated: V
                                     }
                                 }
                             }
-                        } else if matches!(
-                            field_name.as_str(),
-                            "options" | "name" | "limit" | "headers"
-                        ) {
+                        } else if field_name == "limit" {
+                            model_config[field_name] =
+                                limits::merge(model_config.get(field_name), field_value);
+                        } else if matches!(field_name.as_str(), "options" | "name" | "headers") {
                             model_config[field_name] = field_value.clone();
                         }
                     }

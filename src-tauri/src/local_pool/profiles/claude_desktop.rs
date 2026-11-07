@@ -73,8 +73,9 @@ pub async fn connect_claude_desktop(
             "Start the local pool before connecting Claude Desktop",
         )
     })?;
-    let snapshot = commands::state::build_local_runtime_state(&state).await?;
-    let models = models::inference_models(&snapshot.gateway.models)?;
+    let snapshot = commands::state::build_streaming_client_state(&state).await?;
+    let path = paths::config_library()?;
+    let models = client_models(&snapshot.gateway.models, &path).await?;
     if models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -91,7 +92,6 @@ pub async fn connect_claude_desktop(
     let secret = gateway_keys::ensure_local_gateway_key_secret(&key)?;
     let model_count = models.len();
     let config = models::gateway_config(&format!("http://{address}"), &secret, models);
-    let path = paths::config_library()?;
     let recovery = state.claude_desktop_recovery_file();
     // Validate before closing the client. apply repeats these ownership checks
     // after shutdown, so changes during shutdown are not overwritten.
@@ -158,6 +158,45 @@ async fn stop_desktop() -> LocalResult<()> {
         .map_err(|message| LocalPoolError::new(ErrorCode::Io, message))
 }
 
+async fn client_models(
+    models: &[zenith_relay_core::protocol::ModelSummary],
+    library: &std::path::Path,
+) -> LocalResult<Vec<serde_json::Value>> {
+    client_models_with_probe(
+        models,
+        library,
+        crate::launcher::claude_desktop_model_identity_support,
+    )
+    .await
+}
+
+async fn client_models_with_probe<F>(
+    models: &[zenith_relay_core::protocol::ModelSummary],
+    library: &std::path::Path,
+    probe: F,
+) -> LocalResult<Vec<serde_json::Value>>
+where
+    F: FnOnce() -> Option<bool> + Send + 'static,
+{
+    let baseline = models::inference_models_for_client(models, false)?;
+    if baseline.is_empty() {
+        return Ok(baseline);
+    }
+    let identified = models::inference_models_for_client(models, true)?;
+    if identified == baseline && !library::uses_model_identity(library)? {
+        return Ok(baseline);
+    }
+    let observed = tauri::async_runtime::spawn_blocking(probe)
+        .await
+        .ok()
+        .flatten();
+    if library::model_identity_support(library, observed)? {
+        Ok(identified)
+    } else {
+        Ok(baseline)
+    }
+}
+
 pub(in crate::local_pool) fn restore_connection(state: &DesktopState) -> LocalResult<bool> {
     let recovery = state.claude_desktop_recovery_file();
     if !recovery.exists() {
@@ -178,7 +217,7 @@ pub(in crate::local_pool) async fn refresh_catalog(state: &DesktopState) -> Loca
     let Some(address) = state.gateway.address().await else {
         return Ok(());
     };
-    let snapshot = commands::state::build_local_runtime_state(state)
+    let snapshot = commands::state::build_streaming_client_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
     let key = state
@@ -199,13 +238,7 @@ pub(in crate::local_pool) async fn refresh_catalog(state: &DesktopState) -> Loca
             "The local pool request key is unavailable; reconnect Claude Desktop",
         )
     })?;
-    let models = models::inference_models(&snapshot.gateway.models)?;
-    if models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "The pool has no enabled models available to Claude Desktop; the previous Desktop profile was kept",
-        ));
-    }
+    let models = client_models(&snapshot.gateway.models, &path).await?;
     let config = models::gateway_config(&format!("http://{address}"), &secret, models);
     library::apply(&path, &recovery, &config, false)?;
     Ok(())

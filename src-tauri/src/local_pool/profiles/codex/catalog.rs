@@ -38,6 +38,7 @@ pub(in crate::local_pool::profiles::codex) use direct::{
 
 mod managed;
 
+pub(super) use managed::build_managed_model_catalog_for_refresh;
 #[cfg(test)]
 pub(super) use managed::build_managed_model_catalog_with_bundled;
 pub(super) use managed::{build_managed_model_catalog, read_catalog_values};

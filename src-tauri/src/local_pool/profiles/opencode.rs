@@ -111,9 +111,17 @@ pub async fn connect_opencode_to_local_gateway(
 ) -> Result<OpenCodeConnectionResult, CommandError> {
     let _mutation = state.setup_guard().await;
     let config_path = default_opencode_config_path();
-    let prepared = commands::state::build_local_runtime_state(&state)
+    let prepared = commands::state::build_streaming_client_state(&state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
+    let model_ids = model_ids(&prepared.gateway.models);
+    if model_ids.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "the pool has no streaming models supported by OpenCode",
+        )
+        .into());
+    }
     let gateway_key = gateway_keys::ensure_system_gateway_key(&state)?;
     if !gateway_key.enabled || !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
@@ -123,7 +131,6 @@ pub async fn connect_opencode_to_local_gateway(
         .into());
     }
     let gateway_secret = gateway_keys::ensure_local_gateway_key_secret(&gateway_key)?;
-    let model_ids = model_ids(&prepared.gateway.models);
     let mut config_document = read_config(&config_path)?;
     let backup_created = backup_original_config(&state, &config_path, None)?;
     apply_managed_provider(
@@ -194,7 +201,9 @@ fn source_opencode_models(source: &ProviderSourceRecord) -> Result<Vec<String>, 
         .effective_protocol_bindings()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
         .into_iter()
-        .filter(|binding| binding.adapter == SourceAdapter::Native)
+        .filter(|binding| {
+            binding.adapter == SourceAdapter::Native && protocols::supports_sdk(binding.wire_api)
+        })
         .flat_map(|binding| binding.model_ids)
         .map(|model| zenith_relay_core::model_id_key(&model))
         .collect::<HashSet<_>>();

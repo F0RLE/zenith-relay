@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 
 pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_manifest(
     codex_home: &Path,
@@ -48,7 +49,18 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
     codex_home: &Path,
     source_models: &[String],
     metadata: &ModelMetadataCatalog,
+    endpoint_capabilities: &[zenith_relay_core::ModelEndpointCapability],
 ) -> Result<Option<String>> {
+    let endpoints = endpoint_capabilities
+        .iter()
+        .filter(|endpoint| endpoint.upstream_wire_api == zenith_relay_core::WireApi::Responses)
+        .map(|endpoint| {
+            (
+                zenith_relay_core::model_id_key(&endpoint.model_id),
+                endpoint,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let ordered_models = metadata.order_model_ids(source_models);
     let catalog = direct_source_model_catalog_with_manifest(codex_home, &ordered_models, None)?;
     let Some(catalog) = catalog else {
@@ -56,23 +68,41 @@ pub(in crate::local_pool::profiles::codex) fn direct_source_model_catalog_with_c
     };
     let mut catalog_document: Value = serde_json::from_str(&catalog)
         .map_err(|_| LocalPoolError::invalid_state("model catalog is invalid"))?;
+    let mut context_limits = serde_json::Map::new();
     if let Some(models) = catalog_document
         .get_mut("models")
         .and_then(Value::as_array_mut)
     {
-        for model in models {
+        models.retain_mut(|model| {
             let Some(slug) = model.get("slug").and_then(Value::as_str) else {
-                continue;
+                return false;
             };
             let decoded = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+            let endpoint = endpoints
+                .get(&zenith_relay_core::model_id_key(&decoded))
+                .copied();
+            let capabilities = metadata.capabilities_for(&decoded).for_route(endpoint);
+            if capabilities.streaming == Some(false) {
+                return false;
+            }
             model["display_name"] = Value::String(metadata.codex_display_name(&decoded));
-            metadata.apply_codex_capabilities(&decoded, model);
-            zenith_relay_core::publish_routed_codex_context(
-                model,
-                metadata.capabilities_for(&decoded).context_limit,
+            metadata.apply_codex_capabilities_for_route(&decoded, endpoint, model);
+            zenith_relay_core::publish_routed_codex_context(model, capabilities.context_limit);
+            context_limits.insert(
+                zenith_relay_core::model_id_key(&decoded),
+                serde_json::json!(zenith_relay_core::ModelTokenLimits {
+                    context: capabilities.context_limit,
+                    input: capabilities.input_limit,
+                    output: capabilities.output_limit,
+                }),
             );
+            true
+        });
+        if models.is_empty() {
+            return Ok(None);
         }
     }
+    catalog_document["relay_context_limits"] = Value::Object(context_limits);
     Ok(Some(
         serde_json::to_string(&catalog_document).map_err(LocalPoolError::invalid_state)?,
     ))

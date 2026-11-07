@@ -195,6 +195,48 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog(
     )
 }
 
+pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_for_refresh(
+    codex_home: &Path,
+    user_catalog_path: Option<&str>,
+    current_managed_catalog: Option<&[u8]>,
+    catalog_json: &str,
+) -> Result<String> {
+    if catalog_json.len() <= MAX_MODEL_CATALOG_BYTES {
+        let document: Value =
+            serde_json::from_str(catalog_json).map_err(LocalPoolError::invalid_state)?;
+        if document
+            .get("models")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            return Ok("{\"models\":[]}\n".into());
+        }
+    }
+    // An empty owned snapshot has no template to restore on the next refresh.
+    let current_managed_catalog = match current_managed_catalog {
+        Some(content) if content.len() <= MAX_MODEL_CATALOG_BYTES => {
+            let document: Value =
+                serde_json::from_slice(content).map_err(LocalPoolError::invalid_state)?;
+            if document
+                .get("models")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                None
+            } else {
+                Some(content)
+            }
+        }
+        current => current,
+    };
+    build_managed_model_catalog(
+        codex_home,
+        user_catalog_path,
+        current_managed_catalog,
+        catalog_json,
+    )
+}
+
 pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_bundled(
     codex_home: &Path,
     user_catalog_path: Option<&str>,
@@ -326,9 +368,12 @@ pub(in crate::local_pool::profiles::codex) fn build_managed_model_catalog_with_b
         if relay_managed {
             add_installed_codex_ultra(&mut catalog_entry, &model_id, bundled);
         }
-        if let Some(limits) = policy_document
-            .get("relay_context_limits")
-            .and_then(|limits| limits.get(zenith_relay_core::model_id_key(&model_id)))
+        if policy_document
+            .get("relay_model_context_policies")
+            .is_some()
+            && let Some(limits) = policy_document
+                .get("relay_context_limits")
+                .and_then(|limits| limits.get(zenith_relay_core::model_id_key(&model_id)))
         {
             // The per-model Short/Long choice applies only when the provider
             // published a long window for this exact row.

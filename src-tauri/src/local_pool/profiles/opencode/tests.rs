@@ -50,6 +50,7 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
             upstream_wire_api: WireApi::Responses,
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
         }],
         enabled,
         member_count: 1,
@@ -96,7 +97,6 @@ pub(super) fn model(id: &str, enabled: bool) -> ModelSummary {
         reasoning_supported_levels: Vec::new(),
         reasoning_allowed_levels: Vec::new(),
         reasoning_configurable: false,
-        reasoning_manual_fallback: false,
         speed_supported: false,
         speed_tiers: Vec::new(),
         speed_tier: Default::default(),
@@ -156,6 +156,24 @@ fn configures_opencode_for_responses_tool_calls() {
 }
 
 #[test]
+fn configured_context_windows_bound_both_input_and_output() {
+    let mut model = model("bounded-model", true);
+    model.catalog_capabilities = Some(zenith_relay_core::model_metadata::ModelCapabilities {
+        context_limit: Some(32000),
+        input_limit: Some(24000),
+        output_limit: Some(8000),
+        ..Default::default()
+    });
+    model.context_configurable = true;
+    model.context_policy = zenith_relay_core::ModelContextPolicy::Custom { tokens: 1024 };
+    let configured = super::model_config(&[model]);
+    assert_eq!(
+        configured["bounded-model"]["limit"],
+        json!({"context":1024,"input":1024,"output":1024})
+    );
+}
+
+#[test]
 fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
     let metadata = super::ModelMetadataCatalog::from_models_dev_json(
         r#"{
@@ -169,7 +187,12 @@ fn model_capabilities_are_shared_by_pool_and_direct_source_configs() {
     let mut models = vec![model("text-only", true), model("unknown", true)];
     zenith_relay_core::protocol::apply_model_metadata(&mut models, &metadata);
     let pooled = super::model_config(&models);
-    let direct = super::model_config_ids(&["text-only".into(), "unknown".into()], &metadata);
+    let direct = super::model_config_ids(
+        &["text-only".into(), "unknown".into()],
+        &metadata,
+        WireApi::Responses,
+        &[],
+    );
     assert_eq!(pooled, direct);
     assert_eq!(pooled["text-only"]["attachment"], false);
     assert_eq!(pooled["text-only"]["modalities"]["input"], json!(["text"]));

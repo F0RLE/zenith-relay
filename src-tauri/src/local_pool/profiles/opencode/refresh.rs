@@ -46,7 +46,7 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     {
         return Ok(());
     }
-    let snapshot = commands::state::build_local_runtime_state(state)
+    let snapshot = commands::state::build_streaming_client_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
     let (key, sources) = {

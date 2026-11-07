@@ -7,7 +7,6 @@ use provider::{config_uses_zenith_provider, is_zenith_customer_key};
 use std::sync::{Mutex, MutexGuard};
 
 const PROVIDER_ID: &str = "codex_local_access";
-const LEGACY_PROVIDER_ID: &str = "zenith";
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
 static CODEX_PROFILE_LOCK: Mutex<()> = Mutex::new(());

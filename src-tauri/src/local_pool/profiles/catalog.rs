@@ -24,6 +24,14 @@ pub(in crate::local_pool) async fn fetch_local_codex_model_catalog(
     base_url: &str,
     secret: &str,
 ) -> Result<String, CommandError> {
+    fetch_codex_model_catalog(base_url, secret, false).await
+}
+
+async fn fetch_codex_model_catalog(
+    base_url: &str,
+    secret: &str,
+    allow_empty: bool,
+) -> Result<String, CommandError> {
     let mut base = Url::parse(base_url)
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "pool API address is invalid"))?;
     if !base.path().ends_with('/') {
@@ -92,7 +100,7 @@ pub(in crate::local_pool) async fn fetch_local_codex_model_catalog(
                 "pool returned an invalid model catalog",
             )
         })?;
-    if models.is_empty() {
+    if models.is_empty() && !allow_empty {
         return Err(LocalPoolError::new(
             ErrorCode::PoolModelsUnavailable,
             "pool has no available ChatGPT-compatible models; refresh model access for enabled pool connections; quota availability alone does not grant model access",
@@ -192,21 +200,21 @@ pub(in crate::local_pool) async fn refresh_active_codex_catalog(
             let secret =
                 crate::local_pool::store::gateway_keys::ensure_local_gateway_key_secret(&key)?;
             supports_websockets = Some(state.store()?.gateway().codex_websockets_enabled);
-            fetch_local_codex_model_catalog(&format!("http://{address}/v1"), &secret)
+            fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret, true)
                 .await
                 .map_err(|error| LocalPoolError::new(error.code, error.message))?
         }
         CodexCatalogRefreshTarget::DirectSource(source) => {
             let models = direct_source_response_models(source.as_ref())?;
-            let Some(catalog) = codex::direct_source_model_catalog_with_capabilities(
+            codex::direct_source_model_catalog_with_capabilities(
                 &profile_dir,
                 &models,
                 &state.model_metadata_catalog(),
+                &source
+                    .protocol_config
+                    .effective_capabilities(&source.base_url, &source.models),
             )?
-            else {
-                return Ok(CodexCatalogRefreshStatus::Skipped);
-            };
-            catalog
+            .unwrap_or_else(|| "{\"models\":[]}".into())
         }
     };
     let catalog = context_catalog(state, &catalog)?;
@@ -278,20 +286,45 @@ pub(in crate::local_pool) fn context_catalog(
             };
             let model = zenith_relay_core::decode_codex_model_alias(slug)
                 .unwrap_or_else(|| slug.to_owned());
-            let reference = metadata.resolve(&model);
+            let key = zenith_relay_core::model_id_key(&model);
+            let scoped = document
+                .get("relay_context_limits")
+                .and_then(|limits| limits.get(&key));
             limits.insert(
-                zenith_relay_core::model_id_key(&model),
-                json!({
-                    "context": row.get("max_context_window").and_then(Value::as_u64),
-                    "input": reference.and_then(|row| row.capabilities.input_limit),
-                    "output": reference.and_then(|row| row.capabilities.output_limit),
-                }),
+                key,
+                json!(catalog_context_limits(row, &model, &metadata, scoped)?),
             );
         }
     }
     document["relay_model_context_policies"] = json!(model_policies);
     document["relay_context_limits"] = Value::Object(limits);
     serde_json::to_string(&document).map_err(LocalPoolError::invalid_state)
+}
+
+fn catalog_context_limits(
+    row: &serde_json::Value,
+    model: &str,
+    metadata: &zenith_relay_core::model_metadata::ModelMetadataCatalog,
+    scoped: Option<&serde_json::Value>,
+) -> LocalResult<zenith_relay_core::ModelTokenLimits> {
+    let scoped = scoped
+        .cloned()
+        .map(serde_json::from_value::<zenith_relay_core::ModelTokenLimits>)
+        .transpose()
+        .map_err(LocalPoolError::invalid_state)?
+        .unwrap_or_default();
+    let mut capabilities = metadata.capabilities_for(model);
+    scoped.constrain(&mut capabilities);
+    Ok(zenith_relay_core::ModelTokenLimits {
+        context: row
+            .get("max_context_window")
+            .and_then(serde_json::Value::as_u64)
+            .into_iter()
+            .chain(scoped.context)
+            .min(),
+        input: capabilities.input_limit,
+        output: capabilities.output_limit,
+    })
 }
 
 pub(super) fn direct_source_response_models(
@@ -367,6 +400,68 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    #[test]
+    fn context_policy_retains_route_limits_and_does_not_invent_native_windows() {
+        use serde_json::json;
+        let metadata =
+            zenith_relay_core::model_metadata::ModelMetadataCatalog::from_models_dev_json(
+                &json!({"synthetic": {"limit":{"context":100000,"input":90000,"output":10000}}})
+                    .to_string(),
+            )
+            .unwrap();
+        let row = json!({"max_context_window":2000});
+        let scoped = json!({"context":2000,"input":1800,"output":200});
+        let limits = catalog_context_limits(&row, "synthetic", &metadata, Some(&scoped)).unwrap();
+        assert_eq!(limits.context, Some(2000));
+        assert_eq!(limits.input, Some(1800));
+        assert_eq!(limits.output, Some(200));
+        let generous = json!({"context":1000000,"input":1000000,"output":1000000});
+        let limits = catalog_context_limits(&row, "synthetic", &metadata, Some(&generous)).unwrap();
+        assert_eq!(limits.context, Some(2000));
+        assert_eq!(limits.input, Some(90000));
+        assert_eq!(limits.output, Some(10000));
+        assert_eq!(
+            catalog_context_limits(&json!({}), "synthetic", &metadata, None)
+                .unwrap()
+                .context,
+            None
+        );
+        assert!(
+            catalog_context_limits(
+                &row,
+                "synthetic",
+                &metadata,
+                Some(&json!({"input":"invalid"}))
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_empty_catalog_is_allowed_for_refresh_but_blocks_initial_attachment() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"models":[]})) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base_url = format!("http://{address}/v1");
+        let refreshed = fetch_codex_model_catalog(&base_url, "synthetic-key", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&refreshed).unwrap()["models"],
+            serde_json::json!([])
+        );
+        let error = fetch_local_codex_model_catalog(&base_url, "synthetic-key")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::PoolModelsUnavailable);
+        server.abort();
+    }
     #[tokio::test]
     async fn opencode_failure_does_not_prevent_codex_catalog_refresh() {
         let refreshed = Cell::new(false);

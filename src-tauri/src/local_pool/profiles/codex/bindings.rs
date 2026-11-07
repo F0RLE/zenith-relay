@@ -233,7 +233,7 @@ pub(crate) fn refresh_managed_model_catalog(
         return Ok(false);
     }
 
-    let catalog = catalog::build_managed_model_catalog(
+    let catalog = catalog::build_managed_model_catalog_for_refresh(
         codex_home,
         backup.previous_model_catalog_json.as_deref(),
         catalog_bytes.as_deref(),

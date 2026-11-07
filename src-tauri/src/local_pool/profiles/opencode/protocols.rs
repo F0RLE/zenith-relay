@@ -5,6 +5,7 @@ mod merge;
 use merge::merge_provider;
 use merge::{existing_protocol, merge_groups, provider_with_models, set_variants};
 use std::collections::BTreeMap;
+use zenith_relay_core::protocol::ModelProtocolRoute;
 
 pub(super) const GROUPS: [(WireApi, &str, &str); 4] = [
     (WireApi::Responses, PROVIDER_ID, PROVIDER_NPM),
@@ -21,6 +22,12 @@ pub(super) const GROUPS: [(WireApi, &str, &str); 4] = [
     (WireApi::Gemini, "zenith-relay-gemini", "@ai-sdk/google"),
 ];
 
+pub(super) fn supports_sdk(protocol: WireApi) -> bool {
+    GROUPS
+        .iter()
+        .any(|(supported, _, _)| *supported == protocol)
+}
+
 pub(super) fn managed_id(provider_id: &str) -> bool {
     GROUPS
         .iter()
@@ -33,28 +40,39 @@ pub(super) fn managed_model(model: &str) -> bool {
         .is_some_and(|(provider_id, _)| managed_id(provider_id))
 }
 
+pub(super) fn supports_streaming(route: &ModelProtocolRoute) -> bool {
+    SourceAdapter::between(route.client_wire_api, route.upstream_wire_api).is_some()
+        && route
+            .features
+            .get(&zenith_relay_core::ProtocolFeature::Streaming)
+            != Some(&zenith_relay_core::CapabilityStatus::Unsupported)
+}
+
 fn supports(model: &ModelSummary, protocol: WireApi) -> bool {
     model
         .protocol_routes
         .iter()
-        .any(|route| route.client_wire_api == protocol)
+        .any(|route| route.client_wire_api == protocol && supports_streaming(route))
 }
 
 /// The client protocol reaches the provider without a bridge.
 fn native(model: &ModelSummary, protocol: WireApi) -> bool {
-    model
-        .protocol_routes
-        .iter()
-        .any(|route| route.client_wire_api == protocol && route.upstream_wire_api == protocol)
+    model.protocol_routes.iter().any(|route| {
+        route.client_wire_api == protocol
+            && route.upstream_wire_api == protocol
+            && supports_streaming(route)
+    })
 }
 
 pub(super) fn preferred(model: &ModelSummary) -> WireApi {
     WireApi::ALL
         .into_iter()
+        .filter(|protocol| supports_sdk(*protocol))
         .find(|protocol| native(model, *protocol))
         .or_else(|| {
             WireApi::ALL
                 .into_iter()
+                .filter(|protocol| supports_sdk(*protocol))
                 .find(|protocol| supports(model, *protocol))
         })
         .unwrap_or(WireApi::Responses)
@@ -80,39 +98,22 @@ pub(super) fn provider(
     models: &[ModelSummary],
     protocol: WireApi,
 ) -> Result<Value, LocalPoolError> {
-    let mut configured = model_config(models);
+    let mut configured = model_config_for_protocol(models, protocol);
     for (model_id, provider_model_config) in &mut configured {
         let model_record = models.iter().find(|model| model.id == *model_id).unwrap();
         if !model_record.protocol_routes.is_empty() {
             let routes = model_record
                 .protocol_routes
                 .iter()
-                .filter(|route| route.client_wire_api == protocol)
+                .filter(|route| route.client_wire_api == protocol && supports_streaming(route))
                 .collect::<Vec<_>>();
-            if let Some(variants) = provider_model_config
-                .get_mut("variants")
-                .and_then(Value::as_object_mut)
-            {
-                variants.retain(|effort, _| {
-                    routes
-                        .iter()
-                        .any(|route| route.reasoning_efforts.contains(effort))
-                });
-            }
-            for (key, feature) in [
-                (
-                    "tool_call",
-                    zenith_relay_core::ProtocolFeature::FunctionTools,
-                ),
-                ("reasoning", zenith_relay_core::ProtocolFeature::Reasoning),
-            ] {
-                if routes.iter().all(|route| {
-                    route.features.get(&feature)
-                        == Some(&zenith_relay_core::CapabilityStatus::Unsupported)
-                }) {
-                    provider_model_config[key] = false.into();
-                }
-            }
+            restrict_capability_config(provider_model_config, |feature| {
+                !routes.is_empty()
+                    && routes.iter().all(|route| {
+                        route.features.get(&feature)
+                            == Some(&zenith_relay_core::CapabilityStatus::Unsupported)
+                    })
+            });
         }
         set_variants(provider_model_config, protocol);
     }

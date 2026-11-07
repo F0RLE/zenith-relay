@@ -60,8 +60,14 @@ pub(crate) fn direct_source_model_catalog_with_capabilities(
     codex_home: &Path,
     source_models: &[String],
     metadata: &ModelMetadataCatalog,
+    endpoint_capabilities: &[zenith_relay_core::ModelEndpointCapability],
 ) -> Result<Option<String>> {
-    catalog::direct_source_model_catalog_with_capabilities(codex_home, source_models, metadata)
+    catalog::direct_source_model_catalog_with_capabilities(
+        codex_home,
+        source_models,
+        metadata,
+        endpoint_capabilities,
+    )
 }
 
 #[cfg(test)]

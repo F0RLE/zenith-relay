@@ -5,6 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod version;
+pub(crate) use version::model_identity_support;
+
 pub(crate) fn is_claude_desktop_running() -> Result<bool, String> {
     Ok(super::process::codex_process_system()?
         .processes()
@@ -99,14 +102,11 @@ pub(super) fn detected_launch_path() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn packaged_launch_target() -> Result<String, String> {
-    let output = super::process::windows_hidden_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command",
-            "Get-StartApps | Where-Object { $_.Name -eq 'Claude' -and ($_.AppID -like 'AnthropicPBC.Claude_*!*' -or $_.AppID -like 'Anthropic.Claude_*!*') } | ForEach-Object { $_.AppID }"])
-        .output().map_err(|_| "Could not inspect installed Claude Desktop applications".to_string())?;
-    if !output.status.success() {
-        return Err("Could not inspect installed Claude Desktop applications".into());
-    }
-    let output_text = String::from_utf8_lossy(&output.stdout);
+    let mut command = super::process::windows_hidden_command("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command",
+        "Get-StartApps | Where-Object { $_.Name -eq 'Claude' -and ($_.AppID -like 'AnthropicPBC.Claude_*!*' -or $_.AppID -like 'Anthropic.Claude_*!*') } | ForEach-Object { $_.AppID }"]);
+    let output_text = version::query_output(command)
+        .map_err(|_| "Could not inspect installed Claude Desktop applications".to_string())?;
     let target = packaged_target(&output_text).ok_or_else(|| {
         "Claude Desktop was not found. Install Claude Desktop, not the Claude Code CLI".to_string()
     })?;
