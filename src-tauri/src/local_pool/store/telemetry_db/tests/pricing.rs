@@ -155,6 +155,7 @@ fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
         candidate_id: Some("account_1".into()),
         account_id: Some("account_1".into()),
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-5.4".into()),

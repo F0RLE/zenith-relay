@@ -16,9 +16,11 @@ use std::{
     },
 };
 
+pub(crate) mod cli_output;
 pub(crate) mod memory;
 mod persist;
 mod redact;
+pub(crate) mod transport;
 use redact::{safe_code, safe_detail, safe_text, truncate_text};
 
 const LOGS_DIRECTORY: &str = "logs";

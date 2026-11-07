@@ -104,8 +104,10 @@ pub(super) async fn execute(
                                 &mut source_record.detected_model_prices,
                             );
                             changed = source_catalog_changed(&source_before_refresh, source_record);
-                            source_record.last_test_status = Some("ok".into());
-                            source_record.last_error = None;
+                            let failure = discovery.failure_summary();
+                            source_record.last_test_status =
+                                Some(if failure.is_some() { "error" } else { "ok" }.into());
+                            source_record.last_error = failure;
                             source_record.normalize();
                             source_record
                                 .validate_protocol_bindings()

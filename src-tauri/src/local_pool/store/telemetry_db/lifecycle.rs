@@ -197,6 +197,9 @@ impl TelemetryDb {
         if version <= 43 {
             connection.execute_batch(MIGRATION_044).map_err(db_error)?;
         }
+        if version <= 44 {
+            connection.execute_batch(MIGRATION_045).map_err(db_error)?;
+        }
         // Retention reads before writing. Acquire the writer reservation first:
         // a finishing background sample on another connection must not turn
         // that read snapshot into an un-upgradable SQLITE_BUSY_SNAPSHOT.

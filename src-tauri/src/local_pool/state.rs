@@ -83,6 +83,7 @@ pub struct DesktopStateOwner {
     pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    reset_redemption_lock: AsyncMutex<()>,
     subscription_refresh_lock: AsyncMutex<subscription::SubscriptionRefreshState>,
     setup_lock: tokio::sync::Mutex<()>,
     runtime_snapshot_slots: Arc<Semaphore>,
@@ -215,6 +216,7 @@ impl DesktopState {
                 client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
+                reset_redemption_lock: AsyncMutex::new(()),
                 subscription_refresh_lock: AsyncMutex::new(Default::default()),
                 setup_lock: tokio::sync::Mutex::new(()),
                 runtime_snapshot_slots: Arc::new(Semaphore::new(1)),
@@ -328,6 +330,11 @@ impl DesktopState {
             .is_some_and(|applied| applied == fingerprint))
     }
 
+    pub(crate) async fn reset_redemption_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.reset_redemption_lock.lock().await
+    }
+
+    /// Records a redeemed or dispatch-uncertain cycle pending provider recovery evidence.
     pub(crate) fn mark_weekly_reset_applied(
         &self,
         account_id: &str,
@@ -349,6 +356,24 @@ impl DesktopState {
             .remove(account_id)
             .is_some();
         Ok(removed)
+    }
+
+    pub(crate) fn clear_weekly_reset_attempt(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut store = self.store()?;
+        let mut automations = store.automations().clone();
+        if automations
+            .weekly_reset_fingerprints
+            .get(account_id)
+            .is_some_and(|current| current == fingerprint)
+        {
+            automations.weekly_reset_fingerprints.remove(account_id);
+            store.replace_automations(automations)?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn subscription_refresh_guard(

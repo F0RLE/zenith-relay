@@ -2,7 +2,7 @@ use crate::local_pool::{state::DesktopState, store::telemetry_db::PerformanceSam
 use std::time::{Duration, Instant};
 
 /// Only fixed stage names and timings: no model, source, account or credential
-/// data. Fast snapshots retain the existing single total sample.
+/// data. Lock waits are subsets of stages, not additional projection work.
 pub(super) struct SnapshotTiming {
     last: Instant,
     stages: Vec<PerformanceSample<'static>>,
@@ -26,6 +26,14 @@ impl SnapshotTiming {
         self.last = now;
     }
 
+    pub(super) fn record_store_lock_wait(&mut self, duration: Duration) {
+        self.stages.push(PerformanceSample {
+            name: "snapshot_lock_wait",
+            duration_ms: duration.as_secs_f64() * 1_000.0,
+            context: Some("store"),
+        });
+    }
+
     pub(super) fn finish(self, state: &DesktopState, elapsed: Duration) {
         #[cfg(test)]
         super::performance_tests::print_stages(&self.stages);
@@ -44,7 +52,7 @@ impl SnapshotTiming {
 
     fn into_samples(mut self, elapsed: Duration) -> Vec<PerformanceSample<'static>> {
         if elapsed < Duration::from_millis(250) {
-            self.stages.clear();
+            self.stages.retain(|sample| sample.name != "snapshot_stage");
         }
         self.stages.push(PerformanceSample {
             name: "full_snapshot_native",
@@ -68,6 +76,37 @@ mod tests {
         assert_eq!(samples[0].name, "full_snapshot_native");
         assert_eq!(samples[0].context, Some("local"));
         assert!((samples[0].duration_ms - 249.999).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn store_lock_wait_is_retained_below_the_slow_snapshot_threshold() {
+        for wait in [Duration::ZERO, Duration::from_micros(125)] {
+            let mut timing = SnapshotTiming::new();
+            timing.mark("inputs");
+            timing.record_store_lock_wait(wait);
+            let samples = timing.into_samples(Duration::from_millis(12));
+            assert_eq!(samples.len(), 2);
+            assert_eq!(samples[0].name, "snapshot_lock_wait");
+            assert_eq!(samples[0].context, Some("store"));
+            assert_eq!(samples[0].duration_ms, wait.as_secs_f64() * 1_000.0);
+            assert_eq!(samples[1].name, "full_snapshot_native");
+            assert_eq!(samples[1].duration_ms, 12.0);
+        }
+    }
+
+    #[test]
+    fn slow_snapshot_keeps_lock_wait_separate_from_inclusive_stages() {
+        let mut timing = SnapshotTiming::new();
+        timing.mark("inputs");
+        timing.record_store_lock_wait(Duration::from_millis(100));
+        let samples = timing.into_samples(Duration::from_millis(250));
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].name, "snapshot_stage");
+        assert_eq!(samples[0].context, Some("inputs"));
+        assert_eq!(samples[1].name, "snapshot_lock_wait");
+        assert_eq!(samples[1].duration_ms, 100.0);
+        assert_eq!(samples[2].name, "full_snapshot_native");
+        assert_eq!(samples[2].duration_ms, 250.0);
     }
 
     #[test]

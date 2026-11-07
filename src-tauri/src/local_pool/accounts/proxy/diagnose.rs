@@ -36,13 +36,7 @@ fn write_result(result: Result<serde_json::Value, &'static str>, writer: &mut im
         Ok(output) => (output, 0),
         Err(code) => (json!({"status":"error","code":code}), 2),
     };
-    if serde_json::to_writer(&mut *writer, &output).is_err()
-        || writer.write_all(b"\n").is_err()
-        || writer.flush().is_err()
-    {
-        return 2;
-    }
-    exit_code
+    crate::diagnostics::cli_output::write_report(&output, exit_code, writer)
 }
 
 fn diagnostic_root(args: &[std::ffi::OsString]) -> Result<Option<&Path>, &'static str> {

@@ -86,7 +86,7 @@ fn usage_callback_persists_before_returning() {
         })
         .unwrap();
 
-    (state.usage_callback())(UsageEvent {
+    let event = UsageEvent {
         request_id: "req_callback".into(),
         attempt: 1,
         local_key_id: "key_1".into(),
@@ -94,6 +94,7 @@ fn usage_callback_persists_before_returning() {
         candidate_id: Some("source_1".into()),
         account_id: None,
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-test".into()),
@@ -124,7 +125,8 @@ fn usage_callback_persists_before_returning() {
         upstream_error: None,
         quota_snapshot: None,
         image_usage: None,
-    });
+    };
+    (state.usage_callback())(observed_event(&state, event));
 
     let logs = state.telemetry.list(10).unwrap();
     assert_eq!(logs.len(), 1);
@@ -193,7 +195,7 @@ async fn persisted_passive_quota_defers_the_desktop_poll_without_touching_models
     quota.provider_credits_observed_at_ms = Some(now);
     let mut event = account_usage_event("req-passive", true);
     event.quota_snapshot = Some(quota.clone());
-    (state.usage_callback())(event);
+    (state.usage_callback())(observed_event(&state, event));
     assert_eq!(
         state
             .store()
@@ -318,7 +320,10 @@ fn account_usage_persists_natural_wake_completion_across_restart() {
         .unwrap();
     assert!(state.is_wake_permit_active(&permit).unwrap());
 
-    (state.usage_callback())(account_usage_event("req-failed", false));
+    (state.usage_callback())(observed_event(
+        &state,
+        account_usage_event("req-failed", false),
+    ));
     {
         let store = state.store().unwrap();
         assert!(
@@ -337,7 +342,10 @@ fn account_usage_persists_natural_wake_completion_across_restart() {
         );
     }
     assert!(state.is_wake_permit_active(&permit).unwrap());
-    (state.usage_callback())(account_usage_event("req-natural-use", true));
+    (state.usage_callback())(observed_event(
+        &state,
+        account_usage_event("req-natural-use", true),
+    ));
     assert!(!state.is_wake_permit_active(&permit).unwrap());
     assert!(
         !state

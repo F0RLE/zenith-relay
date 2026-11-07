@@ -9,6 +9,7 @@ mod image_usage;
 mod lazy_pages;
 mod maintenance;
 mod performance;
+mod performance_retention;
 mod performance_samples;
 mod pricing;
 mod reader;
@@ -39,6 +40,7 @@ pub(super) fn aggregate_test_event(
         candidate_id: Some("source".into()),
         account_id: None,
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("model".into()),
@@ -97,6 +99,7 @@ fn failed_fallback_test_event(request_id: &str) -> UsageEvent {
         candidate_id: Some("source_1".into()),
         account_id: None,
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-test".into()),

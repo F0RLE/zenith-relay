@@ -7,9 +7,9 @@ use zenith_relay_core::protocol::RuntimeStateSnapshot;
 use zenith_relay_core::protocol::{DesktopCapabilities, GatewaySummary};
 mod snapshot;
 
-pub(crate) use snapshot::build_local_runtime_state;
 #[cfg(test)]
 use snapshot::oauth_account_runtime_available;
+pub(crate) use snapshot::{build_local_runtime_state, build_streaming_client_state};
 
 use zenith_relay_core::CandidateRuntimeSnapshot;
 #[cfg(test)]
@@ -66,7 +66,6 @@ mod parity_tests {
                 visible_model_ids: Vec::new(),
                 max_retry_candidates: 3,
                 default_service_tier: Default::default(),
-                image_base_model: None,
                 models: Vec::new(),
                 model_catalog: BTreeMap::new(),
                 common_proxy_configured: false,

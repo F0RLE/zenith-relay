@@ -238,15 +238,13 @@ pub(super) async fn execute(
             }
             // Reset verification stays inside this job. Enqueuing the same key
             // here would wait on itself, and followers must not settle twice.
-            if super::automations::evaluate_weekly_exhaustions(state, &quota_response, fence)
-                .await?
+            if let Some(verified_response) =
+                super::automations::evaluate_weekly_exhaustions(state, &quota_response, fence)
+                    .await?
             {
-                let next_scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-                if next_scope.fence != *fence {
-                    return Err(super::wait_error(RefreshWaitError::Stale));
-                }
-                quota_response = read_account_quota_once(state, &next_scope, false).await?;
+                quota_response = verified_response;
             }
+            super::automations::schedule_weekly_reserve_checks(state, &quota_response)?;
             if let Some(delay) = reset_due_delay(&quota_response, current_time_ms()) {
                 state
                     .refresh

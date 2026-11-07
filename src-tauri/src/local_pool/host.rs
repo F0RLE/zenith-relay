@@ -258,6 +258,10 @@ fn prune_finished(running: &mut Option<RunningGateway>) {
 }
 
 #[cfg(test)]
+#[path = "host/policy_tests.rs"]
+mod policy_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

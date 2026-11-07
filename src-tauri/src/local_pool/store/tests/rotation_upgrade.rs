@@ -101,6 +101,42 @@ fn startup_upgrades_old_gateway_settings_automatically_and_preserves_controls() 
 }
 
 #[test]
+fn saved_in_order_alias_is_normalized_durably_without_changing_controls() {
+    for version in 1..=3 {
+        let root = crate::files::test_temp_root("rotation-mode-alias");
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        let mut expected = store.gateway().clone();
+        expected.enabled = true;
+        expected.max_retry_candidates = 7;
+        expected.chatgpt_retry_until_available = true;
+        expected.pool_routing.as_mut().unwrap().mode = PoolRoutingMode::RoundRobin;
+        let mut saved = serde_json::to_value(&expected).unwrap();
+        saved["poolRouting"]["version"] = serde_json::json!(version);
+        saved["poolRouting"]["mode"] = serde_json::json!("in_order");
+        store
+            .database
+            .replace_state_json(&[(STATE_GATEWAY, saved.to_string())])
+            .unwrap();
+        drop(store);
+        for _ in 0..2 {
+            let reopened = LocalPoolStore::open(root.clone()).unwrap();
+            assert_eq!(reopened.gateway(), &expected);
+            let saved: serde_json::Value = serde_json::from_str(
+                &reopened
+                    .database
+                    .state_json(STATE_GATEWAY)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["poolRouting"]["mode"], "round_robin");
+            assert_eq!(saved["poolRouting"]["version"], 3);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn startup_cleans_old_scalars_from_saved_rotation_policy_without_changing_controls() {
     for enabled in [true, false] {
         let root = crate::files::test_temp_root("rotation-scalar-cleanup");

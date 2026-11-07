@@ -18,12 +18,9 @@ use zenith_relay_core::{
     accounts::{AccountAccessState, AccountAuthState},
     automations::WakeCoordinator,
     providers::chatgpt::subscription_refresh_due,
-    scheduler::{
-        account_member_key,
-        refresh::{
-            RefreshIdentity, RefreshKind, passive_quota_age_ms, quota_verification_delay,
-            service::RefreshService,
-        },
+    scheduler::refresh::{
+        RefreshIdentity, RefreshKind, passive_quota_age_ms, quota_verification_delay,
+        service::RefreshService,
     },
 };
 
@@ -33,7 +30,7 @@ mod worker;
 pub(super) use worker::offload;
 
 pub(super) use account_state::apply_account_usage_state;
-use account_state::{expire_account_access, persisted_auth_state};
+use account_state::{current_account_usage, expire_account_access, persisted_auth_state};
 
 type TimedUsageCallback = Arc<dyn Fn(UsageEvent, chrono::DateTime<chrono::Utc>) + Send + Sync>;
 
@@ -119,35 +116,32 @@ impl DesktopUsageWriter {
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
             let account_id = event.account_id.clone();
-            // A 401 may arrive after an OAuth refresh or a manual sign-in has
-            // replaced the credentials used by the original request. Acquire
-            // the same per-account lock as credential writers, then compare
-            // the request's provenance before changing either the secret or
-            // the visible account state. Unknown/locked provenance is safer
-            // as a telemetry-only observation than invalidating a fresh login.
-            let (access_expiry, ignore_account_observation, _account_lock) =
-                if event.http_status == 401 {
+            // Hold credential-writer lock order and the exact OAuth revision
+            // through persistence. Delayed or busy ownership remains telemetry
+            // only, including success and quota observations, not just 401s.
+            let _account_guard = current_account_usage(&credentials, &account_locks, &event);
+            let (access_expiry, ignore_account_observation) =
+                if account_id.is_some() && _account_guard.is_none() {
+                    (None, true)
+                } else if event.http_status == 401 {
                     match (account_id.as_deref(), event.account_token_generation) {
                         (Some(account_id), Some(expected_generation)) => {
-                            match account_locks.try_acquire(account_id) {
-                                Ok(Some(lock)) => match expire_account_access(
-                                    &credentials,
-                                    account_id,
-                                    expected_generation,
-                                    observed_at_ms,
-                                ) {
-                                    Some(access_state) => (Some(access_state), false, Some(lock)),
-                                    None => (None, true, Some(lock)),
-                                },
-                                Ok(None) | Err(_) => (None, true, None),
+                            match expire_account_access(
+                                &credentials,
+                                account_id,
+                                expected_generation,
+                                observed_at_ms,
+                            ) {
+                                Some(access_state) => (Some(access_state), false),
+                                None => (None, true),
                             }
                         }
-                        _ => (None, true, None),
+                        _ => (None, true),
                     }
                 } else {
-                    (None, false, None)
+                    (None, false)
                 };
-            let successful_auth_state = if event.success {
+            let successful_auth_state = if event.success && !ignore_account_observation {
                 account_id
                     .as_deref()
                     .and_then(|account_id| persisted_auth_state(&credentials, account_id))
@@ -201,8 +195,6 @@ impl DesktopUsageWriter {
                 if hint.refresh_now {
                     account_refresh.mark_dirty(&hint.identity, RefreshKind::Quota);
                 }
-            } else if let Some(account_id) = account_id.as_deref() {
-                account_refresh.set_member_active(&account_member_key(account_id));
             }
             if !recorded || update.is_err() {
                 failed.fetch_add(1, Ordering::Relaxed);
@@ -251,6 +243,12 @@ fn persist_usage_observation(
             || event
                 .account_token_generation
                 .is_some_and(|generation| generation != account.account.token_generation);
+        if ignore_account_observation {
+            store
+                .touch_usage(&event.local_key_id, &event.source_id, observed_at)
+                .map_err(|_| ())?;
+            return Ok((0, None, false));
+        }
         let visible_state = (
             account.account.quota.clone(),
             account.account.auth_state,

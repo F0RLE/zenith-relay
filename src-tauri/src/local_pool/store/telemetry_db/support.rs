@@ -43,6 +43,7 @@ pub(super) fn document_with_comparison(
             "tools": "policyCatalog describes tools after client policy, before transport encoding. In BPS, catalog schemas are prompt text, so upstreamContext.toolCatalogBytes can be zero. loadedToolCount counts loaded contracts; renderedSchemaBytes counts rendered parameter schemas, not the full prompt or wire payload. upstreamToolCallCount counts native calls before translation; toolCallCount counts client-visible calls. Batch expansion can make them differ without an error.",
             "history": "clientHistory compares current and previous completed client inputs; upstreamHistory compares current and previous completed upstream inputs. relayHistory compares upstream and client inputs within the same request. sharedPrefixItems is the literal positional prefix. leadingContextAlignment, when present, separately compares the remaining items after leading developer/system messages; skipped messages are not proven cache-reusable and the literal prefix is preserved.",
             "cache": "cachedInputTokens and cacheWriteInputTokens are parts of inputTokens; reasoningTokens are part of outputTokens. History comparisons are structural, not proof of provider cache eviction or residency.",
+            "providerBackoff": "Normalized provider deadline and scope, not configured recovery/circuit delays, current readiness or durable credential ownership. Times are Unix milliseconds at observation. Model scope uses report-local references. Missing evidence stays null; reports cannot restore admission.",
             "reasoningLatency": "protocol.requestedReasoningEffort and effectiveReasoningEffort describe the requested and Relay-mapped setting, not the provider's internal reasoning time. TTFT is an observed first-output milestone, not pure reasoning duration. reasoningLatencyComparison uses bounded retained same-route observations only, not a controlled experiment; it never changes reasoning or sends model requests.",
             "payload": "requestPayload describes the final encoded HTTP body or WebSocket JSON text, after ownership guards. bodyBytes excludes HTTP/WebSocket framing and TLS, and is not an acknowledgement of delivered bytes. Continuation means a nonempty previous_response_id, not proof of delta-only input or provider cache reuse. fullRequestReason describes transport/payload facts, not an inferred cache-miss cause. compressionUs (legacy compressionMs) measures encoding wall time including preparation and blocking-pool scheduling within the executor clock, not an additional requestPreparation phase. httpSendToHeadersMs starts at HTTP execute after encoding; it includes connection setup and upstream waiting, not isolated upload time, and overlaps responseHeadersMs/TTFT. connectionReused describes only the observed native WebSocket connection.",
             "missing": "Null means unavailable, unobserved or excluded by the privacy allowlist, not zero. Current settings and provider usage payloads are not reconstructed from historical observations.",
@@ -109,6 +110,12 @@ fn observation(row: &UsageLog, salt: &str) -> Value {
             "inFlightBefore": routing.in_flight_before, "attemptOutcome": routing.attempt_outcome,
             "transport": routing.transport.as_ref().map(transport::document), "cacheContext": routing.cache_context,
             "cacheAffinity": routing.cache_affinity,
+            "providerBackoff": routing.provider_backoff.as_ref().map(|backoff| json!({
+                "scope": if backoff.scope == "*" { "candidate" } else { "model" },
+                "modelRef": (backoff.scope != "*").then(|| reference(&backoff.scope)),
+                "notBeforeMs": backoff.not_before_ms,
+                "observedAtMs": backoff.observed_at_ms,
+            })),
         })
     });
     json!({

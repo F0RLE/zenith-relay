@@ -22,6 +22,7 @@ fn usage_survives_database_reopen() {
         candidate_id: Some("account_1".into()),
         account_id: Some("account_1".into()),
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: Some("client_0123456789ab".into()),
         routing: Some(RoutingDiagnostics {
             reason: SelectionReason::QuotaHeadroom,
@@ -43,6 +44,7 @@ fn usage_survives_database_reopen() {
             attempt_outcome: Some(zenith_relay_core::AttemptOutcome::Completed),
             request_timing: None,
             route_latency: None,
+            provider_backoff: None,
             cache_affinity: None,
             cache_context: Some(
                 serde_json::from_value(serde_json::json!({

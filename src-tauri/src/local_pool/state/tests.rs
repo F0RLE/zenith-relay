@@ -202,6 +202,7 @@ fn account_usage_event(request_id: &str, success: bool) -> UsageEvent {
         candidate_id: Some("account-1".into()),
         account_id: Some("account-1".into()),
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-test".into()),
@@ -250,6 +251,7 @@ fn account_status_event(
         candidate_id: Some(account_id.into()),
         account_id: Some(account_id.into()),
         account_token_generation: Some(1),
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("gpt-test".into()),
@@ -287,5 +289,46 @@ fn account_success_event(account_id: &str) -> UsageEvent {
     let mut event = account_status_event(account_id, 200, None, None, 0);
     event.success = true;
     event.error_category = None;
+    event
+}
+
+fn observed_event(state: &DesktopState, mut event: UsageEvent) -> UsageEvent {
+    use futures_util::FutureExt;
+    use zenith_relay_core::accounts::{
+        TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenSet,
+    };
+    struct NoUsageRefresh;
+    impl TokenRefreshAdapter for NoUsageRefresh {
+        fn refresh<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: u64,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            std::result::Result<TokenRefresh, TokenRefreshFailure>,
+        > {
+            Box::pin(async { unreachable!("synthetic usage credentials do not expire") })
+        }
+    }
+    let Some(id) = event.account_id.as_deref() else {
+        return event;
+    };
+    let generation = event.account_token_generation.unwrap_or(1);
+    let authority = state.token_authority();
+    authority
+        .register_if_absent(
+            id,
+            TokenSet::new("synthetic-usage-access", None, None, None, 1, generation).unwrap(),
+            AccountAuthState::Active,
+        )
+        .unwrap();
+    let prepared = authority
+        .prepare(id, 1, 0, &NoUsageRefresh)
+        .now_or_never()
+        .expect("synthetic usage authority is not contended")
+        .unwrap();
+    event.account_token_generation = Some(generation);
+    event.account_token_revision = Some(prepared.dispatch_revision().clone());
     event
 }

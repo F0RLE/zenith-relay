@@ -55,6 +55,7 @@ pub(super) fn empty_source_discovery(
         resolved_base_url: None,
         detected_model_prices: BTreeMap::new(),
         capabilities: Vec::new(),
+        ..Default::default()
     })
 }
 

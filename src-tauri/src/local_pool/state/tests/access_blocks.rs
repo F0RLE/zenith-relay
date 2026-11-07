@@ -32,12 +32,9 @@ fn unauthorized_access_only_account_is_saved_but_removed_from_routing() {
     assert!(credentials.require(&account_id).is_ok());
     let retry_at_ms = now_ms().saturating_add(30 * 60_000);
 
-    (state.usage_callback())(account_status_event(
-        &account_id,
-        401,
-        Some("*"),
-        Some(retry_at_ms),
-        1,
+    (state.usage_callback())(observed_event(
+        &state,
+        account_status_event(&account_id, 401, Some("*"), Some(retry_at_ms), 1),
     ));
 
     let observed_after = now_ms();
@@ -95,12 +92,15 @@ fn delayed_unauthorized_does_not_expire_a_newer_oauth_login() {
 
     // This result belongs to the immediately preceding credential
     // generation, not the just-completed sign-in above.
-    (state.usage_callback())(account_status_event(
-        &account_id,
-        401,
-        Some("*"),
-        Some(now_ms().saturating_add(30 * 60_000)),
-        1,
+    (state.usage_callback())(observed_event(
+        &state,
+        account_status_event(
+            &account_id,
+            401,
+            Some("*"),
+            Some(now_ms().saturating_add(30 * 60_000)),
+            1,
+        ),
     ));
 
     let stored = credentials.require(&account_id).unwrap();
@@ -145,7 +145,7 @@ fn delayed_results_cannot_change_a_newer_account_generation() {
         old_quota.primary.as_mut().unwrap().observed_at_ms = 3_000;
         old_quota.updated_at_ms = Some(3_000);
         event.quota_snapshot = Some(old_quota);
-        (state.usage_callback())(event);
+        (state.usage_callback())(observed_event(&state, event));
         assert_eq!(
             state.store().unwrap().account(account_id),
             Some(&current),
@@ -153,6 +153,59 @@ fn delayed_results_cannot_change_a_newer_account_generation() {
         );
     }
     assert_eq!(state.telemetry.list(10).unwrap().len(), 3);
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn delayed_results_cannot_change_a_readded_login_with_identical_tokens() {
+    let root = temp_root("usage-reused-generation");
+    let state = DesktopState::open(root.clone()).unwrap();
+    let account_id = "synthetic-reused-generation";
+    for status in [200, 401, 403, 429] {
+        let mut current = account_record(account_id);
+        if status == 200 {
+            current.account.health = AccountHealthState::Blocked;
+        }
+        state
+            .store()
+            .unwrap()
+            .upsert_account(current.clone())
+            .unwrap();
+        let mut event = observed_event(
+            &state,
+            if status == 200 {
+                account_success_event(account_id)
+            } else {
+                account_status_event(account_id, status, None, None, 1)
+            },
+        );
+        if status == 403 {
+            event.error_category = Some("deactivated_workspace".into());
+        }
+        let mut quota = current.account.quota.clone();
+        quota.primary.as_mut().unwrap().available_basis_points = Some(0);
+        quota.updated_at_ms = Some(3_000);
+        event.quota_snapshot = Some(quota);
+        let authority = state.token_authority();
+        let tokens = authority.tokens(account_id).await.unwrap();
+        assert!(authority.remove(account_id));
+        authority
+            .register(account_id, tokens, AccountAuthState::Active)
+            .await
+            .unwrap();
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("accountTokenRevision").is_none());
+        assert!(json.get("accountTokenGeneration").is_none());
+        (state.usage_callback())(event);
+        assert_eq!(
+            state.store().unwrap().account(account_id),
+            Some(&current),
+            "status {status}"
+        );
+    }
+    assert_eq!(state.telemetry.list(10).unwrap().len(), 4);
+    assert_eq!(state.failed_usage_writes.load(Ordering::Relaxed), 0);
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -169,12 +222,9 @@ fn generic_forbidden_account_stays_available_until_an_actual_success() {
         .unwrap();
     let retry_at_ms = now_ms().saturating_add(30 * 60_000);
 
-    (state.usage_callback())(account_status_event(
-        account_id,
-        403,
-        Some("*"),
-        Some(retry_at_ms),
-        2,
+    (state.usage_callback())(observed_event(
+        &state,
+        account_status_event(account_id, 403, Some("*"), Some(retry_at_ms), 2),
     ));
     {
         let store = state.store().unwrap();
@@ -200,7 +250,7 @@ fn generic_forbidden_account_stays_available_until_an_actual_success() {
             .health,
         AccountHealthState::Degraded
     );
-    (reopened.usage_callback())(account_success_event(account_id));
+    (reopened.usage_callback())(observed_event(&reopened, account_success_event(account_id)));
     let store = reopened.store().unwrap();
     let account = store.account(account_id).unwrap();
     assert_eq!(account.account.health, AccountHealthState::Healthy);
@@ -229,7 +279,7 @@ fn explicit_workspace_disable_stays_blocked_until_an_actual_success() {
         2,
     );
     event.error_category = Some("deactivated_workspace".into());
-    (state.usage_callback())(event);
+    (state.usage_callback())(observed_event(&state, event));
     assert_eq!(
         state
             .store()

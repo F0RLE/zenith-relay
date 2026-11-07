@@ -18,6 +18,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, HashMap},
     sync::atomic::Ordering,
+    time::{Duration, Instant},
 };
 use zenith_relay_core::error_codes;
 use zenith_relay_core::{
@@ -124,6 +125,7 @@ impl AccountCredentialFacts {
 
 /// UI projection inputs. Source keys are presence checks, not decrypted copies.
 pub(crate) struct SnapshotInputs {
+    pub store_lock_wait: Duration,
     pub gateway: GatewaySettings,
     pub sources: Vec<ProviderSourceRecord>,
     pub accounts: Vec<LocalAccountRecord>,
@@ -137,6 +139,7 @@ pub(crate) struct SnapshotInputs {
 }
 
 struct SnapshotBase {
+    store_lock_wait: Duration,
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
     source_refresh: BTreeMap<String, SourceRefreshSnapshot>,
@@ -218,6 +221,7 @@ impl DesktopState {
 
     pub(crate) async fn snapshot_inputs(&self) -> Result<SnapshotInputs> {
         let SnapshotBase {
+            store_lock_wait,
             gateway,
             sources,
             source_refresh,
@@ -258,6 +262,7 @@ impl DesktopState {
             }
         }
         Ok(SnapshotInputs {
+            store_lock_wait,
             gateway,
             sources,
             accounts,
@@ -335,8 +340,18 @@ impl DesktopState {
 
     async fn snapshot_base(&self) -> Result<SnapshotBase> {
         let running = self.gateway.address().await.is_some();
-        let (gateway, sources, source_refresh, accounts, account_refresh, automations) = {
+        let (
+            gateway,
+            sources,
+            source_refresh,
+            accounts,
+            account_refresh,
+            automations,
+            store_lock_wait,
+        ) = {
+            let lock_started = Instant::now();
             let store = self.store()?;
+            let store_lock_wait = lock_started.elapsed();
             let source_refresh = store
                 .sources()
                 .iter()
@@ -397,6 +412,7 @@ impl DesktopState {
                 store.accounts().to_vec(),
                 account_refresh,
                 store.automations().clone(),
+                store_lock_wait,
             )
         };
         let mut warnings = Vec::new();
@@ -413,6 +429,7 @@ impl DesktopState {
             warnings.push(error);
         }
         Ok(SnapshotBase {
+            store_lock_wait,
             gateway,
             sources,
             source_refresh,

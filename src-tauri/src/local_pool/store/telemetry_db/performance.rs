@@ -15,6 +15,8 @@ impl PerformanceSample<'_> {
             || self
                 .context
                 .is_some_and(|context| !zenith_relay_core::is_ascii_ref(context, 64))
+            || !valid_command_context(self.name, self.context)
+            || (self.name == "snapshot_lock_wait" && self.context != Some("store"))
         {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
@@ -23,6 +25,33 @@ impl PerformanceSample<'_> {
         }
         Ok(())
     }
+}
+
+fn valid_command_context(name: &str, context: Option<&str>) -> bool {
+    if !matches!(name, "command_save" | "command_switch" | "command_refresh") {
+        return true;
+    }
+    let Some((command, outcome)) = context.and_then(|context| context.split_once(':')) else {
+        return false;
+    };
+    if !matches!(outcome, "ok" | "error")
+        || !command.starts_with(|character: char| character.is_ascii_lowercase())
+        || !command
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return false;
+    }
+    matches!(
+        (name, command.split('_').next()),
+        (
+            "command_save",
+            Some("create" | "update" | "save" | "set" | "rename" | "rotate")
+        ) | (
+            "command_switch",
+            Some("apply" | "select" | "activate" | "switch")
+        ) | ("command_refresh", Some("refresh"))
+    )
 }
 
 impl TelemetryDb {

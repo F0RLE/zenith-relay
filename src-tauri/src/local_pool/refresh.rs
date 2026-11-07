@@ -207,4 +207,4 @@ fn wait_error(error: RefreshWaitError) -> LocalPoolError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::local_pool) mod tests;

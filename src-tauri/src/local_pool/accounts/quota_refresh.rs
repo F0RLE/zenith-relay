@@ -52,6 +52,7 @@ mod profile;
 mod quota;
 mod reads;
 mod types;
+pub(in crate::local_pool::accounts) use quota::verify_reset_account_quota;
 
 pub(in crate::local_pool::accounts) use credentials::reconcile_registered_account_record;
 pub(crate) use credentials::sync_account_profile_bindings;

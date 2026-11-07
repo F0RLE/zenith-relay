@@ -93,6 +93,51 @@ fn legacy_model_block_is_repaired_durably_without_changing_account_policy() {
 }
 
 #[test]
+fn legacy_model_catalog_failure_is_repaired_durably_without_changing_saved_data() {
+    let root = temp_root();
+    let mut legacy = account_record("synthetic-legacy-catalog");
+    legacy.account.health = AccountHealthState::Unhealthy;
+    legacy.account.last_error_code = Some("models_http_status".into());
+    legacy.account.enabled = false;
+    legacy.account.in_pool = false;
+    legacy.account.draining = true;
+    legacy.account.quota.limit_reached = true;
+    legacy.discovered_models = Some(vec!["synthetic-saved-model".into()]);
+    let mut reauth = legacy.clone();
+    reauth.account.id = "synthetic-auth-error".into();
+    reauth.account.auth_state = AccountAuthState::Error;
+    let mut blocked = legacy.clone();
+    blocked.account.id = "synthetic-blocked".into();
+    blocked.account.health = AccountHealthState::Blocked;
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    store
+        .replace_accounts_and_keys(
+            vec![legacy.clone(), reauth.clone(), blocked.clone()],
+            vec![],
+        )
+        .unwrap();
+    drop(store);
+
+    legacy.account.health = AccountHealthState::Degraded;
+    for _ in 0..2 {
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(store.account(&legacy.account.id), Some(&legacy));
+        assert_eq!(store.account(&reauth.account.id), Some(&reauth));
+        assert_eq!(store.account(&blocked.account.id), Some(&blocked));
+        let saved: Vec<LocalAccountRecord> = serde_json::from_str(
+            &store
+                .database()
+                .state_json(STATE_ACCOUNTS)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved, [legacy.clone(), reauth.clone(), blocked.clone()]);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn retired_manual_timezone_settings_are_removed_without_changing_other_controls() {
     let root = temp_root();
     let store = LocalPoolStore::open(root.clone()).unwrap();

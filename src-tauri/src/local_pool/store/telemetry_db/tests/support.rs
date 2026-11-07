@@ -129,6 +129,67 @@ fn native_backend_timing_survives_storage_and_export_without_raw_identifiers() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn provider_backoff_export_preserves_scope_without_raw_model_or_credential_identity() {
+    let mut rows = diagnostic_rows();
+    for (scope, expected_scope) in [("PRIVATE_UPSTREAM_MODEL", "model"), ("*", "candidate")] {
+        for row in &mut rows {
+            row.resolved_model = Some(scope.into());
+            row.routing.as_mut().unwrap().provider_backoff =
+                Some(zenith_relay_core::ProviderBackoff {
+                    scope: scope.into(),
+                    not_before_ms: 123_000,
+                    observed_at_ms: Some(1_000),
+                });
+        }
+        let report = super::super::support::document(rows.last(), &rows, false);
+        let provider = &report["finalRequest"]["routing"]["providerBackoff"];
+        assert_eq!(provider["scope"], expected_scope);
+        assert_eq!(provider["notBeforeMs"], 123_000);
+        assert_eq!(provider["observedAtMs"], 1_000);
+        assert_eq!(provider["modelRef"].is_null(), scope == "*");
+        for row in report["attempts"].as_array().unwrap() {
+            assert_eq!(&row["routing"]["providerBackoff"], provider);
+        }
+        if scope != "*" {
+            assert_eq!(
+                provider["modelRef"],
+                report["finalRequest"]["resolvedModelRef"]
+            );
+            let next = super::super::support::document(rows.last(), &rows, false);
+            assert_ne!(
+                provider["modelRef"],
+                next["finalRequest"]["routing"]["providerBackoff"]["modelRef"]
+            );
+        }
+        let text = serde_json::to_string(&report).unwrap();
+        assert!(!text.contains("PRIVATE_"));
+        assert!(!text.contains("accountTokenGeneration"));
+        assert!(!text.contains("accountTokenRevision"));
+    }
+    for row in &mut rows {
+        row.routing
+            .as_mut()
+            .unwrap()
+            .provider_backoff
+            .as_mut()
+            .unwrap()
+            .observed_at_ms = None;
+    }
+    let unknown_time = super::super::support::document(rows.last(), &rows, false);
+    assert!(unknown_time["finalRequest"]["routing"]["providerBackoff"]["observedAtMs"].is_null());
+    assert_eq!(
+        unknown_time["finalRequest"]["routing"]["providerBackoff"]["notBeforeMs"],
+        123_000
+    );
+    for row in &mut rows {
+        row.routing.as_mut().unwrap().provider_backoff = None;
+    }
+    let legacy = super::super::support::document(rows.last(), &rows, false);
+    assert!(legacy["finalRequest"]["routing"]["providerBackoff"].is_null());
+    assert!(legacy["attempts"][0]["routing"]["providerBackoff"].is_null());
+}
+
 fn diagnostic_rows() -> Vec<UsageLog> {
     let root = crate::files::test_temp_root("relay-diagnostic");
     let db = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();

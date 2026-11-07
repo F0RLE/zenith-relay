@@ -14,7 +14,7 @@ use zenith_relay_core::{
     },
 };
 
-pub(super) fn account() -> LocalAccountRecord {
+pub(in crate::local_pool) fn account() -> LocalAccountRecord {
     // Deliberately do not save credentials. No test may contact a provider.
     let credentials = StoredCodexCredentials::new(
         &format!("refresh_test_{}", uuid::Uuid::new_v4().simple()),
@@ -42,11 +42,11 @@ pub(super) fn account() -> LocalAccountRecord {
     .unwrap()
 }
 
-pub(super) fn state() -> DesktopState {
+pub(in crate::local_pool) fn state() -> DesktopState {
     DesktopState::open(crate::files::test_temp_root("refresh-host")).unwrap()
 }
 
-pub(super) async fn cleanup(state: DesktopState) {
+pub(in crate::local_pool) async fn cleanup(state: DesktopState) {
     state.refresh.shutdown().await;
     let root = state.root.clone();
     drop(state);

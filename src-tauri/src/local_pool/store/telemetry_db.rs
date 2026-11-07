@@ -257,8 +257,12 @@ fn valid_performance_name(metric_name: &str) -> bool {
             | "full_snapshot"
             | "full_snapshot_native"
             | "snapshot_stage"
+            | "snapshot_lock_wait"
             | "mode_switch"
             | "page_open"
+            | "command_save"
+            | "command_switch"
+            | "command_refresh"
     )
 }
 

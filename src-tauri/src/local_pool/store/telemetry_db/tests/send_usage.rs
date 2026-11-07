@@ -172,6 +172,44 @@ fn timed_routing(duration_ms: u64, projection_only: bool, outcome: &str) -> Rout
 }
 
 #[test]
+fn provider_backoff_roundtrips_as_scoped_measurement_without_credential_provenance() {
+    let root = crate::files::test_temp_root("relay-provider-backoff");
+    let path = root.join("usage.sqlite");
+    let database = TelemetryDb::open(&path).unwrap();
+    let provider = zenith_relay_core::ProviderBackoff {
+        scope: "synthetic-model".into(),
+        not_before_ms: 123_000,
+        observed_at_ms: Some(1_000),
+    };
+    let mut event = aggregate_test_event("synthetic-provider-backoff", 1, 10, 0, None, 0);
+    event.success = false;
+    event.http_status = 429;
+    event.error_category = Some("upstream_rate_limited".into());
+    let mut routing = timed_routing(100, false, "returned_failure");
+    routing.provider_backoff = Some(provider.clone());
+    event.routing = Some(routing);
+    database.record(&event).unwrap();
+    drop(database);
+    let database = TelemetryDb::open(&path).unwrap();
+    let rows = database.list(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].routing.as_ref().unwrap().provider_backoff.as_ref(),
+        Some(&provider)
+    );
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        encoded["routing"]["providerBackoff"]["notBeforeMs"],
+        123_000
+    );
+    assert_eq!(encoded["routing"]["providerBackoff"]["observedAtMs"], 1_000);
+    assert!(encoded.get("accountTokenGeneration").is_none());
+    assert!(encoded.get("accountTokenRevision").is_none());
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn request_finalization_preserves_physical_sends_consumption_and_full_duration() {
     let root = crate::files::test_temp_root("relay-final-usage");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();

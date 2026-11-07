@@ -6,7 +6,8 @@ use serde_json::json;
 use std::{sync::atomic::AtomicUsize, time::Duration};
 use tokio::sync::{Notify, mpsc};
 use zenith_relay_core::{
-    SourceStatsStatus, protocol::RefreshStatus, scheduler::refresh::RefreshFreshness,
+    CapabilityOrigin, CapabilityStatus, ProtocolFeature, SourceStatsStatus, WireApi,
+    protocol::RefreshStatus, scheduler::refresh::RefreshFreshness,
     scheduler::refresh::SourceStatsObservation,
 };
 
@@ -25,6 +26,33 @@ async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (format!("http://{address}/v1"), server)
+}
+
+fn source_with_catalog(base_url: &str) -> ProviderSourceRecord {
+    let mut source = source(base_url);
+    source.protocol_config = serde_json::from_value(json!({
+        "capabilities": [
+            {"modelId": "test", "upstreamWireApi": "responses", "status": "declared",
+                "origin": "catalog", "checkedAtMs": 2},
+            {"modelId": "test", "upstreamWireApi": "responses", "status": "unknown",
+                "origin": "manual", "checkedAtMs": 1,
+                "features": {"reasoning": "unsupported"}}
+        ]
+    }))
+    .unwrap();
+    source.protocol_bindings = source
+        .protocol_config
+        .resolve(&source.base_url, &source.models, &[], source.wire_api)
+        .unwrap();
+    source.detected_model_prices.insert(
+        "test".into(),
+        zenith_relay_core::ApiModelPriceOverride {
+            input_micro_usd_per_million: 11,
+            output_micro_usd_per_million: 22,
+            ..Default::default()
+        },
+    );
+    source
 }
 
 #[tokio::test]
@@ -292,6 +320,349 @@ async fn late_reads_do_not_cross_key_address_deletion_or_normalization_boundarie
             server.abort();
             cleanup(state).await;
         }
+    }
+}
+
+#[tokio::test]
+async fn partial_catalog_refresh_preserves_failed_history_and_recovers_on_a_valid_empty_read() {
+    let state = state();
+    let visible = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready = visible.clone();
+    let (base_url, server) = serve(Router::new().route(
+        "/v1/models",
+        get(move |headers: axum::http::HeaderMap| {
+            let ready = ready.clone();
+            async move {
+                if headers.contains_key("x-api-key") {
+                    if ready.load(Ordering::SeqCst) {
+                        (StatusCode::OK, Json(json!({"data": []})))
+                    } else {
+                        (
+                            StatusCode::FORBIDDEN,
+                            Json(json!({"error": "synthetic failure"})),
+                        )
+                    }
+                } else {
+                    (
+                        StatusCode::OK,
+                        Json(json!({"data": [{"id": "new-responses",
+                        "supported_endpoint_types": ["responses"],
+                        "inputMicroUsdPerMillion": 33, "outputMicroUsdPerMillion": 44}]})),
+                    )
+                }
+            }
+        }),
+    ))
+    .await;
+    let mut source = source(&base_url);
+    source.models = vec!["old-responses".into(), "old-messages".into()];
+    source.protocol_bindings = vec![
+        zenith_relay_core::SourceProtocolBinding::legacy(
+            WireApi::Responses,
+            &["old-responses".into()],
+        ),
+        zenith_relay_core::SourceProtocolBinding::legacy(
+            WireApi::Messages,
+            &["old-messages".into()],
+        ),
+    ];
+    source.protocol_config = serde_json::from_value(json!({"capabilities": [
+        {"modelId": "old-messages", "upstreamWireApi": "messages", "status": "declared",
+            "origin": "catalog", "checkedAtMs": 1, "features": {"reasoning": "unsupported"}},
+        {"modelId": "old-messages", "upstreamWireApi": "responses", "status": "unsupported",
+            "origin": "catalog", "checkedAtMs": 1}
+    ]}))
+    .unwrap();
+    source.detected_model_prices.insert(
+        "old-messages".into(),
+        zenith_relay_core::ApiModelPriceOverride {
+            input_micro_usd_per_million: 11,
+            output_micro_usd_per_million: 22,
+            ..Default::default()
+        },
+    );
+    state
+        .store()
+        .unwrap()
+        .upsert_source(source.clone())
+        .unwrap();
+    secret_store::save(&source.secret_ref, "synthetic-key").unwrap();
+    let partial = request_models(&state, &source.id, true).await.unwrap();
+    assert_eq!(partial.models, ["new-responses", "old-messages"]);
+    assert_eq!(partial.protocol_bindings.len(), 2);
+    assert_eq!(partial.last_test_status.as_deref(), Some("error"));
+    assert!(partial.last_error.as_ref().unwrap().contains("403"));
+    assert_eq!(
+        partial.detected_model_prices["old-messages"].input_micro_usd_per_million,
+        11
+    );
+    assert_eq!(
+        partial.detected_model_prices["new-responses"].input_micro_usd_per_million,
+        33
+    );
+    assert_eq!(partial.enabled, source.enabled);
+    assert_eq!(partial.in_pool, source.in_pool);
+    let routes = partial.effective_protocol_bindings().unwrap();
+    let old = routes
+        .iter()
+        .filter(|route| route.model_ids.iter().any(|id| id == "old-messages"))
+        .collect::<Vec<_>>();
+    assert!(!old.is_empty());
+    assert!(old.iter().all(
+        |route| route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Messages
+    ));
+    visible.store(true, Ordering::SeqCst);
+    let recovered = request_models(&state, &source.id, true).await.unwrap();
+    assert_eq!(recovered.models, ["new-responses"]);
+    assert_eq!(recovered.last_test_status.as_deref(), Some("ok"));
+    assert!(recovered.last_error.is_none());
+    assert!(!recovered.detected_model_prices.contains_key("old-messages"));
+    assert!(
+        recovered
+            .protocol_config
+            .capabilities
+            .iter()
+            .all(|row| row.model_id != "old-messages")
+    );
+    assert_eq!(state.store().unwrap().source(&source.id), Some(&recovered));
+    secret_store::delete(&source.secret_ref).unwrap();
+    server.abort();
+    cleanup(state).await;
+}
+
+#[tokio::test]
+async fn paged_model_refresh_commits_only_after_every_page_is_valid() {
+    for complete in [true, false] {
+        let state = state();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let (base_url, server) = serve(Router::new().route(
+            "/v1/models",
+            get(move |uri: axum::http::Uri| {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    let second = uri.query().is_some();
+                    if second && !complete {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": "synthetic failure"})),
+                        )
+                    } else {
+                        let id = if second { "new-second" } else { "new-first" };
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "data": [{"id": id, "supported_endpoint_types": ["messages"],
+                                    "inputMicroUsdPerMillion": 33, "outputMicroUsdPerMillion": 44}],
+                                "has_more": !second, "last_id": "next"
+                            })),
+                        )
+                    }
+                }
+            }),
+        ))
+        .await;
+        let mut source = source_with_catalog(&base_url);
+        source.wire_api = WireApi::Messages;
+        source.protocol_config.endpoint_hint = Some(WireApi::Messages);
+        source.protocol_bindings = source
+            .protocol_config
+            .resolve(&source.base_url, &source.models, &[], source.wire_api)
+            .unwrap()
+            .into_iter()
+            .filter(|binding| binding.wire_api == WireApi::Messages)
+            .collect();
+        assert_eq!(source.protocol_bindings.len(), 1);
+        state
+            .store()
+            .unwrap()
+            .upsert_source(source.clone())
+            .unwrap();
+        secret_store::save(&source.secret_ref, "synthetic-key").unwrap();
+        let before = state.store().unwrap().source(&source.id).unwrap().clone();
+        let updated = request_models(&state, &source.id, true).await.unwrap();
+        if complete {
+            assert_eq!(updated.last_test_status.as_deref(), Some("ok"));
+            assert_eq!(updated.models, ["new-first", "new-second"]);
+            assert_eq!(updated.detected_model_prices.len(), 2);
+            assert!(updated.detected_model_prices.contains_key("new-first"));
+            assert!(updated.detected_model_prices.contains_key("new-second"));
+            assert!(!updated.detected_model_prices.contains_key("test"));
+            let effective = updated
+                .protocol_config
+                .effective_capabilities(&updated.base_url, &updated.models);
+            for model in &updated.models {
+                assert!(effective.iter().any(|row| {
+                    row.model_id == *model
+                        && row.upstream_wire_api == WireApi::Messages
+                        && row.status.available()
+                }));
+            }
+        } else {
+            assert_eq!(updated.last_test_status.as_deref(), Some("error"));
+            assert_eq!(updated.models, before.models);
+            assert_eq!(updated.protocol_bindings, before.protocol_bindings);
+            assert_eq!(updated.protocol_config, before.protocol_config);
+            assert_eq!(updated.detected_model_prices, before.detected_model_prices);
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(state.store().unwrap().source(&source.id), Some(&updated));
+        secret_store::delete(&source.secret_ref).unwrap();
+        server.abort();
+        cleanup(state).await;
+    }
+}
+
+#[tokio::test]
+async fn malformed_or_failed_model_refresh_preserves_catalog_but_valid_empty_refresh_clears_it() {
+    for (status, payload, valid_empty) in [
+        (StatusCode::OK, json!({"data": [null]}), false),
+        (
+            StatusCode::OK,
+            json!({"data": [{"id": "replacement"}, {}]}),
+            false,
+        ),
+        (StatusCode::OK, json!({"data": [{"id": "   "}]}), false),
+        (StatusCode::OK, json!({"error": "synthetic failure"}), false),
+        (StatusCode::SERVICE_UNAVAILABLE, json!({"data": []}), false),
+        (StatusCode::OK, json!({"data": []}), true),
+    ] {
+        let state = state();
+        let (base_url, server) = serve(Router::new().route(
+            "/v1/models",
+            get(move || {
+                let payload = payload.clone();
+                async move { (status, Json(payload)) }
+            }),
+        ))
+        .await;
+        let source = source_with_catalog(&base_url);
+        state
+            .store()
+            .unwrap()
+            .upsert_source(source.clone())
+            .unwrap();
+        secret_store::save(&source.secret_ref, "synthetic-key").unwrap();
+        let before = state.store().unwrap().source(&source.id).unwrap().clone();
+        let updated = request_models(&state, &source.id, true).await.unwrap();
+        assert_eq!(updated.base_url, before.base_url);
+        assert_eq!(updated.enabled, before.enabled);
+        assert_eq!(updated.in_pool, before.in_pool);
+        if valid_empty {
+            assert_eq!(updated.last_test_status.as_deref(), Some("ok"));
+            assert!(updated.last_error.is_none());
+            assert!(updated.models.is_empty());
+            assert!(updated.detected_model_prices.is_empty());
+            assert!(
+                updated
+                    .protocol_config
+                    .resolve(
+                        &updated.base_url,
+                        &updated.models,
+                        &updated.protocol_bindings,
+                        updated.wire_api,
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(updated.last_test_status.as_deref(), Some("error"));
+            assert!(updated.last_error.is_some());
+            assert_eq!(updated.models, before.models);
+            assert_eq!(updated.protocol_bindings, before.protocol_bindings);
+            assert_eq!(updated.protocol_config, before.protocol_config);
+            assert_eq!(updated.detected_model_prices, before.detected_model_prices);
+        }
+        assert_eq!(state.store().unwrap().source(&source.id), Some(&updated));
+        secret_store::delete(&source.secret_ref).unwrap();
+        server.abort();
+        cleanup(state).await;
+    }
+}
+
+#[tokio::test]
+async fn model_refresh_preserves_manual_endpoint_and_feature_exclusions_in_saved_sources() {
+    for manual_status in [CapabilityStatus::Unsupported, CapabilityStatus::Unknown] {
+        let state = state();
+        let (base_url, server) = serve(Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({
+                    "data": [{
+                        "id": "test",
+                        "supported_endpoint_types": ["responses", "messages"]
+                    }]
+                }))
+            }),
+        ))
+        .await;
+        let mut source = source(&base_url);
+        source.protocol_config = serde_json::from_value(json!({
+            "capabilities": [{
+                "modelId": "test",
+                "upstreamWireApi": "messages",
+                "status": manual_status,
+                "origin": "manual",
+                "checkedAtMs": 1,
+                "features": {"reasoning": "unsupported"}
+            }]
+        }))
+        .unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_source(source.clone())
+            .unwrap();
+        secret_store::save(&source.secret_ref, "synthetic-key").unwrap();
+        let updated = request_models(&state, &source.id, true).await.unwrap();
+        assert_eq!(updated.last_test_status.as_deref(), Some("ok"));
+        assert!(updated.last_error.is_none());
+        assert_eq!(updated.models, vec!["test"]);
+        assert!(
+            updated.protocol_config.capabilities.iter().any(|row| {
+                row.origin == CapabilityOrigin::Manual && row.status == manual_status
+            })
+        );
+        let effective = updated
+            .protocol_config
+            .effective_capabilities(&updated.base_url, &updated.models);
+        let messages = effective
+            .iter()
+            .find(|row| row.upstream_wire_api == WireApi::Messages)
+            .unwrap();
+        assert_eq!(
+            messages.status,
+            if manual_status == CapabilityStatus::Unknown {
+                CapabilityStatus::Declared
+            } else {
+                CapabilityStatus::Unsupported
+            }
+        );
+        assert_eq!(
+            messages.features.get(&ProtocolFeature::Reasoning),
+            Some(&CapabilityStatus::Unsupported)
+        );
+        let routes = updated
+            .protocol_config
+            .resolve(
+                &updated.base_url,
+                &updated.models,
+                &updated.protocol_bindings,
+                updated.wire_api,
+            )
+            .unwrap();
+        assert!(!routes.is_empty());
+        assert_eq!(
+            routes.iter().any(|route| {
+                route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Messages
+            }),
+            manual_status == CapabilityStatus::Unknown
+        );
+        assert_eq!(state.store().unwrap().source(&source.id), Some(&updated));
+        secret_store::delete(&source.secret_ref).unwrap();
+        server.abort();
+        cleanup(state).await;
     }
 }
 
