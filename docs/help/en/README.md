@@ -327,6 +327,11 @@ listed in the add-source dialog.
 In **Connections → Automations → Add automation**, choose an action, pool
 accounts, and a model if required. Actions can start a countdown after
 the primary quota recovers or request a reset when weekly quota is exhausted.
+Automatic weekly resets are reserve capacity: Relay first uses fresh ordinary
+quota on other compatible pool accounts. Unknown capacity defers redemption.
+An available reset nearing expiration may restore an exhausted week before the
+next quota check; an imminent natural weekly recovery takes precedence. Relay
+verifies recovery before another automatic reset. Manual reset remains available.
 Save the rule and enable its switch; its card shows the result.
 After saving or enabling it, Relay checks current quota. An already-full window
 is considered without waiting for another transition to 100% or repeating a wake
@@ -610,9 +615,12 @@ converted return an error. `Claude-3p/configLibrary` is the profile directory,
 not an executable path. Do not share its Relay profile: it contains a pool key.
 
 Use [Recovery](#6-recovery) to undo attachment. Newer manual selections and
-edited profiles are preserved. If a recovery record was lost, reconnect can
-reclaim an exactly matching Relay profile, but cannot recover an unknown previous
-selection; restore then leaves that selection unset.
+edited profiles are preserved. You can edit client settings outside Relay:
+background refresh skips external profile edits, and explicit reconnect preserves
+unrelated preferences. A renamed profile or a deleted previous selection does not
+block recovery. If a recovery record was lost, reconnect verifies the current
+gateway and model identities; it cannot recover an unknown previous selection,
+so restore leaves that selection unset.
 
 #### OpenCode
 
@@ -799,6 +807,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_quota_exhausted`, `insufficient_quota`, `quota_exhausted` · 429 | The provider confirmed exhausted quota, credits, or a spending cap. | For accounts, wait for the quota window or use an available reset. For APIs, check wallet and key spending limits in the provider dashboard. Add a compatible reserve; refreshing statistics does not replenish quota. |
 | `upstream_rate_limited`, `rate_limit_exceeded` · 429 | Provider request, concurrency or tokens-per-minute (TPM) limit; the message may say `Request too large`. | Respect the stated delay; reduce simultaneous tasks or request tokens. That wording alone does not prove context overflow or a terminal 413. Avoid immediate retry loops. |
 | `upstream_turn_rate_limited`, `turn_rate_limit_exceeded` · 429 | The current conversation turn reached a rate limit. | Wait for the stated delay before continuing. This error alone does not require another login or account; Relay does not rotate the pool or pause the whole account. |
+| `upstream_session_budget_exceeded`, `budget_reached` · 400 | The provider reports that this session's budget is reached. | Start a new session or adjust its budget. Relay ends the request without retrying, rotating or pausing the account. |
 | `upstream_usage_not_included`, `usage_not_included` · 403 | The plan does not include this capability. | Choose an entitled model or connection. A normal quota reset does not grant a new capability. |
 | `upstream_siwc_not_eligible`, `subscription_sharing_user_not_eligible` · 403 | SIWC is unavailable for this user, workspace or policy. | Check SIWC eligibility and plan-use permission. Relay does not rotate accounts for this refusal. |
 | `upstream_unauthorized` · `invalid_api_key` from a provider | The provider rejected authentication. | Update an external API key in **Connections**, then refresh models. BPS with a saved refresh token renews access before the next request; the failed generation is not repeated automatically. Follow the account's recovery hint and sign in again when refresh is no longer possible. Changing the pool key does not fix provider authorization. |
@@ -902,7 +911,6 @@ such as 429, explains why. More retries do not replenish quota.
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
-| `basis_points_free_account_unsupported` | A historical local Free-plan restriction, removed from current sign-in, import, and pool execution. | Refresh account data or recreate an old import preview. Actual provider access and quota checks still apply. |
 | `quota_unauthorized`, `models_unauthorized`, `models_invalid_access_token`, `subscription_unauthorized`, `subscription_access_token_invalid` | Monitoring authentication was rejected. | Refresh account sign-in and check its data again. |
 | `models_forbidden` | The model-list request returned HTTP 403; this alone does not prove an account block. | Verify model access separately. Initial sign-in and refresh preserve this error without blocking an otherwise healthy account. |
 | `pool_models_unavailable` | The pool has no available ChatGPT-compatible models. | Check enabled members and model rules, refresh model access, then reconnect. |
@@ -911,6 +919,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `quota_timeout`, `models_timeout` | A quota or model-list check timed out while connecting or reading the response. | Check internet and the configured account or common proxy, then refresh. A timeout does not prove that the account is blocked; saved values remain until a successful check. |
 | `quota_transport`, `models_transport`, `subscription_transport`, `quota_probe_failed` | A monitoring request failed to complete because of a connection error. | Check internet and the configured proxy, then refresh. The last recorded quota or model list may remain visible until a successful check. |
 | `quota_upstream`, `models_upstream`, `subscription_upstream`, `quota_http_status`, `models_http_status`, `subscription_http_status` | The monitoring service failed or returned an unexpected status. | Inspect the status. Retry transient failures later; correct access/request problems for 4xx. This does not prove zero quota. |
+| `models_endpoint_not_found` | The model-catalog endpoint returned HTTP 404. | Check the endpoint and proxy, update Relay, then refresh models. The saved catalog and existing account access remain available. |
 | `quota_invalid_response`, `quota_invalid_percentage`, `models_invalid_response`, `subscription_invalid_response` | Monitoring data is invalid. | Check for proxy/login pages replacing API responses. Update Relay and report a persistent code without the raw response body. |
 | `quota_response_too_large`, `models_response_too_large`, `subscription_response_too_large` | Monitoring response size exceeded the limit. | Verify API and proxy configuration. A repeat on the correct connection needs provider/Relay compatibility investigation. |
 | `models_invalid_account_id`, `subscription_account_id_invalid`, `subscription_account_missing` | The check cannot find the account. | Select the correct workspace and repeat sign-in/import. |

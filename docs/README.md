@@ -17,7 +17,7 @@ planned, not an available deployment.
 | Excel / Basis Points executor contract | [BPS](project/BASIS_POINTS.md) |
 | Open Desktop work and acceptance | [Desktop roadmap](project/ROADMAP.md) |
 | Catalog policy and versioned export | [Catalog](../catalog/README.md) |
-| User-visible release history | [Changelog](releases/CHANGELOG.md) |
+| User-visible release history | [English changelog](releases/CHANGELOG.md), [Russian changelog](releases/CHANGELOG.ru.md) |
 
 `PLANNING.md` is the current architecture reference despite its historical
 filename. Start with its [contract map](project/PLANNING.md#contract-map).

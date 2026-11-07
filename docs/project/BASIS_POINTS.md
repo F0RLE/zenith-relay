@@ -229,8 +229,14 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   TTFT/generation accounting remains unchanged. Preparation excludes admission
   and route selection; offsets are not additive stage durations. Readiness is
   observed inside Relay before delivery, not client receipt, tool execution,
-  or the pause before the next request. Buffered replies outside the observed
-  SSE stream do not invent a client-first-output observation. Unobserved stages,
+  or the pause before the next request. Observed upstream SSE retains separate
+  native tool-start/first-complete-item and text-delta
+  observations when available. Native item completion is not permission to
+  execute a client call. The UI separates source offsets, Relay readiness and
+  measured intervals after the first complete item or source terminal; these
+  intervals do not claim pure validation CPU time. Older rows stay unknown.
+  Buffered replies outside the observed SSE stream do not invent a
+  client-first-output observation. Unobserved stages,
   older records, and
   buffered discovery without raw timing evidence leave fields absent; measured
   zero stays zero. Failed/incomplete/cancelled responses do not claim successful
@@ -253,6 +259,15 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   Optional `contextAccountingMs` measures prepared-context accounting after
   attachments, separately from those phases; it is not all diagnostic overhead.
   Support-export phase accounting includes it when observed.
+  Optional `requestPreparation.attachments` separates credential preparation,
+  image validation/cache lookup, and concurrent resolution wall time inside
+  `attachmentsMs`. It counts image parts, existing file references, successful
+  physical uploads and their image bytes, and inline images reused from cache
+  or a shared upload. Shared waiters do not count another upload; image bytes
+  exclude multipart framing. The diagnostic detail is opt-in, contains no IDs
+  or image data, and remains absent in older observations. Its nested timings
+  are not added again to preparation totals. No credential timing is reported
+  when existing file references bypass authorization preparation.
   Schema-3 support exports expose this gap as
   `transport.preparationAccounting.unattributedMs`, computed from observed
   non-overlapping phases only. Initial schema validation is never added twice.

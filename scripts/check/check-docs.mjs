@@ -16,7 +16,8 @@ const requiredDocuments = [
   "docs/README.md", "docs/project/PLANNING.md", "docs/project/ROADMAP.md", "docs/project/BASIS_POINTS.md",
   "docs/hosted/HOSTED_RELAY_ARCHITECTURE.md", "docs/hosted/HOSTED_RELAY_ROADMAP.md",
   "docs/hosted/HOSTED_RELAY_WEB_DESIGN.md", "docs/help/en/README.md",
-  "docs/help/ru/README.md", "docs/releases/CHANGELOG.md", "catalog/README.md", "web/README.md",
+  "docs/help/ru/README.md", "docs/releases/CHANGELOG.md", "docs/releases/CHANGELOG.ru.md",
+  "catalog/README.md", "web/README.md",
 ];
 
 function plainText(node) {

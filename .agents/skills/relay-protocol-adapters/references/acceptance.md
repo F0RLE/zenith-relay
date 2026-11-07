@@ -26,6 +26,11 @@ not silently discard state or cause duplicate historical calls.
   the target's system field in instruction order, with user-content order intact,
   and survive JSON/SSE tool continuations. Do not reinterpret a foreign role or
   move an instruction past an earlier assistant turn into the initial prompt.
+- With explicit Messages `interleaved_system` support, retain system groups at
+  their original positions through JSON/SSE tool continuations. Check leading
+  instructions, consecutive groups, after-tool-result placement, missing/negative
+  route evidence, and reference exclusions. Invalid placement and nonleading
+  developer roles must not be repaired by hoisting or ordinary user text.
 - Nullable or alternate token-limit fields must not erase an explicit limit.
   Conflicting non-null limits need a named error instead of an arbitrary winner.
 - Gemini Parts retain one data payload. Reject conflicting content, malformed
@@ -79,6 +84,19 @@ not silently discard state or cause duplicate historical calls.
 
 ## Reasoning and route ownership
 
+- Messages thinking display: JSON/SSE `omitted` hides only public summaries,
+  keeps effort/budget and usage, preserves contiguous visible block indices,
+  and replays original opaque state after tool results. `summarized` keeps the
+  ordinary visible representation; malformed controls and foreign signatures
+  fail. Exact keep-all context edits retain history without enabling pruning.
+  Include Chat's `reasoning_content` / `reasoning` aliases through the next tool
+  result: both JSON and fragmented SSE preserve private portable reasoning in
+  the scoped checkpoint even though the client never receives its thinking text.
+- Gemini thought inclusion: cover true/false/null and malformed booleans, flag-only
+  requests, exact effort/budget, disabled and known non-reasoning models. Run both
+  visible and hidden JSON/SSE tool cycles on the supported targets, checking original
+  signatures, result contents, next answer and usage. Display-only omission must
+  not enable thinking; unsupported summary generation needs the Gemini parameter.
 - PDF input: preserve base64 bytes/labels through every supported pair and
   retain PDF tool-result IDs on Responses/Messages. Keep supported HTTPS URLs
   unchanged without Relay downloads. Native file IDs, citations/context and

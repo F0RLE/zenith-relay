@@ -1472,13 +1472,13 @@ route/attempt diagnostics, internal exception details and other customers. Unkno
 financial/execution data has an explicit pending/unavailable state, not a reassuring
 but unsupported "no charge" message.
 
-| Observed situation | Example RU / EN summary | Required explanation/action |
+| Observed situation | Example English summary | Required explanation/action |
 | --- | --- | --- |
-| Client connection closed, completion unknown | «Соединение прервано; итог запроса уточняется» / "Connection closed; request outcome is being checked" | Show uncertainty and real hold status; refresh status rather than suggest blind resend |
-| Invalid upstream response shape | «Не удалось обработать ответ модели» / "Could not process the model response" | Preserve stable adapter code; owner gets safe stage/shape evidence, not a fabricated cause or raw body |
-| Capacity unavailable before dispatch | «Сейчас нет свободной мощности» / "No capacity is currently available" | Retry guidance only with proven non-dispatch; show release only after committed closure |
-| Upstream credential requires renewal | «Модель временно недоступна» / "The model is temporarily unavailable" | Owner receives connection-specific renewal guidance; customer sees no account identity |
-| Completed output with pending settlement | «Ответ завершён; списание уточняется» / "Response completed; charge is being reconciled" | Distinguish completed execution from pending money; do not offer another generation as repair |
+| Client connection closed, completion unknown | "Connection closed; request outcome is being checked" | Show uncertainty and real hold status; refresh status rather than suggest blind resend |
+| Invalid upstream response shape | "Could not process the model response" | Preserve stable adapter code; owner gets safe stage/shape evidence, not a fabricated cause or raw body |
+| Capacity unavailable before dispatch | "No capacity is currently available" | Retry guidance only with proven non-dispatch; show release only after committed closure |
+| Upstream credential requires renewal | "The model is temporarily unavailable" | Owner receives connection-specific renewal guidance; customer sees no account identity |
+| Completed output with pending settlement | "Response completed; charge is being reconciled" | Distinguish completed execution from pending money; do not offer another generation as repair |
 
 `next_action` is one of `retry_when_allowed`, `wait_for_capacity`, `check_status`,
 `fix_request`, `sign_in_again`, `owner_recovery`, `contact_support`, or `none`.

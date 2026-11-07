@@ -23,7 +23,7 @@ qualification and specific missing semantics.
 | Native fidelity | Ordered schemas, precise numbers, repeated permitted headers, opaque state, and native extensions survive without lossy conversion. |
 | Accounting and errors | One logical outcome plus retained attempts; partial/unknown usage remains explicit; the failing stage and origin are safe and understandable. |
 | Client profiles | ChatGPT, Claude Desktop, and OpenCode expose only usable models/efforts/context for that route; attachment and recovery preserve user settings. |
-| Claude Desktop effort menus | Qualify picker → embedded Code capability lookup → wire effort, including Max/XHigh on opaque Relay IDs. Find a supported metadata path for exact per-model lists. `maxEffort` is only a cap; `modelCatalogUrl` requires Anthropic-signed content. Do not hide higher choices, infer Max from received High, or patch client signature checks. |
+| Claude Desktop effort menus | Qualify the actual Desktop picker/settings → embedded Code handoff and real-provider acceptance of Max/XHigh on catalog-derived opaque IDs. Find a supported metadata path for exact per-model lists. `maxEffort` is only a cap; `modelCatalogUrl` requires Anthropic-signed content. Do not hide higher choices, infer Max from received High, or patch client signature checks. |
 
 Use the [official contracts](../../.agents/skills/relay-protocol-adapters/references/contracts.md)
 and [conversation matrix](../../.agents/skills/relay-protocol-adapters/references/acceptance.md).
@@ -52,7 +52,9 @@ headers/collection, normalized first stream output, and response/tool readiness.
 Qualify their coverage on the intended HTTP/SSE/discovery paths after installation;
 client receipt and between-request harness delays require client-side evidence.
 Cold-preparation qualification should compare request building, its initial
-schema-validation subset, catalog preparation, and attachment work. Locate live
+schema-validation subset, catalog preparation, and attachment work. Use the
+attachment breakdown to distinguish authorization, staging, upload/shared-wait
+time and physical upload/reuse counts on the installed build. Locate live
 bottlenecks with request-stage timings alongside synthetic validator benchmarks.
 Use context-size and cache-prefix diagnostics to verify the cause of TTFT and
 the safety of any history reduction before removing work.
@@ -61,7 +63,7 @@ the safety of any history reduction before removing work.
 | --- | --- |
 | Provider presets | Exact endpoint/region/key scope, Moonshot USD/CNY statistics, Kimi Code discovery/tools; quota readers only after their units/reset contract is verified. |
 | Lifecycle | Add, refresh, disable, trash/restore, removal, credential replacement, failed save/rollback, and restart on Desktop. |
-| Outcomes | Completed, incomplete, refusal, malformed terminal, interruption, late usage, cancellation, and safe pre-output retries. Check state, not only displayed text. |
+| Outcomes | Completed, incomplete, refusal, malformed terminal, interruption, late usage, cancellation, and safe pre-output retries. Distinguish local pre-dispatch rejections from dispatched attempts across HTTP, account-only and WebSocket paths. Check state, not only displayed text. |
 | Tools/state | Parallel calls, fragmented arguments, namespace/custom identity, Gemini optional IDs, signed reasoning, full-history and ID-based continuations, missing state after restart. |
 | Native extensions | Gemini continuation-token resumes with unchanged contents and owner; provider cache references/hosted tools; client-executed Responses discovery and PDF inputs/results on supported pairs. |
 | Authentication | OAuth renewal, same-token reauthentication, delayed 401/invalid grant, routing-cookie expiry; old turn/WS state must not cross authorization incarnations. |
@@ -83,8 +85,9 @@ the safety of any history reduction before removing work.
   cache hits.
 - Repeated and overlapping catalog lookups: verify earlier-result references,
   unchanged schema validation, and total input across all generations. Concurrent
-  identical images should share uploads within the existing account/credential
-  scope; include failure, cancellation and cache-capacity cases.
+  identical images: qualify shared uploads within the existing account/credential
+  scope using physical upload/reuse counts; include failure, cancellation and
+  cache-capacity cases.
 - Warm discovery-to-tool-less continuations, including client compaction through
   ordinary Responses: measure observed cached input and end-to-end latency
   against the cold path at matched model/effort/account. Check restart/expiry,
@@ -108,8 +111,12 @@ the safety of any history reduction before removing work.
 
 - Verify HTTP/2 refusal behavior against the installed executable: no hidden
   reqwest resend inside a recorded dispatch; preserve Relay's retry eligibility.
-- Finish native Responses WS multiplexing: independent lanes/FIFO, bounded
-  queues, scoped errors, continuation forks, retry/usage and disconnect ownership.
+  Repeat the [offline check](../../CONTRIBUTING.md#offline-http2-transport-check)
+  on the installed copy, retaining its executable identity. Qualify actual
+  TLS/proxy/provider paths separately from the loopback prior-knowledge fixture.
+- Qualify native Responses WS retry exhaustion, route/authorization changes,
+  queued-parent eviction and installed-provider behavior across native reuse
+  and automatic HTTP fallback.
 - Qualify mixed HTTP/SSE/WS/image admission on an authorized live pool. Local
   fixtures cover repeated mixed waves, lifecycle churn, bounded queue retention,
   and scheduler lock/reservation timings; they do not establish process-memory
@@ -121,25 +128,20 @@ the safety of any history reduction before removing work.
 
 - Measure startup, page reads, saves, pool switches, history sizes, first-output
   latency, refresh work, and lock waits. Optimize the measured path, not a
-  guessed protocol or assumed cache-hit benefit.
-- Extend typed retry/continuation ownership through remaining execution-stage
-  interfaces rather than adding independent mutable flags.
-  Preserve one request identity, budget, lease, and recorded outcome across
-  HTTP, account-only, and WS paths; add parity cases before extracting helpers.
-- Group remaining `GatewayRuntime` session/provider state into internal owners
-  with explicit lock boundaries. Preserve the model-policy owner; do not duplicate
-  continuation stores or replace locks with a new actor/cache layer without measurement.
-- Exercise policy-only updates without losing listeners, active streams,
-  leases, affinity, or authorization provenance. Measure restart persistence
-  needs for hard deadlines separately from disposable health hints.
+  guessed protocol or assumed cache-hit benefit. Qualify the existing native,
+  renderer, snapshot store-lock and command-roundtrip samples on the installed
+  build; distinguish refresh acknowledgement from completed work and isolate
+  lock waits separately.
+- Measure restart persistence needs for explicit provider backoff deadlines
+  beyond durable quota-reset snapshots, using recorded provider clocks and scope.
+  Analyze durations from the original normalization time when available, not
+  storage/finalization timestamps; unknown observation times remain unknown.
+  Keep credential ownership separate from disposable health and circuit hints.
+  Any restore must preserve policy-only edits while rejecting expired evidence,
+  replacement credentials and deleted/re-added members.
 
 ## Maintenance
 
-- Establish a maintainer-approved private vulnerability-reporting channel, then
-  document it in `SECURITY.md`. Enable GitHub private reporting or confirm another
-  confidential contact before advertising it; do not invent an address, supported
-  version policy or response-time promise. Public issues must not contain secrets
-  or nonpublic exploit details.
 - Upgrade Tauri/GTK as a tested platform change, not incidental cleanup.
 - Keep profile/history recovery, Windows paths, partial cleanup, transactional
   bulk mutations, and concurrent policy edits covered by their owning checks.
@@ -166,11 +168,3 @@ authentication, renewal/revocation, protected storage, entitlements, quota units
 usage, models, execution, and recovery. A generic API codec is not a subscription
 connector. Kimi Code subscription and MiniMax M Plan readers remain unqualified
 until their exact cloud contracts are verified.
-
-## Demand-gated future work
-
-- Distributed scheduling only after measured demand and shared admission,
-  member leases, durable ownership, and idempotent delivery exist.
-- Additional aliases/groups/profiles need scoped identities, collision checks,
-  independent ordering, enablement, and price fields; presentation cannot alter
-  protocol or scheduler policy.

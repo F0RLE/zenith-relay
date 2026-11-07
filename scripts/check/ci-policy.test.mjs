@@ -39,6 +39,17 @@ test("Rust checks share Desktop's target directory without changing packaging pa
 describe("desktop CI", () => {
   const build = workflow("build.yml");
 
+  test("release publication compiles separate changelogs and stops on assembly errors", () => {
+    const steps = build.jobs["publish-release"].steps;
+    const setup = steps.findIndex((step) => step.uses?.startsWith("oven-sh/setup-bun@"));
+    const prepare = steps.findIndex((step) => step.name === "Prepare release body");
+    expect(setup).toBeGreaterThan(-1);
+    expect(prepare).toBeGreaterThan(setup);
+    expect(steps[prepare].run).toContain("bun scripts/release/build-release-notes.mjs $env:GITHUB_REF_NAME");
+    expect(steps[prepare].run).toContain("if ($LASTEXITCODE -ne 0)");
+    expect(steps[prepare]["continue-on-error"]).toBeUndefined();
+  });
+
   test("only confirmed duplicate release pushes may omit the independent check suite", () => {
     const plan = build.jobs["check-plan"];
     expect(plan.if).toBe("github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')");

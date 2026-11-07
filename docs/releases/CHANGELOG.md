@@ -4,19 +4,259 @@ All notable Zenith Relay changes are recorded here. The `Unreleased` section
 tracks merged or review-ready work that has not been published as a release;
 release entries summarize user-visible behavior and link to the relevant changes.
 
-## [Unreleased]
+[Russian translation](CHANGELOG.ru.md)
 
-<!-- relay-notes:en -->
+## [Unreleased]
 
 ### Changed
 
-<!-- relay-notes:ru -->
+- Localization build configuration uses the maintained TOML parser instead of
+  `basic-toml`; dependency checks match immutable Git revisions to the lockfile.
+- Desktop builds pin an upstream macro-compatibility fix, removing the Rust
+  future-incompatibility warning while preserving Codex authorization encryption.
+- Frequent snapshot measurements no longer evict startup, navigation and command
+  timings from local performance history. Per-metric limits preserve those
+  observations within the existing 30-day and 2,048-row bounds.
+- Claude Desktop accepts profile edits made outside Relay. Reconnection preserves
+  unrelated preferences, background refresh leaves external changes alone, and
+  recovery retains edited profiles and renamed entries instead of blocking them.
+- Added an offline HTTP/2 retry check that compares physical sends with recorded
+  attempts and configured retry limits, without opening Desktop or loading saved
+  connections.
+- Local performance diagnostics now distinguish saves, configuration/route
+  switches and refresh commands, including failed operations, without recording
+  their arguments, results or error text or waiting for the diagnostic write.
+  Native snapshot diagnostics separately retain time spent waiting for the local
+  store lock, including fast reads, without counting it twice in preparation time.
+  Preparing snapshots no longer blocks asynchronous command processing while
+  waiting for that lock; cancellation preserves the existing worker bound.
+- Reduced writer-lock contention when loading quota cards and weekly-capacity
+  charts, preserving committed-data snapshots and usage-report revision checks.
+- Malformed Responses history statuses now report `input.status` before
+  conversion instead of disappearing from the forwarded request.
+- Gemini `includeThoughts` now converts through the shared thinking-display
+  policy, preserving exact effort/budget, provider defaults and full tool-turn
+  state in JSON/SSE. Unsupported summary generation reports the incoming Gemini
+  parameter instead of producing an incomplete Messages thinking control.
+- Removed the unused Responses-only pool-scope alias, retired protocol-suffixed
+  candidate-ID remapping, and the obsolete local Free-plan error across model
+  discovery, account/import UI, translations and Help. Current candidate IDs,
+  stored account data and recovery migrations remain intact. Obsolete model
+  reference caches are rebuilt from the current sources.
+- Messages conversion accepts the exact keep-all thinking-context policy and
+  honors `thinking.display` in JSON and SSE. Omitting visible thinking preserves
+  effort/budget, usage, tool ordering, portable Chat reasoning and original
+  upstream state in the scoped checkpoint;
+  unsupported context edits and foreign signatures still fail explicitly.
+- Removed old rotation-policy UI/IPC branches and the duplicate `in_order`
+  runtime mode. Stored policies migrate to canonical `round_robin` without
+  changing inventory or controls. Usage previews use only current exact-query
+  keys; native history and account/profile recovery migrations are preserved.
+- Claude catalog refresh skips external version checks when neither the current
+  models nor the owned profile need model identity mapping. Existing identity
+  profiles retain the same unknown-version protection.
+- Removed unused image-routing runtime options and retired model-picker fallback
+  fields from the backend, desktop snapshots and frontend. Codex key lookup no
+  longer accepts the retired `zenith` provider ID. Claude profile ownership uses
+  the current UUID and complete gateway settings; unmanaged profiles are preserved.
+- Claude Desktop 4.29.0+ profiles use version-neutral routes and `behavesAs`
+  for catalog-verified Claude identities with supported effort levels. Unknown
+  client versions preserve existing identity profiles; recovery reclaim verifies
+  the exact identity. Retired `claude-zenith-` and `claude-fable-5-zenith-` aliases
+  no longer resolve pool models.
+- Claude Desktop profiles use streaming-compatible Messages routes and scoped
+  effort evidence, including source-only enums narrowed by captured pool policy.
+  Reference exclusions remain binding. Successful empty catalog refreshes clear
+  stale owned model entries while preserving credentials and recovery; initial
+  connection still requires a usable model.
+- Converted Messages history validates system-message placement and text content
+  before lowering tool changes. Consecutive system messages keep their order
+  and valid tool updates; malformed instructions no longer become accepted or
+  disappear on another API. Native forwarding remains unchanged.
+- OpenCode pool profiles honor endpoint-scoped context/input/output ceilings and
+  preserve smaller custom windows. Sparse UI catalog merges retain route limits.
+  Pool connections and refreshes derive features,
+  efforts and limits from streaming-compatible members only. Direct connections
+  choose a usable native SDK binding instead of an explicitly non-streaming
+  preferred endpoint; unsupported protocols cannot reappear during refresh.
+  Confirmed route controls fill unknown reference fields without overriding
+  exclusions. Source-only effort lists honor the same captured pool policy;
+  empty intersections cannot restore reference or SDK variants.
+- Codex live catalogs use key-scoped Responses routes without an explicit streaming
+  exclusion. Models that cannot stream stay in generic inventory but leave the
+  Codex picker. Context bounds, efforts, speed modes and image/tool flags use the
+  same eligible routes; endpoint declarations cannot override reference exclusions
+  or invent parallel-call support. Managed reasoning placeholders also honor key
+  prefixes and the request's streaming mode.
+- Direct Codex profiles honor their exact Responses endpoint's tool/image
+  exclusions, effort levels, speed modes and token ceilings. Desktop context
+  policies preserve route-scoped input/output limits when generating profiles.
+  Successful empty catalog refreshes remove stale managed entries without changing
+  authentication or profile configuration; failed reads preserve the saved catalog,
+  and initial connection still requires compatible models.
+- Pool catalogs preserve endpoint feature exclusions and effort intersections
+  instead of replacing them with model-wide flags. Alternatives combine only
+  within their model/client/upstream scope; unavailable or excluded members cannot
+  restore a capability. OpenCode profiles omit unsupported image input without
+  discarding independently declared PDF or other media support.
+- Direct OpenCode profiles honor endpoint tool/reasoning exclusions and advertise
+  only the reference/route effort intersection. Runtime and client catalogs share
+  the typed generation-control projection, so explicit route denials no longer
+  leave optimistic feature flags behind. Unknown controls do not invent defaults,
+  and source declarations cannot override reference exclusions.
+  Explicitly disabled reasoning keeps standard SDK effort variants disabled too.
+- OpenCode direct profiles respect the selected source endpoint's numeric token
+  ceilings without changing model-wide metadata. Refresh preserves smaller custom
+  windows while preventing older larger limits from overriding current bounds;
+  generated input/output limits fit the configured context. Interactions-only
+  sources no longer appear usable by an SDK that does not support that protocol.
+- Repeated upstream `Retry-After` fields retain the longest valid recovery delay
+  instead of depending on header order. Decimal overflow no longer discards a
+  valid delay; signed and comma-combined values remain invalid. Token-count errors
+  also exclude ambiguous and connection-local retry fields from client responses.
+- Native HTTP forwarding preserves repeated permitted response headers in order.
+  Request and response forwarding share credential and connection-option filters;
+  opaque bytes cannot hide connection-local fields. Ambiguous singleton response
+  headers are omitted while Relay-generated JSON/SSE content types remain intact.
+- Partial mixed-protocol catalog refreshes preserve the failed binding's previous
+  models and evidence while accepting complete successful reads. Failed empty
+  bindings remain retryable without exposing unrelated models; partial results
+  retain an error status and clear it after recovery. Canonical-root resolution
+  no longer mixes catalog evidence from different API paths.
+- Messages and Gemini source catalogs collect all pages before accepting models,
+  prices or endpoint evidence. A later-page failure discards that binding's partial
+  result; cursor loops, oversized reads and unsupported pagination remain bounded
+  errors rather than truncated catalogs.
+- Malformed source catalog rows reject the affected catalog read instead of being
+  silently discarded. Failed refreshes retain saved models, bindings, prices and
+  capability evidence; genuinely empty catalogs still clear current discovery.
+- Source catalog refresh and reload preserve explicit endpoint and feature
+  exclusions. New discovery replaces its own evidence without overriding
+  retained manual restrictions.
+- Cancelling account or Usage export keeps the action available without reporting
+  a saved file. Account export retains its description for retry and no longer
+  reloads the runtime snapshot after copying or saving.
+- Converted Messages requests preserve ordered system instructions on routes
+  with explicit support, including JSON/SSE tool continuations. Unsupported roles
+  and placement remain explicit errors instead of being moved into the root prompt.
+- Request diagnostics distinguish provider retry/reset deadlines and their
+  model or account scope from configured recovery delays. Usage history retains
+  this evidence and its original observation time, when known, without restoring
+  old health hints as restart admission rules. Support reports include both
+  timestamps with anonymized model references.
+- Native WebSocket-to-HTTP fallback retains repaired history, one-shot recovery
+  state and the shared dispatch budget. Slow optional handshakes preserve their
+  selected pool member and a single rotation step.
+- Account-only attempts now record explicit outcomes for completion, errors,
+  candidate failover and interrupted bodies. Exhausted repairs retain one logical
+  request identity and the usage reported by each physical attempt.
+  HTTP and account-only controllers share retry/continuation state, keeping
+  prepared continuation facts, exclusions and one-shot repair guards together.
+  HTTP selection, dispatch and JSON/SSE response stages borrow that state
+  throughout repairs and candidate failover.
+- Runtime provider state has separate owners for API sources, accounts and
+  metadata, preserving existing locks and cache lifetimes. In-place model-policy
+  updates retain provider evidence, callbacks and shared continuation stores.
+  Policy-only edits preserve the listener and dispatched streams; quota reset
+  evidence remains separate from volatile recovery hints during reconstruction.
+- Concurrent API-source policy edits keep routing rules and configured recovery
+  delays from the same update. An invalid source batch leaves both unchanged.
+- Native WebSocket timing notifications no longer delay behind response setup,
+  contaminate token usage, or prevent safe pre-output history repair. Available
+  backend measurements stay bound to their active response, including concurrent
+  lanes; late or unmatched measurements cannot be adopted by another turn.
+- Late responses after a new OAuth login cannot change its health or quota,
+  expire its access token, or complete its pending automatic wake. This also
+  covers reused token generations and identical credentials. Request usage
+  remains recorded; authorization ownership stays out of exports.
+  Finishing or cancelling an old request releases its slot without applying
+  cooldowns or recovery observations to the replacement login. Authorization
+  retries remain bound to the credential used by their latest actual send.
+- A delayed OAuth refresh cannot mark a removed-and-readded account unhealthy
+  or require the new login to sign in again. Runtime preparation uses the
+  replacement credential once before dispatch, while current invalid grants
+  retain their sign-in requirement. Replacement expiry checks include time spent
+  waiting for renewal, so an expired credential cannot appear fresh against an
+  earlier preparation timestamp.
+- Native WebSocket lanes can overlap on one upstream socket from the first
+  dispatch, before any upstream output, with separate usage and capacity ownership.
+  Same-lane requests remain FIFO; the default lane counts toward the 16 active-response limit. Retries and
+  route changes drain sibling requests before replacing their shared socket.
+  Connection loss settles every active request without replaying uncertain work.
+  Pre-output repairs retain their one-shot state across reconnects; reported setup
+  usage survives interruption. A sequential HTTP handoff preserves deferred retries
+  and queued work. Failed requests and exhausted repairs leave the client connection
+  usable on the default lane too; unrelated active lanes keep their own output
+  and usage. Connection-wide errors still settle every active request.
+  A queued fork replays its original parent after eviction, rather than adopting
+  newer source-lane history.
+  Credential renewal keeps active responses flowing; its failure stays scoped
+  to the waiting request. Disconnect releases its reserved slot while rotated
+  credentials finish saving. Reauthentication validates continuation history
+  before opening a replacement socket.
+- Pool cards place exhausted weekly quota after temporary five-hour waits.
+  When both quota windows are empty, the runtime waits for the last required
+  reset; a missing reset remains unknown instead of implying early recovery.
+- Model catalog failures no longer mark an otherwise healthy account unavailable.
+  Saved catalog-only failures recover on load while retaining model inventory,
+  quota, credentials and pool settings. HTTP 404 now has a specific explanation;
+  authentication failures and actual account or quota blocks remain enforced.
+- Native WebSocket continuation tracks the latest response per lane. Sequential
+  forks reuse the same upstream socket and preserve the source branch, including
+  connection-local incomplete responses. Named terminal failures leave the
+  socket usable; replacing it clears all lane-local state.
+- WebSocket clients can run independent lanes concurrently through the HTTP
+  bridge when upstream WebSockets are disabled. Same-lane requests remain FIFO;
+  failed lanes leave other answers running, and disconnect cancels active work
+  without starting queued requests.
+- Native WebSocket events identifying another lane or response no longer replace
+  the active answer, alter its recorded usage, or trigger a retry for that answer.
+- Back-to-back WebSocket requests wait in a bounded FIFO queue instead of
+  interrupting the active answer, including HTTP fallback. Queue overflow leaves
+  the current answer running; disconnect discards unstarted requests.
+- Invalid WebSocket requests and unavailable continuations leave the connection
+  usable and preserve queued valid requests. Unsupported controls keep the active
+  answer running; HTTP fallback advances after a pre-output rejection without
+  resending the rejected request.
+- Keyboard tooltips stay visible when focus scrolls their control into view;
+  scrolling the control out of view dismisses the hint.
+- Automatic sign-in checks submit-input values and accessible button labels
+  before filling and again before submission, leaving account creation, recovery
+  and authorization actions to the user.
 
-### Изменения
+- Connections and Pool show consistent account availability, including temporary
+  cooldowns and retry countdowns, while retaining error details.
+- Requests rejected because continuation state is unavailable, including
+  compaction and WebSocket requests, appear once in request history as local
+  failures, without provider usage or account penalties.
+- Adapter preparation rejections on account routes, including unsupported
+  compaction and incompatible SIWC context, retain their error details in request
+  history without counting each skipped account as a failed provider request.
+- With debug enabled, BPS attachment details separate authorization, validation
+  and upload/cache waiting, with counts for uploads, reused images and existing
+  file references.
+- Automatic weekly resets preserve saved resets while compatible pool accounts
+  have ordinary quota, account for reset expiration and imminent natural recovery,
+  and verify restoration before another automatic redemption. Manual reset remains available.
+- Provider `budget_reached` ends the request with a distinct session-budget
+  error, preserving known usage without retries or account rotation.
+- Debug WebSocket details identify connections reopened after authorization
+  changes, including a new login with an unchanged bearer token.
+- Streaming replies remain incremental when a compatible upstream omits or
+  mislabels its SSE content type. JSON replies and structured-output validation
+  retain their existing behavior.
+- Debug request details show the start of upstream reasoning separately from
+  first-output timing, without changing retries, routing or account availability.
+- Native account requests retain scoped turn state returned with upstream errors.
+- Enabling web search on a reused native account WebSocket opens a compatible
+  connection with retained history instead of sending an unsupported continuation.
+- Unsupported interruption controls leave an HTTP-bridged reply running and
+  return `response.interrupt.failed`; real disconnects still release the request.
+- Native account generation preserves the client's output-token limit over HTTP
+  and WebSocket, including full/Lite continuations. Compaction keeps its separate
+  request-field rules.
 
 ## [1.1.5] - 2026-11-03
-
-<!-- relay-notes:en -->
 
 This update adds Claude Desktop pool profiles, shared protocol conversion, and
 recoverable account deletion. [Release changes: #84](https://github.com/F0RLE/zenith-relay/pull/84).
@@ -339,335 +579,7 @@ recoverable account deletion. [Release changes: #84](https://github.com/F0RLE/ze
 - Desktop windows can be moved by dragging the title bar.
   ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
 
-<!-- relay-notes:ru -->
-
-Обновление добавляет профили пула для Claude Desktop, общий механизм
-преобразования протоколов и корзину аккаунтов. [Изменения выпуска: #84](https://github.com/F0RLE/zenith-relay/pull/84).
-
-### Изменения
-
-- Автоматическая ротация учитывает доступность, нагрузку, свежую квоту и привязку
-  сессии; ручная следует сохранённому порядку доступных участников. Детали запроса
-  объясняют выбор владельца кеша без раскрытия идентификаторов аккаунтов и ключей.
-- Заметки сохраняются после повторного входа. Новые OAuth-аккаунты попадают в пул
-  после явного выбора; неудачная смена профиля возвращает предыдущую сессию.
-- Детали запроса показывают источник ошибки Account, Provider или Relay,
-  транспорт HTTP/WebSocket и стоимость в API-эквиваленте. Отсутствующие цены неизвестны.
-- Импорт Excel / Basis Points сохраняет разрешённые заголовки клиента провайдера
-  при обновлении токена и повторном входе; кеш вложений разделён по учётным данным.
-- BPS отдаёт приоритет основным coding-инструментам и ограниченным обращениям
-  к каталогу, сохраняя историю, размышление и текущие разрешения инструментов.
-- Ошибка зашифрованной истории объясняет восстановление профиля и ключа.
-  Пересборка или перезапуск Relay не возвращают потерянный ключ шифрования.
-- Преобразование сохраняет текст coding-инструментов и поддерживаемый порядок
-  developer/system, включая JSON из файлов и ошибки команд при отправке в Gemini.
-- API-источники поддерживают нативный подсчёт токенов Messages/Gemini. Веб-поиск
-  Responses работает через Claude Messages с цитатами, разрешёнными доменами
-  и примерным местоположением; неподдерживаемые настройки возвращают явную ошибку.
-- Экспериментальный HTTP/3 использует фоновую проверку прямых HTTPS-маршрутов;
-  первый запрос и неподдерживаемые адреса остаются на TCP. Прокси и нативный
-  WebSocket не меняются. `ZENITH_RELAY_HTTP3=0` отключает эксперимент;
-  отправленная генерация не повторяется.
-- Повторные таймауты необязательного WebSocket временно переключают маршрут
-  на HTTP, убирая повторные задержки подключения без изменения правил повторов.
-- Остаток недели оценивается по сопоставимой нагрузке; связанные подключения
-  считаются один раз, без достаточных данных показано `—`. Обзор показывает историю,
-  разброс и сбросы; фильтры Использования сохраняют общую окупаемость аккаунта.
-- Временный отказ доступа BPS сохраняет совместимость каталога Codex; успешное
-  обновление доступа возвращает доступные модели без перезапуска Relay.
-- Аккаунтные HTTP, сжатие контекста, WebSocket и профили Codex по умолчанию
-  используют полный Responses. Явный выбор Lite клиентом поддерживается.
-- Справка и подписи стали короче; узкие карточки, заголовки таблиц и фокус
-  клавиатуры остаются удобными при широких системных шрифтах.
-
-#### Производительность
-
-- Сокращена повторная обработка истории, каталогов и потоков с сохранением
-  проверок, владельца продолжения и точного содержимого запроса.
-- Пул и Подключения избегают лишней работы скрытого окна; счётчики обновляются
-  при возврате, а смена языка, квот и маршрутизации учитывается сразу.
-- Использование загружает отчёты и прогнозы с меньшим числом повторных чтений.
-  Стартовые и отложенные страницы делят ресурсы в прежних лимитах размера сборки.
-
-#### Подключения и карточки аккаунтов
-
-- Часовой пояс автоматически следует назначенному прокси: удалены выбор города,
-  глобальные переключатели, ручные привязки и запасной Нью-Йорк. Общие фоновые
-  задачи определяют выход без открытия UI, обновляют пояс до истечения 15 минут
-  и повторяют сбои с паузой. Запросы не ждут геолокацию; без актуальных данных
-  поля клиента сохраняются. Старые настройки очищаются при запуске, карточки
-  получают новые результаты по объединяемым событиям.
-
-- В настройке аккаунта ChatGPT кратко поясняются вход в Codex для управления
-  с телефона и выполнение запросов через пул.
-
-- Бейдж «Только изображения» показан только в Пуле и выборе его участников.
-
-- Карточки аккаунтов в Подключениях используют те же шрифты, отступы шапки и
-  толщину полос квоты, что и в Пуле.
-
-- Массовые действия API-источников и прокси заменяют поиск и сортировку в той же
-  строке, как в аккаунтах, а не сдвигают карточки вниз. После сброса выделения
-  возвращаются прежние поиск и сортировка.
-
-- Тесты скорости прокси выполняются по очереди вместо ошибки занятости.
-  Карточки различают ожидание и измерение; очередь не расходует таймаут
-  измерения и не создаёт конкуренцию за полосу скачивания.
-
-- На одной локальной карточке можно явно объединить авторизации Codex, SIWC и
-  Excel/BPS и выбрать маршрут в Аккаунтах или Ротации. Токены и квоты не смешиваются;
-  переключение сохраняет вес/параллельность и доступно после завершения запросов.
-  Проверяется вся группа; SIWC не подтверждает общую рабочую область или равные лимиты.
-  Автоматизации следуют за маршрутом атомарно с проверкой доступности модели.
-
-- Codex, ChatGPT/SIWC и Excel / Basis Points остаются отдельными
-  способами входа. Экспорт/импорт Zenith сохраняет клиента и регистрацию SIWC;
-  импорт SIWC требует повторного входа перед добавлением в пул. SIWC использует
-  проверенные регистрации, защищённые ротируемые токены и публичный Responses
-  HTTP/SSE. SIWC остаётся экспериментальным; неподдерживаемые возможности отклоняются явно.
-- SIWC открывается в окне Tauri внутри Relay с отдельным профилем и прежними
-  настройками прокси. Проверки OAuth и отмена остаются в Rust; ссылка для входа
-  через браузер сохранена.
-
-#### Адаптеры протоколов и Excel / Basis Points
-
-- Responses, Chat Completions, Messages и Gemini Generate Content используют общий
-  механизм преобразования. Поддерживаемые инструменты, схемы, медиа, цитаты и правила
-  параллельных вызовов сохраняются; непереносимые возможности возвращают явную ошибку.
-  Нативная передача сохраняет расширения провайдера, точные числа и разрешённые заголовки.
-  ([1f64175](https://github.com/F0RLE/zenith-relay/commit/1f64175))
-- API-источники с ключом могут явно использовать нативный Gemini Interactions JSON/SSE.
-  Поддержка Generate Content не даёт доступ к Interactions; агенты, фоновые задачи,
-  получение ресурсов, конвертация и несовместимые SDK OpenCode остаются исключены.
-- Нативные продолжения Gemini сохраняют проверки владельца, ключа, модели и истории,
-  а также поздний usage. Кеш провайдера и серверные инструменты остаются нативными.
-- Преобразуемые маршруты поддерживают клиентский поиск инструментов Responses и PDF
-  в base64. Responses/Messages также передают URL PDF и PDF-результаты инструментов;
-  ID файлов провайдера и непереносимые настройки цитирования требуют нативного маршрута.
-- Начальные служебные инструкции Claude сохраняют поддерживаемый порядок. Меню
-  и отчёты размышления используют фактический уровень или бюджет, включая `xhigh`;
-  публичные сводки сохраняют нативное состояние без подделки подписей другого провайдера.
-- Excel/BPS поддерживает function/custom, изображения и поиск в результатах инструментов,
-  атрибуцию совместной работы. Текст идёт потоком; инструменты выдаются только после
-  проверки завершения, текущих разрешений и исходных схем.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Большие каталоги BPS загружают описания и схемы ограниченными локальными запросами.
-  Детали показывают загруженные схемы и расход; нативный поиск инструментов не подменяется.
-- Продолжения инструментов переживают эквивалентную пересериализацию JSON без изменения
-  аргументов и reasoning. Передача нового чата Codex сохраняет помеченный контекст;
-  ветки и дочерние сессии получают мягкую привязку, но не право на чужое продолжение.
-- Явно нестрогий вывод BPS по JSON-схеме проверяется локально до выдачи. Неверный
-  или незавершённый ответ завершается без перегенерации; нативный строгий вывод
-  по-прежнему требует совместимого маршрута.
-- BPS принимает многострочные аргументы в явном обрамлении и проверяемую совместимую
-  форму одного вызова. Допустимое восстановление переносов, табуляций и слешей сохраняет
-  правильные escape-последовательности; неверные синтаксис, Unicode и схемы отклоняются.
-- Ошибки инструментов сохраняют безопасную причину парсера в JSON и SSE без аргументов.
-  Локальные ошибки обычного HTTP-ответа передают `x-should-retry: false`; явная повторная
-  отправка возможна. Удалённые инструменты и противоречивое завершение не становятся успехом.
-- BPS выносит настройки инструментов текущего хода из стабильного префикса каталога
-  и истории. Аккаунтные Responses получают ключ кеша контекста только при отсутствии
-  клиентского.
-- Общий срок ожидания заголовков native HTTP выключен по умолчанию и разделён между
-  попытками. Он не ограничивает тело ответа, BPS или native WebSocket; истечение
-  не повторяет потенциально принятый запрос и не отключает аккаунты.
-- BPS работает только через пул, обновляется через выдавший OAuth-клиент и поддерживает
-  экспорт Zenith/Sub2API. Free требует свежего подтверждения доступа; публикация
-  каталога и выполнение исключают отключённые и ограниченные модели.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-
-#### Пул, маршрутизация и модели
-
-- Автоматическая ротация сохраняет прогретый маршрут среди кандидатов при разнице
-  нормализованной нагрузки в один запрос, не отправляя диалог сразу на холодного участника.
-  Ёмкость, существенная разница квоты/кредитов, здоровье и непрозрачное владение сохраняются;
-  независимые запросы распределяются по нагрузке.
-- Автоматическая ротация может передать диалог с полной историей инструментов
-  более подходящему участнику. Непрозрачные продолжения и результаты без вызова
-  сохраняют владельца, пока проверенное локальное восстановление не даст полную
-  историю. Оба окна квоты ограничивают выбор; одинаковые остатки не гарантируются.
-  Передача той же модели восстанавливает сохранённые вызовы инструментов
-  и reasoning по `previous_response_id`, а не использует текстовую ветку смены
-  модели. HTTP и WebSocket сохраняют ключ кеша и текущие настройки; без истории
-  владелец не меняется. Исходный ciphertext передаётся без изменений: он не
-  удаляется и не служит общим запретом ротации.
-- Обновление кредитов отделено от заголовков ответов. Нагрузка не делает старые
-  кредиты свежими, не откладывает опрос бесконечно и не отменяет новые лимиты.
-  Общий баланс ChatGPT учитывает последнее состояние одного счёта провайдера один раз.
-- API-маршруты выбирают нативный протокол известной модели независимо от клиента.
-  Выбор SDK OpenCode использует ту же справочную политику; неподдерживаемые
-  эндпоинты исключаются. Смена модели сохраняет завершённую историю, но не переносит
-  активное провайдерское состояние другой модели.
-- Контекст и сжатие настраиваются независимо. Опубликованные Short/Long и нативные
-  значения аккаунта сохраняются; резервные 25% применяются только без известного
-  значения по умолчанию. Лимиты API остаются обязательными, длинный контекст включается
-  явно. Сохранения последовательны, предупреждения не перезапускают приложения.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-- Каталоги используют общий порядок по разработчику, семейству и версии, ручные
-  исключения и публичный экспорт политики. Получение моделей сохраняет приоритеты
-  провайдера и корректный кэш при ошибках. Каталоги ChatGPT/Codex принимают до 4 МиБ
-  и один раз повторяют временный сетевой сбой с задержкой.
-  ([#86](https://github.com/F0RLE/zenith-relay/pull/86))
-- Скорость сохраняется при повторах. Цены разделяют Standard, Flex, Fast, Ultrafast
-  и опубликованные диапазоны длинного контекста, включая нулевые цены. Оценка
-  использует фактический вход запроса; отсутствующие цены остаются неизвестными.
-- Настройка API объединяет пресеты провайдеров и ссылки на консоли, отделяя
-  Kimi Code от API-кошелька Moonshot. Балансы Moonshot сохраняют региональную валюту
-  USD/CNY; известные сервисы без чтения баланса не получают общие биллинг-пробы.
-
-#### Claude Desktop и профили
-
-- Фиксированная шкала размышлений Claude Desktop сопоставляет пропущенные
-  уровни с ближайшим поддерживаемым и разрешённым уровнем снизу либо минимальным
-  разрешённым, если ниже ничего нет. В использовании остаются запрошенный и
-  фактический уровни; выключение, явные бюджеты, прямой API и другие клиенты не меняются.
-
-- Claude Desktop подключается через профиль стороннего провайдера. Relay проверяет
-  настройки до закрытия клиента, сохраняет восстановление, записывает каталог
-  и запускает приложение только по выбранному действию. Восстановление сохраняет
-  чужие профили и новые ручные изменения. Прямой ChatGPT получает нативный каталог,
-  профили пула — каталог Relay.
-- Каждая модель Claude Desktop показана один раз со стабильным клиентским ID.
-  Встроенный Effort выбирается отдельно в пределах возможностей маршрута и правил
-  пула. Названия, реальные модели провайдера, контекст и цены не меняются;
-  слишком большой каталог отклоняется до изменения профиля.
-- Инструменты MCP загружаются по требованию. Мост Messages принимает проверенные
-  загруженные определения, ссылки поиска, метаданные и рекомендательные указания
-  кэша, но не имитирует серверный поиск или цены кэша Anthropic у другого провайдера.
-  Для применения настройки профиля переподключитесь и начните новый диалог.
-
-#### Интерфейс и Доступ
-
-- При первом запуске язык выбирается по системе с английским запасным вариантом;
-  ручной выбор сохраняется. Экран запуска, трей и страницы входа используют
-  выбранный язык; дополнительные переводы загружаются отдельными языковыми пакетами.
-- Справка объясняет восстановление подключений и разделяет инструкции Desktop,
-  технические справочники и планы Hosted.
-- Использование загружает выбранную страницу и повторно использует актуальные
-  отчёты. Итоги появляются автоматически; фильтры и поиск ID отбрасывают устаревшие
-  ответы и обновляются при изменении истории или цен.
-- Детали запроса загружаются при открытии, закрываются первым Escape и возвращают
-  фокус на исходную кнопку без обновления всего журнала Использования.
-- Работа с историей, копиями, сетью и диагностикой вынесена с потока окна.
-  Обзор показывает готовую аналитику до сохранения её кеша.
-- В настроенном приложении навигация появляется до загрузки данных. Настройки
-  и Справка доступны сразу; ошибка чтения предлагает повтор вместо пустого списка.
-- Удалены старый личный сервер и клиент управления. Режим «На устройстве» и LAN
-  сохранены; прежнее владение аккаунтами учитывается при явном локальном восстановлении.
-  Hosted — отдельный план, а не готовая серверная замена в этом выпуске.
-- Экран запуска учитывает тему и язык, позволяет перезагрузить окно при задержке
-  или ошибке. Страницы загружаются по необходимости; скрытое окно избегает лишней работы.
-- Пресеты ротации вынесены на боковую панель, участники собраны в компактные
-  карточки; все настройки доступны в узких окнах.
-- Доступ объединяет Локальный API, Приложения и Аккаунты. Сохранение пути не запускает
-  приложение; возврат Claude находится в Восстановлении. Индивидуальные настройки
-  и отказы от автозапуска сохраняются; часовой пояс следует назначенному прокси.
-- Компактные карточки источников и прокси показывают готовность, баланс и результаты
-  проверки подключения. macOS сохраняет нативные кнопки окна.
-  ([4cb1d2d](https://github.com/F0RLE/zenith-relay/commit/4cb1d2d),
-  [#85](https://github.com/F0RLE/zenith-relay/pull/85))
-- Успешный вход закрывается после сохранения; ошибки остаются видимыми. Импорт
-  и экспорт поддерживают JSON Cockpit Tools. Участие в пуле включается отдельно.
-- Удалённые аккаунты попадают в постоянную корзину. Восстановленные остаются
-  отключёнными и вне пула; окончательное удаление требует подтверждения.
-- Использование объединяет время, токены/кеш, попытки и ошибки. Дополнительная
-  диагностика сравнивает размеры без сохранения переписки и выдуманных токенов;
-  карточки BPS и справка объясняют срок входа и восстановление.
-- Пароли и секреты 2FA раскрываются отдельно. Смена секрета очищает ранее
-  рассчитанный код.
-
-### Исправления
-
-#### Аккаунты и защита данных
-
-- Восстановление зашифрованной авторизации Codex сохраняет совместимость с файлами
-  age/scrypt; неиспользуемая уязвимая криптографическая зависимость исключена.
-- Проверки подписки сохраняют выбранный аккаунт и прежние метаданные при отсутствии
-  его данных. Успешные чтения сохраняют интервал опроса; ошибки — HTTP-статус
-  и Retry-After с обезличенной диагностикой.
-- Хранилище, снимки, импорт и восстановление проверяют размеры и границы путей
-  до замены файлов. Неудачная запись и неполные копии сохраняют рабочую точку
-  восстановления; параллельные сохранения каталога не конфликтуют.
-- Проверки подписки отклоняют удалённый незашифрованный HTTP до отправки
-  учётных данных; заголовки авторизации скрыты в диагностике.
-- Поздние операции импорта, токенов, прокси и пояса сохраняют более новые настройки
-  и входы. Сброс общего прокси оставляет сохранённые записи и привязки аккаунтов.
-- Вход в маршрут Codex/BPS может использовать Заметки; SIWC остаётся ручным.
-  Добавление способа входа сохраняет Заметки, разделяет авторизации и даёт
-  скопировать ссылку для входа в браузере.
-
-#### Продолжения, инструменты и транспорт
-
-- Продолжения Responses различают повторные ID инструментов по предыдущему ответу
-  и владельцу. Длинные нативные/BPS-диалоги используют прежний лимит истории 16 МиБ;
-  отсутствующее состояние требует восстановления, а не смены владельца или потери истории.
-- BPS восстанавливает историю владельца до выбора маршрута и использует завершённый
-  поиск каталога при явном повторе. Сохранённые схемы избавляют от лишнего поиска;
-  исчерпание лимита больше не дублирует usage. Текущие разрешения и проверки сохраняются.
-- Для скриптов и патчей BPS рекомендует отдельные нативные вызовы; простые пакеты
-  и параллельные вызовы сохранены. До четырёх изображений загружаются одновременно
-  в пределах одной авторизации; неверные исполняемые аргументы отклоняются.
-- SIWC передаёт роль developer для инструментов. HTTP и мост WebSocket сохраняют
-  явные настройки кеша и создают ключ контекста только при его отсутствии.
-  Данные тарифа/квоты Codex/BPS сохраняют происхождение и отдельные правила доступа.
-- Преобразование сохраняет поддерживаемые отказы, порядок инструкций, лимиты токенов,
-  детализацию изображений и пустые результаты. Конфликтующие схемы, роли и правила
-  инструментов отклоняются; нативный BPS принимает именованный результат без выдуманного вызова.
-- Структурированный вывод исключает несовместимые BPS-маршруты до резервирования.
-  Поиск через WebSocket обновляет доступ BPS, не обращаясь к исключённым нативным аккаунтам.
-- HTTP-клиенты не скрывают дополнительные повторы внутри попытки Relay. Cloudflare
-  1010 не портит состояние авторизации; внутренний WebSocket 403 — терминальная ошибка
-  транспорта. Обрыв SSE не выдаётся за успешное завершение.
-- BPS 401 обновляет доступ перед следующим запросом; 429 соблюдает Retry-After,
-  а отказ модели остаётся в её границах. Общий отказ, лимит хода и неверный
-  преобразованный ответ не вызывают ротацию всего аккаунта или повтор принятой генерации.
-- Таймаут Excel по умолчанию — 120 секунд без прогресса провайдера; heartbeat его
-  не продлевает. Завершающее событие заканчивает ответ без ожидания закрытия,
-  сохраняя известный частичный расход и фактическое время.
-  ([#84](https://github.com/F0RLE/zenith-relay/pull/84))
-
-#### Использование, квота и мониторинг
-
-- Автоматизации проверяют квоту при сохранении/включении, распознают сброс при
-  округлённых 100% и не повторяют завершённый цикл. Отсчёт работает с остановленным
-  API; недоступная сохранённая модель требует выбора, а не незаметной подмены.
-- Карточки различают ошибки обновления, временное ожидание и блокировку запросов.
-  События пула не по порядку больше не оставляют завершённый запрос активным.
-- Использование сохраняет последний фильтр, обновляется без посторонних перечитываний
-  runtime и считает последние 24 часа от текущего момента. Подсказки, фокус клавиатуры
-  и временные сбои хранилища браузера сохраняют доступ к настройкам и действиям.
-- Редактор цен использует данные выбранного источника. Неизвестные тарифы и цены
-  остаются неизвестными, нули сохраняются; общая цена записи в кеш не выдумывает
-  срок хранения и не заимствует тариф другого провайдера.
-- Чтение/запись кеша за запрос отделены от оценок хранения. Cache-hit DeepSeek
-  и завершающий usage Gemini сохраняются при преобразовании; поток Chat соблюдает
-  `include_usage` без отключения внутреннего учёта.
-- Ошибка владельца до отправки сохраняется локально, без выдуманной попытки или
-  токенов провайдера. Диагностика содержит безопасные ID и причины парсера,
-  а не учётные данные, личность аккаунта или аргументы инструментов.
-
-#### Профили клиентов и Desktop
-
-- **Запустить приложение** открывает существующий клиент без подключения Relay
-  и перезапуска работающего приложения, в том числе при остановленном API и пустом
-  пуле. Внешняя смена аккаунта и ручные настройки контекста сохраняются.
-- Проверка запуска отличает Desktop от CLI и служебных процессов, проверяет пути
-  до остановки клиента; OpenCode и Claude подтверждают запуск процесса приложения.
-  Диагностика Windows сохраняет ошибки ОС; перезапуск OpenCode вынесен с UI-потока.
-- Смена пула на нативный Codex исправляет провайдера чатов в поддерживаемых базах
-  истории, не меняя посторонние строки и переписку.
-- Claude Desktop сохраняет доступные High/Max; фиксированное меню использует
-  описанное сопоставление уровней. OpenCode скрывает неподдерживаемые варианты,
-  а запросы Claude к Gemini сохраняют непрозрачную атрибуцию пользователя.
-- Обновление ждёт выхода конкретного процесса Relay и сохраняет установленный
-  файл при таймауте; принудительная остановка требует `-ForceStop`. Остановленные
-  listeners освобождают неиспользуемое состояние, сохраняя состояние отправленных запросов.
-- Окно Desktop перемещается за область заголовка.
-  ([#88](https://github.com/F0RLE/zenith-relay/pull/88))
-
 ## [1.1.4] - 2026-10-03
-
-<!-- relay-notes:en -->
 
 Zenith Relay 1.1.4 improves quota-based rotation, checks the model reported by ChatGPT account routes, adds images to Basis Points, and makes launcher controls more responsive.
 
@@ -698,40 +610,7 @@ Zenith Relay 1.1.4 improves quota-based rotation, checks the model reported by C
 - Runtime snapshots reuse account facts and shared projections instead of repeatedly copying credentials and rebuilding the same state. Desktop and Relay Server use the same core definitions for account status and source summaries.
 - Both Help languages explain route mismatch, model-access refusals, usage-policy blocks, continuation failures, and the corresponding recovery steps. These release notes are included in the in-app updater in English or Russian according to the selected language.
 
-<!-- relay-notes:ru -->
-
-Zenith Relay 1.1.4 улучшает ротацию по квоте, проверяет модель в ответах аккаунтов ChatGPT, добавляет изображения в Basis Points и ускоряет реакцию элементов лаунчера.
-
-### Изменения
-
-- Автоматическая ротация выбирает участника с наибольшим свежим остатком квоты. Одного пункта достаточно для переключения. Нагрузка сравнивается только при равном остатке. Чат остаётся на своём участнике, если сохранённую историю нельзя переслать участнику с большим остатком.
-- Модели OpenAI остаются в порядке Astra, Sol, Terra, затем Luna. Модели Anthropic остаются в порядке Fable, Opus, Sonnet, затем Haiku. Новая версия того же семейства занимает это же место.
-- Цена API сначала берётся у провайдера. Если провайдер её не прислал, Relay использует официальную цену семейства: GPT, ChatGPT и Codex относятся к OpenAI, Claude к Anthropic, Gemini к Google, Grok к xAI. Ручная цена нужна только когда обеих нет.
-- На вкладке API можно блокировать маршрут аккаунта ChatGPT, если он сообщает внутренний degrade-id или другую модель. Проверяются response.created, последующие события SSE, собранные ответы и ходы WebSocket, в том числе на повторно используемом соединении. Отказ до генерации позволяет выбрать другого участника; подмена после генерации останавливает ответ без повторного выполнения. Проверяется заявленная модель, а не её интеллект.
-- Переключатель оптимизации инструментов убран. Список инструментов уходит так, как его прислал клиент. Сохранённый оптимизированный режим больше не меняет новые запросы.
-- Переключение аккаунта сохраняет официальный каталог ChatGPT и его официальные модели. Прямое API-подключение берёт модели, которые сообщил этот провайдер. Известные уровни размышления берутся из разбора каталога и подключаются напрямую, без переписывания пулом.
-- При добавлении в пул можно отфильтровать рабочие, в кулдауне, недоступные, отключённые и серверные подключения. Цвет состояния совпадает с карточкой аккаунта. Автоматическая очередь видна порядком карточек слева направо, а не текстовым списком.
-- Скорость модели показана иконками. Выбор размышления появляется только у текстовой модели, у которой есть уровни, и стоит после иконок скорости.
-- На macOS закрытие, сворачивание и полный экран стоят слева и выполняют свои обычные действия. Название и логотип остаются справа.
-- Переключение модели сохраняется без ожидания полного снимка. Остальные переключатели сохраняют новое значение, пока идёт фоновое обновление, поэтому остальным окном можно пользоваться.
-- Запросы аккаунта ChatGPT отправляются с актуальными заголовками Chrome. Отказ по квоте оставляет аккаунт восстановимым и применяется к открытому основному окну, а не помечает аккаунт сломанным.
-- Excel / Basis Points принимает изображение в сообщении пользователя. Data URL загружается от имени аккаунта и заменяется на file_id. Внешняя ссылка отклоняется, поле detail не пересылается. Одна ошибка зашифрованного содержимого убирает чужой шифротекст и повторяет запрос тем же аккаунтом.
-- Excel / Basis Points удерживает длинные идентификаторы истории в допустимом пределе, поэтому вызов инструмента по-прежнему совпадает со своим ответом. Видимое краткое содержание размышления сохраняется даже без шифротекста. Максимальное размышление отправляется как экстра-высокий уровень, который поддерживает этот маршрут.
-- Пустой ответ каталога моделей ChatGPT больше не удаляет модели, которые аккаунт уже сообщил. Ошибка обновления списка моделей говорит, что список не удалось обновить, а поздняя локальная ошибка не скрывает уже записанную ошибку провайдера.
-- Отказы Basis Points по доступу к модели и правилам использования сохраняют исходный статус 403. Отказ доступа временно приостанавливает эту модель у конкретного участника, а не блокирует весь аккаунт. Отказ по правилам использования завершает запрос, не обнуляет квоту и не перебирает другие аккаунты для обхода ограничения.
-- Модель проверяется до преобразования протокола: адаптер не может скрыть другую модель провайдера, записав в ответ запрошенное имя. Код ошибки и безопасное объяснение сохраняются в протоколе клиента.
-- Сборка ответа аккаунта заканчивается сразу после завершающего события, даже если провайдер держит соединение открытым. Разбитые на части события SSE проверяются целиком; слишком большое событие, которое нельзя проверить, останавливает поток.
-- Ошибка завершения, в которой уже есть сгенерированный ответ, не запускает восстановление истории с повторной генерацией. Обрыв с неизвестным результатом также остаётся ошибкой, а не скрытым повтором запроса.
-- Быстрый путь текстовых SSE-дельт распознаёт обычные события без построения полного JSON-дерева. Итоговое использование, токены размышления, счётчики кеша и сообщённый провайдером класс обслуживания по-прежнему учитываются обычным способом.
-- Порядок карточек сначала учитывает доступность выбранной модели, затем квоту. Аккаунт без этой модели не оказывается впереди подходящего API-провайдера только потому, что в целом он исправен.
-- Если настройку не удалось сохранить, переключатель возвращается назад и перестаёт висеть в загрузке — в том числе при мгновенной ошибке команды. Вкладки и остальные элементы остаются доступны во время независимых фоновых операций.
-- Фокус с клавиатуры больше не добавляет нежелательные обводки и внутренние тени в лаунчере. Уведомления об изменениях сохраняют компактный блок без дополнительной рамки и тени.
-- Снимки состояния повторно используют сведения об аккаунтах и общие представления вместо лишнего копирования учётных данных и одинаковых вычислений. Desktop и Relay Server используют общие определения статусов аккаунтов и сводок провайдеров.
-- В справке на обоих языках описаны несовпадение модели, отказы доступа, блокировки по правилам использования, ошибки продолжения и способы восстановления. Описание этой версии попадает во встроенное обновление на русском или английском согласно выбранному языку.
-
 ## [1.1.3] - 2026-09-30
-
-<!-- relay-notes:en -->
 
 Zenith Relay 1.1.3 keeps a ChatGPT account available after a generic provider
 403, restores Excel tool history, shows an approximate cache lifetime beside usage tokens, and
@@ -1364,283 +1243,6 @@ uses the same compact controls across the launcher.
   status instead of making the whole pool look unavailable.
 - The OAuth completion page no longer shows a close button that cannot work.
 
-<!-- relay-notes:ru -->
-
-Zenith Relay 1.1.3 оставляет аккаунт ChatGPT доступным после общего отказа провайдера 403, восстанавливает историю инструментов Excel, показывает примерный срок кэша рядом с токенами использования и применяет те же компактные переключатели по всему приложению.
-
-### Изменения
-
-- Вход в ChatGPT открывается в окне Relay, а не в системном браузере. Прокси
-  аккаунта используется и для этого окна, и для обмена токена. Действующая
-  сессия завершает вход сама; иначе вход заканчивается в окне. Сохранённые
-  заметки входа сами не подставляются. Замок внутри кнопки нового входа
-  выбирает сохранённый HTTP-прокси для первого входа и не подставляет
-  случайный.
-
-- Инструкции инструментов Excel / Basis Points следуют адаптеру v0.2.8.
-  Примеры используют только инструменты текущего запроса и совпадают с их
-  типом и схемой, включая два слоя JSON для аргументов функции. Отдельное
-  напоминание разработчика повторяет правило транспорта и оставляет ввод
-  custom-инструмента как есть. Подсказка одноразового повтора добавляется
-  после подготовленного ввода, до триггера сжатия. Структурный `text.format`
-  отклоняется, а не отбрасывается. Обычные значения `service_tier` `auto`,
-  `default` и `standard` остаются на этом маршруте; Fast по-прежнему нет.
-  Загрузка изображений из внешнего плагина не копируется.
-
-- Поток изображения, который закончился неполным, с ошибкой или без реального
-  завершения, записывается как ошибка, а не как готовое изображение.
-
-- Неудачное обновление баланса провайдера сохраняет последнюю сумму. Обзор
-  выбранного API помечает её **Не обновлено**. Карточка пула оставляет сумму
-  без этой пометки; причина остаётся в диагностике.
-
-- Переключатель оптимизации инструментов теперь поясняет, что схемы открываются по запросу на обычном маршруте Responses, а Excel и остальные маршруты по-прежнему отправляют полный список.
-
-- Переключатель для аккаунтов ChatGPT в пуле теперь называется **Использовать Basis Points**. Такие аккаунты отправляются через Excel, а не через Responses. Это может помочь деградировавшему аккаунту с генерацией, но результат не гарантирован.
-
-- Закрытие главного окна освобождает его страницу, а пул продолжает работать в трее. Следующее открытие создаёт окно заново, а не возвращает скрытую страницу.
-
-- Общий отказ провайдера 403 больше не блокирует аккаунт ChatGPT навсегда. Аккаунт остаётся доступным, диалог показывает ошибку доступа от провайдера, а ранее сохранённая ложная блокировка снимается при открытии локального хранилища или при успешном обновлении квоты без нового отказа. Явно отключённое рабочее пространство по-прежнему остаётся заблокированным.
-
-- Модели Anthropic идут в порядке семейств провайдера: Fable, Opus, Sonnet, затем Haiku. Внутри семейства новые выпуски остаются первыми, неизвестные семейства видны после известного ряда.
-
-- Пул и Подключения используют общий компактный заголовок с понятными основными действиями и переносимыми вкладками. Пресеты пула находятся в дополнительном меню. Статус участников, фильтры аккаунтов и управление маршрутизацией собраны в одной панели, а текущая активность показана рядом с управлением пулом.
-
-- Именованные запросы Responses по WebSocket проверяют допустимые символы и длину `stream_id`. События запасного HTTP/SSE и ошибки запроса, созданные Relay, содержат этот идентификатор. Неверный идентификатор возвращает `invalid_stream_id`. Одиночный нативный `[DONE]` у Responses без `response.completed` теперь считается незавершённым потоком, а не успешным ходом WebSocket без завершающего события. Завершающие маркеры SSE другого протокола больше не отмечают запрос Responses, Chat Completions, Messages или Gemini как завершённый. Заявленное завершение Responses с явно неуспешным или неполным статусом больше не записывается как успех. Полное параллельное мультиплексирование WebSocket остаётся незавершённой работой.
-
-- Если у аккаунта одновременно есть оставшееся окно квоты провайдера и кредиты, для допуска в пул сохраняется сообщённое окно, включая защищённый резерв аккаунта Codex. Временно недоступный маршрут без ошибки аккаунта больше не показывается как выдуманный сбой аккаунта.
-
-- Списки запросов и ошибок в использовании принимают номер страницы для прямого перехода. Кнопки назад и вперёд остаются.
-
-- Ожидание восстановления маршрута находится в **API → API** и применяется к текстовым запросам Responses, Chat Completions, Messages и Gemini, в том числе не из ChatGPT. Сохранённые переключатели не сбрасываются. Ожидание остаётся живым и по-прежнему использует бюджеты отправки и очереди этого запроса. Пустые блоки запроса Gemini, преобразованные в Chat Completions, сохраняют пустое поле содержимого ответа ассистента.
-
-- Цены источника и правила участника пула показывают модели прямо под провайдером, без дополнительных заголовков семейств. Порядок списка остаётся каталожным, строки в окнах стали плотнее и единообразнее. Цены источника показывают явную запись кэша на 5 минут и на 1 час, даже если каталог модели получен через другой адрес. Цена без указанного срока остаётся неизвестной. Неизвестная цена чтения кэша больше не подменяется ценой входа.
-
-- Быстрая настройка начинается с общего локального или серверного пула. На компьютере в одном шаге можно добавить и аккаунты ChatGPT, и API-источники, в том числе несколько подключений до выбора клиента. Новый API-источник сразу входит в пул. Импорт текущего профиля ChatGPT остаётся на том же шаге, чтобы можно было добавить ещё один источник. Прямой режим **Выбрать API** по-прежнему доступен в меню режима приложения.
-
-- Светлая и тёмная темы используют тёплые нейтральные поверхности и глубокий зелёный акцент с сайта Zenith. Цвета предупреждения, ошибки и информации остаются различимыми.
-
-- В правилах моделей компактные переключатели размышления, скорости запроса и видимости модели выглядят одинаково. Выбранные уровни размышления отмечены галочкой. В узком окне подписи скорости остаются видны без горизонтальной прокрутки.
-
-- В использовании отдельные карточки сводки, компактные фильтры и более понятные сведения о запросе. В узком окне карточки отчёта подписаны, а переключатели сводки такие же, как в остальном Relay.
-
-- Окна Relay используют один компактный вид и закрываются по щелчку на свободном месте вокруг окна. Меню действий, списки вариантов, выбор режима, контекстные меню и оглавление справки на узком экране используют ту же поверхность и тоже закрываются по щелчку снаружи. Escape и кнопка закрытия работают как раньше. Длинные формы подключений, прокси, автоматизаций и экспорта держат одинаковую ширину полей, область действий, состояние выбора и границы прокрутки.
-
-- Пул отдельно показывает число участников, управление маршрутизацией и текущую активность. Подключения и Пул используют компактную сводку со счётчиками в строке. В узком окне поиск по аккаунтам занимает всю ширину. В сведениях о запросе по-прежнему указан использованный транспорт.
-
-- Ошибки инструментов Excel / Basis Points называют неверное поле конверта и не раскрывают аргументы инструмента. Неоднозначный инструмент без полного имени пространства или аргумент функции, который не является объектом, отклоняется, а не вызывает не тот инструмент. Вывод Responses разворачивается перед преобразованием в Chat Completions, Messages или Gemini, включая их форматы событий SSE. Повреждённый завершённый вывод один раз ограниченно пересобирается, после чего Relay возвращает окончательную ошибку 502. Аккаунт при этом не уходит на паузу, и повторной попытки после этой пересборки нет.
-
-- Маршруты аккаунтов через Excel / Basis Points используют конверт инструментов v0.1.14: имя инструмента клиента передаётся в `references`, а `code` содержит аргументы функции или ввод пользовательского инструмента напрямую. Прежние вызовы клиента, даже если их описания уже нет в запросе, восстанавливаются в этот конверт. Инструмент, исключённый `tool_choice`, отклоняется как ошибка выбора. Инструменты с пространством имён сохраняют полное имя. Запросы также несут устойчивые сведения о ходе и точные заголовки клиента Excel, включая исправленные имена заголовков Office, чтобы внешний адрес не отвечал общим отказом 422 на иначе правильный запрос. Строгое тело Basis Points совпадает с внешним адаптером: описания инструментов клиента остаются в инструкциях разработчика, `tools` и `tool_choice` не пересылаются, исходный признак потока сохраняется. Повреждённая передача инструмента клиента получает ту же одну ограниченную пересборку, что и официальный адаптер, прежде чем Relay запишет окончательную ошибку 502.
-
-- Отключение управляемого профиля ChatGPT восстанавливает только настройки и поля входа, которыми владеет Relay. Внешние правки `config.toml` и более новый ручной вход OAuth сохраняются и не блокируют отключение. Повторное подключение по-прежнему не может тихо заменить этот новый вход.
-
-- Изменённый файл каталога моделей ChatGPT больше не делает резервную копию профиля повреждённой. Отключение возвращает прежние настройки и вход, не удаляя каталог, изменённый снаружи. Более новый вход остаётся защищён.
-
-- Преобразованные ходы с инструментами сохраняют параллельные вызовы функций Responses вместе для провайдеров Chat Completions. Отказы Messages и Chat Completions доходят до клиента с правильной причиной завершения, включая пустой отказ в Codex. Неполный ответ Messages больше не выглядит успешным завершением. Сведения о запросе отличают модель, которую запросил клиент, от идентификатора, отправленного выбранному источнику, если они различаются.
-
-- Сборки macOS подписываются ad-hoc, без сертификата Apple. DMG и архив обновления проверяются до публикации, у файлов релиза есть контрольные суммы. Первый запуск по-прежнему требует одно разрешение в настройках macOS.
-
-- Каталоги Codex сохраняют Ultra для точных моделей, которые поддерживает установленный Codex или подходящая нативная карточка аккаунта, если пул может провести Max и усилие субагента. Обычный Max у API или адаптера больше не создаёт вводящий в заблуждение вариант Ultra. Этот режим оркестрации Codex отделён от скорости запроса.
-
-- Обновление моделей и баланса API-источника делит ограниченную работу между ручным и фоновым запросом. Смена адреса, ключа или каталога отбрасывает запоздалый результат. Повторное открытие страницы использует статистику текущего сеанса. Явное обновление запрашивает данные снова. Если запрос не удался, последняя успешная сумма показывается как устаревшая вместе с причиной, без отключения маршрутизации. Фоновые наблюдения появляются в Пуле и в режиме «Выбрать API» без лишнего обращения к провайдеру. Псевдонимы протокола включают периодичность своего физического API-источника и больше не принимаются за аккаунты.
-
-- Карточки пула и API не показывают в обычном виде подробности обновления моделей, квоты и баланса. Значения, ошибки, с которыми можно что-то сделать, и предупреждение об устаревшем чтении остаются там, где они помогают. Подробное состояние и время проверки остаются в диагностике и не влияют на маршрутизацию.
-
-- Приложение и сервер Relay делят обновление квоты и моделей аккаунта между фоновыми задачами и ручными запросами. Списки квоты и моделей обновляются независимо. Повторные обновления соблюдают паузу провайдера, а закрытие ожидающего запроса не отменяет общую работу. Подготовка авторизации для первичной квоты, моделей и кредитов сброса идёт отдельной задачей по требованию с зарезервированной ёмкостью. Учётные данные не попадают в кэш наблюдений. Запоздалый результат и ошибка не затирают более новый вход, настройку прокси или заменённый аккаунт. Более новая квота из запроса моделей важнее более старого чтения. Свежие заголовки квоты из запроса генерации могут отложить следующую автоматическую проверку, если сведения о подписке актуальны. Ручное обновление и проверка сброса остаются в расписании. Сервер Relay также проверяет квоту вскоре после сообщённого будущего сброса. Запоздалый ответ 401 со старым ключом не может сделать недействительными более новый токен или заменённый вход во время восстановления квоты или моделей. Запоздалая запись OAuth и задач агента не заменяет учётные данные, установленные последующим импортом. Старая сборка среды выполнения не может опубликовать состояние после этого импорта или удаления аккаунта. Повторный импорт и удаление на сервере закрывают старый маршрут аккаунта до смены сохранённых учётных данных. Неудачное удаление из хранилища восстанавливает запись и не открывает заново ожидающую работу старой среды. Управляющие запросы к провайдеру идут через общую ограниченную очередь HTTP с резервом для входа и восстановления. Изменённый аккаунт или источник не может отправить устаревшее чтение из очереди. Более старое обновление приложения или ожидающая запись токена не может заново создать учётные данные после удаления аккаунта и его повторного добавления.
-
-- Обновление 1.1.3 при запуске само переводит существующие профили пула на текущую ротацию, сохраняя настройки участников и включённое состояние шлюза. Отдельное подтверждение, уведомление, ручная остановка, запуск или откат не нужны. Устаревшие пороги ошибок и параметры ранжирования отбрасываются. Старые профили и пресеты по-прежнему открываются. Старый сервер не принимает неподдерживаемые настройки ротации.
-
-- Перенос аккаунтов на свой сервер закрывает ожидающую локальную отправку через импорт и проверенную очистку. Прерванный перенос или аккаунт, уже принадлежащий серверу, не может снова появиться в локальной маршрутизации после перезапуска. Неудачная локальная активация оставляет владение в восстановлении и не включает две копии.
-
-- Если удаление локального аккаунта не удалось и его учётные данные или профиль нельзя восстановить, локальный шлюз останавливается и не обслуживает устаревший маршрут.
-
-- Ожидание ёмкости и восстановления использует общие пределы числа и сохранённых байтов для среды и для каждого ключа, пробуждение по событиям и один накопленный бюджет ожидания на повторы и смену транспорта. Занятая ёмкость распределяется между ключами справедливо. Отмена освобождает учёт очереди и не штрафует провайдера. Когда заняты все физические слоты, новый запрос больше не просматривает всю очередь ожидания заново. Неподдерживаемый маршрут по-прежнему завершается ошибкой, не входя в эту очередь.
-
-- Выбор в автоматическом режиме использует нормализованную локальную загрузку. Физический участник делит ёмкость между псевдонимами протоколов. Повторы используют один бюджет запроса через транспорты и исправления. Неопределённый результат провайдера не повторяется молча. Обязательная пауза провайдера устанавливается до того, как слот станет доступен другому запросу. У API-источников сервера больше нет второй, отдельно отсчитываемой блокировки шторма вне ротации пула. Ожидающая отправка не может использовать старый маршрут аккаунта или источника приложения, пока меняются его участие, адрес, прокси, вход или разрешения. Уже начатая работа может завершиться.
-
-- В сведениях об использовании примерный срок кэша стоит в скобках рядом с чтением кэша, а если чтения нет — рядом с записью. Окно, которое сообщил провайдер, используется как есть. Для GPT-5.6 и новее при отсутствии окна берётся документированный минимум OpenAI в 30 минут. Остальные пропуски помечаются как несообщённый срок. Оценка считается от последней записи или чтения кэша в этом запросе и не является живым сроком у провайдера.
-
-- Порядок каталога держит семейства одной номерной линейки вместе и использует устойчивые идентификаторы семейств. Более поздняя дата выпуска сама по себе больше не поднимает GPT-6 Sol выше GPT-6 Astra.
-
-- Фоновое обновление больше не может заменить сохранённые настройки более старым снимком. Уход с подключения и возврат к нему также сбрасывают ожидающее обновление, поэтому медленный предыдущий запрос не блокирует текущий экран. Открытые страницы удалённого пула подхватывают изменения сервера периодически и при возврате к окну, без локального события об изменении состояния.
-
-- В настройках API есть небольшой переключатель стандартной или автоматической оптимизации инструментов для локального пула и совместимого сервера. Стандартный режим передаёт полный каталог. Автоматический режим применяет отложенный поиск инструментов нативного Responses к каждому подходящему запросу и один раз повторяет запрос без этих полей, если выбранный адрес их не поддерживает. Пороги и списки разрешения или запрета по именам больше не показываются. Переключатель сохраняется сразу. Полное поведение описано в справке.
-
-- Обновление каталога пула один раз определяет маршруты участника для всех его моделей и не повторяет политику обнаружения по мере роста списка. Отключённые от сети модели сохраняют редактируемые сведения и поля цены кэша. (`3e6e174`)
-
-- Схемы инструментов Codex сохраняют область ссылок, ограничения проверки и буквальные данные, ограничивая раскрытие ссылок, чтобы глубокие или ветвящиеся описания не раздували память. (`3e6e174`)
-
-- Преобразованные ответы Chat Completions сохраняют текст размышления рядом с вызовами инструментов в JSON, потоке и последующей истории. Непрозрачное состояние размышления по-прежнему требует своего нативного владельца. (`e211560`)
-
-- Повтор настройки источника после неудачного снимка или обновления участия в пуле использует уже сохранённый источник и не создаёт дубликат. Убраны неиспользуемые элементы и вспомогательный код интерфейса для прежнего порядка ролей API и ручного редактора маршрутов. (`54b0c75`)
-
-- Долгая генерация больше не обрывается из-за таймеров HTTP, SSE или WebSocket самого Relay. Relay ждёт провайдера, поддерживает поток и сохраняет отмену клиентом и повторы для настоящих сбоев до появления ответа. (`3e6e174`)
-
-- Каталоги-справочники удерживают меньше памяти между обновлениями. Данные источника остаются компактными, производные кэшированные данные не читаются при загрузке, а сохранение каталога больше не загружает в память ещё одну полную копию предыдущего файла.
-
-- Запуск и обновление каталога делают меньше работы: совпадения моделей индексируются один раз, неизменяемые справочные данные используются совместно. Обновление больше не сливает один и тот же каталог дважды и не дублирует его дерево JSON в памяти.
-
-- Исправлен аварийный выход Windows при обновлении участников пула. Массовое обновление квоты сохраняет ограниченную параллельность и возвращает результат каждого аккаунта, не переполняя стек команды приложения.
-
-- Запуск Codex применяет ожидающие обновления каталога моделей до открытия клиента. Подключение локального пула проверяет каталог до закрытия Codex, а запуск клиента больше не ждёт промежуточного обновления интерфейса. Ошибка подготовки профиля надёжно снова открывает ранее работавший клиент. Запросы каталогов аккаунтов идут параллельно в общем пределе времени, а сверка истории не перечитывает каждый файл только ради отпечатка. Успешное подключение повторно использует свой каталог при запуске. Ошибка настройки OpenCode больше не мешает обновлению каталога Codex.
-
-- Повторное подключение Codex больше не срывается из-за того, что уже совпадающая история чатов превышает предел исправления истории. В бюджет перезаписи входят только файлы, которым нужна смена провайдера, поэтому обновление модели и скорости завершается без резервного копирования неизменённых разговоров.
-
-- Сведения о моделях берутся из общего справочного каталога для аккаунтов и API-провайдеров. Если метаданных нет, применяются одинаковые значения по умолчанию. Поля возможностей участника больше не скрывают размышление или инструменты, лишний опрос метаданных убран. Цена провайдера по-прежнему важнее, если она передана.
-
-- Модели OpenAI предлагают Обычную, Быструю и Сверхбыструю скорость по правилу Relay, даже если аккаунт или провайдер не вернул поля скорости. Явный выбор скорости сохраняется при ротации и перекрывает значение пула по умолчанию. В каталоге скоростей есть описания, поэтому у Сверхбыстрой в Codex больше нет пустого пояснения.
-
-- API-источники, сохранённые прокси и автоматизации квоты используют более читаемую раскладку и компактные редакторы. Импорт прокси может сразу проверить новый адрес и показать фактический выходной IP, страну и время ответа. Неудачная проверка сохраняет прокси и назначения. Заявленное место показано отдельно от наблюдаемого. Правила квоты выполняются сами, без отдельной кнопки запуска и выбора режима. Прежние ручные правила обновляются, отключённые остаются отключёнными. Имена правил по умолчанию отличают запуск отсчёта квоты от сброса недельного лимита, в том числе у уже существующих правил. Свои имена не меняются. Редактор начинается с типа автоматизации и нужных ей полей. Своё имя правила необязательно. Общие подписи автоматизаций больше не говорят только о квоте. На вкладке автоматизаций нет общей строки поиска и обновления: список обновляется при изменении правила. Частые действия в строке — значки с подсказками. В строке API-источника запуск стоит перед правкой, дополнительные действия — последними. (`0b65f07`, `54b0c75`)
-
-- При создании источника выбор провайдера остаётся над одним столбцом полей ключа, адреса и имени. Быстрая настройка собирает ход, выбор и переход в компактной области и не повторяет логотип окна. Настройка своего API показывает все обязательные поля и позволяет продолжить после их заполнения. Повторный выбор уже активного провайдера сохраняет правки. (`54b0c75`)
-
-- Вкладка API собирает состояние, счётчики пула, адрес и ключ в одной панели подключения с подписанным копированием. Порт настроен в своей строке, а перевыпуск ключа доступен из меню действий ключа.
-
-- Добавление подключений в пул использует один список с поиском, разделы аккаунтов и API, вид выбранных подключений и закреплённые действия добавления. Выбор не сбрасывается при фильтрации.
-
-- Нативный запрос больше не проваливает проверку совместимости адаптера только потому, что каталог источника пропустил уровень размышления или ошибочно пометил возможность как неподдерживаемую. Преобразованные маршруты сохраняют свои проверки возможностей и размышления.
-
-- Настройки больше не повторяют под переключателем уведомление о включённом подробном режиме и кнопку папки операций. Открыть папку по-прежнему можно в диагностике.
-
-- Сигналы поддержания потока ждут границы целого события, чтобы пауза в разорванном ответе не вставила служебный кадр внутрь его JSON.
-
-- Неверные события потока сохраняют безопасную диагностику разбора в сведениях о запросе: категорию ошибки JSON, позицию и размеры кадра, без записи содержимого ответа. Эта диагностика отличает разбор Relay от сообщения об ошибке провайдера.
-
-- Поток со смешанными окончаниями строк LF, CRLF и CR больше не склеивает отдельные события и не завершается ошибкой `stream_invalid`. Общий разбор сохраняет порядок событий для нативных потоков, адаптеров протоколов и сжатия контекста.
-
-- Преобразованные запросы Codex принимают трассировку клиента, ключи привязки кэша и необязательный выбор зашифрованного вывода размышления. Обычный текст и пустое управление размышлением больше не исключают иначе совместимый маршрут. Неподдерживаемый параметр называет поле. Зашифрованный ввод по-прежнему требует нативный маршрут.
-
-- Сжатие контекста Codex принимает завершённые элементы вывода, пришедшие до последнего события потока. Маршрутизация аккаунта держит в памяти только инфраструктурный cookie ChatGPT, отдельно для аккаунта и авторизации. Продолжение WebSocket после смены учётных данных переподключается только при переносимой истории. Запоздалое обновление каталога не может перезаписать привязку другого профиля Codex.
-
-- Relay принимает JSON-запросы gzip и zstd от текущих клиентов. Сжатие аккаунта переходит на механизм сжатия Responses, только если старый адрес сжатия явно недоступен, и сохраняет контекст и использование. Подсказки состояния хода остаются у точных сеанса, модели и учётных данных аккаунта, включая обновление авторизации и одновременные ответы.
-
-- Видимость модели, разрешения моделей участника, вывод из ротации, предпочтение запуска и включение автоматизации используют тот же вид переключателя, что и настройки приложения.
-
-- Правила моделей пула могут сбросить порядок моделей и групп к каталогу по умолчанию. Сначала идут OpenAI, Anthropic, Google и xAI, затем остальные компании по алфавиту. Внутри компании семейства каталога держатся вместе, более новые версии — первыми внутри семейства, одинаково у всех провайдеров. Новые семейства группируются сами по метаданным. Неудачная перестановка возвращает показанный сохранённый порядок, а вторая перестановка не накладывается на ещё не сохранённую.
-
-- Обновление каталога сохраняет цены и справочные уровни размышления, даже если старые списки маршрутов или объявления адресов неполны. Проекция клиента пула следует автоматической маршрутизации, а преобразованные запросы сохраняют цены источника во всех четырёх протоколах. Фоновое обновление сервера также обновляет метаданные протокола, не затирая одновременные правки и не возвращая удалённые источники. Codex получает общие справочные уровни размышления через подходящие маршруты Responses, включая преобразованные модели, с учётом областей ключа и ограничений адаптера.
-
-- Правила моделей пула сохраняют имена, группы, цены, режимы размышления и сохранённый порядок для всех моделей аккаунтов и API в пуле, даже если участник отключён или недоступен. Одинаковые идентификаторы моделей показаны одной строкой и считают только участников пула.
-
-- Подписи моделей Codex используют общее справочное имя, а затем компактную подпись из идентификатора модели, одинаково в пуле и при прямом подключении API. Справочное имя не портится из-за повреждённых метаданных участника. Верная карточка аккаунта-владельца важнее несовместимой. Идентификаторы моделей и порядок пула сохраняются.
-
-- С карточек и меню аккаунтов убрано техническое действие принудительного обновления входа. Восстановление входа остаётся в обычном входе, а обновление квоты — единственное видимое действие обновления.
-
-- Восстановление пула автоматическое: рассматриваются все совместимые участники, временный сбой даёт паузу не меньше пяти секунд, повторные сбои увеличивают паузу. Недоступная модель, отклонённые учётные данные и непрозрачный отказ шлюза больше не мешают перейти к другому подходящему API или аккаунту. Ручные настройки числа повторов и паузы последнего кандидата убраны.
-
-- Английская и русская справка переписаны вокруг текущего порядка подключений, режимов, ротации пула, квот, балансов и восстановления. Добавлено связанное оглавление, исправлены устаревшие пути настроек и описания поведения. У справки есть колонка чтения, закреплённое оглавление с текущим разделом, нумерованные шаги настройки и строки ошибок, которые помещаются в узкое окно. На маленьком экране оглавление становится компактным меню. Справочник ошибок группирует точные коды с причинами и конкретными шагами восстановления, категории раскрываются, доступен поиск по коду или симптому.
-
-- Сброс недельной квоты использует компактную строку действия и отдельный счётчик кредитов на карточках аккаунта и пула.
-
-- Правила участника пула открываются компактным списком моделей с одним переключателем на модель. Раскрываемые группы провайдеров сохраняют отключённые модели, длинные списки можно искать. Цены API выровнены столбцами рядом с моделью, включая запись кэша на 5 минут и 1 час. В узком окне цены подписаны по строкам. Вторичные настройки выровнены на своей вкладке. Порядок моделей аккаунта и API следует метаданным и сохранённому ручному порядку, не перемещая отключённые модели и не ставя выше переопределение цены.
-
-- У аккаунтов и API-провайдеров три режима ротации пула: Автоматически, По порядку и По кругу. Сохранённый Smart при обновлении становится Автоматически. Один переставляемый список заменяет отдельные роли API, с долями участников и общими пределами запросов. Настройки применяются, не прерывая уже идущие запросы. Недоступные участники не блокируют остальных. Одновременные правки обнаруживаются до сохранения, пресеты сохраняют смешанный порядок. В редакторе одна полоса прокрутки, короткие подписи состояния и элементы, нужные выбранному режиму. По центру стоят доля запросов и одновременные запросы, для снятого предела показано «Без ограничений». Подробности — в справке. Автоматический режим выбирает наименее занятых подходящих участников и использует долю запросов только при равной загрузке. Он не ранжирует по ручному порядку, балансу или проценту квоты. По порядку сохраняет ручную очередь. Режимы выбираются с клавиатуры. Недавний сбой теряет штраф планирования в течение минуты, поэтому восстановившийся участник может вернуться сам. Завершение более старого запроса не освобождает чужую пробу восстановления. Занятые пробы допускают ограниченное ожидание. Изменение состава пула на сервере сразу применяет сохранённый порядок и пределы запросов. Подсказка следующего кандидата следует планировщику и не показывается, если выбор зависит от модели или формата. Устаревшие события активности не затирают состояние более новой среды выполнения.
-
-- Управление пулом использует компактную панель, отдельную строку текущего и следующего маршрута и рамку с затенённой полосой состояния и разделителями между счётчиками. Подключения используют ту же панель для поиска, фильтров и действий аккаунта. Обе сводки сохраняют общую сумму кредитов провайдера, если она есть. Полные имена маршрутов и моделей переносятся на узком экране. У действий-значков остаются подсказки.
-
-- Скорость запросов пула — один перетаскиваемый переключатель на три положения: Обычная, Быстрая и Сверхбыстрая, вместо меню и отдельного выключателя. Компактная подпись показывает только выбранный режим, переход плавный и учитывает настройку уменьшения движения. Выбор доступен с клавиатуры и касанием. Перетаскивание сохраняется при отпускании.
-
-### Добавлено
-
-- Пул одновременно обслуживает Responses, Chat Completions, Messages и Gemini, с нативными путями и поддерживаемым преобразованием для JSON и потоковых запросов.
-
-- Маршрутизация API-источника полностью автоматическая. Relay не показывает выбор адаптера, предпочитает объявленный нативный адрес каждой модели и при необходимости преобразует запрос из Responses, Chat Completions, Messages или Gemini. Chat Completions поддерживает функции-инструменты и историю их результатов.
-
-- Новый API-источник определяет форматы сам по объявлениям провайдера и настройкам адреса. Каждая модель каталога остаётся маршрутизируемой через запасной путь источника, если объявлений нет. Старые поля ручного режима принимаются при импорте и игнорируются. Прежние назначения физических адресов остаются подсказкой запасного пути, поэтому источник со смешанными протоколами продолжает работать после обновления.
-
-- OpenCode использует группы SDK по протоколам и сохраняет рабочие идентификаторы моделей и пользовательские параметры при обновлении каталога. Codex использует поток HTTP, когда модели нужно преобразование, а нативные соединения WebSocket по-прежнему поддерживаются.
-
-- Карточки API распознают балансы Sub2API, New API, совместимого биллинга One API, DeepSeek и SiliconFlow. Статистика OpenRouter работает с обычным ключом генерации. Карточки различают кошелёк, остаток ключа, подписку, валюту и собственную оценку использования Relay, не показывают внутренние подписи адаптера и отсутствующее число запросов и помечают неудачное обновление, не отбрасывая последний известный баланс. Ход обновления виден на анимации кнопки, без второй строки состояния под счётчиками.
-
-- Сведения о неудачном запросе показывают исходные код, тип, сообщение и статус HTTP провайдера отдельно от категории Relay. Сообщение можно скопировать. Секретное содержимое скрыто, длинное сообщение ограничено. У старых записей явно показано, что сообщение провайдера не было сохранено.
-
-- В настройках есть **Диагностика**. Relay ведёт отдельные ограниченные по размеру и очищенные журналы ошибок, аварийных завершений и важных этапов операций. Каждую папку можно открыть из приложения. Подробный журнал операций выключен по умолчанию и включается там же, когда нужно разобраться в сбое.
-
-- Импорт переносимых аккаунтов сохраняет безопасное имя и ограниченные
-  неповторяющиеся метки, не раскрывая учётные данные. При повторном импорте
-  метки Relay остаются главными.
-
-### Исправления
-
-- Блоки запроса Gemini и пустые кандидаты, отфильтрованные или ограниченные по токенам, доходят до клиента как неполный ответ в JSON и в потоковом преобразовании, а не как повреждённый вывод провайдера или успешное завершение.
-
-- Действия на карточке аккаунта разделены и выглядят одинаково, без вложенной рамки заголовка. Состояние квоты, требующее входа, имеет более понятную цель для клавиатуры и указателя.
-
-- Режимы ротации пула сохраняются при первом использовании и когда участники входят или выходят, и не возвращаются к Smart из-за устаревшего сохранённого списка. Одновременные правки по-прежнему обновляются и безопасно повторяют сохранение. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Выбор аккаунта ChatGPT и резерв квоты находятся в одной компактной панели. Переключатели возможностей — плоские строки с коротким описанием. Настройки участника пула больше не добавляют вторую рамку внутри окна. Подзаголовок вкладки OpenCode говорит «Использовать пул в OpenCode». ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Имена моделей GPT в ChatGPT и Codex сохраняют исходные идентификаторы, даже если у выбранного аккаунта нет подходящей карточки каталога. Явные префиксы ключей и существующие псевдонимы поддерживаются. Возможности берутся у совпавшей модели. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Восстановление истории инструментов Responses сохраняет связь вызова и результата, если клиент ссылается на идентификатор элемента или не передаёт идентификатор вызова. Результаты сопоставляются по виду и пространству имён, без удаления истории и без угадывания среди параллельных вызовов. HTTP, поток и WebSocket используют одно и то же ограниченное восстановление. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Ротация пула сразу сохраняет режим, порядок и настройки участников. Перетаскивание работает одинаково, одновременное изменение состава обновляет редактор, а конфликт сохранения повторяется и не возвращает удалённых участников. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Действия правил моделей стоят в одной выровненной группе, элементы формата, размышления, скорости и включения одного размера. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Поля цены провайдера имеют одну скруглённую обводку, отдельный знак валюты и числа, выровненные вправо. Фокус и неверное значение подсвечивают всё поле одинаково в обеих темах. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Подписи скорости пула и сводки подключений помещаются при более широком системном шрифте и не обрезаются и не переносятся без нужды на обычном экране. ([#74](https://github.com/F0RLE/zenith-relay/pull/74))
-
-- Несколько маршрутов одного участника делят вес ротации и ёмкость запросов. Неподдерживаемый адрес не отключает остальные форматы участника. Сбои квоты и авторизации остаются общими. Повторы продолжения сохраняют полную историю, результаты инструментов и непрозрачное владение.
-
-- Преобразованный запрос отклоняет неподдерживаемые параметры, а не отбрасывает их молча. Схемы сохраняют ограничения, инструкции одного хода не переносятся в следующие, уровни размышления предлагаются только там, где их можно сопоставить. Потоковые инструменты сохраняют идентификаторы и порядок. Использование отражает фактический формат провайдера и не выдумывает отсутствующие счётчики.
-
-- Привязка кэша больше не выбирает участника вне лучшей доступной группы и не обходит учёт ротации.
-
-- Задержка повтора, которую сообщил провайдер, соблюдается для перегруженных и недоступных моделей и других ошибок службы, в том числе если настроена более короткая задержка восстановления.
-
-- Обработка TLS обновлена до rustls 0.23.45, чтобы закрыть RUSTSEC-2026-0285.
-
-- Пул больше не сообщает, что недоступны все участники, если телеметрия маршрутизации отсутствует или устарела, но готовые участники есть. Если готовых нет, предупреждение отдельно показывает ожидание квоты, недоступных и отключённых участников, с понятной причиной ошибки. Пул и Подключения группируют аккаунты по доступности и сохраняют порядок маршрутизации внутри группы.
-
-- Ошибка провайдера внутри ответа HTTP 200, в JSON или в потоке, остаётся ошибкой в истории использования. Ограничение частоты и лимит расходов различаются. Явная ошибка проверки запроса не отправляет аккаунт на паузу.
-
-- Общий отказ запроса провайдером или отключённая модель больше не блокируют переход к другому совместимому участнику. Ошибка службы на маршруте аккаунта сохраняет принадлежность аккаунту и не помечает аккаунт нездоровым.
-
-- Продолжение инструментов проверяет всю историю, включая вызовы после первых шестнадцати. Завершённые старые вызовы больше не выбирают владельца нового результата инструмента, а выводы разных владельцев нельзя смешать неявно. Примеры в схемах инструментов и вложенные данные результата больше не влияют на маршрутизацию.
-
-- Обновление моделей аккаунта больше не стирает независимую блокировку, требование входа или ошибку проверки и не понижает окончательную ошибку каталога после временного сбоя сети. Ошибка наблюдения за квотой больше не скрывает причину недоступности аккаунта в Подключениях и Пуле.
-
-- Активность пула сопоставляет последний аккаунт или API-источник по идентичности, поэтому запросы с одинаковым временем не подсвечивают не того участника.
-
-- Восстановление сохраняет исходную привязку ответа для других веток чата и повторов и использует параметры текущего запроса, не возвращая старые инструкции или настройки транспорта. Ссылки провайдера на разговор и элементы или результаты инструментов без их вызовов больше не считаются полным локальным повтором.
-
-- Чат с переданным сжатым контекстом может продолжиться без устаревшей ссылки на ответ по HTTP или WebSocket. Сжатое окно и сохранённые результаты инструментов остаются. Нечитаемое сжатие больше не отбрасывается молча.
-
-- Восстановление чата требует сохранённую цепочку разговора, прежде чем убрать прежнюю ссылку на ответ, если не передано полное сжатое окно. Так прежний контекст не теряется молча.
-
-- Ручное обновление учётных данных и наблюдаемый вход клиента возвращают аккаунту возможность маршрутизации. Карточки удалённых аккаунтов показывают паузу среды выполнения и недоступные маршруты.
-
-- Восстановленные аккаунты пула остаются доступны, не удаляя другого участника. Запоздалое обновление авторизации больше не отменяет более новое отключение аккаунта. Карточки аккаунтов показывают временную недоступность среды во время паузы.
-
-- Импорт аккаунта или API-источника без добавления в пул больше не перезапускает работающий локальный шлюз. Посторонний перезапуск приёмника не прерывает Relay при импорте только в список.
-
-- После прерванного запуска или импорта диагностика при следующем старте записывает последний очищенный этап операции, даже если подробный журнал был выключен.
-
-- Чат, у исходного аккаунта которого кончилась квота, может продолжиться через следующий совместимый здоровый аккаунт или API-источник. Это работает и для обычных запросов Responses, и для WebSocket.
-
-- Чат может восстановиться после истёкшей ссылки на ответ по локально сохранённой истории Relay, в том числе на уже открытом WebSocket. Полная история инструментов может перейти вместе с пулом. Неполное состояние инструмента больше не удаляется молча при восстановлении.
-
-- Неизвестная ссылка на ответ отклоняется до обращения к несвязанному аккаунту. Клиент может отправить полную историю без старой ссылки. Иначе Relay сообщает, что контекст продолжения недоступен.
-
-- Аккаунт, которому нужен вход, который на паузе или у которого ошибка, отключает только этого кандидата, в том числе если статус изменился при уже работающем локальном шлюзе. Остальной пул и его доступные модели продолжают ротацию.
-
-- Импорт аккаунта и очистка OAuth больше не оставляют устаревшее временное состояние, которое может закрыть Relay или заблокировать следующий импорт. JSON-аккаунт можно добавить в Relay, не добавляя его в пул.
-
-- Обновлённые кредиты аккаунта и пределы квоты применяются к работающему пулу, в том числе когда Relay открыт только в трее. Как доступный баланс показываются только настоящие кредиты провайдера.
-
-- Фоновые проверки пробуждения ChatGPT используют живую среду шлюза, включая обновление токена, паузу, использование и диагностику, и остаются закреплены за аккаунтом, который выбрал планировщик.
-
-- Модель можно вернуть на Обычную скорость, пока её маршрут временно недоступен. Быстрая и Сверхбыстрая заново считаются для каждого кандидата повтора, поэтому неподдерживаемая скорость не переносится на следующий аккаунт или API-источник.
-
-- Правила моделей сохраняют каждую модель участников пула, включая отключённых и временно недоступных. Доступность запроса проверяется при выборе участника, поэтому отсутствие маршрута не удаляет строку модели.
-
-- Сохранение неполной перестановки правил моделей сохраняет недоступные модели и модели, которые есть только как привязка, и не считает их удалёнными.
-
-- Карточки Пула и Подключений одинаково показывают сведения об аккаунте и управление повторным входом. Недоступные аккаунты остаются видны со своим статусом, и из-за них весь пул не выглядит недоступным.
-
-- На странице завершения OAuth больше нет кнопки закрытия, которая не может сработать.
 ## [1.1.2] - 2026-09-03
 
 Zenith Relay 1.1.2 improves provider failover, usage visibility, application

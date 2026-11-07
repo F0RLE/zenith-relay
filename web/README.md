@@ -1,335 +1,331 @@
 # Relay Hosted web
 
-Независимый React/TypeScript/Vite-фронтенд внутри репозитория Relay. Клиентский
-кабинет и панель владельца работают только в Hosted-контексте. Подключение Hosted
-API, авторизация и серверные операции остаются будущей работой H13/H14/H15.
-В development используются синтетические данные в памяти окна. Production-сборка
-содержит экраны, но исключает fixtures и вымышленную авторизованную сессию.
+[Russian translation](README.ru.md)
 
-## Локальный запуск
+An independent React/TypeScript/Vite frontend in the Relay repository. The customer
+dashboard and owner panel operate only in the Hosted context. Hosted API integration,
+authentication and server operations remain future H13/H14/H15 work. Development uses
+synthetic data held in window memory. The production build includes the screens but
+excludes fixtures and simulated authenticated sessions.
 
-Из `web/`, тем же Bun, который используется для Desktop:
+## Local development
+
+From `web/`, using the same Bun installation as Desktop:
 
 ```powershell
 bun install --frozen-lockfile
 bun run dev
 ```
 
-Открыть `http://127.0.0.1:1441/`: главная страница с кнопкой «Начать» ведёт в
-демо-кабинет напрямую, без приветственного окна и записи отметок в sessionStorage.
-Вторичное действие «Модели и цены» открывает `/app/models` без промежуточного обзора.
+Open `http://127.0.0.1:1441/`. The landing page's Get started action opens the demo
+dashboard directly, without a welcome dialog or sessionStorage markers. The secondary
+Models & pricing action opens `/app/models` without an intermediate Overview page.
 
-## Кабинеты и учебные данные
+## Dashboards and synthetic data
 
-Клиентский кабинет: `http://127.0.0.1:1441/app/overview`. Разделы `/app/`:
+Customer dashboard: `http://127.0.0.1:1441/app/overview`. Sections under `/app/`:
 `overview`, `usage`, `models`, `status`, `keys`, `billing`.
-«Статус» находится сразу после «Моделей»: общая сводка, поиск и список моделей
-с историей доступности за 24 часа или 7 дней. Наведение, фокус и касание истории
-открывают показатели выбранного интервала; стрелки выбирают интервал, Escape
-закрывает подсказку. Время показано в UTC. Источники и маршрутизация не раскрываются.
-До подключения мониторинга метрики неизвестны, история нейтральная; каталог
-не доказывает доступность, личная история запросов не подменяет статус сервиса.
-Прежний `/preview.html?page=…`
-сохранён как development-вход в тот же интерфейс, а не отдельный кабинет.
-Прямые ссылки, перезагрузка и Back/Forward сохраняют выбранный раздел.
+Status follows Models and includes a summary, search and model availability history
+for the past 24 hours or 7 days. Hover, focus or touch reveals interval metrics;
+arrow keys select an interval and Escape closes the tooltip. Times use UTC. Sources
+and routing are private. Until monitoring is connected, metrics remain unknown and
+history stays neutral. The catalog does not prove availability, and personal request
+history does not substitute for service status.
+The legacy `/preview.html?page=…` remains a development entry into the same interface,
+not a separate dashboard. Direct links, reload and Back/Forward preserve the section.
 
-Панель владельца: `http://127.0.0.1:1441/admin/overview`. Разделы `/admin/`:
+Owner panel: `http://127.0.0.1:1441/admin/overview`. Sections under `/admin/`:
 `overview`, `connections`, `pools`, `models`, `usage`, `notifications`.
-Набор маршрутов задаёт `src/features/app/routes.ts`.
-Это отдельная поверхность:
-в клиентском кабинете нет переключателя роли или входа от имени клиента.
-В макете можно добавлять учебные подключения, отдельно включать их в пул,
-менять порядок, парковать, приостанавливать и восстанавливать вне пула.
-Изменения общие для Подключений, Пула и Обзора и исчезают после перезагрузки.
-Поиск учитывает имя, источник и модели; смена фильтра или вкладки снимает выбор.
-Корзина сохраняет подключения,
-а восстановление не возвращает их в пул автоматически. Порядок участников
-меняется относительно полного пула, включая скрытых фильтром участников.
-Квоты, подписки и здоровье источников не выдумываются из наличия подключения.
-Карточки аккаунтов показывают подписку, маршрут, квоты, известные сроки,
-API-эквивалент использования, оценку остатка недели и окупаемость.
-Обновление квот отключено до подключения Hosted API.
-Отсутствующие сроки скрыты, неизвестная квота не равна нулю, истёкшее окно
-не превращается в новую полную квоту. Экономика — API-эквивалент, не списания
-пользователей и не расходы провайдера; без цены покупки окупаемость не считается.
-Итоги включают только аккаунты текущего сохранённого состава, не поисковой выдачи:
-известное использование суммируется, общие квоты учитываются один раз по ledger,
-окупаемость считается по парным данным использования и цены покупки. Неполные
-данные отмечены приближением, полностью неизвестные — прочерком. Кнопка `$`
-одновременно скрывает/показывает итоговые расчёты и метрики в карточках.
-`accountPresentation.ts` переиспользует чистые Desktop-функции из
-`accountEconomics.ts`, `poolFormatting.ts` и `quotaFormatting.ts`, без store/IPC.
-Телеметрия двух учебных аккаунтов задана отдельно в `preview/ownerAccounts.ts`
-по синтетическим Desktop-тестам и привязана к времени снимка. Локальные
-аккаунты, данные со скриншотов и секреты не служат источником этих значений.
-В Обзоре владельца отдельно видны итоговые списания пользователей за API,
-запросы, ошибки и текущий состав пула. Денежная сумма учитывает только `posted`
-за выбранный период/модель: не пополнения, резервы, ожидающие расчёта запросы
-или расходы провайдеров. Неизвестное итоговое списание остаётся неизвестным.
-Это проверка синтетического снимка, не настоящая статистика всех пользователей.
+`src/features/app/routes.ts` defines the routes. The owner panel is a separate surface;
+the customer dashboard has no role switch or impersonation action.
 
-Добавление в пул требует отдельного подтверждения.
-Выбор сохраняется при фильтрации и переходе к созданию API-подключения;
-сохранённый провайдер попадает в список выбранных, но в пул — только после
-явного подтверждения. Пакетное добавление не снимает паузу и не возвращает
-подключения из корзины. Используется только Hosted-инвентарь, без Desktop IPC
-или переноса локальных аккаунтов.
+The preview supports adding synthetic connections, admitting them to the pool
+separately, reordering, parking, pausing and restoring them outside the pool.
+Connections, Pool and Overview share these changes until reload. Search matches
+names, sources and models; changing the filter or tab clears the selection. Trash
+preserves connections, and restoring one does not automatically rejoin the pool.
+Member order is relative to the entire pool, including members hidden by filters.
+The presence of a connection does not establish quota, subscription or source health.
 
-Использование сохраняет свои фильтры. В клиентском и владельческом Обзоре
-периоды — последние 24 часа, 7 или 30 суток до `snapshot.asOf`, а не дни
-от полуночи. Все 24/7/30 интервалов полные; точное время остаётся в подсказках
-и доступной таблице, без подписей интервалов под графиками. Dev-снимок
-фиксирован: до подключения API он не изображает обновление реальных данных.
+Account cards show subscription, route, quotas, known dates, API-equivalent usage,
+estimated weekly remainder and cost recovery. Quota refresh stays disabled until
+Hosted API integration. Missing dates are hidden; unknown quota is not zero, and an
+expired window does not become a fresh full quota. Economics are API equivalents,
+not customer charges or provider costs. Cost recovery requires a purchase price.
+Totals include accounts in the current saved inventory, not just search results:
+known usage is summed, shared quotas count once per ledger, and cost recovery uses
+paired usage and purchase-price data. Partial values are marked as approximate;
+fully unknown values use a dash. The `$` control toggles both summary economics and
+card metrics.
 
-Периоды задаёт `src/features/overview/timeline.ts`; у владельца есть также весь
-период. В Использовании «Сегодня» начинается с полуночи UTC, а остальные окна
-скользят относительно снимка (`src/features/usage/period.ts`).
+`accountPresentation.ts` reuses pure Desktop functions from `accountEconomics.ts`,
+`poolFormatting.ts` and `quotaFormatting.ts`, without the store or IPC. Telemetry for
+two demo accounts is defined separately in `preview/ownerAccounts.ts`, based on
+synthetic Desktop tests and anchored to the snapshot time. Local accounts, screenshot
+data and secrets are not sources for these values.
 
-## Каталог и подключения
+Owner Overview separately shows posted customer API charges, requests, errors and
+current pool membership. Charges include only `posted` amounts for the selected
+period/model, excluding top-ups, holds, unsettled requests and provider costs.
+Unknown total charges remain unknown. This validates a synthetic snapshot, not live
+statistics across customers.
 
-Маршруты вне приведённого списка показывают «Страница не найдена».
-Каталог общий для клиентского и владельческого кабинетов, без локального
-редактора тарифов. Меню тарифа/контекста показывает опубликованные сочетания;
-каждая строка поддерживает копирование ID.
+Pool admission requires separate confirmation. Selection survives filtering and
+navigation to API connection creation. A saved provider joins the selection but
+enters the pool only after explicit confirmation. Bulk admission neither resumes
+paused connections nor restores trashed ones. Only Hosted inventory is used; there
+is no Desktop IPC or transfer of local accounts.
 
-Контракт представления находится в `src/features/models/model.ts`:
-`rates` — microUSD за миллион токенов, `comparison.officialRates` — сопоставимые
-официальные тарифы, `comparison.savingsPercent` — готовые проценты от бэка,
-отдельно для входа, выхода, чтения и записи кэша. Фронтенд не считает скидки,
-не выбирает официальный прайс по имени модели и не восстанавливает текущие
-цены из истории запросов. Сопоставимость модели, тарифа, контекстного диапазона
-и правил кэша проверяет сервер. Нет процента — нет бейджа; нет цены — «—»,
-не ноль. Некорректные проценты и официальные цены, не превышающие нашу,
-не становятся рекламной скидкой. По умолчанию сохраняется входящий порядок
-серверного каталога, без выдуманных «популярных» моделей.
+Usage preserves its filters. Customer and owner Overview periods cover the last
+24 hours, 7 days or 30 days before `snapshot.asOf`, not calendar days from midnight.
+All 24/7/30 intervals are complete. Exact times remain in tooltips and the accessible
+table, without interval labels below charts. The development snapshot is fixed and
+does not simulate live refresh before API integration.
+`src/features/overview/timeline.ts` defines the periods; the owner also has an all-time
+option. In Usage, Today starts at midnight UTC, while other windows roll relative
+to the snapshot (`src/features/usage/period.ts`).
 
-В Пуле → Правила моделей компании разделены как в Desktop Relay. Группа задаётся
-`catalogProvider` (в preview также метаданными `publisher`), а не именем модели
-или типом подключения. Цены и включение доступны прямо в строках, без отдельных
-редакторов. Компактная стрелка слева от названия компании сворачивает или раскрывает её строки
-только в текущей админке; это не отключает модели и не скрывает их с витрины.
-Группы изначально раскрыты; их сворачивание не затрагивает цены или порядок.
-За маркер слева можно перенести целую компанию либо модель внутри её компании;
-доступны касание, стрелки клавиатуры, Home/End и отмена перетаскивания через Escape.
-Общий `modelDisplayOrder` хранит полные блоки, включая выключенные модели;
-новые модели добавляются внутрь своей компании. Этот порядок, состояния и цены
-использует одна проекция админского и клиентского каталогов.
+## Catalog and connections
 
-В dev-only preview изменения каталога синхронизируются между открытыми вкладками
-через `BroadcastChannel`, только в памяти. Новая вкладка получает изменения от
-уже открытой; после закрытия всех вкладок изменения теряются. Без поддержки
-`BroadcastChannel` изменения ограничены текущей вкладкой. Это не серверное
-сохранение или публикация тарифов: revision-checked запись, авторизация и
-проекции публичной продажи остаются в H07/H13–H15 Hosted roadmap. Перестановка
-не меняет ротацию пула, доступность маршрута и расчёт списаний.
+Unknown routes show Page not found. Customer and owner dashboards share the catalog,
+without a local tariff editor. The tier/context menu shows published combinations;
+each row supports copying the model ID.
 
-`pricingVariants` — проекция уже разрешённых сервером клиентских предложений,
-а не второй движок тарифов. Идентификаторы Standard/Flex/Priority/Ultrafast,
-контекстные полосы `base`/`above100k`/`above128k`/`above200k`/`above272k`/`above512k`
-и форматирование диапазонов переиспользуют чистые типы и helper Desktop/core
-(`api/types/pricing.ts`, `components/sourcePriceEditorModel.ts`). Порог цены
-не выводится из максимального контекста модели. Каждый вариант несёт свои
-готовые цены и сравнения: отсутствующие значения не наследуются от другого
-тарифа. Ставки записи кэша 5 минут/1 час остаются отдельными компонентами.
-Исходная цена провайдера не становится нашей ценой продажи, а наличие прайса
-не доказывает доступность маршрута. Разрешение core-overlay, доступность,
-розничная наценка и сопоставимость официальных цен остаются на сервере.
+`src/features/models/model.ts` owns the presentation contract: `rates` are microUSD
+per million tokens, `comparison.officialRates` are comparable official rates, and
+`comparison.savingsPercent` contains server-calculated percentages for input, output,
+cache reads and cache writes. The frontend does not calculate discounts, select
+official prices by model name or reconstruct current prices from request history.
+The server qualifies model, tier, context-band and cache-rule comparability. Missing
+percentages have no badge; missing prices display a dash, not zero. Invalid percentages
+and official prices at or below the offered rate do not become advertised discounts.
+The default order follows the server catalog, without invented popularity rankings.
 
-В dev/preview используются синтетические данные
-`src/preview/models.ts`, а не реальные предложения OpenAI, Anthropic или Google.
-Их нет в production-сборке. Адаптер Hosted API и публикация серверных тарифов
-пока не подключены.
+Pool model rules group companies as Desktop Relay does. `catalogProvider` identifies
+the group, with `publisher` metadata also used in the preview, rather than model name
+or connection type. Prices and enabled state are editable inline. The compact arrow
+before a company name collapses or expands its rows only in the current owner panel;
+it neither disables models nor hides them from the customer catalog. Groups start
+expanded, and collapsing them preserves prices and order.
 
-API-карточки в Подключениях и Пуле повторяют структуру Desktop: имя и адрес,
-баланс/расходы провайдера, число моделей и четыре действия. Типы `SourceSummary`,
-`SourceStats` и чистые helpers валют/протоколов переиспользуются из Desktop/core;
-неизвестные суммы остаются «—», расходы клиента не подменяют расходы провайдера.
-Счётчик моделей открывает их список с разрешёнными core-привязками протоколов.
-Добавление и редактирование адреса, протокола и ручного списка моделей работают
-только в demo store. Новый адрес сбрасывает старые наблюдения, новые модели
-не получают выдуманных возможностей. Ключи не принимаются, запросы к провайдеру
-не отправляются; обновление остаётся отключено до подключения Hosted API.
-Запуск локальных приложений в Hosted не переносится: последнее действие — пауза/возобновление.
+The leading drag handle moves an entire company or a model within its company.
+Touch, arrow keys, Home/End and Escape cancellation are supported. Shared
+`modelDisplayOrder` retains complete blocks, including disabled models; new models
+join their company. One projection supplies this order, state and pricing to both
+owner and customer catalogs.
 
-Удаление текущих экранов не отменяет будущие требования к учёту,
-авторизации и аудиту Hosted. Публикация, возвраты, вход и управление сервером
-не симулируют успешные серверные операции.
+In the development-only preview, catalog edits synchronize between open tabs through
+`BroadcastChannel`, in memory only. A new tab receives edits from an existing tab;
+closing all tabs loses them. Without `BroadcastChannel`, edits stay in the current
+tab. This is not server persistence or tariff publication: revision-checked writes,
+authorization and public-sale projections remain H07/H13–H15 roadmap work.
+Reordering does not change pool rotation, route availability or charge calculation.
 
-Веб-версия не содержит режима «Локально», запуска приложений, локальных профилей,
-импорта реальных аккаунтов, Tauri IPC или доступа к Desktop runtime. Состояние
-Desktop не переносится. Полные учебные ключи показываются один раз и не попадают
-в URL или хранилища; создание, замена и отзыв действуют только на данные макета.
-Тема и язык всего Hosted переключаются в шапке: SVG-флаг расположен рядом
-с темой, как на лендинге. Это необязательные локальные предпочтения; английский
-используется по умолчанию. Отдельного раздела настроек нет в обоих кабинетах, старые пути
-`/app/settings`, `/admin/settings` и `/preview.html?page=settings` показывают
-«Страница не найдена». На телефонах навигация открывается
-в модальной панели с фокусом, Escape и возвратом к кнопке меню.
-В кабинете выбор языка раскрывается лентой на месте флага, колокольчика и темы:
-центр подсвечен, прокрутка колеса и стрелки плавно перемещают флаги без выбора
-языка заранее. Нажатие или Enter подтверждает выбор; Escape возвращает прежний.
-Раскрытие и закрытие не двигают шапку, быстрые повторные действия прерывают
-анимацию без ожидания. Reduced motion оставляет только короткое затухание.
-Данные и тарифы вымышленные; реальных ключей, авторизации и сетевых API-вызовов нет.
-Демо-пополнение меняет только состояние текущего окна.
-Ввод суммы, быстрые суммы и выбор способа оплаты находятся прямо в блоке баланса,
-без окон ввода и подтверждения. Способы берутся из `paymentMethods` в демо-снимке;
-выбранный способ сохраняется в деталях операции, платёжные провайдеры не вызываются.
-Диапазон остаётся прежним: целые суммы от 1 до 1000 USD. После пополнения поле
-очищается, результат показывается на странице. Демо-баланс
-сбрасывается после перезагрузки и явно обозначен как симуляция. Баланс показывает
-операции пополнения; журнал запросов находится в Использовании. Графики и таблицы используют один набор
-fixtures; фильтры Обзора и Использования сохраняются независимо.
+`pricingVariants` projects server-authorized customer offers rather than implementing
+a second pricing engine. Standard/Flex/Priority/Ultrafast identifiers, context bands
+`base`/`above100k`/`above128k`/`above200k`/`above272k`/`above512k` and range formatting reuse
+pure Desktop/core types and helpers (`api/types/pricing.ts`,
+`components/sourcePriceEditorModel.ts`). A price threshold is not inferred from a
+model's maximum context. Each variant carries its own rates and comparisons; missing
+values are not inherited from another tier. Five-minute and one-hour cache-write
+rates remain separate components. A provider's rate is not the retail price, and a
+price record does not prove route availability. Core-overlay resolution, availability,
+retail markup and official-price comparability remain server responsibilities.
 
-## Оформление и локализация
+`src/preview/models.ts` supplies synthetic development/preview data, not actual OpenAI,
+Anthropic or Google offers. These fixtures are excluded from production. The Hosted
+API adapter and server tariff publication are not connected yet.
 
-[Дизайн-система](DESIGN.md) описывает реализованные стили, компоненты, мобильную
-компоновку, фокус и reduced motion. README описывает запуск и поведение данных,
-не дублируя пиксельные размеры и историю перестановок элементов. Локальные шрифты
-Golos Text и лицензия SIL OFL находятся в `public/fonts`.
+API cards in Connections and Pool follow Desktop's structure: name and address,
+provider balance/spend, model count and four actions. `SourceSummary`, `SourceStats`
+and pure currency/protocol helpers are reused from Desktop/core. Unknown amounts use
+a dash; customer charges do not substitute for provider costs. The model count opens
+a list with permitted core protocol bindings. Adding or editing addresses, protocols
+and manual model lists affects only the demo store. A changed address clears old
+observations, and new models receive no invented capabilities. Keys are not accepted,
+provider requests are not sent, and refresh stays disabled until Hosted API integration.
+Hosted does not launch local applications; its final card action is pause/resume.
 
-Dev-only fixtures и операции в памяти остаются учебными, даже когда интерфейс
-не повторяет пометку «демо». Предупреждения об ошибках и неподключённых серверных
-функциях сохраняются. Тема общая для обоих входов; сбой localStorage не блокирует UI.
+Removing preview screens does not remove future Hosted accounting, authorization or
+audit requirements. Publication, refunds, sign-in and server management do not simulate
+successful server operations.
 
-Лендинг, вопросы, клиентский кабинет, панель владельца и экран неподключённого
-Hosted доступны на английском, русском и упрощённом китайском. Английский —
-основной язык и fallback; язык браузера не меняет этот выбор. Предпочтение
-сохраняется локально независимо от темы и синхронизируется между вкладками.
-Смена языка не сбрасывает черновики, фильтры или данные. Лендинг и служебный вход
-используют `LanguageSwitcher`: всплывающее меню на компьютере и системный выбор
-на узких/сенсорных экранах. Кабинет использует отдельный `HeaderLanguageSwitcher`
-с лентой в шапке. Оба сохраняют доступные названия и клавиатурное управление.
-Переводы находятся в отдельных JSON-файлах `src/i18n/messages/en.json`,
-`ru.json` и `zh-CN.json`. Компоненты используют постоянные смысловые ключи,
-например `t("common.save")`, а не английские предложения или языковые условия.
-Общие действия переиспользуют один ключ; разные значения, например действие
-пополнения и вид операции, имеют отдельные ключи. Английский JSON задаёт тип
-`MessageKey`; неизвестный ключ обнаруживается TypeScript. Тексты интерфейса,
-подсказки, accessibility-подписи и уведомления находятся в этих ресурсах.
+The web app has no local mode, application launching, local profiles, real account
+import, Tauri IPC or Desktop runtime access. Desktop state is not transferred. Full
+demo keys appear once and never enter URLs or storage; create, reissue and revoke
+affect preview data only.
 
-Чтобы добавить язык, создайте `src/i18n/messages/<locale>.json` с теми же
-ключами и плейсхолдерами `{name}`, `{count}` и добавьте запись в
-`src/i18n/registry.ts`: код, название, краткую метку, направление текста,
-начало недели и динамический импорт словаря. Компоненты копировать не нужно.
-SVG-флаг можно добавить в `LanguageFlag.tsx`; без него используется краткая
-метка языка. Перед включением языка проверьте календарь, длинные подписи,
-мобильные экраны и направление текста. Проверки словарей автоматически
-проходят по реестру языков.
+Hosted theme and language controls are in the header, with an SVG flag beside the
+theme control as on the landing page. These are optional local preferences; English
+is the default. Neither dashboard has a Settings section. `/app/settings`,
+`/admin/settings` and `/preview.html?page=settings` show Page not found. On phones,
+navigation uses a modal drawer with focus handling, Escape and focus return to the
+menu button.
 
-Английский ресурс доступен сразу; остальные загружаются только при выборе
-или восстановлении сохранённого языка. Словари и выполняющиеся загрузки
-кэшируются отдельно; поздний ответ не отменяет более новый выбор. При ошибке
-остаётся текущий язык и доступен повтор загрузки. Отсутствующее или пустое
-сообщение использует английский текст. Новые ресурсы не увеличивают начальную
-загрузку на размер всех словарей. Язык в URL пока не реализован.
+In the dashboard, the language control expands into a strip replacing the flag,
+notification bell and theme control. The center is highlighted; wheel scrolling and
+arrow keys smoothly move flags without committing a choice. Click or Enter confirms;
+Escape restores the previous choice. Opening and closing do not shift the header.
+Rapid repeated actions interrupt animation without waiting; reduced motion uses only
+a short fade.
 
-Числа, суммы, длительности и даты форматируются для выбранного языка.
-Календарь хранит ISO-даты независимо от формата ввода, а денежные вычисления
-остаются целочисленными microUSD. Имена ключей/аккаунтов, идентификаторы,
-названия моделей и произвольные данные провайдеров не переводятся.
+Data and tariffs are synthetic; there are no real keys, authentication or network API
+calls. Demo top-ups change only the current window's state. Amount input, shortcuts and
+payment-method selection sit in the balance block without entry or confirmation
+dialogs. Methods come from the demo snapshot's `paymentMethods`; the selected method
+is retained in transaction details without calling payment providers. Amounts remain
+whole USD from 1 to 1000. After a top-up, the input clears and the result appears on
+the page. The demo balance resets on reload and is explicitly marked as simulated.
+Balance shows top-up transactions; request history stays in Usage. Charts and tables
+share fixtures, while Overview and Usage preserve their filters independently.
 
-## История, ключи и навигация
+## Design and localization
 
-История платежей отделена от запросов: пополнения и возвраты фильтруются по периоду,
-типу и статусу, сортируются от новых к старым и выводятся по 10/25/50 строк.
-Расходы показаны только в Использовании, без отдельного блока на странице баланса.
-Неизвестная сумма остаётся неизвестной, ожидающий расчёт не
-считается бесплатным.
-Запросы и группы моделей/API-ключей выводятся по 8/16/32 строки; итоги относятся
-ко всему выбранному набору, не к странице. На телефоне строки сокращены до
-основного, подробности запроса остаются в его окне. Эта пагинация работает по
-загруженному снимку фронтенда и не заменяет будущую серверную пагинацию.
+[DESIGN.md](DESIGN.md) describes implemented styles, components, mobile layout, focus
+and reduced motion. This README owns startup and data behavior rather than repeating
+pixel dimensions or layout-change history. Local Golos Text fonts and their SIL OFL
+license are in `public/fonts`.
 
-Графики и сводки используют один диапазон снимка. Скорость взвешивается
-по времени измеренных запросов; пустые интервалы остаются разрывами.
+Development-only fixtures and in-memory operations remain demonstrations even when
+the interface does not repeat a demo label. Error and disconnected-backend warnings
+remain visible. Both entry points share the theme; localStorage failures do not block
+the interface.
 
-Внизу сайдбара находится только выход; настройки темы и языка — в шапке.
-Логотип сворачивает и разворачивает меню, не меняя текущий раздел;
-на телефоне он закрывает панель навигации. Отдельной кнопки сворачивания,
-подписи «Макет · без сервера» и меню профиля нет.
-Страница «Подключение и помощь», её модальное окно и ссылки удалены;
-`/app/help` и `/preview.html?page=help` показывают «Страница не найдена».
-Раздел владельца «Подключения» сохранён. Приветственное окно удалено полностью.
-Выход требует подтверждения; отмена и Escape сохраняют кабинет открытым.
-Подтверждение показывает «Просмотр завершён», а «Вернуться в кабинет» перезагружает
-его с исходными fixtures. Выход меняет только локальное состояние.
-API-ключи доступны отдельным разделом; реальная авторизация,
-выпуск ключей и управление сессиями остаются будущей работой.
-Ключи показаны компактной таблицей с общей шапкой и центрированными колонками:
-имя, API-ключ, статус, модели, дневной лимит, срок действия, действия.
-Шапка сортирует строки по имени, статусу, моделям, лимиту и сроку; на узких
-экранах её заменяют подписанные поля и выбор сортировки. Создание открывается
-над таблицей, редактирование и замена — под строкой ключа, без модальных окон. Отзыв требует
-второго явного действия «Да, отозвать»; «Отмена», Escape и клик снаружи
-снимают подтверждение. Замена не отзывает старый ключ автоматически.
-Новый ключ показывается один раз в блоке копирования на странице; «Готово»
-или уход со страницы скрывает полный текст. Пока блок не закрыт, повторное
-создание и замена недоступны, чтобы не потерять ещё не сохранённый ключ.
+The landing page, FAQ, customer dashboard, owner panel and disconnected Hosted screen
+support English, Russian and Simplified Chinese. English is the primary language and
+fallback; browser language does not override it. The preference persists locally,
+independently of the theme, and synchronizes between tabs. Language changes preserve
+drafts, filters and data. The landing page and service entry use `LanguageSwitcher`:
+a desktop popover and a native selector on narrow/touch screens. The dashboard uses
+the separate `HeaderLanguageSwitcher` strip. Both retain accessible names and keyboard
+controls.
 
-Колокольчик открывает компактную панель уведомлений рядом с кнопкой, без затемнения
-и блокировки страницы. Доступны отметка прочтения и переход к деталям запроса;
-повторное нажатие колокольчика, Escape и клик снаружи закрывают панель.
+Keep source documentation in English and translations in separate locale-specific
+files. UI translations live in `src/i18n/messages/en.json`, `ru.json` and `zh-CN.json`.
+Components use stable semantic keys such as `t("common.save")`, not English sentences
+or language-specific branches. Shared actions reuse a key; distinct meanings such as
+the top-up action and transaction type have separate keys. The English JSON defines
+`MessageKey`, so TypeScript catches unknown keys. Interface text, tooltips,
+accessibility labels and notifications belong in these resources.
 
-## Отдельное окно из лаунчера
+To add a language, create `src/i18n/messages/<locale>.json` with matching keys and
+`{name}`/`{count}` placeholders. Add its code, name, short label, text direction,
+week start and dynamic dictionary import to `src/i18n/registry.ts`. Components do not
+need copies. An SVG flag may be added to `LanguageFlag.tsx`; otherwise the short label
+is used. Check the calendar, long labels, mobile screens and text direction before
+enabling the locale. Dictionary checks automatically iterate over the registry.
 
-1. В корне репозитория запустить `bun run web:dev` (либо `bun run dev` в `web/`).
-2. В другом терминале запустить development-лаунчер: `bun run app:dev`.
-3. Выбрать «На сервере» → «Открыть демо Hosted».
+English is immediately available. Other resources load only when selected or when
+restoring a saved language. Dictionaries and in-flight loads are cached separately;
+a late response cannot override a newer choice. On failure, the current language
+remains active and loading can be retried. Missing or empty messages fall back to
+English. New resources do not add every dictionary to the initial download. URL-based
+language selection is not implemented yet.
 
-Окно `hosted-preview` открывает только фиксированный loopback-адрес, использует
-InPrivate/incognito и не входит в Desktop capabilities. Произвольные навигации
-и новые окна запрещены. Оно не читает аккаунты, токены или runtime лаунчера.
-Повторное открытие фокусирует существующее окно. Если web dev-сервер не запущен,
-лаунчер показывает инструкцию запуска. После закрытия демо API продолжает работать.
-Проверки могут запускаться с Tauri mock; реальная WebView2-приёмка — отдельная
-локальная проверка. В release кнопка скрыта, а native-команда отклоняет вызов.
+Numbers, amounts, durations and dates use the selected locale. The calendar stores
+ISO dates regardless of input format; money arithmetic remains integer microUSD.
+Key/account names, identifiers, model names and arbitrary provider data are not
+translated.
 
-`index.html` — отдельный вход приложения: `/` показывает публичный лендинг.
-Вопросы открываются якорями `/#faq` или `/#features`, без отдельного маршрута.
-Все ссылки перехода в кабинет ведут в `/app/overview` без промежуточного окна.
-До интеграции production-кабинет показывает недоступность данных, а не нулевые
-балансы или успешный вход. `/login` и `/admin/login` остаются неподключёнными;
-маршруты сами по себе не предоставляют права. Неизвестный раздел показывает 404-экран.
-Production build содержит `index.html` и отдельно загружаемый код кабинета;
-`preview.html` и fixtures остаются development-only. Статический хост должен
-возвращать `index.html` для `/app/*` и `/admin/*`. Подключение API, сессии,
-проверки доступа и серверная приёмка входят в H13/H14/H15, не в этот перенос UI.
+## History, keys and navigation
 
-## Структура
+Payment history is separate from requests: top-ups and refunds filter by period,
+type and status, sort newest first and paginate by 10/25/50 rows. Spending appears
+only in Usage, without a duplicate balance-page block. Unknown amounts remain unknown;
+pending settlement is not free usage. Requests and model/API-key groups paginate by
+8/16/32 rows; totals cover the selected dataset, not the current page. Phone rows show
+essential information, with request details in their dialog. This pagination operates
+on the loaded frontend snapshot and does not replace future server pagination.
 
-- `src/features/` — независимые от Desktop страницы и панели, view model и форматирование.
-- `src/components/` — диалог и безопасное копирование с ручным fallback.
-- `src/i18n/` — реестр языков, загрузка и словари.
-- `src/preview/` — отдельный dev-only вход и синтетические fixtures.
-- `tests/unit/` — арифметика токенов/стоимости, неизвестные значения, сводка поддержки.
-- `tests/e2e/` — детали, фильтры, клавиатура, темы, мобильная компоновка.
+Charts and summaries share one snapshot range. Speed is weighted by the duration of
+measured requests; empty intervals remain gaps.
 
-Расчётные компоненты и итоговое списание в реальном кабинете должны приходить
-из разрешённой клиентской проекции Hosted API. Текущая чистая функция расчёта
-используется для согласованности синтетических fixtures и проверки отображения.
+Only sign-out appears at the bottom of the sidebar; theme and language live in the
+header. The logo collapses or expands navigation without changing the current section;
+on phones it closes the drawer. There is no separate collapse button, preview/backend
+caption or profile menu. The Connection and help page, its dialog and links were
+removed; `/app/help` and `/preview.html?page=help` show Page not found. Owner Connections
+remains available. The welcome dialog was removed entirely.
 
-Стоимость находится непосредственно в строках токенов. Кэш входит во входные
-токены, рассуждения — в выходные. `null` означает неизвестное значение.
-Состояния выполнения и расчёта независимы.
-В Hosted показано итоговое списание, а не эквивалент API; локальное подключение
-заменено API-ключом. Токены образуют общий список с количеством и стоимостью:
-сначала входные, затем выходные. Протокол, транспорт, тариф и настройки
-рассуждения находятся в свёрнутых технических деталях рядом с ID запроса и модели.
-«Диагностика» скачивает разрешённую сводку средствами браузера, без Desktop IPC,
-локальных аккаунтов, текста запросов, ответов и секретов. Итоговое списание остаётся
-в верхней сводке, стоимости компонентов — в строках токенов.
-Предупреждения об ожидаемом расчёте и расхождениях сохраняются.
+Sign-out requires confirmation; Cancel and Escape leave the dashboard open. Confirming
+shows the preview-ended screen; returning to the dashboard reloads the initial
+fixtures. Sign-out changes only local state. API keys have their own section; real
+authentication, key issuance and session management remain future work.
 
-## Проверки
+Keys use a compact table with a shared header and centered columns: name, API key,
+status, models, daily limit, expiry and actions. Headers sort by name, status, models,
+limit and expiry. Narrow layouts replace them with labelled fields and a sort selector.
+Creation opens above the table; editing and reissue stay below the key row, without
+dialogs. Revocation requires the explicit second action Yes, revoke. Cancel, Escape
+and outside click disarm confirmation. Reissue does not automatically revoke the old
+key. A new key appears once in an inline copy region; Done or leaving the page hides
+the full value. While that region remains open, further creation and reissue are
+disabled to protect the unacknowledged key.
 
-Команды сборки, unit/browser-тестов и настройки Chromium:
-[проверки web-preview](../CONTRIBUTING.md#web-preview). CI проверяет этот пакет
-отдельно. Hosted backend и реальную WebView-интеграцию проверяют после подключения.
+The bell opens a compact notification panel beside the button, without a backdrop
+or page lock. Notifications can be marked read or opened in request detail. Clicking
+the bell again, Escape or outside click closes the panel.
 
-Контракты: [Hosted architecture](../docs/hosted/HOSTED_RELAY_ARCHITECTURE.md),
-[web design](../docs/hosted/HOSTED_RELAY_WEB_DESIGN.md),
+## Separate launcher window
+
+1. Run `bun run web:dev` at the repository root, or `bun run dev` inside `web/`.
+2. In another terminal, start the development launcher with `bun run app:dev`.
+3. Select Hosted, then Open Hosted demo.
+
+The `hosted-preview` window opens only a fixed loopback address, uses InPrivate/incognito
+and has no Desktop capabilities. Arbitrary navigation and new windows are blocked.
+It does not read launcher accounts, tokens or runtime state. Opening it again focuses
+the existing window. If the web development server is unavailable, the launcher shows
+startup instructions. Closing the demo leaves the API running. Tests may use a Tauri
+mock; real WebView2 acceptance is a separate local check. Release builds hide the button
+and reject the native command.
+
+`index.html` is the independent app entry; `/` shows the public landing page. FAQ and
+feature links use `/#faq` or `/#features`, not separate routes. All dashboard links
+open `/app/overview` without an intermediate dialog. Until integration, production
+dashboards show unavailable data, not zero balances or successful authentication.
+`/login` and `/admin/login` remain disconnected; routes alone grant no permissions.
+Unknown sections show a 404 screen.
+
+The production build contains `index.html` and lazy-loaded dashboard code;
+`preview.html` and fixtures remain development-only. Static hosting must return
+`index.html` for `/app/*` and `/admin/*`. API integration, sessions, access checks and
+server acceptance belong to H13/H14/H15, not this UI migration.
+
+## Structure
+
+- `src/features/`: Desktop-independent pages/panels, view models and formatting.
+- `src/components/`: dialogs and safe copying with a manual fallback.
+- `src/i18n/`: locale registry, loading and dictionaries.
+- `src/preview/`: separate development-only entry and synthetic fixtures.
+- `tests/unit/`: token/cost arithmetic, unknown values and support summaries.
+- `tests/e2e/`: details, filters, keyboard interaction, themes and mobile layout.
+
+In the live dashboard, billing components and final charges must come from an
+authorized Hosted API customer projection. The current pure calculation function
+supports synthetic-fixture consistency and presentation checks.
+
+Component costs appear in token rows. Cached tokens are part of input; reasoning
+tokens are part of output. `null` means unknown. Execution and accounting states are
+independent. Hosted shows the final charge, not an API equivalent, and an API key
+replaces the local connection. Token counts and costs form one list, input before
+output. Protocol, transport, tier and reasoning settings live in collapsed technical
+details beside request and model IDs.
+
+Diagnostics downloads an allowed summary through the browser, without Desktop IPC,
+local accounts, prompts, responses or secrets. The final charge remains in the top
+summary and component costs remain in token rows. Pending-settlement and discrepancy
+warnings are preserved.
+
+## Checks
+
+Build, unit/browser test and Chromium setup commands are in the
+[web preview checks](../CONTRIBUTING.md#web-preview). CI checks this package separately.
+Hosted backend and real WebView integration are checked after they are connected.
+
+Contracts: [Hosted architecture](../docs/hosted/HOSTED_RELAY_ARCHITECTURE.md),
+[web design](../docs/hosted/HOSTED_RELAY_WEB_DESIGN.md) and
 [H13/H14 roadmap](../docs/hosted/HOSTED_RELAY_ROADMAP.md#h13--default-web-application-and-typed-transport).
-Текущие стили и переводы описаны в [DESIGN.md](DESIGN.md). Настоящие сессии,
-ключи, платежи, серверный каталог, API-совместимость и полная приёмка H13/H14/H15
-ещё не реализованы; наличие экранов не завершает эти этапы.
+[DESIGN.md](DESIGN.md) describes current styles and localization. Real sessions, keys,
+payments, the server catalog, API compatibility and full H13/H14/H15 acceptance are
+not implemented yet; the presence of screens does not complete those milestones.
