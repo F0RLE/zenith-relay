@@ -25,10 +25,10 @@ const MAX_FILE_ID_LEN: usize = 512;
 const MAX_ATTACHMENT_CACHE: usize = 512;
 const MAX_CONCURRENT_UPLOADS: usize = 4;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::gateway::execution) enum AttachmentFailure {
-    Reject(AttemptFailure),
-    Retry(AttemptFailure),
+    Reject(Box<AttemptFailure>),
+    Retry(Box<AttemptFailure>),
 }
 
 struct InlineImage {
@@ -171,7 +171,7 @@ async fn prepare_attachment_credential(
     let prepared = runtime
         .prepare_authorization(candidate_id, crate::unix_time_ms())
         .await
-        .map_err(|error| AttachmentFailure::Retry(AttemptFailure::prepare(error)))?;
+        .map_err(|error| AttachmentFailure::Retry(Box::new(AttemptFailure::prepare(error))))?;
     let generation = prepared.token_generation.ok_or_else(upload_failed)?;
     let mut digest = Sha256::new();
     digest.update(b"zenith-relay-basis-points-attachment-v2");
@@ -531,10 +531,10 @@ async fn upload_image(
         .await
         .map_err(|error| match error {
             crate::runtime::AuthorizedRequestError::NotReplayable => {
-                AttachmentFailure::Reject(AttemptFailure::authorized_request(error))
+                AttachmentFailure::Reject(Box::new(AttemptFailure::authorized_request(error)))
             }
             crate::runtime::AuthorizedRequestError::Transport(error) => {
-                AttachmentFailure::Retry(AttemptFailure::transport(&error))
+                AttachmentFailure::Retry(Box::new(AttemptFailure::transport(&error)))
             }
             _ => upload_failed(),
         })?;
@@ -550,9 +550,9 @@ async fn upload_image(
                 | StatusCode::TOO_MANY_REQUESTS
         );
         return Err(if no_fallback {
-            AttachmentFailure::Reject(failure)
+            AttachmentFailure::Reject(Box::new(failure))
         } else {
-            AttachmentFailure::Retry(failure)
+            AttachmentFailure::Retry(Box::new(failure))
         });
     }
     let upload_response_body = read_capped(upstream.response, MAX_UPLOAD_RESPONSE_BYTES).await?;
@@ -702,14 +702,14 @@ fn remember_file_id(key: [u8; 32], file_id: String) {
 }
 
 fn invalid_image(message: &'static str) -> AttachmentFailure {
-    AttachmentFailure::Reject(AttemptFailure::rejected_request(message))
+    AttachmentFailure::Reject(Box::new(AttemptFailure::rejected_request(message)))
 }
 
 fn upload_failed() -> AttachmentFailure {
-    AttachmentFailure::Retry(AttemptFailure::status_with_body(
+    AttachmentFailure::Retry(Box::new(AttemptFailure::status_with_body(
         StatusCode::BAD_GATEWAY,
         None,
-    ))
+    )))
 }
 
 fn path_unescape(escaped_path: &str) -> Result<Vec<u8>, ()> {

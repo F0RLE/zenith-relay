@@ -76,6 +76,9 @@ pub(super) async fn dispatch_request_attempt(
         selected_error_origin,
         retry,
     } = request_dispatch_input;
+    if crate::transport::permits_image_generation(adapter_request.upstream_body()) {
+        budget.mark_image_generation();
+    }
     let RetryState {
         attempt,
         last_failure,
@@ -157,14 +160,14 @@ pub(super) async fn dispatch_request_attempt(
                 Ok(owner) => attachment_owner = owner,
                 Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                     return RequestDispatch::Respond(attempt_error_response(
-                        failure,
+                        *failure,
                         None,
                         selected_error_origin,
                         request_id,
                     ));
                 }
                 Err(super::super::basis_points::AttachmentFailure::Retry(failure)) => {
-                    *last_failure = Some(failure);
+                    *last_failure = Some(*failure);
                     *last_failure_origin = selected_error_origin;
                     return RequestDispatch::Continue;
                 }

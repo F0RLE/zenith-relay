@@ -446,6 +446,10 @@ async fn read_completed_body(
         .copied();
     let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
         .then_some(read.route.source_model.as_str());
+    let pending_usage = Some(crate::gateway::response::PendingUsageObservation::new(
+        read.runtime,
+        usage(false, read.status.as_u16(), None),
+    ));
     let collected =
         if read.route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints {
             super::super::super::response::collect_basis_points_response(
@@ -453,6 +457,7 @@ async fn read_completed_body(
                 expected_model,
                 read.started,
                 timing,
+                pending_usage,
             )
             .await
         } else {
@@ -467,6 +472,7 @@ async fn read_completed_body(
                 prewarm,
                 read.started,
                 timing,
+                pending_usage,
             )
             .await
         };

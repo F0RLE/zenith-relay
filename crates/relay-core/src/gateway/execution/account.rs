@@ -18,6 +18,7 @@ use super::super::now_ms;
 use super::super::request::{
     AccountEndpoint, RequestToolPolicy, ServiceTierPolicy, client_request_identity, request_id,
 };
+use super::super::response::attach_request_id;
 use super::CandidateRetryContext;
 use super::compatibility::{
     RejectedRequest, record_adapter_rejection, record_continuation_rejection,
@@ -64,6 +65,22 @@ pub(in crate::gateway) struct AccountExecution {
 pub(in crate::gateway) async fn execute_account_endpoint(
     context: AccountExecution,
 ) -> Response<Body> {
+    let request_id = request_id();
+    let budget =
+        SharedRequestBudget::for_incoming_request(context.runtime.request_dispatch_budget());
+    let scope = context.runtime.track_request_usage(&request_id, &budget);
+    let mut response = execute_account_endpoint_inner(context, request_id.clone(), budget).await;
+    attach_request_id(&mut response, &request_id);
+    // Account-only endpoints collect upstream bodies before returning a response.
+    scope.finish(response.status().as_u16(), false);
+    response
+}
+
+async fn execute_account_endpoint_inner(
+    context: AccountExecution,
+    request_id: String,
+    budget: SharedRequestBudget,
+) -> Response<Body> {
     let started = std::time::Instant::now();
     let AccountExecution {
         runtime,
@@ -82,7 +99,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         .agent_message_context(&key.id)
         .restore_request(&mut request)
     {
-        return adapter_error_response(error, None);
+        return adapter_error_response(error, Some(&request_id));
     }
     let mut service_tier_policy = ServiceTierPolicy::pool_owned(&request);
     service_tier_policy.capture_pool_default(
@@ -90,7 +107,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         &resolved_model,
         &runtime.account_service_tiers(&key, &resolved_model),
     );
-    let request_id = request_id();
     if let Some(origin) = request_origin {
         runtime.mark_request_origin(&request_id, origin);
     }
@@ -132,7 +148,6 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut state = AttemptState::from_prepared(continuation);
     let account_only_exclusions = runtime.api_source_candidate_ids();
     state.retry.tried = account_only_exclusions.clone();
-    let budget = SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget());
     let operation = if endpoint == AccountEndpoint::Compact {
         RotationOperation::Compaction
     } else {

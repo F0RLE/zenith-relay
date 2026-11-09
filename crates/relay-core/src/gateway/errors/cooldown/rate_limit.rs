@@ -1,12 +1,14 @@
 use super::super::{MAX_RATE_LIMIT_RETRY_HINT_MS, upstream_error_text};
+use crate::scheduler::ProviderClock;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RateLimitBodyHint {
-    pub(crate) retry_after_ms: Option<u64>,
-    pub(crate) explicit_retry_after_ms: Option<u64>,
+    pub(crate) retry_clock: Option<ProviderClock>,
+    pub(crate) explicit_retry_clock: Option<ProviderClock>,
+    pub(crate) headers_normalized: bool,
     pub(crate) chatgpt_subscription: bool,
     /// Exact SIWC quota discriminator, never inferred from diagnostic prose.
     pub(crate) siwc_usage_limit: bool,
@@ -15,12 +17,44 @@ pub(crate) struct RateLimitBodyHint {
 }
 
 impl RateLimitBodyHint {
-    pub(crate) fn retry_after_for_account(self, account_route: bool) -> Option<u64> {
+    pub(crate) fn retry_clock_for_account(self, account_route: bool) -> Option<ProviderClock> {
         if self.chatgpt_subscription && !account_route {
-            self.explicit_retry_after_ms
+            self.explicit_retry_clock
         } else {
-            self.retry_after_ms
+            self.retry_clock
         }
+    }
+
+    pub(crate) fn with_retry_headers_at(
+        mut self,
+        headers: &reqwest::header::HeaderMap,
+        now: SystemTime,
+    ) -> Self {
+        // This hint belongs to one rejection. Re-reading its headers must not
+        // renew a relative Retry-After while that rejection waits to settle.
+        if !self.headers_normalized {
+            let observed_at_ms = crate::unix_time_ms_at(now);
+            let header_clock = retry_after_ms(headers, now).map(|delay| {
+                ProviderClock::new(observed_at_ms.saturating_add(delay), Some(observed_at_ms))
+            });
+            self.retry_clock =
+                ProviderClock::latest(self.retry_clock.into_iter().chain(header_clock));
+            self.explicit_retry_clock =
+                ProviderClock::latest(self.explicit_retry_clock.into_iter().chain(header_clock));
+            self.headers_normalized = true;
+        }
+        self
+    }
+
+    pub(crate) fn merge_retry_clocks(&mut self, other: Self) {
+        self.retry_clock =
+            ProviderClock::latest(self.retry_clock.into_iter().chain(other.retry_clock));
+        self.explicit_retry_clock = ProviderClock::latest(
+            self.explicit_retry_clock
+                .into_iter()
+                .chain(other.explicit_retry_clock),
+        );
+        self.headers_normalized |= other.headers_normalized;
     }
 }
 
@@ -108,9 +142,13 @@ pub(crate) fn rate_limit_body_hint_value(
                 "rate_limit_reached" | "websocket_connection_limit_reached"
             )
     });
+    let observed_at_ms = crate::unix_time_ms_at(now);
+    let clock =
+        |delay| ProviderClock::new(observed_at_ms.saturating_add(delay), Some(observed_at_ms));
     RateLimitBodyHint {
-        retry_after_ms,
-        explicit_retry_after_ms,
+        retry_clock: retry_after_ms.map(clock),
+        explicit_retry_clock: explicit_retry_after_ms.map(clock),
+        headers_normalized: false,
         chatgpt_subscription,
         siwc_usage_limit,
         global,
@@ -162,15 +200,14 @@ fn rate_limit_reset_delay_ms(rate_limit_payload: &Value, now: SystemTime) -> Opt
     ]
     .into_iter()
     .find_map(|path| rate_limit_payload.pointer(path).and_then(json_u64))?;
-    let reset_seconds = if reset_at > 10_000_000_000 {
-        reset_at / 1_000
-    } else {
+    let reset_at_ms = if reset_at > 10_000_000_000 {
         reset_at
+    } else {
+        reset_at.checked_mul(1_000)?
     };
-    let now_seconds = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    reset_seconds
-        .checked_sub(now_seconds)
-        .and_then(|seconds| seconds.checked_mul(1_000))
+    let now_ms = u64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    reset_at_ms
+        .checked_sub(now_ms)
         .filter(|duration_ms| *duration_ms > 0)
         .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
 }
@@ -221,18 +258,6 @@ fn retry_delay_from_text(text: &str) -> Option<u64> {
             .ceil()
             .min(MAX_RATE_LIMIT_RETRY_HINT_MS as f64) as u64,
     )
-}
-
-pub(crate) fn retry_delay_ms(
-    header_retry_after_ms: Option<u64>,
-    body_retry_after_ms: Option<u64>,
-    fallback_ms: u64,
-) -> u64 {
-    header_retry_after_ms
-        .into_iter()
-        .chain(body_retry_after_ms)
-        .max()
-        .unwrap_or(fallback_ms)
 }
 
 pub(crate) fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<u64> {

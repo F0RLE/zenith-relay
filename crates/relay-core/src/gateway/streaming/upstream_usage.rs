@@ -1,10 +1,11 @@
 use super::*;
 
 /// Inspect native counters and identity before an adapter changes their representation.
-pub(super) struct UpstreamUsage {
+pub(in crate::gateway) struct UpstreamUsage {
     pending: Vec<u8>,
     event: UsageEvent,
     usage_snapshot: Option<Value>,
+    usage_revision: u64,
     expected_model: Option<String>,
     rejection: Option<&'static str>,
     finished: bool,
@@ -13,11 +14,12 @@ pub(super) struct UpstreamUsage {
 }
 
 impl UpstreamUsage {
-    pub(super) fn new(event: UsageEvent, expected_model: Option<String>) -> Self {
+    pub(in crate::gateway) fn new(event: UsageEvent, expected_model: Option<String>) -> Self {
         Self {
             pending: Vec::new(),
             event,
             usage_snapshot: None,
+            usage_revision: 0,
             expected_model,
             rejection: None,
             finished: false,
@@ -119,7 +121,7 @@ impl UpstreamUsage {
         Bytes::from(format!("data: {error}\n\n"))
     }
 
-    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
+    pub(in crate::gateway) fn observe(&mut self, bytes: &[u8]) -> bool {
         let bytes = if self.pending.is_empty()
             && self.timing.is_none()
             && self.observed_started.is_none()
@@ -223,6 +225,7 @@ impl UpstreamUsage {
             }
         }
         if let Some(usage) = &parsed.usage {
+            self.usage_revision = self.usage_revision.saturating_add(1);
             crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
             if let Some(snapshot) = &self.usage_snapshot {
                 apply_usage(&mut self.event, snapshot);
@@ -239,6 +242,12 @@ impl UpstreamUsage {
         }) {
             self.rejection = Some(error_codes::UPSTREAM_ROUTE_DEGRADED);
         }
+    }
+
+    pub(in crate::gateway) fn reported_usage(&self) -> Option<(u64, &Value)> {
+        self.usage_snapshot
+            .as_ref()
+            .map(|usage| (self.usage_revision, usage))
     }
 
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
@@ -316,6 +325,20 @@ mod tests {
     use super::*;
 
     mod benchmark;
+
+    #[test]
+    fn native_usage_snapshot_retains_reported_cache_writes() {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        let mut capture = UpstreamUsage::new(event.clone(), None);
+        assert!(capture.observe(
+            b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":6,\"output_tokens\":2,\"total_tokens\":12}}\n\n"
+        ));
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, Some(10));
+        assert_eq!(event.cache_write_input_tokens, Some(6));
+        assert_eq!(event.output_tokens, Some(2));
+        assert_eq!(event.total_tokens, Some(12));
+    }
 
     #[test]
     fn timed_fast_path_ignores_empty_output_and_keeps_cache_metadata() {

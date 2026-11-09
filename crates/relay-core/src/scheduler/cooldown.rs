@@ -12,21 +12,21 @@ pub struct ProviderBackoff {
     pub observed_at_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct ProviderClock {
-    pub(super) not_before_ms: u64,
-    pub(super) observed_at_ms: Option<u64>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderClock {
+    pub(crate) not_before_ms: u64,
+    pub(crate) observed_at_ms: Option<u64>,
 }
 
 impl ProviderClock {
-    pub(super) fn new(not_before_ms: u64, observed_at_ms: Option<u64>) -> Self {
+    pub(crate) fn new(not_before_ms: u64, observed_at_ms: Option<u64>) -> Self {
         Self {
             not_before_ms,
             observed_at_ms: observed_at_ms.filter(|observed| *observed < not_before_ms),
         }
     }
 
-    pub(super) fn latest(clocks: impl Iterator<Item = Self>) -> Option<Self> {
+    pub(crate) fn latest(clocks: impl Iterator<Item = Self>) -> Option<Self> {
         // Keep the original known observation when the selected deadline is unchanged.
         clocks.max_by_key(|clock| {
             (

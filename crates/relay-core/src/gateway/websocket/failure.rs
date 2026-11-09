@@ -1,3 +1,4 @@
+use super::super::errors::RateLimitBodyHint;
 use super::*;
 use crate::ErrorOrigin;
 use crate::error_codes;
@@ -132,8 +133,19 @@ impl GatewayFailure {
 
     pub(super) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
         if self.status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_at = crate::transport::retry_after_ms(headers, std::time::SystemTime::now())
-                .map(|delay| now_ms().saturating_add(delay));
+            let now = std::time::SystemTime::now();
+            let retry_at = crate::transport::retry_after_ms(headers, now)
+                .map(|delay| crate::unix_time_ms_at(now).saturating_add(delay));
+            self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
+        }
+        self
+    }
+
+    pub(super) fn with_retry_hint(mut self, hint: RateLimitBodyHint) -> Self {
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_at = hint
+                .retry_clock_for_account(self.origin == ErrorOrigin::Account)
+                .map(|clock| clock.not_before_ms);
             self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
         }
         self
@@ -308,7 +320,7 @@ impl GatewayFailure {
     ) -> Self {
         let classification =
             super::super::errors::classify_upstream_error(status, upstream_error_body);
-        let mut failure = Self::classified(status, classification.category, origin)
+        let failure = Self::classified(status, classification.category, origin)
             .with_upstream_error(upstream_error_body.map(|error_body| {
                 crate::usage::UpstreamErrorDetails::from_response_body(
                     Some(status.as_u16()),
@@ -316,10 +328,11 @@ impl GatewayFailure {
                 )
             }));
         if failure.status == StatusCode::TOO_MANY_REQUESTS {
-            failure.retry_at_ms = upstream_error_body
-                .map(rate_limit_body_hint)
-                .and_then(|hint| hint.retry_after_for_account(origin == ErrorOrigin::Account))
-                .map(|delay| now_ms().saturating_add(delay));
+            return failure.with_retry_hint(
+                upstream_error_body
+                    .map(rate_limit_body_hint)
+                    .unwrap_or_default(),
+            );
         }
         failure
     }

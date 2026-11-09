@@ -6,6 +6,7 @@ use super::drive::{AttemptCarry, DriveAttemptInput, DrivenAttempt, drive_selecte
 use super::prelude::*;
 use super::recovery::{adapter_error_response, request_has_previous_response_id};
 use super::selection::{SelectionMiss, SelectionMissInput, handle_selection_miss};
+use crate::gateway::response::attach_request_id;
 
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
@@ -13,7 +14,9 @@ pub(in crate::gateway::execution) async fn execute_request(
     let scope = context
         .runtime
         .track_request_usage(&context.request_id, &context.budget);
-    let response = execute_request_inner(context).await;
+    let request_id = context.request_id.clone();
+    let mut response = execute_request_inner(context).await;
+    attach_request_id(&mut response, &request_id);
     let streaming = response.status().is_success()
         && response
             .headers()

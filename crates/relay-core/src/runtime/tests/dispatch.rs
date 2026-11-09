@@ -1,6 +1,8 @@
 use super::*;
 use crate::providers::chatgpt::{BasisPointsCapturedHeaders, BasisPointsHeader};
 
+mod refresh_deadline;
+
 #[test]
 fn basis_points_headers_match_excel_client_contract() {
     let captured = BasisPointsCapturedHeaders::from_entries(vec![BasisPointsHeader {

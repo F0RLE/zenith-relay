@@ -2,6 +2,9 @@ use super::*;
 use axum::extract::ws::{Message as ServerMessage, WebSocketUpgrade};
 use axum::http::HeaderValue;
 
+#[path = "native_fidelity/json_roundtrip.rs"]
+mod json_roundtrip;
+
 #[tokio::test]
 async fn native_http_preserves_repeated_headers_without_forwarding_connection_local_metadata() {
     for streaming in [false, true] {
@@ -72,6 +75,21 @@ async fn native_http_preserves_repeated_headers_without_forwarding_connection_lo
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let relay_request_id = response
+            .headers()
+            .get("x-zenith-relay-request-id")
+            .expect("JSON and SSE retain the Relay request identity")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            response
+                .headers()
+                .get_all("x-zenith-relay-request-id")
+                .iter()
+                .count(),
+            1
+        );
         assert_eq!(
             response
                 .headers()
@@ -106,7 +124,9 @@ async fn native_http_preserves_repeated_headers_without_forwarding_connection_lo
                 HeaderValue::from_static("synthetic-second=v1"),
             ]]
         );
-        assert!(events.lock().unwrap().iter().any(|event| event.success));
+        let events = events.lock().unwrap();
+        let event = events.iter().find(|event| event.success).unwrap();
+        assert_eq!(relay_request_id, event.request_id);
     }
 }
 

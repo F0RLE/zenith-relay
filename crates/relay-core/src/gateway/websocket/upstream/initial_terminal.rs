@@ -6,6 +6,10 @@ use super::telemetry::{
 };
 use super::{ConnectProgress, ConnectScope};
 
+#[cfg(test)]
+#[path = "initial_terminal/tests.rs"]
+mod tests;
+
 pub(in crate::gateway::websocket) enum TerminalAction {
     Continue,
     Break,
@@ -342,6 +346,7 @@ fn classified_terminal_failure(
 ) -> GatewayFailure {
     GatewayFailure::classified(status, category, origin)
         .with_upstream_error(terminal.upstream_error.clone())
+        .with_retry_hint(terminal.body_hint)
 }
 
 fn remember_terminal_rejection(

@@ -192,6 +192,8 @@ pub(in crate::gateway::execution) async fn resolve(
             .observe_http_response(&headers, context.started.elapsed().as_millis() as u64);
         context.tool_use.upstream_tool_call_count = None;
         let mut event = context.event(status);
+        let mut pending_usage =
+            crate::gateway::response::PendingUsageObservation::new(context.runtime, event.clone());
         let expected_model = context
             .runtime
             .block_degraded_routes_enabled()
@@ -206,6 +208,7 @@ pub(in crate::gateway::execution) async fn resolve(
             },
             MAX_RESPONSE_BYTES,
             |frame| {
+                pending_usage.observe(frame);
                 let observed = crate::gateway::streaming::parse_sse_event(frame);
                 timing.observe(&observed, context.started.elapsed().as_millis() as u64);
                 crate::gateway::response::should_stop_basis_points_event(&observed, expected_model)

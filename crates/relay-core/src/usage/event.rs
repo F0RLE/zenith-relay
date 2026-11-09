@@ -156,6 +156,16 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// Canonical internal cancellation telemetry, preserving reported usage.
+    pub(crate) fn normalize_client_cancellation(&mut self) {
+        if !self.success && self.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED) {
+            self.http_status = 499;
+            if let Some(routing) = self.routing.as_mut() {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::ClientDisconnected);
+            }
+        }
+    }
+
     pub fn is_request_completion(&self) -> bool {
         self.routing
             .as_ref()

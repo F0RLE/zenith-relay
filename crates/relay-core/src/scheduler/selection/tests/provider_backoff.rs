@@ -17,9 +17,8 @@ fn observe_at(
             scope,
             retry_at_ms: effective,
             reason: CooldownReason::RateLimit,
-            provider_not_before_ms: provider,
+            provider_clock: provider.map(|deadline| ProviderClock::new(deadline, observed_at_ms)),
         },
-        observed_at_ms,
     ));
 }
 
@@ -144,7 +143,7 @@ fn shared_provider_evidence_keeps_its_bucket_and_expires_before_local_backoff() 
     for id in ["a", "b", "c", "new"] {
         scheduler.upsert(candidate(id));
     }
-    let shared = |scheduler: &mut PoolScheduler, id: &str, bucket, now, provider| {
+    let shared = |scheduler: &mut PoolScheduler, id: &str, bucket, now, provider: Option<u64>| {
         scheduler.observe_shared_rate_limit(
             id,
             [bucket; 32],
@@ -152,7 +151,7 @@ fn shared_provider_evidence_keeps_its_bucket_and_expires_before_local_backoff() 
                 scope: "gpt-5",
                 retry_at_ms: 20_000,
                 reason: CooldownReason::RateLimit,
-                provider_not_before_ms: provider,
+                provider_clock: provider.map(|deadline| ProviderClock::new(deadline, Some(now))),
             },
             now,
         );

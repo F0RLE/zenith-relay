@@ -228,7 +228,7 @@ fn account_response(
         AccountEndpoint::Wake => ResponseCompletion::for_protocol(crate::WireApi::Responses, &body),
         AccountEndpoint::Compact => {
             let compacted = super::super::super::compaction::compaction_document(&body)
-                .map_err(|failure| Box::new(failure.into()))?;
+                .map_err(|failure| Box::new((*failure).into()))?;
             if siwc_route {
                 bytes = compacted;
             }

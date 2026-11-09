@@ -43,6 +43,7 @@ pub(super) async fn run_selected_attempt(
         lease,
         mut route,
     } = selected_image_route;
+    budget.mark_image_generation();
     let account_route = route.account_id.is_some();
     let upstream_url = image_endpoint_url(route.upstream_url.clone(), endpoint);
     let Some(upstream_url) = upstream_url else {

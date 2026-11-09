@@ -1,10 +1,49 @@
-use super::super::{proxy_json_response, proxy_response, proxy_sse_response};
+use super::super::{attach_request_id, proxy_json_response, proxy_response, proxy_sse_response};
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Response};
 
 type Factory = fn(reqwest::StatusCode, &HeaderMap, Body) -> Response<Body>;
 
 const FACTORIES: [Factory; 3] = [proxy_response, proxy_json_response, proxy_sse_response];
+
+#[test]
+fn relay_request_identity_replaces_owned_headers_without_changing_provider_identity() {
+    let mut response = Response::new(Body::empty());
+    response.headers_mut().append(
+        "x-zenith-relay-request-id",
+        HeaderValue::from_static("first"),
+    );
+    response.headers_mut().append(
+        "x-zenith-relay-request-id",
+        HeaderValue::from_static("second"),
+    );
+    response
+        .headers_mut()
+        .insert("request-id", HeaderValue::from_static("provider-request"));
+    attach_request_id(&mut response, " synthetic-relay-request ");
+    assert_eq!(
+        response.headers()["x-zenith-relay-request-id"],
+        "synthetic-relay-request"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get_all("x-zenith-relay-request-id")
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(response.headers()["request-id"], "provider-request");
+}
+
+#[test]
+fn invalid_relay_request_identity_never_becomes_a_response_header() {
+    for request_id in ["", " ", "synthetic\nrequest", "\u{1f642}", &"x".repeat(129)] {
+        let mut response = Response::new(Body::empty());
+        attach_request_id(&mut response, request_id);
+        assert!(!response.headers().contains_key("x-zenith-relay-request-id"));
+    }
+}
 
 #[test]
 fn permitted_response_headers_preserve_order_and_opaque_values() {

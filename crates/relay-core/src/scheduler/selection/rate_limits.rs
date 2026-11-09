@@ -44,9 +44,10 @@ impl PoolScheduler {
             .max_by_key(|observation| observation.retry_at_ms);
         let provider_clock = ProviderClock::latest(
             request
-                .provider_not_before_ms
-                .filter(|deadline| *deadline <= request.retry_at_ms && *deadline > now_ms)
-                .map(|deadline| ProviderClock::new(deadline, Some(now_ms)))
+                .provider_clock
+                .filter(|clock| {
+                    clock.not_before_ms <= request.retry_at_ms && clock.not_before_ms > now_ms
+                })
                 .into_iter()
                 .chain(matching.filter_map(|(_, observation)| {
                     observation
@@ -54,7 +55,7 @@ impl PoolScheduler {
                         .filter(|clock| clock.not_before_ms > now_ms)
                 })),
         );
-        request.provider_not_before_ms = provider_clock.map(|clock| clock.not_before_ms);
+        request.provider_clock = provider_clock;
         let backoff_ms = previous.map_or(MIN_BACKOFF_MS, |observation| {
             if observation.retry_at_ms <= now_ms {
                 observation.backoff_ms.saturating_mul(2)
@@ -99,11 +100,7 @@ impl PoolScheduler {
         }
         // Never infer membership from the connector type or an account's name.
         for member in members {
-            self.set_cooldown_with_reason_for_model_at(
-                &member,
-                request,
-                provider_clock.and_then(|clock| clock.observed_at_ms),
-            );
+            self.set_cooldown_with_reason_for_model_at(&member, request);
         }
     }
 

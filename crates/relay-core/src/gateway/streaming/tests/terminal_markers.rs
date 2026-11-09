@@ -150,12 +150,28 @@ async fn interactions_interruptions_keep_partial_usage_and_emit_native_errors() 
 
 #[tokio::test]
 async fn native_streams_forward_provider_extensions_without_using_them_as_completion() {
-    for (protocol, frames) in [
+    for (protocol, prefix, suffix) in [
+        (
+            WireApi::Responses,
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-response\",\"output\":[]}}\n\n",
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"answer\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            ),
+        ),
+        (
+            WireApi::ChatCompletions,
+            "data: {\"id\":\"synthetic-chat\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"synthetic-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+            concat!(
+                "data: {\"id\":\"synthetic-chat\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"synthetic-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"id\":\"synthetic-chat\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"synthetic-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+                "data: [DONE]\n\n",
+            ),
+        ),
         (
             WireApi::Messages,
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"synthetic-message\",\"content\":[]}}\n\n",
             concat!(
-                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"synthetic-message\",\"content\":[]}}\n\n",
-                "data: {\"type\":\"vendor_progress\",\"vendor_extension\":{\"step\":1}}\n\n",
                 "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"answer\"}}\n\n",
                 "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
                 "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
@@ -164,32 +180,67 @@ async fn native_streams_forward_provider_extensions_without_using_them_as_comple
         ),
         (
             WireApi::Gemini,
-            concat!(
-                "data: {\"type\":\"vendor_progress\",\"vendor_extension\":{\"step\":1}}\n\n",
-                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\",\"vendor_extension\":true}]},\"finishReason\":\"STOP\"}]}\n\n",
-            ),
+            "",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"answer\",\"vendor_extension\":true}]},\"finishReason\":\"STOP\"}]}\n\n",
+        ),
+        (
+            WireApi::GeminiInteractions,
+            "",
+            "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"synthetic-interaction\",\"status\":\"completed\",\"outputs\":[{\"type\":\"text\",\"text\":\"answer\"}],\"usage\":{\"total_input_tokens\":3,\"total_output_tokens\":2}}}\n\n",
         ),
     ] {
-        let recorded = Arc::new(Mutex::new(Vec::new()));
-        let capture = recorded.clone();
-        let mut event = test_usage_event();
-        event.wire_api = protocol;
-        let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(frames.as_bytes()))]);
-        let mut stream = UsageStream::new(
-            input,
-            Arc::new(move |event| capture.lock().unwrap().push(event)),
-            event,
-            Instant::now(),
-            Arc::new(|_, _, _| {}),
-        );
-        let mut output = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            output.extend_from_slice(&chunk.unwrap());
+        let mut extension: Value = serde_json::from_str(r#"{"vendor_extension":{"z":123456789012345678901234567890,"p":0.12345678901234567890123456789,"opaque":"synthetic-✓"}}"#).unwrap();
+        match protocol {
+            WireApi::ChatCompletions => {
+                extension["id"] = "synthetic-chat".into();
+                extension["object"] = "chat.completion.chunk".into();
+                extension["created"] = 0.into();
+                extension["model"] = "synthetic-model".into();
+                extension["choices"] = json!([{"index":0,"delta":{},"finish_reason":null}]);
+            }
+            WireApi::GeminiInteractions => {
+                extension["event_type"] = "interaction.created".into();
+                extension["interaction"] =
+                    json!({"id":"synthetic-interaction","status":"in_progress"});
+            }
+            _ => extension["type"] = "vendor_progress".into(),
         }
-        assert_eq!(output, frames.as_bytes(), "{protocol:?}");
-        let recorded = recorded.lock().unwrap();
-        assert_eq!(recorded.len(), 1, "{protocol:?}");
-        assert!(recorded[0].success, "{protocol:?}");
+        let frames = format!(
+            ": synthetic metadata\n\nid: synthetic-frame\nretry: 1500\ndata: {extension}\n\n"
+        );
+        let frames = format!("{prefix}{frames}{suffix}");
+        for chunk_size in [1, 7, frames.len()] {
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let capture = recorded.clone();
+            let mut event = test_usage_event();
+            event.wire_api = protocol;
+            let input = stream::iter(
+                frames
+                    .as_bytes()
+                    .chunks(chunk_size)
+                    .map(|chunk| Ok::<_, Infallible>(Bytes::copy_from_slice(chunk)))
+                    .collect::<Vec<_>>(),
+            );
+            let mut stream = UsageStream::new(
+                input,
+                Arc::new(move |event| capture.lock().unwrap().push(event)),
+                event,
+                Instant::now(),
+                Arc::new(|_, _, _| {}),
+            );
+            let mut output = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                output.extend_from_slice(&chunk.unwrap());
+            }
+            assert_eq!(
+                output,
+                frames.as_bytes(),
+                "{protocol:?}: chunk size {chunk_size}"
+            );
+            let recorded = recorded.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "{protocol:?}: chunk size {chunk_size}");
+            assert!(recorded[0].success, "{protocol:?}: chunk size {chunk_size}");
+        }
     }
 }
 

@@ -35,7 +35,7 @@ pub(super) fn missing_legacy_endpoint(status: StatusCode, response_body: &[u8]) 
     }
 }
 
-fn request_body(request_json: &Value) -> Result<Vec<u8>, AttemptFailure> {
+fn request_body(request_json: &Value) -> Result<Vec<u8>, Box<AttemptFailure>> {
     let mut request_json = request_json.clone();
     let input_items = request_json
         .get_mut("input")
@@ -55,15 +55,15 @@ fn request_body(request_json: &Value) -> Result<Vec<u8>, AttemptFailure> {
     Ok(bytes)
 }
 
-fn invalid_stream() -> AttemptFailure {
-    AttemptFailure::classified_with_hint(
+fn invalid_stream() -> Box<AttemptFailure> {
+    Box::new(AttemptFailure::classified_with_hint(
         StatusCode::BAD_GATEWAY,
         error_codes::COMPACTION_RESPONSE_INVALID,
         Default::default(),
-    )
+    ))
 }
 
-fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
+fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, Box<AttemptFailure>> {
     let mut completed_response = None;
     let mut capture = NativeReplayCapture::default();
     while let Some(end) = sse_event_end(bytes) {
@@ -84,13 +84,13 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
             event.outcome,
             Some(TerminalOutcome::Failure | TerminalOutcome::Incomplete)
         ) {
-            return Err(AttemptFailure::classified_with_hint(
+            return Err(Box::new(AttemptFailure::classified_with_hint(
                 event.error_status.unwrap_or(StatusCode::BAD_GATEWAY),
                 event
                     .error_category
                     .unwrap_or(error_codes::COMPACTION_RESPONSE_INVALID),
                 event.cooldown_hint,
-            ));
+            )));
         }
         if let Some(event_response) = event
             .response
@@ -125,7 +125,9 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
 
 /// Codex compact response. Retained tail items stay in `output`; exactly one
 /// encrypted compaction checkpoint is required.
-pub(super) fn compaction_document(compaction_response: &Value) -> Result<Vec<u8>, AttemptFailure> {
+pub(super) fn compaction_document(
+    compaction_response: &Value,
+) -> Result<Vec<u8>, Box<AttemptFailure>> {
     if compaction_response
         .get("status")
         .is_some_and(|status_value| status_value != "completed")
@@ -190,7 +192,7 @@ pub(super) async fn execute(
     lease: &crate::runtime::CandidateLease,
 ) -> Result<(HeaderMap, Vec<u8>), Box<(AttemptFailure, HeaderMap)>> {
     let request_body =
-        request_body(client_request).map_err(|failure| Box::new((failure, HeaderMap::new())))?;
+        request_body(client_request).map_err(|failure| Box::new((*failure, HeaderMap::new())))?;
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -219,14 +221,14 @@ pub(super) async fn execute(
     let mut headers = upstream_response.headers().clone();
     let response_bytes = crate::transport::collect(upstream_response)
         .await
-        .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
+        .map_err(|_| Box::new((*invalid_stream(), headers.clone())))?;
     if !status.is_success() {
         let mut failure = AttemptFailure::status_with_body(status, Some(&response_bytes));
         super::errors::apply_degraded_route_policy(runtime, &mut failure);
         return Err(Box::new((failure, headers)));
     }
     let compacted_body =
-        compact_output(&response_bytes).map_err(|failure| Box::new((failure, headers.clone())))?;
+        compact_output(&response_bytes).map_err(|failure| Box::new((*failure, headers.clone())))?;
     for header_name in [
         "content-length",
         "content-encoding",

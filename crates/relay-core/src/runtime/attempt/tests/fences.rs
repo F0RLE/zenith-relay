@@ -317,7 +317,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
             scope: "*",
             retry_at_ms: crate::unix_time_ms() + 60_000,
             reason: CooldownReason::Mandatory,
-            provider_not_before_ms: None,
+            provider_clock: None,
         }),
         None,
         crate::unix_time_ms(),

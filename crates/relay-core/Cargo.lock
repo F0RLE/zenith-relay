@@ -3401,6 +3401,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "tokio-rustls",
  "url",
  "zstd",
 ]

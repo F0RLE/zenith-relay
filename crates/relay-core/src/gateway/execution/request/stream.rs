@@ -116,6 +116,24 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         requested_model,
         prompt_affinity_key,
     };
+    let mut pending_usage = crate::gateway::response::PendingUsageObservation::new(
+        runtime,
+        usage_event(
+            UsageAttempt {
+                request_id: &request_id,
+                attempt,
+                local_key_id: &key.id,
+                route: &route,
+                reasoning_effort: Some(&reasoning_effort),
+                requested_model: &requested_model,
+                tool_use: tool_use.clone(),
+            },
+            false,
+            status.as_u16(),
+            None,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
     let expected_model = (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
         .then_some(route.source_model.as_str());
     let prewarm = route.account_transport == crate::runtime::AccountTransport::Siwc
@@ -123,16 +141,17 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
             .upstream_body()
             .pointer("/prompt_cache_options/prewarm")
             == Some(&Value::Bool(true));
-    let observation = route
-        .routing
-        .as_mut()
-        .and_then(|routing| routing.transport.as_mut())
-        .map(
-            |transport| crate::gateway::streaming::StreamBootstrapObservation::Transport {
-                started,
-                transport,
-            },
-        );
+    let mut observe = |bytes: &[u8]| pending_usage.observe(bytes);
+    let observation = Some(
+        crate::gateway::streaming::StreamBootstrapObservation::Transport {
+            started,
+            transport: route
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut()),
+            on_retained_body: Some(&mut observe),
+        },
+    );
     let opened = crate::gateway::streaming::bootstrap_observed_stream(
         upstream,
         expected_model,

@@ -26,10 +26,8 @@ impl<S> UsageStream<S> {
                 },
             );
         }
-        if !event.success && event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED)
-        {
-            event.http_status = 499;
-        } else if !event.success
+        event.normalize_client_cancellation();
+        if !event.success
             && event.http_status < 400
             && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
         {

@@ -65,7 +65,7 @@ impl GatewayRuntime {
         request: CooldownRequest<'_>,
     ) -> bool {
         let mut scheduler = self.lock_scheduler();
-        self.apply_cooldown_locked(&mut scheduler, candidate_id, request, None)
+        self.apply_cooldown_locked(&mut scheduler, candidate_id, request)
     }
 
     pub(crate) fn settle_rotation_failure(
@@ -97,12 +97,7 @@ impl GatewayRuntime {
                         now_ms,
                     );
                 } else {
-                    self.apply_cooldown_locked(
-                        scheduler,
-                        lease.candidate_id(),
-                        request,
-                        Some(now_ms),
-                    );
+                    self.apply_cooldown_locked(scheduler, lease.candidate_id(), request);
                 }
             }
         });
@@ -113,11 +108,10 @@ impl GatewayRuntime {
         scheduler: &mut PoolScheduler,
         candidate_id: &str,
         request: CooldownRequest<'_>,
-        observed_at_ms: Option<u64>,
     ) -> bool {
         // All source protocol routes share the candidate's physical quota,
         // activity and cooldown. No sibling candidate needs synchronization.
-        scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request, observed_at_ms)
+        scheduler.set_cooldown_with_reason_for_model_at(candidate_id, request)
     }
 
     pub(crate) fn failure_state_for(

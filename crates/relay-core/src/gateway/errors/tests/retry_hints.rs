@@ -97,7 +97,9 @@ async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay(
                 category,
                 &headers,
                 RateLimitBodyHint {
-                    retry_after_ms: body,
+                    retry_clock: body.map(|delay| {
+                        crate::scheduler::ProviderClock::new(started + delay, Some(started))
+                    }),
                     global: false,
                     ..Default::default()
                 },
@@ -115,6 +117,116 @@ async fn model_failure_preserves_provider_retry_after_over_shorter_source_delay(
             let snapshot = runtime.candidate_runtime_order();
             assert!(snapshot[0].available, "the other model must remain usable");
             assert_eq!(snapshot[0].model_retries[0].retry_at_ms, retry_at);
+        }
+    }
+}
+
+#[test]
+fn delayed_failure_settlement_does_not_restart_the_provider_reset_clock() {
+    let runtime = runtime(5);
+    let observed = UNIX_EPOCH + Duration::from_millis(1_700_000_000_900);
+    let now = observed + Duration::from_secs(5);
+    let headers = reqwest::header::HeaderMap::new();
+    for payload in [
+        serde_json::json!({"error":{"resets_at":1_700_000_010_900_u64}}),
+        serde_json::json!({"error":{"resets_in_seconds":10}}),
+        serde_json::json!({"error":{"retry_after":10}}),
+    ] {
+        let result = failure_cooldown(CooldownInput {
+            runtime: &runtime,
+            candidate_id: "source",
+            model: "model-a",
+            status: StatusCode::TOO_MANY_REQUESTS,
+            category: error_codes::UPSTREAM_RATE_LIMITED,
+            headers: &headers,
+            hint: cooldown::rate_limit_body_hint_value(&payload, observed),
+            now,
+        })
+        .unwrap();
+        let clock = result.provider_clock.unwrap();
+        assert_eq!(clock.not_before_ms, 1_700_000_010_900);
+        assert_eq!(clock.observed_at_ms, Some(1_700_000_000_900));
+        assert_eq!(result.retry_at_ms, 1_700_000_010_900);
+    }
+}
+
+#[test]
+fn subsecond_provider_reset_remains_separate_from_the_local_recovery_floor() {
+    let runtime = runtime(5);
+    let now = UNIX_EPOCH + Duration::from_millis(1_700_000_000_900);
+    let headers = reqwest::header::HeaderMap::new();
+    for reset in [
+        serde_json::json!(1_700_000_000_950_u64),
+        serde_json::json!("1700000000950"),
+    ] {
+        let payload = serde_json::json!({"error":{"resets_at":reset}});
+        let result = failure_cooldown(CooldownInput {
+            runtime: &runtime,
+            candidate_id: "source",
+            model: "model-a",
+            status: StatusCode::TOO_MANY_REQUESTS,
+            category: error_codes::UPSTREAM_RATE_LIMITED,
+            headers: &headers,
+            hint: cooldown::rate_limit_body_hint_value(&payload, now),
+            now,
+        })
+        .unwrap();
+        assert_eq!(result.scope, "model-a");
+        assert_eq!(
+            result.provider_clock.unwrap().not_before_ms,
+            1_700_000_000_950
+        );
+        assert_eq!(result.retry_at_ms, 1_700_000_005_900);
+    }
+}
+
+#[tokio::test]
+async fn settlement_retains_clock_provenance_without_renewing_expired_evidence() {
+    for known_observation in [false, true] {
+        for seconds in [1, 60] {
+            let runtime = runtime(5);
+            let lease = reserve(&runtime).await;
+            let observed_ms = now_ms();
+            let observed = UNIX_EPOCH + Duration::from_millis(observed_ms);
+            let settled_ms = observed_ms + 5_000;
+            let mut hint = cooldown::rate_limit_body_hint_value(
+                &serde_json::json!({"retry_after":seconds}),
+                observed,
+            );
+            if !known_observation {
+                hint.retry_clock.as_mut().unwrap().observed_at_ms = None;
+            }
+            let failure = AttemptFailure::classified_with_hint(
+                StatusCode::TOO_MANY_REQUESTS,
+                error_codes::UPSTREAM_RATE_LIMITED,
+                hint,
+            );
+            let headers = reqwest::header::HeaderMap::new();
+            let cooldown = failure_cooldown(CooldownInput {
+                runtime: &runtime,
+                candidate_id: "source",
+                model: "model-a",
+                status: failure.status,
+                category: failure.category,
+                headers: &headers,
+                hint,
+                now: UNIX_EPOCH + Duration::from_millis(settled_ms),
+            });
+            failure.settle_rotation_rejection(&runtime, &lease, cooldown, settled_ms);
+            let (_, effective, provider) =
+                runtime.failure_state_for("source", "model-a", settled_ms);
+            if seconds == 1 {
+                assert!(provider.is_none());
+                assert_eq!(effective, Some(("model-a".into(), settled_ms + 5_000)));
+            } else {
+                let provider = provider.unwrap();
+                assert_eq!(provider.not_before_ms, observed_ms + 60_000);
+                assert_eq!(
+                    provider.observed_at_ms,
+                    known_observation.then_some(observed_ms)
+                );
+                assert_eq!(effective, Some(("model-a".into(), observed_ms + 60_000)));
+            }
         }
     }
 }
@@ -143,15 +255,20 @@ fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
         if let Some(value) = header {
             headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
         }
+        let hint =
+            cooldown::rate_limit_body_hint_at(&body, now).with_retry_headers_at(&headers, now);
         let failure = AttemptFailure::classified_with_hint(
             StatusCode::TOO_MANY_REQUESTS,
             error_codes::UPSTREAM_QUOTA_EXHAUSTED,
-            cooldown::rate_limit_body_hint_at(&body, now),
-        )
-        .with_retry_headers(&headers);
+            hint,
+        );
         assert_eq!(
-            failure.cooldown_hint.retry_after_for_account(true),
-            Some(518_400_000)
+            failure
+                .cooldown_hint
+                .retry_clock_for_account(true)
+                .unwrap()
+                .not_before_ms,
+            1_700_518_400_000,
         );
         // Streaming paths may retain retry headers only in the failure hint.
         let result = failure_cooldown(CooldownInput {
@@ -173,7 +290,7 @@ fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
             .chain(header.map(|seconds| seconds.parse::<u64>().unwrap() * 1_000))
             .max();
         assert_eq!(
-            result.provider_not_before_ms,
+            result.provider_clock.map(|clock| clock.not_before_ms),
             provider_delay.map(|delay| 1_700_000_000_000 + delay)
         );
     }
@@ -194,14 +311,21 @@ fn relayed_subscription_reset_does_not_cool_the_entire_api_key() {
     .unwrap();
     assert_eq!(result.scope, "*");
     assert_eq!(result.retry_at_ms, 1_700_518_400_000);
-    assert_eq!(result.provider_not_before_ms, Some(1_700_518_400_000));
+    assert_eq!(
+        result.provider_clock.unwrap().not_before_ms,
+        1_700_518_400_000
+    );
 }
 
 #[test]
 fn relayed_subscription_reset_does_not_become_an_http_retry_after_header() {
-    let body = br#"{"error":{"type":"usage_limit_reached","resets_at":1700518400}}"#;
-    let hint =
-        cooldown::rate_limit_body_hint_at(body, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let now = SystemTime::now();
+    let body = serde_json::to_vec(&serde_json::json!({"error":{
+        "type":"usage_limit_reached",
+        "resets_at":crate::unix_time_ms_at(now) + 518_400_000,
+    }}))
+    .unwrap();
+    let hint = cooldown::rate_limit_body_hint_at(&body, now);
     for (origin, expected) in [
         (crate::ErrorOrigin::Provider, None),
         (crate::ErrorOrigin::Account, Some("518400")),

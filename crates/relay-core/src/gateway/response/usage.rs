@@ -149,7 +149,7 @@ pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut Usag
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
-    normalize_client_cancellation(&mut event);
+    event.normalize_client_cancellation();
     if event.success
         && event.error_category.is_none()
         && let Some(origin) = runtime.request_origin(&event.request_id)
@@ -174,25 +174,13 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
     let mut event = event;
-    normalize_client_cancellation(&mut event);
+    event.normalize_client_cancellation();
     if let Some(routing) = event.routing.as_mut()
         && event.success
     {
         routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
-}
-
-fn normalize_client_cancellation(event: &mut UsageEvent) {
-    // Internal telemetry only: the disconnected client cannot receive a status.
-    if !event.success
-        && event.error_category.as_deref() == Some(crate::error_codes::CLIENT_CANCELLED)
-    {
-        event.http_status = 499;
-        if let Some(routing) = event.routing.as_mut() {
-            routing.attempt_outcome = Some(crate::AttemptOutcome::ClientDisconnected);
-        }
-    }
 }
 
 pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {

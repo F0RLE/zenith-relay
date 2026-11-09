@@ -39,6 +39,14 @@ impl SharedRequestBudget {
         crate::poison::mutex(&self.budget).dispatches()
     }
 
+    pub(crate) fn mark_image_generation(&self) {
+        self.with_budget(|budget| budget.image_generation = true);
+    }
+
+    pub(crate) fn is_image_generation(&self) -> bool {
+        self.with_budget(|budget| budget.image_generation)
+    }
+
     pub(crate) fn http_headers_deadline(
         &self,
         timeout: std::time::Duration,

@@ -43,6 +43,7 @@ mod events;
 mod fast_delta;
 mod replay;
 mod upstream_usage;
+pub(in crate::gateway) use upstream_usage::UpstreamUsage;
 
 pub(in crate::gateway) use fast_delta::{FastResponseDelta, fast_response_delta_json};
 

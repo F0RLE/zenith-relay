@@ -1,4 +1,5 @@
 use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::test]
 async fn usage_distinguishes_provider_deadline_from_inferred_and_configured_backoff() {
@@ -63,7 +64,19 @@ async fn usage_distinguishes_provider_deadline_from_inferred_and_configured_back
             assert_eq!(provider.scope, MODEL);
             let observed_at_ms = provider.observed_at_ms.unwrap();
             assert_eq!(provider.not_before_ms - observed_at_ms, 30_000);
-            assert_eq!(first.retry_at_ms.unwrap() - provider.not_before_ms, 30_000);
+            // The provider clock starts at normalization; the local recovery
+            // floor starts at settlement, which can occur later.
+            let checked_at_ms = u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap();
+            assert!(
+                (observed_at_ms + 60_000..=checked_at_ms + 60_000)
+                    .contains(&first.retry_at_ms.unwrap())
+            );
             assert_eq!(encoded["providerBackoff"]["scope"], MODEL);
             assert_eq!(encoded["providerBackoff"]["observedAtMs"], observed_at_ms);
             assert_eq!(

@@ -1,5 +1,7 @@
 use super::*;
 
+mod tls_proxy;
+
 #[tokio::test]
 async fn loopback_http2_diagnostic_preserves_physical_dispatch_and_retry_limits() {
     let result = diagnose_http2_retries().await.unwrap();

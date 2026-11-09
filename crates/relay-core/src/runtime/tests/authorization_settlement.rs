@@ -90,7 +90,10 @@ impl AuthorizedLease {
                 scope: "*",
                 retry_at_ms: now + 60_000,
                 reason: crate::scheduler::CooldownReason::Mandatory,
-                provider_not_before_ms: Some(now + 60_000),
+                provider_clock: Some(crate::scheduler::ProviderClock::new(
+                    now + 60_000,
+                    Some(now),
+                )),
             }),
             None,
             now,

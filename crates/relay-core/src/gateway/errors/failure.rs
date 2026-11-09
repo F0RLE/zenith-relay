@@ -60,8 +60,8 @@ impl AttemptFailure {
             HealthObservation::CountableTransient {
                 provider_not_before_ms: cooldown.map(|request| request.retry_at_ms).or_else(|| {
                     self.cooldown_hint
-                        .retry_after_ms
-                        .map(|delay| now_ms.saturating_add(delay))
+                        .retry_clock_for_account(true)
+                        .map(|clock| clock.not_before_ms)
                 }),
             }
         } else if self.execution.certainty
@@ -92,6 +92,7 @@ impl AttemptFailure {
             AuthorizedRequestError::ModelAccess(failure) => {
                 let rate_limited = failure.code
                     == crate::providers::chatgpt::ModelDiscoveryFailureCode::RateLimited;
+                let observed = now_ms();
                 Self {
                     execution: ExecutionObservation::not_sent(),
                     status: if rate_limited {
@@ -106,7 +107,12 @@ impl AttemptFailure {
                         "Basis Points model access could not be verified"
                     },
                     cooldown_hint: RateLimitBodyHint {
-                        retry_after_ms: failure.retry_after_ms,
+                        retry_clock: failure.retry_after_ms.map(|delay| {
+                            crate::scheduler::ProviderClock::new(
+                                observed.saturating_add(delay),
+                                None,
+                            )
+                        }),
                         global: rate_limited,
                         ..Default::default()
                     },
@@ -239,15 +245,9 @@ impl AttemptFailure {
     }
 
     pub(crate) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
-        let header_delay = super::cooldown::retry_after_ms(headers, std::time::SystemTime::now());
-        self.cooldown_hint.explicit_retry_after_ms = header_delay
-            .into_iter()
-            .chain(self.cooldown_hint.explicit_retry_after_ms)
-            .max();
-        self.cooldown_hint.retry_after_ms = header_delay
-            .into_iter()
-            .chain(self.cooldown_hint.retry_after_ms)
-            .max();
+        self.cooldown_hint = self
+            .cooldown_hint
+            .with_retry_headers_at(headers, std::time::SystemTime::now());
         self
     }
 

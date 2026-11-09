@@ -33,7 +33,8 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
     );
     assert_eq!(terminal.error_category, Some("upstream_quota_exhausted"));
     assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
-    assert_eq!(terminal.cooldown_hint.retry_after_ms, Some(7_000));
+    let clock = terminal.cooldown_hint.retry_clock.unwrap();
+    assert_eq!(clock.not_before_ms - clock.observed_at_ms.unwrap(), 7_000);
     assert!(terminal.cooldown_hint.global);
 }
 
@@ -129,7 +130,8 @@ async fn observed_bootstrap_keeps_body_json_and_output_boundaries_distinct() {
             Some(
                 super::super::bootstrap::StreamBootstrapObservation::Transport {
                     started,
-                    transport: &mut transport,
+                    transport: Some(&mut transport),
+                    on_retained_body: None,
                 },
             ),
         )
@@ -575,6 +577,7 @@ async fn buffered_basis_points_rejects_created_without_waiting_for_the_body() {
             false,
             Instant::now(),
             &mut timing,
+            None,
         ),
     )
     .await;

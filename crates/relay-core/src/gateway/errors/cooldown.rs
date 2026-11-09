@@ -3,12 +3,9 @@ use crate::error_codes;
 
 mod rate_limit;
 
+pub(crate) use rate_limit::{RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value};
 #[cfg(test)]
-pub(crate) use rate_limit::rate_limit_body_hint_at;
-pub(crate) use rate_limit::{
-    RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms,
-    retry_delay_ms,
-};
+pub(crate) use rate_limit::{rate_limit_body_hint_at, retry_after_ms};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn settle_status_failure(
@@ -93,7 +90,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         (
             error_codes::UPSTREAM_RATE_LIMITED,
             RateLimitBodyHint {
-                retry_after_ms: hint.retry_after_for_account(false),
+                retry_clock: hint.explicit_retry_clock,
                 global: false,
                 ..hint
             },
@@ -111,10 +108,10 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         return None;
     }
     let now = crate::unix_time_ms_at(now_system);
-    let header_retry_after_ms = retry_after_ms(headers, now_system);
-    let explicit = header_retry_after_ms.is_some()
-        || hint.retry_after_ms.is_some()
-        || category == error_codes::UPSTREAM_ROUTE_DEGRADED;
+    let provider_clock = hint
+        .with_retry_headers_at(headers, now_system)
+        .retry_clock_for_account(true);
+    let explicit = provider_clock.is_some() || category == error_codes::UPSTREAM_ROUTE_DEGRADED;
     let reason = failure_cooldown_reason(status, category, explicit);
     if reason == CooldownReason::Transient {
         return None;
@@ -158,12 +155,9 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
     } else {
         TRANSIENT_COOLDOWN_MS
     };
-    let provider_not_before_ms = header_retry_after_ms
-        .into_iter()
-        .chain(hint.retry_after_ms)
-        .max()
-        .map(|delay| now.saturating_add(delay));
-    let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    let mut duration_ms = provider_clock
+        .map(|clock| clock.not_before_ms.saturating_sub(now))
+        .unwrap_or(fallback);
     if basis_points_rate_limit {
         // Millisecond token-bucket hints must not recycle a saturated BPS route immediately.
         duration_ms =
@@ -181,7 +175,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         scope,
         retry_at_ms,
         reason,
-        provider_not_before_ms,
+        provider_clock,
     })
 }
 
@@ -317,7 +311,7 @@ pub(crate) fn settle_image_capability_failure(
             scope,
             retry_at_ms,
             reason: CooldownReason::Mandatory,
-            provider_not_before_ms: None,
+            provider_clock: None,
         }),
         now,
     );

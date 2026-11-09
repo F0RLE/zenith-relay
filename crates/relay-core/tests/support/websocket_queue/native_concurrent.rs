@@ -808,6 +808,13 @@ async fn websocket_native_concurrent_repair_drains_siblings_before_replacing_soc
         "error":{"type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id","message":"Synthetic missing parent"}
     }));
     reject_marker(&mut socket).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the rejected attempt must release its lease while its sibling remains active");
     assert_eq!(probe.sockets.lock().unwrap().len(), 1);
     assert_eq!(probe.requests.lock().unwrap().len(), 3);
     assert_eq!(

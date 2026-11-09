@@ -422,7 +422,7 @@ impl GatewayRuntime {
         let headers_deadline = budget
             .filter(|_| !self.is_basis_points_account(candidate_id))
             .and_then(|budget| {
-                crate::transport::http_headers_timeout()
+                crate::transport::http_headers_timeout(budget.is_image_generation())
                     .map(|timeout| budget.http_headers_deadline(timeout))
             });
         if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {

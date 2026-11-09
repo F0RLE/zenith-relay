@@ -4,10 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    task::JoinSet,
-};
+use tokio::{net::TcpListener, task::JoinSet};
 
 #[derive(Clone, Copy)]
 pub(super) enum Reply {
@@ -57,7 +54,10 @@ impl Fixture {
     }
 }
 
-async fn serve(socket: TcpStream, requests: Arc<AtomicUsize>, reply: Reply) {
+pub(super) async fn serve<Io>(socket: Io, requests: Arc<AtomicUsize>, reply: Reply)
+where
+    Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut builder = h2::server::Builder::new();
     builder.max_header_list_size(4096).max_concurrent_streams(4);
     let Ok(mut connection) = builder.handshake::<_, Bytes>(socket).await else {

@@ -7,7 +7,8 @@ use super::super::super::request::{
     forwarded_codex_headers,
 };
 use super::super::super::response::{
-    UsageAttempt, emit_usage, populate_tokens, stop_basis_points_event, usage_event,
+    PendingUsageObservation, UsageAttempt, emit_usage, populate_tokens, stop_basis_points_event,
+    usage_event,
 };
 use super::super::super::turn_state::request_scope;
 use super::super::state::{ContinuationState, RetryState};
@@ -165,14 +166,14 @@ pub(super) async fn dispatch_account_attempt(
             Ok(owner) => attachment_owner = owner,
             Err(super::super::basis_points::AttachmentFailure::Reject(failure)) => {
                 return AccountDispatch::Respond(attempt_error_response(
-                    failure,
+                    *failure,
                     None,
                     selected_error_origin,
                     request_id,
                 ));
             }
             Err(super::super::basis_points::AttachmentFailure::Retry(failure)) => {
-                *last_failure = Some(failure);
+                *last_failure = Some(*failure);
                 *last_failure_origin = selected_error_origin;
                 return AccountDispatch::Continue;
             }
@@ -366,6 +367,9 @@ pub(super) async fn dispatch_account_attempt(
     };
     let mut status = upstream.status();
     let mut response_headers = upstream.headers().clone();
+    let mut observed_usage = authorization_event;
+    observed_usage.attempt = u16::from(budget.dispatches());
+    let mut pending_usage = PendingUsageObservation::new(runtime, observed_usage);
     let mut bytes = match crate::transport::collect_with_progress(
         upstream,
         if basis_points_route {
@@ -374,6 +378,7 @@ pub(super) async fn dispatch_account_attempt(
             None
         },
         |event| {
+            pending_usage.observe(event);
             basis_points_route
                 && stop_basis_points_event(
                     event,

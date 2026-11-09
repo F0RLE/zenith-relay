@@ -90,6 +90,28 @@ async fn http_headers_deadline_cannot_be_extended_by_retry_or_transport_handoff(
 }
 
 #[tokio::test(start_paused = true)]
+async fn image_header_policy_survives_handoff_without_refunding_a_started_deadline() {
+    let budget = SharedRequestBudget::for_incoming_request(4);
+    assert!(!budget.is_image_generation());
+    budget.mark_image_generation();
+    let first = budget.http_headers_deadline(std::time::Duration::from_secs(180));
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    let handoff = budget.clone();
+    assert!(handoff.is_image_generation());
+    handoff.mark_image_generation();
+    assert_eq!(
+        handoff.http_headers_deadline(std::time::Duration::from_secs(180)),
+        first
+    );
+    tokio::time::advance(std::time::Duration::from_secs(170)).await;
+    assert_eq!(
+        handoff.http_headers_deadline(std::time::Duration::from_secs(180)),
+        tokio::time::Instant::now()
+    );
+    assert_eq!(budget.dispatches(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn retry_window_starts_at_rejection_and_survives_transport_handoff() {
     let budget = SharedRequestBudget::for_incoming_request(8);
     budget.configure_retry_window(30_000, false);

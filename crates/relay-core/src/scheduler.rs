@@ -17,8 +17,8 @@ pub use candidate::{
     RuntimeCandidate, account_candidate_health,
 };
 pub use capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
-pub(crate) use cooldown::CooldownReason;
 pub use cooldown::ProviderBackoff;
+pub(crate) use cooldown::{CooldownReason, ProviderClock};
 pub(crate) use selection::CooldownRequest;
 pub(crate) use selection::ReservationId;
 pub use selection::{

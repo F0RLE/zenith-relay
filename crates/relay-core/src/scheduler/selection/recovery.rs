@@ -73,9 +73,8 @@ impl PoolScheduler {
                 scope: model,
                 retry_at_ms,
                 reason,
-                provider_not_before_ms: None,
+                provider_clock: None,
             },
-            None,
         )
     }
 
@@ -83,16 +82,14 @@ impl PoolScheduler {
         &mut self,
         candidate_id: &str,
         request: CooldownRequest<'_>,
-        observed_at_ms: Option<u64>,
     ) -> bool {
-        self.set_cooldown_with_reason_inner(candidate_id, request, observed_at_ms)
+        self.set_cooldown_with_reason_inner(candidate_id, request)
     }
 
     fn set_cooldown_with_reason_inner(
         &mut self,
         candidate_id: &str,
         request: CooldownRequest<'_>,
-        observed_at_ms: Option<u64>,
     ) -> bool {
         // Transient health is reduced exactly once by the dispatched rotation
         // lease. This map stores only provider/mandatory rate deadlines.
@@ -140,9 +137,8 @@ impl PoolScheduler {
         metadata.provider_clock = ProviderClock::latest(
             metadata.provider_clock.into_iter().chain(
                 request
-                    .provider_not_before_ms
-                    .filter(|deadline| *deadline <= request.retry_at_ms)
-                    .map(|deadline| ProviderClock::new(deadline, observed_at_ms)),
+                    .provider_clock
+                    .filter(|clock| clock.not_before_ms <= request.retry_at_ms),
             ),
         );
         if metadata.reason.is_some() || metadata.provider_clock.is_some() {

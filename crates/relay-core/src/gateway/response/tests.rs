@@ -349,8 +349,14 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
         let mut timing = BufferedResponseTiming::default();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             if basis_points {
-                collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing)
-                    .await
+                collect_basis_points_response(
+                    upstream,
+                    Some("gpt-6-astra"),
+                    started,
+                    &mut timing,
+                    None,
+                )
+                .await
             } else {
                 super::collect_upstream_response(
                     upstream,
@@ -359,6 +365,7 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
                     prewarm,
                     started,
                     &mut timing,
+                    None,
                 )
                 .await
             }
@@ -781,6 +788,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     Some("gpt-6-astra"),
                     std::time::Instant::now(),
                     &mut timing,
+                    None,
                 )
                 .await;
                 let mut event = test_usage_event();
@@ -796,6 +804,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     false,
                     std::time::Instant::now(),
                     &mut BufferedResponseTiming::default(),
+                    None,
                 )
                 .await
             }

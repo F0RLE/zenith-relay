@@ -43,6 +43,7 @@ pub struct RequestBudget {
     persistent_retry: bool,
     rate_limit_deadline: Option<tokio::time::Instant>,
     http_headers_deadline: Option<tokio::time::Instant>,
+    image_generation: bool,
     retry_window_ms: Option<u64>,
 }
 
@@ -86,6 +87,7 @@ impl RequestBudget {
             persistent_retry: false,
             rate_limit_deadline: None,
             http_headers_deadline: None,
+            image_generation: false,
             retry_window_ms: None,
         })
     }

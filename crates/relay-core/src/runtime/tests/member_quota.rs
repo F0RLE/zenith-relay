@@ -59,7 +59,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
 
                 retry_at_ms: 1000,
                 reason,
-                provider_not_before_ms: None,
+                provider_clock: None,
             }
         ));
         let mut scheduler = runtime.lock_scheduler();

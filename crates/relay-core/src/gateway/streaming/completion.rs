@@ -62,9 +62,7 @@ impl StreamCompletionSettlement {
             }
             discovery_headers.clone_from(&progress.headers);
             // Canonical client errors omit the original provider's retry fields.
-            hint.retry_after_ms = hint
-                .retry_after_ms
-                .max(progress.cooldown_hint.retry_after_ms);
+            hint.merge_retry_clocks(progress.cooldown_hint);
             hint.global |= progress.cooldown_hint.global;
             if let Some(details) = &progress.upstream_error {
                 event.upstream_error = Some(details.clone());

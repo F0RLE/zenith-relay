@@ -1,7 +1,10 @@
 mod completion;
 mod format;
 mod http;
+mod pending_usage;
 mod usage;
+
+pub(in crate::gateway) use pending_usage::PendingUsageObservation;
 
 pub(in crate::gateway) use completion::{
     BufferedResponseTiming, collect_basis_points_response, has_complete_rejection_body,
@@ -12,9 +15,9 @@ pub(super) use completion::{
 };
 pub(in crate::gateway) use format::normalize_event_stream;
 pub(super) use http::{
-    CompletionCallback, attach_error_diagnostics, attach_stream_diagnostics, proxy_error_response,
-    proxy_json_response, proxy_response, proxy_sse_response, route_error_origin,
-    upstream_body_error_response,
+    CompletionCallback, attach_error_diagnostics, attach_request_id, attach_stream_diagnostics,
+    proxy_error_response, proxy_json_response, proxy_response, proxy_sse_response,
+    route_error_origin, upstream_body_error_response,
 };
 pub(super) use usage::{
     UsageAttempt, apply_usage, emit_callback, emit_repair, emit_usage, find_usage,

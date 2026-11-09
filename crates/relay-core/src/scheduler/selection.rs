@@ -60,7 +60,7 @@ pub(crate) struct CooldownRequest<'a> {
     pub(crate) retry_at_ms: u64,
     pub(crate) reason: CooldownReason,
     /// Explicit provider clock evidence, separate from inferred/policy delays.
-    pub(crate) provider_not_before_ms: Option<u64>,
+    pub(crate) provider_clock: Option<ProviderClock>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

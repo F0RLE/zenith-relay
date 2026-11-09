@@ -420,7 +420,7 @@ async fn due_timer_and_release_before_await_are_not_lost() {
             scope: "model-a",
             retry_at_ms: now + 2_000,
             reason: crate::scheduler::CooldownReason::RateLimit,
-            provider_not_before_ms: None,
+            provider_clock: None,
         }
     ));
     let mut waiting = Box::pin(recovery(&runtime, &request, false));

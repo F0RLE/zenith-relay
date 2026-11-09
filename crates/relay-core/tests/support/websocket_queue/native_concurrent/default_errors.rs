@@ -1,6 +1,55 @@
 use super::*;
 
 #[tokio::test]
+async fn websocket_native_turn_limit_preserves_retry_without_cooling_the_source() {
+    for lane in [None, Some("limited")] {
+        let (upstream, probe) = fixture_with_startup(false).await;
+        let (gateway, events) = gateway_for(&upstream).await;
+        let mut socket = connect(&gateway).await;
+        socket.send(create(0, lane)).await.unwrap();
+        probe.wait_requests(1).await;
+        let mut rejection = json!({"type":"error", "status":429,
+            "error":{"code":"turn_rate_limit_exceeded", "retry_after":30,
+            "message":"Synthetic turn limit"}
+        });
+        if let Some(lane) = lane {
+            rejection["stream_id"] = json!(lane);
+        }
+        probe.emit(rejection);
+        let rejected = receive_websocket_json(&mut socket).await;
+        assert_eq!(rejected["type"], "error");
+        assert_eq!(rejected["error"]["code"], "turn_rate_limit_exceeded");
+        assert_eq!(rejected["error"]["retry_after"], 30);
+        assert_eq!(rejected.get("stream_id").and_then(Value::as_str), lane);
+        probe.wait_settled(&gateway).await;
+        let state = &gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0];
+        assert!(state.available);
+        assert!(state.next_retry_at_ms.is_none());
+        assert_eq!(probe.requests.lock().unwrap().len(), 1);
+        socket.send(create(1, Some("followup"))).await.unwrap();
+        probe.wait_requests(2).await;
+        probe.complete(Some("followup"), "native-1", 5);
+        let complete = receive_websocket_json(&mut socket).await;
+        assert_eq!(complete["type"], "response.completed");
+        assert_eq!(complete["stream_id"], "followup");
+        probe.wait_settled(&gateway).await;
+        assert_eq!(probe.requests.lock().unwrap().len(), 2);
+        assert!(probe.http_requests.lock().unwrap().is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.attempt == 1));
+        let failed = events.iter().find(|event| !event.success).unwrap();
+        assert_eq!(
+            failed.error_category.as_deref(),
+            Some("upstream_turn_rate_limited")
+        );
+        assert!(failed.retry_at_ms.is_none());
+        assert!(failed.input_tokens.is_none());
+        assert_eq!(events.iter().filter(|event| event.success).count(), 1);
+    }
+}
+
+#[tokio::test]
 async fn websocket_native_default_empty_incomplete_preserves_queued_work() {
     for reason in [None, Some("max_output_tokens")] {
         let (upstream, probe) = fixture_with_startup(false).await;
