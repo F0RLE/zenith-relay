@@ -3,7 +3,7 @@ use crate::{
     local_pool::{
         commands,
         error::{CommandError, ErrorCode, LocalPoolError},
-        models::ProviderSourceRecord,
+        models::{CatalogRefreshClient, ProviderSourceRecord},
         state::DesktopState,
         store::{gateway_keys, secret_store},
     },
@@ -11,7 +11,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::{collections::HashSet, fs};
+use std::collections::HashSet;
 use tauri::State;
 use zenith_relay_core::{
     SourceAdapter, WireApi, model_metadata::ModelMetadataCatalog, protocol::ModelSummary,
@@ -144,6 +144,7 @@ pub async fn connect_opencode_to_local_gateway(
         .map(|model| model.id.clone())
         .collect::<Vec<_>>();
     write_config_with_model_order(&config_path, &config_document, &model_order)?;
+    state.clear_client_catalog_refresh_failure(CatalogRefreshClient::OpenCode);
     Ok(OpenCodeConnectionResult {
         path: config_path.display().to_string(),
         model_count: model_ids.len(),
@@ -188,6 +189,7 @@ pub async fn launch_opencode_source(
         true,
     )?;
     write_config_with_model_order(&config_path, &config_document, &models)?;
+    state.clear_client_catalog_refresh_failure(CatalogRefreshClient::OpenCode);
     restart_opencode_app().await?;
     Ok(OpenCodeConnectionResult {
         path: config_path.display().to_string(),
@@ -239,39 +241,11 @@ pub async fn restart_opencode_app() -> Result<(), CommandError> {
 #[tauri::command]
 pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<bool, CommandError> {
     let _mutation = state.setup_guard().await;
-    let config_path = default_opencode_config_path();
-    let backup = backup_path(&state);
-    if backup.exists() {
-        if !current_config_is_managed(&config_path)? {
-            return Err(LocalPoolError::new(
-                ErrorCode::ProfileRestoreBlocked,
-                "OpenCode config was changed outside Relay; restore was blocked",
-            )
-            .into());
-        }
-        restore_original_config_preserving_user_changes(&backup, &config_path)?;
-        fs::remove_file(&backup)
-            .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
-        let _ = fs::remove_file(backup_name_path(&state));
-        return Ok(true);
+    let restored = restore_saved_config(&state, &default_opencode_config_path())?;
+    if restored {
+        state.clear_client_catalog_refresh_failure(CatalogRefreshClient::OpenCode);
     }
-    if missing_marker_path(&state).exists() {
-        let mut config_document = read_config(&config_path)?;
-        let managed = remove_managed_configuration(&mut config_document);
-        if managed {
-            if config_document.is_empty() {
-                fs::remove_file(&config_path)
-                    .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
-            } else {
-                write_config(&config_path, &config_document)?;
-            }
-        }
-        fs::remove_file(missing_marker_path(&state))
-            .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
-        let _ = fs::remove_file(backup_name_path(&state));
-        return Ok(managed);
-    }
-    Ok(false)
+    Ok(restored)
 }
 
 #[cfg(test)]

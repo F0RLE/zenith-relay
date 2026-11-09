@@ -119,6 +119,23 @@ fn parses_comments_and_trailing_commas_without_changing_strings() {
 }
 
 #[test]
+fn malformed_jsonc_does_not_join_tokens_or_erase_empty_entries() {
+    for content in [
+        r#"{"limit":1/* comment */2}"#,
+        r#"{"enabled":tr/* comment */ue}"#,
+        "{} /* unfinished comment",
+        "{,}",
+        "[,]",
+        r#"{"provider":{/* comment */,}}"#,
+    ] {
+        assert!(
+            parse_jsonc(content).is_err(),
+            "accepted malformed JSONC: {content}"
+        );
+    }
+}
+
+#[test]
 fn keeps_prepared_catalog_order_and_excludes_disabled_models() {
     let models = vec![
         model("claude-opus-4-8", true),

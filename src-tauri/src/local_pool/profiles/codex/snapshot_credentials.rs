@@ -192,10 +192,10 @@ pub(super) fn read_profile_auth(home: &Path) -> Result<Option<Vec<u8>>> {
     read(
         home,
         config,
-        snapshot_text(&file, &path)?,
+        || snapshot_text(&file, &path).map(|text| text.map(str::to_owned)),
         &NativeAuthKeyring,
     )
-    .map(|auth| auth.map(String::into_bytes))
+    .map(|captured| captured.auth.map(String::into_bytes))
 }
 
 pub(super) fn update_auth(
@@ -230,20 +230,26 @@ pub(super) fn update_auth(
     Ok(())
 }
 
+pub(super) struct ReadAuth {
+    pub auth: Option<String>,
+    pub uses_file: bool,
+}
+
 pub(super) fn read(
     home: &Path,
     config: Option<&str>,
-    file: Option<&str>,
+    file: impl FnOnce() -> Result<Option<String>>,
     keyring: &impl AuthKeyring,
-) -> Result<Option<String>> {
-    let auth = match store(config)? {
-        AuthStore::File => file.map(str::to_owned),
-        AuthStore::Keyring => keyring.load(home, encrypted_backend(config)?)?,
+) -> Result<ReadAuth> {
+    let (auth, uses_file) = match store(config)? {
+        AuthStore::File => (file()?, true),
+        AuthStore::Keyring => (keyring.load(home, encrypted_backend(config)?)?, false),
         // Fail on a locked store instead of capturing an unverified fallback
         // belonging to an older login. A missing entry can safely use the file.
-        AuthStore::Auto => keyring
-            .load(home, encrypted_backend(config)?)?
-            .or_else(|| file.map(str::to_owned)),
+        AuthStore::Auto => match keyring.load(home, encrypted_backend(config)?)? {
+            Some(auth) => (Some(auth), false),
+            None => (file()?, true),
+        },
     };
     if auth.as_ref().is_some_and(|auth| auth.len() > 1024 * 1024) {
         return Err(LocalPoolError::invalid_state(
@@ -251,7 +257,7 @@ pub(super) fn read(
         ));
     }
     projection::merge_auth(None, auth.as_deref())?;
-    Ok(auth)
+    Ok(ReadAuth { auth, uses_file })
 }
 
 /// Let the existing profile transaction journal native credentials together

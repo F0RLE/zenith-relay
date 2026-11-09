@@ -70,15 +70,25 @@ pub(super) fn snapshot_user_profile_locked(
     // A named snapshot records the connection visible at capture time. The
     // automatic attachment undo record is a different recovery operation.
     let config = snapshot_text(&config_bytes, &config_path)?.map(str::to_string);
-    let auth = snapshot_credentials::read(
+    let captured_auth = snapshot_credentials::read(
         &profile_dir,
         config.as_deref(),
-        snapshot_text(&auth_bytes, &auth_path)?,
+        || snapshot_text(&auth_bytes, &auth_path).map(|text| text.map(str::to_owned)),
         keyring,
     )?;
+    // External editors need not hold Codex's auth lock. A slow native-store
+    // read must not pair their newer connection with an older configuration.
+    if read_optional_bytes(&config_path)? != config_bytes
+        || (captured_auth.uses_file && read_optional_bytes(&auth_path)? != auth_bytes)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "ChatGPT connection changed while the snapshot was being captured; retry with its current state",
+        ));
+    }
     Ok(UserProfileSnapshot {
         config: snapshot_credentials::pin_backend(config)?,
-        auth,
+        auth: captured_auth.auth,
     })
 }
 
@@ -172,9 +182,10 @@ pub(super) fn restore_snapshot_with_keyring(
         snapshot_credentials::read(
             &profile_dir,
             current_config,
-            snapshot_text(&original_auth_bytes, &auth_path)?,
+            || snapshot_text(&original_auth_bytes, &auth_path).map(|text| text.map(str::to_owned)),
             keyring,
         )?
+        .auth
     };
     let snapshot = snapshot::restore_connection(
         snapshot,

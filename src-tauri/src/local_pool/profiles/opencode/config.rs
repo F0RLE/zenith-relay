@@ -8,9 +8,11 @@ use crate::{
 use serde_json::{Map, Value};
 
 mod order;
+mod recovery;
 #[cfg(test)]
 pub(super) use order::serialize_config;
 pub(super) use order::serialize_config_with_model_order;
+pub(super) use recovery::restore_saved_config;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -92,10 +94,6 @@ pub(super) fn read_config(path: &Path) -> Result<Map<String, Value>, LocalPoolEr
     })
 }
 
-pub(super) fn write_config(path: &Path, config: &Map<String, Value>) -> Result<(), LocalPoolError> {
-    write_config_with_model_order(path, config, &[])
-}
-
 pub(super) fn write_config_with_model_order(
     path: &Path,
     config: &Map<String, Value>,
@@ -142,84 +140,6 @@ pub(super) fn remove_managed_configuration(config: &mut Map<String, Value>) -> b
     provider_removed || model_removed
 }
 
-pub(super) fn current_config_is_managed(path: &Path) -> Result<bool, LocalPoolError> {
-    if !path.exists() {
-        return Ok(true);
-    }
-    let config = read_config(path)?;
-    Ok(config
-        .get("provider")
-        .and_then(Value::as_object)
-        .is_some_and(|providers| {
-            providers
-                .keys()
-                .any(|provider_id| super::protocols::managed_id(provider_id))
-        }))
-}
-
-pub(super) fn restore_original_config_preserving_user_changes(
-    original: &Path,
-    target_config_path: &Path,
-) -> Result<(), LocalPoolError> {
-    let original_content = fs::read_to_string(original)
-        .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
-    let mut restored = parse_jsonc(&original_content)
-        .map_err(|error| {
-            LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!("OpenCode snapshot is not valid JSON: {error}"),
-            )
-        })?
-        .as_object()
-        .cloned()
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "OpenCode snapshot root must be a JSON object",
-            )
-        })?;
-    let current_config = read_config(target_config_path)?;
-    for (key, config_value) in &current_config {
-        if key != "provider" && key != "model" {
-            restored.insert(key.clone(), config_value.clone());
-        }
-    }
-
-    let mut providers = restored
-        .get("provider")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    if let Some(current_providers) = current_config.get("provider").and_then(Value::as_object) {
-        for (provider_id, provider) in current_providers {
-            if !super::protocols::managed_id(provider_id) {
-                providers.insert(provider_id.clone(), provider.clone());
-            }
-        }
-    }
-    if providers.is_empty() {
-        restored.remove("provider");
-    } else {
-        restored.insert("provider".into(), Value::Object(providers));
-    }
-
-    let current_model_is_managed = current_config
-        .get("model")
-        .and_then(Value::as_str)
-        .is_some_and(super::protocols::managed_model);
-    if !current_model_is_managed {
-        match current_config.get("model") {
-            Some(model_value) => {
-                restored.insert("model".into(), model_value.clone());
-            }
-            None => {
-                restored.remove("model");
-            }
-        }
-    }
-    write_config(target_config_path, &restored)
-}
-
 /// OpenCode accepts JSONC. Strip comments and trailing commas without
 /// touching characters inside JSON strings before handing the value to
 /// serde_json. The original bytes remain recoverable through the backup.
@@ -247,6 +167,7 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
         }
         if ch == '/' && chars.peek() == Some(&'/') {
             chars.next();
+            cleaned.push(' ');
             for line_char in chars.by_ref() {
                 if line_char == '\n' {
                     cleaned.push('\n');
@@ -257,15 +178,23 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
         }
         if ch == '/' && chars.peek() == Some(&'*') {
             chars.next();
+            cleaned.push(' ');
             let mut previous_char = '\0';
+            let mut closed = false;
             for block_char in chars.by_ref() {
                 if previous_char == '*' && block_char == '/' {
+                    closed = true;
                     break;
                 }
                 if block_char == '\n' {
                     cleaned.push('\n');
                 }
                 previous_char = block_char;
+            }
+            if !closed {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "Unterminated JSONC block comment",
+                ));
             }
             continue;
         }
@@ -297,7 +226,13 @@ pub(super) fn parse_jsonc(content: &str) -> Result<Value, serde_json::Error> {
             while lookahead_index < chars.len() && chars[lookahead_index].is_whitespace() {
                 lookahead_index += 1;
             }
-            if lookahead_index < chars.len()
+            let follows_value = normalized_json
+                .chars()
+                .rev()
+                .find(|ch| !ch.is_whitespace())
+                .is_some_and(|ch| !matches!(ch, '[' | '{' | ':' | ','));
+            if follows_value
+                && lookahead_index < chars.len()
                 && (chars[lookahead_index] == '}' || chars[lookahead_index] == ']')
             {
                 continue;

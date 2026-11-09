@@ -580,6 +580,18 @@ export function initializeTauriMock(input: MockOptions) {
     let claudeDesktopHasRecovery = claudeDesktopConfigured;
     let claudeDesktopSnapshotName: string | null = null;
     let claudeDesktopSnapshotCreatedAtMs: number | null = claudeDesktopConfigured ? 1_781_000_000_000 : null;
+    const openCodeStatus = {
+      configured: false, modelCount: 0, hasBackup: false,
+      backupCreatedAtMs: null as number | null, backupName: null as string | null,
+      path: "C:\\Users\\Test\\.config\\opencode\\opencode.json",
+    };
+    const captureOpenCodeSnapshot = (name: string | null = null) => {
+      if (openCodeStatus.hasBackup) return false;
+      openCodeStatus.hasBackup = true;
+      openCodeStatus.backupCreatedAtMs = Date.now();
+      openCodeStatus.backupName = name;
+      return true;
+    };
     const applicationLaunchPaths: Record<string, string | null> = {};
     const detectedApplicationPaths: Record<string, string> = {
       chatgpt: "C:\\Program Files\\ChatGPT\\ChatGPT.exe",
@@ -1217,12 +1229,30 @@ export function initializeTauriMock(input: MockOptions) {
           case "launch_application": return null;
           case "open_hosted_preview": return null;
           case "pick_application_launch_path": return detectedApplicationPaths[String(args.application)] ?? null;
-          case "get_opencode_config_status": return { configured: false, modelCount: 0, hasBackup: false, backupCreatedAtMs: null, backupName: null, path: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
-          case "create_opencode_snapshot": return true;
-          case "connect_opencode_to_local_gateway": return { path: "C:\\Users\\Test\\.config\\opencode\\opencode.json", modelCount: 2, backupCreated: true };
-          case "launch_opencode_source": return { path: "C:\\Users\\Test\\.config\\opencode\\opencode.json", modelCount: source.models.length, backupCreated: true };
-          case "restart_opencode_app":
-          case "restore_opencode_config": return null;
+          case "get_opencode_config_status": return structuredClone(openCodeStatus);
+          case "create_opencode_snapshot": return captureOpenCodeSnapshot(String(args.name).trim());
+          case "connect_opencode_to_local_gateway": {
+            const backupCreated = captureOpenCodeSnapshot();
+            openCodeStatus.configured = true;
+            openCodeStatus.modelCount = 2;
+            return { path: openCodeStatus.path, modelCount: openCodeStatus.modelCount, backupCreated };
+          }
+          case "launch_opencode_source": {
+            const backupCreated = captureOpenCodeSnapshot();
+            openCodeStatus.configured = true;
+            openCodeStatus.modelCount = source.models.length;
+            return { path: openCodeStatus.path, modelCount: openCodeStatus.modelCount, backupCreated };
+          }
+          case "restart_opencode_app": return null;
+          case "restore_opencode_config": {
+            if (!openCodeStatus.hasBackup) return false;
+            openCodeStatus.configured = false;
+            openCodeStatus.modelCount = 0;
+            openCodeStatus.hasBackup = false;
+            openCodeStatus.backupCreatedAtMs = null;
+            openCodeStatus.backupName = null;
+            return true;
+          }
           case "get_claude_desktop_status": return { configured: claudeDesktopConfigured, modelCount: claudeDesktopConfigured ? 2 : 0, hasRecovery: claudeDesktopHasRecovery, snapshotName: claudeDesktopSnapshotName, snapshotCreatedAtMs: claudeDesktopSnapshotCreatedAtMs, running: false, path: "C:\\Users\\Test\\AppData\\Local\\Claude-3p\\configLibrary" };
           case "create_claude_desktop_snapshot": {
             if (claudeDesktopHasRecovery) return false;
