@@ -10,6 +10,107 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- Saved account methods remain selectable when a card has an older route snapshot.
+  Switching back to a linked Excel/BPS connection reuses its saved grant instead
+  of starting another sign-in or reporting a duplicate association.
+- Switching from an older SIWC registration can reuse an Excel/BPS connection
+  already associated with another registration of the same account. Protected
+  identity checks cover every retained grant; the group keeps one pool member
+  and prefers a usable grant when returning to SIWC.
+- API-source refresh distinguishes incomplete discovery from successful updates.
+  Pool refresh preserves manual model lists.
+- Image requests can opt into a longer response-header wait with
+  `ZENITH_RELAY_IMAGE_HEADERS_TIMEOUT_SECONDS` when the general HTTP header
+  timeout is enabled. Text requests and already-started response streams keep
+  their existing timing policy.
+- ChatGPT snapshot capture detects connection-file edits made during native
+  credential reads, returning a retryable conflict instead of saving mixed state.
+  Current files remain untouched; unused fallback-file edits or non-UTF-8 content
+  do not block capturing the selected keyring sign-in.
+- Automated HTTP/2 transport checks cover certificate-verified TLS/ALPN and
+  source-specific CONNECT proxies, including physical-send accounting, retry
+  budgets, HTTP 429 failover and unavailable proxies without direct bypass.
+- Streaming requests retain reported usage when cancelled before the first output
+  and client-stream handoff, for both native and converted routes. Accounting
+  remains active with debug diagnostics disabled, without inventing a first-token
+  time, repeating a send, or keeping the cancelled route reserved.
+- Cancellation of buffered account/BPS responses now retains usage already
+  reported in complete SSE frames, including before first output and during
+  discovery. Updates stay bound to the pending physical attempt and preserve its
+  dispatch clock; missing counters remain unknown and no extra send is recorded.
+  Native usage snapshots also retain reported cache-write input tokens.
+  Buffered usage tracking keeps the native snapshot off nested request stacks,
+  preventing stack overflow during WebSocket-to-HTTP fallback.
+- Account-only compact, search and wake requests retain an already dispatched
+  attempt when cancelled before upstream headers or while reading the buffered
+  response. They share the ordinary request-lifetime owner and preserve unknown
+  consumption, completed-response accounting and the original dispatch budget.
+  Their responses also expose the Relay request-ID correlation header.
+- Cancellation before stream handoff or during retry recovery now records the same
+  HTTP 499 client-disconnected outcome as ordinary streaming cancellation, keeping
+  reported partial usage and unknown consumption distinct. Preceding provider
+  failures retain their own attempt status and usage.
+- Buffered text-generation responses include the Relay request-ID header already
+  available on streams, allowing exact correlation with request history while
+  preserving provider IDs and native response bodies.
+- Added opt-in installed Codex tool-cycle qualification through a generated
+  catalog and the actual Relay gateway. It checks catalog adoption, exact effort,
+  one audited MCP execution, two physical sends, complete multi-part tool output
+  and terminal usage, using isolated temporary state and loopback-only fixtures.
+  A separate explicit-consent mode qualifies one selected live profile/model/effort,
+  retaining dynamic call identity and complete results. Its observer forwards SSE
+  incrementally and reports stream, client-cycle and between-turn timing; the
+  working profile and application remain unchanged.
+  A parallel scenario validates two independently audited functions, their namespace
+  identities and distinct grouped results. Duplicate audits block further generation;
+  swapped results and unrelated executable output cannot produce a passing check.
+- Claude Desktop catalog preparation on Windows resolves the registered package
+  and reads its publisher version in one bounded helper instead of two. Exact
+  package identity and selected-binary checks remain in place, with fresh metadata
+  on each eligible refresh and no client launch.
+- OpenCode recovery accepts connection edits made outside Relay, preserving newer
+  providers, selections and preferences, including removed preferences. A missing
+  config restores the saved selection. Successful recovery consumes its snapshot
+  even after manual disconnection; invalid files keep the recovery record.
+  JSONC comments no longer join tokens or conceal unfinished comments and empty
+  comma entries. Unmergeable provider settings and inconsistent recovery records
+  remain untouched. Observed concurrent config/snapshot edits return a conflict;
+  failed writes preserve the recovery record for retry.
+- Client-catalog refreshes retain independent Claude Desktop, OpenCode and Codex
+  outcomes. A failed client cannot hide Codex's restart requirement, and a Codex
+  success leaves other client errors intact. Client/code/time warnings survive
+  restart without storing private error messages. Late background results cannot
+  restore errors after a successful reconnect or clear newer failures and restart
+  requirements; unaffected clients still retain their own results.
+- Concurrent client-catalog warning updates keep their in-memory and persisted
+  order aligned, preserving unrelated settings and the warning state after
+  restart instead of publishing it before its storage transaction.
+- Source discovery recognizes published `endpoints` lists and `/api/v1` protocol
+  paths. A declared native Responses route is selected before conversion, keeping
+  native request fields intact; endpoint pins and explicit exclusions still apply.
+- Malformed models.dev, OpenRouter or LiteLLM reference-catalog rows no longer
+  replace valid cached models or reasoning efforts. The previous source remains
+  available as stale across restart while independent metadata sources refresh.
+  Individual and combined model limits reject replacements atomically, retaining
+  the previous snapshot and disk cache. Oversized cached combinations refresh at
+  startup without exposing a truncated catalog.
+- WebSocket initial-rejection errors retain normalized retry deadlines through
+  retry selection, preserving provider/account origins and subscription-reset
+  ownership in the final error.
+- Provider retry windows no longer restart when failures are settled later.
+  HTTP, streaming and WebSocket paths retain the normalized deadline and its
+  observation time; HTTP `Retry-After` reflects the remaining wait. Deferred
+  discovery compares absolute deadlines instead of unrelated relative delays.
+- Provider reset timestamps retain millisecond precision during cooldown
+  normalization, including resets less than one second away. Local recovery
+  floors remain separate from provider deadlines.
+- Diagnostic error codes redact recognized token and API-key forms while keeping
+  canonical error labels readable.
+- A missing optional subscription expiry returned as JSON 404 is recorded as an
+  informational observation. Authenticated metadata and the retry pause are
+  preserved; primary-check failures and authorization/challenge refusals retain
+  error diagnostics. The probe's fixed operation name remains readable in logs
+  and interrupted-stage markers while identity details stay redacted.
 - Localization build configuration uses the maintained TOML parser instead of
   `basic-toml`; dependency checks match immutable Git revisions to the lockfile.
 - Desktop builds pin an upstream macro-compatibility fix, removing the Rust
@@ -22,7 +123,7 @@ release entries summarize user-visible behavior and link to the relevant changes
   recovery retains edited profiles and renamed entries instead of blocking them.
 - Added an offline HTTP/2 retry check that compares physical sends with recorded
   attempts and configured retry limits, without opening Desktop or loading saved
-  connections.
+  connections. It also runs directly from the installed executable.
 - Local performance diagnostics now distinguish saves, configuration/route
   switches and refresh commands, including failed operations, without recording
   their arguments, results or error text or waiting for the diagnostic write.

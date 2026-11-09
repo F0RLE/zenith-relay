@@ -42,10 +42,12 @@ credential-family metadata.
 BPS multi-tool batching has a bounded [Relay-local contract](BASIS_POINTS.md) and
 synthetic roundtrip coverage for JSON/SSE, discovery, tool restrictions,
 disabled parallel policy, typed results, and opaque reasoning. Remaining live
-qualification must verify model adoption of the envelope, client acceptance of
-reversible call IDs and result grouping, and the complete tool-results/next-turn
-cycle on each intended harness. Measure cache reuse, TTFT and end-to-end latency
-separately, across the complete client execution cycle.
+qualification covers larger batches, custom tools, discovery, media, explicit
+disabled-parallel policy, interruption and malformed-batch outcomes on intended
+harnesses. Qualify other declared model/effort/client pairs individually, including
+multi-call envelope adoption, reversible IDs and grouped-result continuations.
+Measure matched cold/warm cache reuse, TTFT and end-to-end latency separately,
+across the complete client execution cycle.
 
 Request-stage diagnostics distinguish selected-attempt preparation, upstream
 headers/collection, normalized first stream output, and response/tool readiness.
@@ -109,11 +111,12 @@ the safety of any history reduction before removing work.
 
 ### Concurrency and load
 
-- Verify HTTP/2 refusal behavior against the installed executable: no hidden
-  reqwest resend inside a recorded dispatch; preserve Relay's retry eligibility.
-  Repeat the [offline check](../../CONTRIBUTING.md#offline-http2-transport-check)
-  on the installed copy, retaining its executable identity. Qualify actual
-  TLS/proxy/provider paths separately from the loopback prior-knowledge fixture.
+- Qualify HTTP/2 refusal behavior on installed TLS/proxy/provider paths: no hidden
+  reqwest resend inside a recorded dispatch, with Relay's retry eligibility
+  preserved. Local prior-knowledge and certificate-verified TLS/ALPN/CONNECT
+  fixtures cover physical-send accounting, reset/failover budgets and fail-closed
+  proxy errors; installed binaries and actual provider/proxy combinations still
+  require their own evidence.
 - Qualify native Responses WS retry exhaustion, route/authorization changes,
   queued-parent eviction and installed-provider behavior across native reuse
   and automatic HTTP fallback.

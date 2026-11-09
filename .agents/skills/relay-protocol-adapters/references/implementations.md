@@ -23,6 +23,16 @@ behavior only after evaluating the affected Relay contract.
 
 ## Additional inspected revisions
 
+The **2026-11-08 Sub2API comparison** checked `v2.20.0` at
+`6df0cd5bb0ce4d774d34004008f9dd661d236468` (LGPL-3.0), including
+`backend/internal/service/{oauth_refresh_api,token_refresh_service,gateway_forward_as_chat_completions}.go`
+and `frontend/src/composables/useModelWhitelist.ts`. Relay independently tests
+refresh completion at an expired request boundary while retaining rotated
+credentials, reports fenced source-catalog deltas, and supports an opt-in image
+header-wait extension. Existing strict terminal/replay and stream-timing owners
+remain authoritative. No Go implementation, automatic 2FA rotation, billing,
+zero-cache request blocking, or provider retry policy is imported.
+
 The **2026-11-03 Codex transport comparison** checked codex-proxy-rs `v3.39.1`
 at `12c32fcdecb29da4e44a21bb33fbbf2aaf6a166d` (Apache-2.0), including
 `backend/crates/providers/openai/src/compat/search_tools.rs` and

@@ -192,6 +192,11 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Context sizes, local CPU probes, provider token usage, prompt-cache evidence
   and transport latency are separate measurements. A faster envelope parser
   alone establishes neither smaller requests nor provider/cache improvements.
+- Buffered SSE consumption is retained on the current physical attempt as valid
+  usage frames arrive, before final response assembly or discovery continuation.
+  Cancellation keeps those reported counters; absent counters stay unknown.
+  These observations do not emit another attempt, reset dispatch clocks, grant
+  health/quota evidence or change retry and terminal validation.
 - Paired context sizes describe the client request and the final prepared body,
   after catalog preloads and inline-image replacement. Optional `conversation`
   counters partition conversation bytes into messages, tool calls, tool results,

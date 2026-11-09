@@ -404,6 +404,18 @@ checks. Use the actual PR target and fetch it first; omit the option to use each
 check's normal local default. Packaging, publication, Desktop restarts and
 installed-app acceptance are separate steps.
 
+### Public metadata contract check
+
+Deterministic metadata regressions run with the core tests. To validate current
+public models.dev, OpenRouter and LiteLLM responses through the actual loader:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib public_reference_sources_pass_atomic_refresh_validation -- --ignored --nocapture
+~~~
+
+This explicit network check uses isolated temporary state and no accounts or
+credentials. It qualifies catalog loading, not provider generation or route access.
+
 ### Required CI and dependency maintenance
 
 The Build workflow checks pull requests and pushes to `main` and `release/**`.
@@ -471,6 +483,22 @@ qualification, repeat with that exact executable after updating to a build that
 supports this flag and retain its SHA-256 with the result. Scope is the compiled
 HTTP/2 client and gateway accounting; qualify TLS/ALPN, configured proxies, live
 pool load and provider behavior separately.
+
+Source-level transport regressions also exercise certificate-verified TLS with
+negotiated `h2` ALPN, directly and through source-specific HTTP CONNECT proxies:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib runtime::http2_diagnostic::tests
+~~~
+
+The TLS suite uses freshly generated in-memory certificates and bounded loopback
+peers, without prior knowledge or certificate-verification bypasses. It counts
+HTTP/2 streams and CONNECT tunnels, compares real gateway dispatches with usage
+attempts, and checks refused/uncertain resets, HTTP 429 failover, candidate limits
+and an unavailable proxy with no direct bypass. A default-client positive control
+must expose protocol-level resends. The TLS matrix has a 30-second deadline;
+individual fixture connections and gateway calls are bounded separately.
+These tests do not qualify an installed binary or a real provider/proxy combination.
 
 ### Subscription proxy diagnostics
 
@@ -822,6 +850,66 @@ signatures and function-call/result association. A non-opt-in unit check also
 validates the foreign fixtures and fragmented streams without launching Code.
 Other tool types, real provider behavior, streaming latency and Desktop UI remain
 separate checks.
+
+#### Installed Codex tool cycle
+
+Qualify an explicitly selected Codex executable through a generated Relay catalog,
+the in-process gateway and a synthetic native Responses upstream:
+
+~~~powershell
+$env:ZENITH_CODEX_BIN = 'C:\path\to\installed\codex.exe'
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay installed_codex_completes_gateway_tool_cycle -- --ignored --nocapture --test-threads=1
+~~~
+
+The driver uses an empty temporary `CODEX_HOME`, strict inline config, ephemeral
+sessions and a read-only sandbox. User config, project instructions, remote
+discovery, plugins, telemetry and updates stay outside the fixture. Its only MCP
+server exposes the deterministic lookup tool; all generation and audit traffic
+stays on loopback with synthetic keys. Any unexpected connection fails the check.
+The test requires positive adoption of the generated instructions, unchanged model
+and declared Low effort, one audited execution, two physical requests and two
+terminal usage records. A content/type/order digest checks every text part of the
+client's tool result at the physical upstream, including client-added metadata.
+Codex 0.167.0-alpha.3.2 passed this native Responses SSE case. The observer forwards
+SSE bytes incrementally with backpressure and reports first-byte, first-text,
+tool-argument and terminal timing separately. A synthetic upstream is not a
+provider-latency benchmark. This mode leaves working accounts and the running
+Relay untouched.
+
+For an explicitly authorized real-provider check, select an existing Codex profile,
+one model from its generated catalog and an exact declared effort:
+
+~~~powershell
+$cli = (Get-Command codex.exe -CommandType Application | Select-Object -First 1).Source
+$profile = Join-Path $HOME '.codex\config.toml'
+bun scripts/check/check-codex-wire.mjs --cli "$cli" --profile "$profile" --model "<generated catalog ID>" --effort high --allow-provider-requests
+~~~
+
+This mode makes real generation requests through the selected profile's
+authenticated loopback `/v1` provider. Its local key stays in the parent process;
+the isolated client receives a synthetic observer key. Only the selected catalog
+row is copied into temporary state. The check requires two generation requests,
+one audited MCP execution, the original dynamic call identity and complete result,
+two completed SSE responses, and the exact final acknowledgement. Unknown
+connections, extra generations and unrelated built-in execution fail qualification.
+The output distinguishes `live_gateway` from synthetic modes and reports client
+cycle and between-request time. Match its Relay request IDs against retained
+usage/attempt records before claiming physical-send counts or accounting acceptance.
+
+Add `--scenario parallel` to qualify two independent MCP functions in the first
+response and both distinct results in the next request. Each tool has its own audit
+and expected result. The check preserves namespaces, dynamic call IDs and argument
+strings, and accepts independently returned result order. Duplicate executions,
+swapped/missing results, a serial-only first response, explicit disabled parallel
+policy and unrelated executable output fail qualification. A rejected audit blocks
+the next provider generation. The ordinary single-function scenario remains the
+default. Effort comes from the selected catalog row and is checked unchanged on
+the wire; the installed client's strict configuration must also accept it.
+
+Qualification remains specific to the selected client version, model, effort and
+route. JSON clients, other tool kinds, larger batches, media, foreign protocols,
+Desktop UI handoff and provider failure/recovery need their own checks. A cache hit
+on the next turn is an observation, not a matched cold/warm performance comparison.
 
 Prepared BPS prefix reuse and opt-in debug fingerprinting:
 

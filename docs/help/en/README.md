@@ -675,6 +675,12 @@ seconds; unset, zero or invalid disables it. Bodies, BPS and native WS are exclu
 disables the account. Check the client outcome before retrying; increase the limit
 or disable it for slow sources.
 
+For a longer image-only header wait, also set
+`ZENITH_RELAY_IMAGE_HEADERS_TIMEOUT_SECONDS` to 1–1800 seconds. It extends the
+enabled general limit for image generation/edits and Responses requests that
+allow the native image-generation tool; a shorter or invalid value keeps the
+general limit. It does not enable a timeout by itself or limit an active stream.
+
 ### Image requests
 
 Select Codex in **Connections → Accounts → Add to pool for images**, or its
@@ -710,8 +716,15 @@ but shared connection settings can affect them too. Model selections change when
 the route changes. Credentials come from the file or standard OS
 keyring; an unavailable store requires recovery. Explicit restore returns the saved
 sign-in; automatic attachment undo preserves newer manual sign-ins.
+If the connection changes during capture, finish editing and create the snapshot
+again. An unused fallback file does not replace the selected keyring sign-in.
 
-**OpenCode** keeps one snapshot, consumed on restoration.
+**OpenCode** keeps one snapshot, consumed after successful restoration. Restore
+works after connection edits outside Relay and keeps newer preferences and other
+providers. A missing config is recreated from the snapshot. Invalid files leave
+the snapshot available for recovery. If Relay detects a file change during
+restoration, it reports a conflict and keeps the recovery data; finish editing
+and retry.
 
 **Claude Desktop** keeps one original recovery point. Restoration works with
 the API stopped. For an attached profile, Relay validates files, closes Desktop
