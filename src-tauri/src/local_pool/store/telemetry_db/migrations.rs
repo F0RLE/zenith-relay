@@ -1,5 +1,6 @@
 mod attempts;
 mod context_bands;
+mod diagnostics;
 mod early;
 mod image_usage;
 mod late;
@@ -15,6 +16,7 @@ mod weekly_capacity;
 
 pub(super) use attempts::MIGRATION_033;
 pub(super) use context_bands::migrate_032;
+pub(super) use diagnostics::migrate_046;
 pub(super) use early::*;
 pub(super) use image_usage::MIGRATION_038;
 pub(super) use late::*;
@@ -28,7 +30,7 @@ pub(super) use usage_page_order::MIGRATION_042;
 pub(super) use usage_reads::{MIGRATION_037, MIGRATION_043, MIGRATION_044};
 pub(super) use weekly_capacity::MIGRATION_041;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 45;
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 46;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 16_384;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = concat!(

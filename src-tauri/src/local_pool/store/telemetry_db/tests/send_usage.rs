@@ -233,10 +233,15 @@ fn request_finalization_preserves_physical_sends_consumption_and_full_duration()
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap();
     assert_eq!(send, (1, 5_837, 100));
-    let logical: (i64, String) = connection.query_row(
-        "SELECT latency_ms,json_extract(routing_json,'$.attemptOutcome') FROM request_logs WHERE request_id='request-final'",
-        [], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+    let logical: (i64, String) = connection
+        .query_row(
+            "SELECT latency_ms,json_extract(COALESCE(routing_json,
+            (SELECT data_json FROM usage_diagnostics WHERE id = routing_diagnostics_id)),
+            '$.attemptOutcome') FROM request_logs WHERE request_id='request-final'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(logical, (472_000, "returned_failure".into()));
     drop(connection);
     let page = database.usage_page(&UsageQuery::default()).unwrap();

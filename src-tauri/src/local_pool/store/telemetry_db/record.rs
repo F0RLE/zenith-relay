@@ -63,8 +63,9 @@ impl UsageRecordKind {
                 cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
                 service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                 requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
-                usage_aggregate_recorded, client_context_id, upstream_error_json, image_usage_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32, ?33)
+                usage_aggregate_recorded, client_context_id, upstream_error_json, image_usage_json,
+                routing_diagnostics_id, tool_diagnostics_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32, ?33, ?34, ?35)
             ON CONFLICT({conflict_columns}) DO UPDATE SET
                 created_at = CURRENT_TIMESTAMP,
                 attempt = excluded.attempt,
@@ -92,6 +93,9 @@ impl UsageRecordKind {
                 applied_service_tier = excluded.applied_service_tier,
                 routing_json = excluded.routing_json,
                 tool_use_json = excluded.tool_use_json,
+                routing_diagnostics_id = excluded.routing_diagnostics_id,
+                tool_diagnostics_id = excluded.tool_diagnostics_id,
+                diagnostics_pruned = 0,
                 error_origin = excluded.error_origin,
                 requested_reasoning_effort = excluded.requested_reasoning_effort,
                 effective_reasoning_effort = excluded.effective_reasoning_effort,
@@ -102,8 +106,10 @@ impl UsageRecordKind {
                 usage_aggregate_recorded = 1
             WHERE excluded.attempt >= {table_name}.attempt
               AND (excluded.attempt > {table_name}.attempt
-                OR COALESCE(json_extract({table_name}.routing_json, '$.requestTiming.projectionOnly'), 0) = 0
-                OR COALESCE(json_extract(excluded.routing_json, '$.requestTiming.projectionOnly'), 0) = 1)"
+                OR COALESCE(json_extract(COALESCE({table_name}.routing_json,
+                    (SELECT data_json FROM usage_diagnostics WHERE id = {table_name}.routing_diagnostics_id)), '$.requestTiming.projectionOnly'), 0) = 0
+                OR COALESCE(json_extract((SELECT data_json FROM usage_diagnostics
+                    WHERE id = excluded.routing_diagnostics_id), '$.requestTiming.projectionOnly'), 0) = 1)"
         )
     }
 }
@@ -202,6 +208,8 @@ impl TelemetryDb {
         let is_latest_attempt = previous_usage
             .as_ref()
             .is_none_or(|previous_usage| i64::from(event.attempt) >= previous_usage.attempt);
+        let routing_id = super::diagnostics::store_json(&transaction, routing_json.as_deref())?;
+        let tool_id = super::diagnostics::store_json(&transaction, tool_use_json.as_deref())?;
         let usage_parameters = params![
             event.request_id,
             event.attempt,
@@ -227,8 +235,8 @@ impl TelemetryDb {
             event.total_tokens.map(sql_u64),
             event.service_tier.as_str(),
             event.applied_service_tier.as_deref(),
-            routing_json,
-            tool_use_json,
+            Option::<&str>::None,
+            Option::<&str>::None,
             event.error_origin().map(|origin| origin.as_str()),
             requested_reasoning_effort,
             effective_reasoning_effort,
@@ -239,6 +247,8 @@ impl TelemetryDb {
             event.client_context_id,
             upstream_error_json,
             image_usage_json,
+            routing_id,
+            tool_id,
         ];
         if record_send {
             transaction
@@ -257,6 +267,7 @@ impl TelemetryDb {
                 .execute(request_parameters.as_slice())
                 .map_err(db_error)?
                 > 0;
+        super::diagnostics::discard_unreferenced(&transaction, routing_id, tool_id)?;
         // Usage belongs to the physical send, not to whichever send completed last.
         // A correction to an older send must update its own model/member bucket.
         if record_send {

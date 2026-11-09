@@ -200,6 +200,9 @@ impl TelemetryDb {
         if version <= 44 {
             connection.execute_batch(MIGRATION_045).map_err(db_error)?;
         }
+        if version <= 45 {
+            migrate_046(&mut connection)?;
+        }
         // Retention reads before writing. Acquire the writer reservation first:
         // a finishing background sample on another connection must not turn
         // that read snapshot into an un-upgradable SQLITE_BUSY_SNAPSHOT.
@@ -209,6 +212,7 @@ impl TelemetryDb {
         retention
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
+        super::diagnostics::compact(&retention)?;
         retention.commit().map_err(db_error)?;
         let report_connection = connection.path().filter(|path| !path.is_empty()).map(|path| {
             let reader = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)

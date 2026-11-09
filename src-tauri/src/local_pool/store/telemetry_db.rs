@@ -19,6 +19,7 @@ use zenith_relay_core::{
 use zenith_relay_core::{ApiModelPriceOverride, ResponseAffinityBinding};
 
 mod affinity;
+mod diagnostics;
 mod lifecycle;
 mod maintenance;
 mod migrations;

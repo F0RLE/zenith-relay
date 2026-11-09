@@ -3,6 +3,7 @@ use super::*;
 use zenith_relay_core::{
     ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
 };
+mod diagnostics_retention;
 mod filter_cache;
 mod filter_options;
 mod image_usage;

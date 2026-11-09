@@ -246,7 +246,12 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_filter(
         clauses.push("success = ?");
         query_parameters.push(SqlValue::Integer(i64::from(success)));
         if !success {
-            clauses.push("NOT (COALESCE(json_extract(routing_json, '$.attemptOutcome'), '') = 'tool_discovery' AND error_category IS NULL AND http_status >= 200 AND http_status < 300)");
+            clauses.push(concat!(
+                "NOT (COALESCE(json_extract(COALESCE(routing_json, ",
+                "(SELECT data_json FROM usage_diagnostics WHERE id = routing_diagnostics_id)), ",
+                "'$.attemptOutcome'), '') = 'tool_discovery' AND error_category IS NULL ",
+                "AND http_status >= 200 AND http_status < 300)"
+            ));
         }
     }
     if let Some(error_category) = query.error_category.as_deref() {

@@ -56,16 +56,19 @@ pub(crate) fn read_samples(connection: &Connection, anchor: Option<&UsageLog>) -
                 r.input_tokens, r.cached_input_tokens
          FROM request_logs a CROSS JOIN recent
          CROSS JOIN request_logs r ON r.id = recent.id
+         LEFT JOIN usage_diagnostics d ON d.id = r.routing_diagnostics_id
          WHERE a.id = ?1 AND r.local_key_id IS a.local_key_id AND r.source_id IS a.source_id
            AND r.candidate_id IS a.candidate_id AND r.account_id IS a.account_id
            AND r.requested_model IS a.requested_model AND r.resolved_model IS a.resolved_model
            AND r.wire_api IS a.wire_api AND r.transport IS a.transport
            AND r.service_tier IS a.service_tier AND r.applied_service_tier IS a.applied_service_tier
            AND r.created_at >= datetime(a.created_at, '-7 days') AND r.created_at <= a.created_at
-           AND json_extract(CASE WHEN length(r.routing_json) <= 65536 AND json_valid(r.routing_json)
-               THEN r.routing_json ELSE '{{}}' END, '$.transport.upstream') = ?2
-           AND json_extract(CASE WHEN length(r.routing_json) <= 65536 AND json_valid(r.routing_json)
-               THEN r.routing_json ELSE '{{}}' END, '$.transport.mode') = ?3"
+           AND json_extract(CASE WHEN length(COALESCE(r.routing_json, d.data_json)) <= 65536
+               AND json_valid(COALESCE(r.routing_json, d.data_json))
+               THEN COALESCE(r.routing_json, d.data_json) ELSE '{{}}' END, '$.transport.upstream') = ?2
+           AND json_extract(CASE WHEN length(COALESCE(r.routing_json, d.data_json)) <= 65536
+               AND json_valid(COALESCE(r.routing_json, d.data_json))
+               THEN COALESCE(r.routing_json, d.data_json) ELSE '{{}}' END, '$.transport.mode') = ?3"
     )).map_err(db_error)?;
     let rows = statement
         .query_map(
