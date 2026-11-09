@@ -74,6 +74,10 @@ pub(super) fn record_subscription_failure(
             "response_mitigation",
             failure.response_mitigation().unwrap_or("unreported").into(),
         ),
+        (
+            "transport_failure",
+            failure.transport_failure().unwrap_or("unreported").into(),
+        ),
     ];
     if optional_expiry_missing(failure) {
         crate::diagnostics::record_operation(

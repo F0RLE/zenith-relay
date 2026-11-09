@@ -1,6 +1,8 @@
 mod refresh;
 mod windows;
 
+pub(crate) use refresh::QuotaTransportFailure;
+
 pub(crate) fn observation_is_fresh(
     observed_at_ms: Option<u64>,
     now_ms: u64,
