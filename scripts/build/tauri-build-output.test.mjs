@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { conciseBuildOutput, runLoggedTauriBuild } from "./tauri-build-output.mjs";
@@ -64,6 +64,31 @@ test.each([0, 7])("logged builds preserve both streams and exit status %i", asyn
     expect(readFileSync(logPath, "utf8")).toContain("synthetic stderr");
     expect(messages[0]).toContain(logPath);
     if (status !== 0) expect(messages[1]).toContain("synthetic stderr");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("build diagnostics stay bound to the opened log when its pathname is replaced", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "relay-build-replaced-"));
+  const logPath = join(directory, "build.log");
+  const messages = [];
+  try {
+    const result = await runLoggedTauriBuild({
+      command: process.execPath,
+      args: ["-e", 'console.error("error: original diagnostic"); process.exit(7);'],
+    }, { shell: false, windowsHide: true }, {
+      logPath, progressIntervalMs: 0,
+      log(message) {
+        messages.push(message);
+        renameSync(logPath, join(directory, "original.log"));
+        writeFileSync(logPath, "error: replacement diagnostic");
+      },
+      error: message => messages.push(message),
+    });
+    expect(result.status).toBe(7);
+    expect(messages[1]).toContain("error: original diagnostic");
+    expect(messages[1]).not.toContain("replacement diagnostic");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

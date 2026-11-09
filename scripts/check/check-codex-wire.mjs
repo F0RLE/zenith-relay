@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { runClient } from "./check-claude-effort-wire.mjs";
 import { FIXTURE_TOOL, FIXTURE_RESULT, fixtureResults, PARALLEL_FIXTURE_RESULT } from "./fixtures/claude-tool-server.mjs";
 import { forwardCodexGateway, loopbackOrigin } from "./fixtures/codex-gateway-forward.mjs";
+import { readCheckedText } from "../lib/checked-file.mjs";
 
 const ACK = "relay-codex-contract-ok";
 const KEY = "sk-relay-synthetic-codex-contract";
@@ -331,10 +332,13 @@ export async function liveCodexProfile({ profile, model, effort, allowProviderRe
   }
   let config, catalog;
   try {
-    if ((await stat(profile)).size > LIMIT) throw new Error();
-    config = Bun.TOML.parse(await readFile(profile, "utf8"));
-    if (!isAbsolute(config.model_catalog_json ?? "") || (await stat(config.model_catalog_json)).size > 16 * 1024 * 1024) throw new Error();
-    catalog = JSON.parse(await readFile(config.model_catalog_json, "utf8"));
+    const profileText = readCheckedText(profile, undefined, { maxBytes: LIMIT });
+    if (profileText === null) throw new Error();
+    config = Bun.TOML.parse(profileText);
+    if (!isAbsolute(config.model_catalog_json ?? "")) throw new Error();
+    const catalogText = readCheckedText(config.model_catalog_json, undefined, { maxBytes: 16 * 1024 * 1024 });
+    if (catalogText === null) throw new Error();
+    catalog = JSON.parse(catalogText);
   } catch { throw new Error("Cannot read the selected Codex profile and generated catalog safely"); }
   const provider = config.model_providers?.[config.model_provider];
   let url;

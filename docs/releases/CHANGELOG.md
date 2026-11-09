@@ -10,6 +10,8 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- Build diagnostics and Codex qualification read through stable file handles;
+  selected profile/catalog reads enforce byte limits on the opened files.
 - Request and send history share immutable diagnostic snapshots. Detailed
   route/cache/context observations expire after seven days while core history
   keeps its 30-day window and lifetime usage totals remain available.

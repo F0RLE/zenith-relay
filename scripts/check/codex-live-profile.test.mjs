@@ -17,7 +17,7 @@ async function withProfile(run) {
   };
   try {
     await save();
-    await run({ profile, save, options: { profile, model: "synthetic-model", effort: "high", allowProviderRequests: true } });
+    await run({ profile, catalog, save, options: { profile, model: "synthetic-model", effort: "high", allowProviderRequests: true } });
   } finally {
     const resolved = await realpath(root), location = relative(await realpath(tmpdir()), resolved);
     if (resolved !== root || isAbsolute(location) || location === ".." || location.startsWith(`..${sep}`)
@@ -67,5 +67,15 @@ test("invalid profile diagnostics contain no source text or credentials", async 
       expect(error.message).not.toContain(key);
       expect(error.message).not.toContain(profile);
     }
+  });
+});
+
+test("oversized profile and catalog reads fail without exposing their content", async () => {
+  await withProfile(async ({ profile, catalog, options, save }) => {
+    await writeFile(profile, " ".repeat(512 * 1024 + 1));
+    await expect(liveCodexProfile(options)).rejects.toThrow("Cannot read the selected Codex profile and generated catalog safely");
+    await save();
+    await writeFile(catalog, " ".repeat(16 * 1024 * 1024 + 1));
+    await expect(liveCodexProfile(options)).rejects.toThrow("Cannot read the selected Codex profile and generated catalog safely");
   });
 });
