@@ -157,26 +157,73 @@ fn installed_wire_command(
     model: &Value,
     efforts: &str,
 ) -> std::process::Command {
+    let cli = std::path::Path::new(cli);
+    assert!(
+        cli.is_absolute(),
+        "Select an absolute Claude Code executable path"
+    );
+    let cli = cli
+        .canonicalize()
+        .expect("Resolve the selected Claude Code executable");
+    assert!(
+        cli.is_file(),
+        "Select a regular Claude Code executable file"
+    );
+    let cli_argument = format!(
+        "--cli={}",
+        cli.to_str()
+            .expect("Select a UTF-8 Claude Code executable path")
+    );
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
     let mut command = std::process::Command::new("bun");
     command
         .current_dir(repository)
-        .args(["scripts/check/check-claude-effort-wire.mjs", "--cli"])
-        .arg(cli)
-        .args([
-            "--model",
-            &serde_json::to_string(model).unwrap(),
-            "--efforts",
-            efforts,
-        ]);
+        .arg("scripts/check/check-claude-effort-wire.mjs")
+        .arg(cli_argument)
+        .arg(format!("--model={}", serde_json::to_string(model).unwrap()))
+        .arg(format!("--efforts={efforts}"));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
         command.creation_flags(0x0800_0000);
     }
     command
+}
+
+#[test]
+fn installed_wire_arguments_keep_values_attached_to_their_options() {
+    let cli = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let model = json!({"name": "synthetic model --with-native-control", "maxEffort": "max"});
+    let command = installed_wire_command(cli.as_os_str(), &model, "max");
+    let arguments = command.get_args().collect::<Vec<_>>();
+    let mut cli_argument = std::ffi::OsString::from("--cli=");
+    cli_argument.push(cli);
+    assert_eq!(arguments.len(), 4);
+    assert_eq!(arguments[0], "scripts/check/check-claude-effort-wire.mjs");
+    assert_eq!(arguments[1], cli_argument);
+    assert_eq!(
+        arguments[2],
+        std::ffi::OsStr::new(&format!("--model={model}"))
+    );
+    assert_eq!(arguments[3], "--efforts=max");
+}
+
+#[test]
+#[should_panic(expected = "Select an absolute Claude Code executable path")]
+fn installed_wire_command_rejects_relative_executable_paths() {
+    installed_wire_command(
+        std::ffi::OsStr::new("--with-native-control"),
+        &json!({}),
+        "max",
+    );
+}
+
+#[test]
+#[should_panic(expected = "Select a regular Claude Code executable file")]
+fn installed_wire_command_rejects_directories() {
+    installed_wire_command(std::env::temp_dir().as_os_str(), &json!({}), "max");
 }
 
 mod tool_cycle_tests;

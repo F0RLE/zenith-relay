@@ -29,7 +29,15 @@ fn release(version: &str) -> Option<(u32, u32, u32)> {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub(super) fn query_output(mut command: Command) -> Result<String, &'static str> {
+pub(super) fn query_output(command: Command) -> Result<String, &'static str> {
+    query_output_with_timeout(command, Duration::from_secs(5))
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn query_output_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<String, &'static str> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(if cfg!(test) {
@@ -43,7 +51,7 @@ pub(super) fn query_output(mut command: Command) -> Result<String, &'static str>
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+            Ok(None) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(20));
             }
             _ => break None,
@@ -78,16 +86,26 @@ fn installed_version() -> Result<String, &'static str> {
         super::super::settings::configured_path(super::super::settings::Application::ClaudeDesktop)
             .map_err(|_| "configured Desktop path could not be resolved")?
             .or_else(super::desktop_executable);
+    let packaged = selected.is_none();
     let mut command = super::super::process::windows_hidden_command("powershell.exe");
     command
         .args(["-NoProfile", "-NonInteractive", "-Sta", "-Command", r#"
 $ErrorActionPreference = 'Stop'
 $path = $env:RELAY_CLAUDE_VERSION_BIN
+$appId = $null
+$family = $null
 if ([string]::IsNullOrEmpty($path)) {
-    $appId = $env:RELAY_CLAUDE_VERSION_APPID
+    $appId = Get-StartApps | Where-Object {
+        $_.Name -eq 'Claude' -and
+        ($_.AppID -like 'AnthropicPBC.Claude_*!*' -or $_.AppID -like 'Anthropic.Claude_*!*') -and
+        $_.AppID.Length -le 256 -and $_.AppID -cmatch '^[A-Za-z0-9._!-]+$'
+    } | Select-Object -First 1 -ExpandProperty AppID
+    if ([string]::IsNullOrEmpty($appId)) { throw 'Claude Desktop registered package identity is unavailable' }
     $shell = New-Object -ComObject Shell.Application
     $item = $shell.Namespace('shell:AppsFolder').ParseName($appId)
-    if ($null -eq $item -or $item.ExtendedProperty('System.AppUserModel.PackageFamilyName') -ne $appId.Split('!')[0]) {
+    if ($null -eq $item) { throw 'Claude Desktop registered package identity is unavailable' }
+    $family = $item.ExtendedProperty('System.AppUserModel.PackageFamilyName')
+    if ($family -ne $appId.Split('!')[0]) {
         throw 'Claude Desktop registered package identity is unavailable'
     }
     $root = $item.ExtendedProperty('System.AppUserModel.PackageInstallPath')
@@ -95,22 +113,48 @@ if ([string]::IsNullOrEmpty($path)) {
     $path = Join-Path $root 'app\Claude.exe'
 }
 if (Test-Path -LiteralPath $path -PathType Leaf) {
-    [Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductVersion
+    [pscustomobject]@{
+        version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductVersion
+        appId = $appId
+        family = $family
+    } | ConvertTo-Json -Compress
 }
 "#])
-        .env_remove("RELAY_CLAUDE_VERSION_BIN")
-        .env_remove("RELAY_CLAUDE_VERSION_APPID");
+        .env_remove("RELAY_CLAUDE_VERSION_BIN");
     if let Some(path) = selected {
         command.env("RELAY_CLAUDE_VERSION_BIN", path);
-    } else {
-        let target = super::packaged_launch_target()
-            .map_err(|_| "installed Desktop package could not be resolved")?;
-        let app_id = target
-            .strip_prefix("shell:AppsFolder\\")
-            .ok_or("installed Desktop package identity was invalid")?;
-        command.env("RELAY_CLAUDE_VERSION_APPID", app_id);
     }
-    query_output(command)
+    // Keep the previous combined discovery/version budget for registered packages.
+    let timeout = Duration::from_secs(if packaged { 10 } else { 5 });
+    windows_metadata_version(&query_output_with_timeout(command, timeout)?, packaged)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_metadata_version(output: &str, packaged: bool) -> Result<String, &'static str> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Metadata {
+        version: String,
+        app_id: Option<String>,
+        family: Option<String>,
+    }
+    let metadata: Metadata =
+        serde_json::from_str(output).map_err(|_| "Desktop publisher metadata was invalid")?;
+    if release(&metadata.version).is_none() {
+        return Err("Desktop publisher version was invalid");
+    }
+    match (
+        packaged,
+        metadata.app_id.as_deref(),
+        metadata.family.as_deref(),
+    ) {
+        (true, Some(app_id), Some(family))
+            if super::packaged_target(app_id) == Some(app_id)
+                && app_id.split_once('!').map(|(prefix, _)| prefix) == Some(family) => {}
+        (false, None, None) => {}
+        _ => return Err("Desktop publisher package identity was invalid"),
+    }
+    Ok(metadata.version)
 }
 
 #[cfg(target_os = "macos")]
@@ -163,6 +207,51 @@ mod tests {
         ] {
             assert!(release(version).is_none(), "{version:?}");
         }
+    }
+
+    #[test]
+    fn publisher_metadata_requires_the_selected_binary_or_exact_registered_identity() {
+        let package = serde_json::json!({
+            "version":"4.4212.0",
+            "appId":"AnthropicPBC.Claude_test!Claude",
+            "family":"AnthropicPBC.Claude_test"
+        });
+        assert_eq!(
+            windows_metadata_version(&package.to_string(), true),
+            Ok("4.4212.0".into())
+        );
+        assert!(windows_metadata_version(&package.to_string(), false).is_err());
+        for (field, value) in [
+            (
+                "appId",
+                serde_json::json!("AnthropicPBC.ClaudeCode_test!Claude"),
+            ),
+            (
+                "appId",
+                serde_json::json!("AnthropicPBC.Claude_test!Claude & calc.exe"),
+            ),
+            (
+                "appId",
+                serde_json::json!("AnthropicPBC.Claude_test!Claude\n"),
+            ),
+            ("appId", serde_json::Value::Null),
+            ("family", serde_json::json!("Other.Package_test")),
+            ("family", serde_json::Value::Null),
+            ("version", serde_json::json!("4.4212.0-beta")),
+            ("version", serde_json::Value::Null),
+            ("extra", serde_json::json!("unexpected")),
+        ] {
+            let mut changed = package.clone();
+            changed[field] = value;
+            assert!(
+                windows_metadata_version(&changed.to_string(), true).is_err(),
+                "accepted invalid field: {field}"
+            );
+        }
+        let binary = r#"{"version":"4.29.0","appId":null,"family":null}"#;
+        assert_eq!(windows_metadata_version(binary, false), Ok("4.29.0".into()));
+        assert!(windows_metadata_version(binary, true).is_err());
+        assert!(windows_metadata_version("4.29.0", false).is_err());
     }
 
     #[cfg(any(target_os = "windows", target_os = "macos"))]

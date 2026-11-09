@@ -1,6 +1,7 @@
 use crate::local_pool::{
     commands,
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+    models::CatalogRefreshClient,
     state::DesktopState,
     store::{gateway_keys, secret_store},
 };
@@ -98,6 +99,7 @@ pub async fn connect_claude_desktop(
     library::check_attach(&path, &recovery, &config)?;
     stop_desktop().await?;
     let backup_created = library::apply(&path, &recovery, &config, true)?;
+    state.clear_client_catalog_refresh_failure(CatalogRefreshClient::ClaudeDesktop);
     Ok(ClaudeDesktopConnection {
         model_count,
         backup_created,
@@ -132,6 +134,7 @@ pub async fn launch_claude_desktop(state: State<'_, DesktopState>) -> Result<(),
         );
     }
     refresh_catalog(&state).await?;
+    state.clear_client_catalog_refresh_failure(CatalogRefreshClient::ClaudeDesktop);
     tauri::async_runtime::spawn_blocking(|| crate::launcher::launch_claude_desktop(true))
         .await
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "Claude Desktop launch was interrupted"))?

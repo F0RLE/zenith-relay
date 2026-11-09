@@ -5,6 +5,7 @@ mod binding_safety;
 mod bindings;
 mod context;
 mod direct_capabilities;
+mod installed_wire;
 mod memory_model;
 mod model_catalog;
 mod reasoning;
