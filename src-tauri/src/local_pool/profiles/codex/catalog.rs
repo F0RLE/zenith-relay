@@ -180,6 +180,33 @@ mod ultra_tests {
     }
 
     #[test]
+    fn bundled_codex_ultra_rows_skip_malformed_entries_and_keep_the_last_valid_duplicate() {
+        for catalog in [json!(null), json!([]), json!({}), json!({"models":{}})] {
+            assert!(official_codex_ultra_rows(&catalog).is_empty());
+        }
+        let rows = official_codex_ultra_rows(&json!({"models":[
+            null,
+            {"slug":42,"supported_reasoning_levels":[{"effort":"ultra"}]},
+            {"slug":"","supported_reasoning_levels":[{"effort":"ultra"}]},
+            {"slug":"gpt-test","supported_reasoning_levels":[{"effort":"ultra"}],"multi_agent_version":"v1"},
+            {"slug":"gpt-test","supported_reasoning_levels":[{"effort":"ultra"}],"multi_agent_version":"v2","multi_agent_reasoning_effort":null},
+            {"slug":"gpt-test","supported_reasoning_levels":"ultra"},
+            {"slug":"gpt-test","supported_reasoning_levels":[null,{"effort":"max"}]}
+        ]}));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows["gpt-test"]["multi_agent_version"], "v2");
+        assert_eq!(
+            rows["gpt-test"]["supported_reasoning_levels"],
+            json!([{"effort":"ultra"}])
+        );
+        assert!(
+            rows["gpt-test"]
+                .get("multi_agent_reasoning_effort")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn installed_codex_cli_is_the_only_external_ultra_metadata_source() {
         let cli = json!({"models": [{"slug": "gpt-6-sol", "supported_reasoning_levels": [
             {"effort": "max"}
