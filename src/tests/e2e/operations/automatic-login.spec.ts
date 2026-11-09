@@ -2,13 +2,13 @@ import { readFileSync } from "node:fs";
 import { expect, test, type Page } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 
-const driver = readFileSync(new URL("../../../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.js", import.meta.url), "utf8");
+const driver = readFileSync(new URL("../../../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.cjs", import.meta.url), "utf8");
 const locales = ["en", "ru"].map((locale) => JSON.parse(readFileSync(new URL(`../../../../src-tauri/src/local_pool/auth_page_patterns/${locale}.json`, import.meta.url), "utf8")));
 const email = "synthetic@example.test";
 const password = "synthetic-\"\\-password";
 
 async function formPage(page: Page, html: string, path = "/log-in") {
-  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: html }));
   await page.goto(`https://auth.openai.com${path}`);
   await page.evaluate(() => {
     document.querySelectorAll("form").forEach((form) => form.addEventListener("submit", (event) => {
@@ -23,7 +23,7 @@ function runDriver(page: Page, input: Record<string, unknown> = {}) {
 }
 
 function driverScript(input: Record<string, unknown>) {
-  return `(${driver})(${JSON.stringify(locales)},${JSON.stringify({ expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, ...input })})`;
+  return `(() => {const module = {exports: null}; ${driver};return module.exports(${JSON.stringify(locales)},${JSON.stringify({ expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, ...input })});})()`;
 }
 
 test("a hydrating login form waits within the bounded loading grace", async ({ page }) => {

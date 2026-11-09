@@ -1,21 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
+import authSnapshot from "../../src-tauri/src/local_pool/client_auth_watchdog/auth_snapshot.cjs";
+import automaticLogin from "../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.cjs";
 
 const root = new URL("../../src-tauri/src/local_pool/", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 const locales = ["en", "ru"].map((locale) => JSON.parse(read(`auth_page_patterns/${locale}.json`)));
-const snapshotDriver = read("client_auth_watchdog/auth_snapshot.js");
-const loginDriver = read("commands/oauth/window/automatic_login.js");
 
 function snapshot(headings, controls, route = "/index.html", hash = "") {
-  return runInNewContext(`(${snapshotDriver})(${JSON.stringify(locales)})`, {
+  return authSnapshot(locales, {
     location: { pathname: route, hash },
     document: {
       querySelectorAll: (selector) => (selector === "h1,h2" ? headings : controls)
         .map((textContent) => ({ textContent })),
     },
-  }, { timeout: 1000 });
+  });
 }
 
 function login({ label = "Continue", url = "https://auth.openai.com/log-in", input = {}, patterns = locales, onInput, attributes = {}, labelledBy = {} } = {}) {
@@ -46,7 +45,7 @@ function login({ label = "Continue", url = "https://auth.openai.com/log-in", inp
   const window = {};
   window.top = window.self = window;
   const args = { url, expiresAtMs: Date.now() + 10000, waitUntilMs: Date.now() + 10000, ...input };
-  const result = runInNewContext(`(${loginDriver})(${JSON.stringify(patterns)}, ${JSON.stringify(args)})`, {
+  const result = automaticLogin(patterns, args, {
     window, location: new URL(url), URL,
     getComputedStyle: () => ({ visibility: "visible" }),
     HTMLInputElement: Input, Event: class {},
@@ -55,7 +54,7 @@ function login({ label = "Continue", url = "https://auth.openai.com/log-in", inp
       querySelectorAll: (selector) => selector === "input" ? [field] : [],
       getElementById: (id) => Object.hasOwn(labelledBy, id) ? { textContent: labelledBy[id] } : null,
     },
-  }, { timeout: 1000 });
+  });
   return { result, submissions, value: field.value };
 }
 
@@ -95,6 +94,12 @@ describe("external login page language resources", () => {
       expect(login({ label, input: { stage: "email", value: "synthetic@example.test" } }))
         .toEqual({ result: "manual", submissions: 0, value: "" });
     }
+  });
+
+  test("login values stay literal data", () => {
+    const value = '\"); throw new Error("synthetic input is data"); //';
+    expect(login({ input: { stage: "email", value } }))
+      .toEqual({ result: "submitted", submissions: 1, value });
   });
 
   test("rechecks localized safety after filling and fails closed on invalid resources", () => {

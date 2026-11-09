@@ -57,8 +57,8 @@ impl AuthPageSnapshot {
 
 fn auth_snapshot_script() -> String {
     format!(
-        "({})({})",
-        include_str!("auth_snapshot.js"),
+        "(() => {{const module = {{exports: null}}; {};return module.exports({});}})()",
+        include_str!("auth_snapshot.cjs"),
         crate::local_pool::auth_page_patterns::JSON
     )
 }
@@ -349,9 +349,9 @@ mod tests {
     #[test]
     fn watchdog_snapshot_embeds_all_supported_language_patterns() {
         let script = auth_snapshot_script();
-        assert!(script.contains(include_str!("auth_snapshot.js")));
+        assert!(script.contains(include_str!("auth_snapshot.cjs")));
         assert!(script.ends_with(&format!(
-            "({})",
+            "return module.exports({});}})()",
             crate::local_pool::auth_page_patterns::JSON
         )));
     }

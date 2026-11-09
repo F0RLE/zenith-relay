@@ -1,5 +1,6 @@
-function automaticLogin(locales, input) {
+module.exports = function automaticLogin(locales, input, environment = globalThis) {
   try {
+    const { window, location, URL, getComputedStyle, HTMLInputElement, Event, document } = environment;
     const fresh = () => Number.isFinite(input.expiresAtMs) && Date.now() < input.expiresAtMs;
     if (!fresh()) return "manual";
     if (window.top !== window.self || location.origin !== "https://auth.openai.com" || location.href !== input.url) return "manual";
@@ -63,4 +64,4 @@ function automaticLogin(locales, input) {
   } catch {
     return "manual";
   }
-}
+};

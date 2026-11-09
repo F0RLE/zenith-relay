@@ -1,4 +1,5 @@
-function authSnapshot(locales) {
+module.exports = function authSnapshot(locales, environment = globalThis) {
+  const { location, document } = environment;
   const normalize = (value) => String(value || "")
     .replace(/^#/, "").split(/[?#]/, 1)[0].replace(/\/+$/, "") || "/";
   const path = normalize(location.pathname);
@@ -18,4 +19,4 @@ function authSnapshot(locales) {
     loginUiSignal: markers.length > 0,
     loginUiMarkers: markers,
   };
-}
+};
