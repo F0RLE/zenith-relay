@@ -18,6 +18,30 @@ fn same_route_owner(
 }
 
 #[test]
+fn linked_route_lookup_distinguishes_saved_members_from_other_groups() {
+    let gateway = GatewaySettings {
+        account_routes: vec![
+            zenith_relay_core::accounts::AccountRouteGroup {
+                account_ids: vec!["account_excel".into(), "account_siwc".into()],
+                selected_account_id: "account_siwc".into(),
+                notes_account_id: Some("account_excel".into()),
+            },
+            zenith_relay_core::accounts::AccountRouteGroup {
+                account_ids: vec!["other_codex".into(), "other_excel".into()],
+                selected_account_id: "other_codex".into(),
+                notes_account_id: None,
+            },
+        ],
+        ..Default::default()
+    };
+    assert!(route_is_linked(&gateway, "account_siwc", "account_excel"));
+    assert!(route_is_linked(&gateway, "account_excel", "account_siwc"));
+    assert!(!route_is_linked(&gateway, "account_siwc", "other_excel"));
+    assert!(!route_is_linked(&gateway, "standalone", "account_excel"));
+    assert!(!route_is_linked(&gateway, "account_siwc", "missing"));
+}
+
+#[test]
 fn saved_route_candidates_filter_by_method_and_reject_ambiguous_matches() {
     let candidates = vec![
         ("synthetic-codex".into(), OAuthClientKind::Codex),
@@ -458,6 +482,234 @@ fn selecting_a_route_preserves_quota_identity_and_one_pool_members_weight() {
         settings.account_routes[0].notes_account_id.as_deref(),
         Some("account_codex")
     );
+}
+
+#[test]
+fn excel_siwc_round_trip_reuses_saved_connections_after_restart_and_stale_attach() {
+    let root = crate::files::test_temp_root("excel-siwc-route-round-trip");
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut excel = records().remove(1);
+    excel.account.in_pool = true;
+    excel.weight = 7;
+    excel.account.quota.limit_reached = true;
+    let excel_identity = excel.account.identity.clone();
+    let siwc = connection(
+        "account_siwc",
+        OAuthClientKind::Siwc,
+        "siwc-workspace",
+        "siwc-user",
+        "owner@example.test",
+    )
+    .0;
+    let mut accounts = vec![excel, siwc];
+    let mut gateway = store.gateway().clone();
+    select_records(
+        &mut accounts,
+        &mut gateway,
+        "account_excel",
+        "account_siwc",
+        true,
+        OAuthClientKind::Siwc,
+    )
+    .unwrap();
+    gateway.account_routes[0].notes_account_id = Some("account_excel".into());
+    store
+        .replace_account_routes(accounts, gateway, store.automations().clone())
+        .unwrap();
+    drop(store);
+    let store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut accounts = store.accounts().to_vec();
+    let mut gateway = store.gateway().clone();
+    assert!(route_is_linked(&gateway, "account_siwc", "account_excel"));
+    let before = accounts.clone();
+    assert!(
+        select_records(
+            &mut accounts,
+            &mut gateway,
+            "account_excel",
+            "account_siwc",
+            true,
+            OAuthClientKind::Siwc,
+        )
+        .is_err()
+    );
+    assert_eq!(accounts, before);
+    select_records(
+        &mut accounts,
+        &mut gateway,
+        "account_siwc",
+        "account_excel",
+        true,
+        OAuthClientKind::ExcelBps,
+    )
+    .unwrap();
+    assert_eq!(accounts.len(), 2);
+    assert_eq!(gateway.account_routes.len(), 1);
+    let group = &gateway.account_routes[0];
+    assert_eq!(group.account_ids, ["account_excel", "account_siwc"]);
+    assert_eq!(group.selected_account_id, "account_excel");
+    assert_eq!(group.notes_account_id.as_deref(), Some("account_excel"));
+    assert!(accounts[0].account.in_pool);
+    assert!(!accounts[1].account.in_pool);
+    assert_eq!(accounts[0].account.identity, excel_identity);
+    assert!(accounts[0].account.quota.limit_reached);
+    assert_eq!(accounts[0].weight, 7);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn matching_siwc_registration_duplicates_join_the_existing_excel_group_without_losing_grants() {
+    let root = crate::files::test_temp_root("duplicate-siwc-route");
+    let mut store = LocalPoolStore::open(root.clone()).unwrap();
+    let mut connections = [
+        connection(
+            "siwc_live",
+            OAuthClientKind::Siwc,
+            "registration-one",
+            "subject-one",
+            "owner@example.test",
+        ),
+        connection(
+            "account_excel",
+            OAuthClientKind::ExcelBps,
+            "workspace",
+            "user",
+            "owner@example.test",
+        ),
+        connection(
+            "siwc_expired",
+            OAuthClientKind::Siwc,
+            "registration-two",
+            "subject-two",
+            "owner@example.test",
+        ),
+    ];
+    connections[1].0.account.in_pool = true;
+    connections[2].0.account.in_pool = true;
+    connections[2].0.weight = 7;
+    connections[2].0.account.auth_state = serde_json::from_value(serde_json::json!({
+        "state": "requires_reauth", "reason": "token_rotation_recovery_required"
+    }))
+    .unwrap();
+    let secrets = connections
+        .iter()
+        .map(|(_, credentials)| credentials.clone())
+        .collect::<Vec<_>>();
+    let mut accounts = connections
+        .iter()
+        .map(|(record, _)| record.clone())
+        .collect::<Vec<_>>();
+    let original_quota = accounts[1].account.quota.clone();
+    let mut gateway = store.gateway().clone();
+    gateway.account_routes.push(AccountRouteGroup {
+        account_ids: vec!["siwc_live".into(), "account_excel".into()],
+        selected_account_id: "account_excel".into(),
+        notes_account_id: Some("siwc_live".into()),
+    });
+    gateway.pool_routing.as_mut().unwrap().members = vec![
+        PoolRoutingMember {
+            kind: PoolMemberKind::Account,
+            id: "account_excel".into(),
+            weight: 2,
+            max_concurrency: 1,
+        },
+        PoolRoutingMember {
+            kind: PoolMemberKind::Account,
+            id: "siwc_expired".into(),
+            weight: 7,
+            max_concurrency: 3,
+        },
+    ];
+    let group = route_association_plan(
+        &gateway,
+        "siwc_expired",
+        "account_excel",
+        connections
+            .iter()
+            .map(|(record, credentials)| (record, credentials)),
+    )
+    .unwrap();
+    select_group_records(
+        &mut accounts,
+        &mut gateway,
+        "siwc_expired",
+        OAuthClientKind::ExcelBps,
+        group,
+    )
+    .unwrap();
+    assert_eq!(gateway.account_routes.len(), 1);
+    assert_eq!(
+        gateway.account_routes[0].account_ids,
+        ["siwc_live", "account_excel", "siwc_expired"]
+    );
+    assert_eq!(
+        gateway.account_routes[0].notes_account_id.as_deref(),
+        Some("siwc_live")
+    );
+    assert_eq!(
+        accounts
+            .iter()
+            .filter(|record| record.account.in_pool)
+            .count(),
+        1
+    );
+    assert!(accounts[1].account.in_pool);
+    assert_eq!(accounts[1].account.quota, original_quota);
+    assert_eq!(accounts[1].weight, 7);
+    let members = &gateway.pool_routing.as_ref().unwrap().members;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].id, "account_excel");
+    assert_eq!(members[0].max_concurrency, 3);
+    store
+        .replace_account_routes(accounts, gateway, store.automations().clone())
+        .unwrap();
+    drop(store);
+    let store = LocalPoolStore::open(root.clone()).unwrap();
+    assert_eq!(store.accounts().len(), 3);
+    assert_eq!(
+        store
+            .gateway()
+            .account_route_group("siwc_expired")
+            .unwrap()
+            .selected_account_id,
+        "account_excel"
+    );
+    assert!(
+        connections
+            .iter()
+            .zip(&secrets)
+            .all(|((_, credentials), before)| credentials.matches_snapshot(before))
+    );
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn duplicate_client_candidates_prefer_a_usable_grant_only_within_the_same_group() {
+    let candidates = preferred_route_candidates([
+        SavedRouteCandidate {
+            id: "expired".into(),
+            kind: OAuthClientKind::Siwc,
+            group_id: "group".into(),
+            usable: false,
+        },
+        SavedRouteCandidate {
+            id: "active".into(),
+            kind: OAuthClientKind::Siwc,
+            group_id: "group".into(),
+            usable: true,
+        },
+        SavedRouteCandidate {
+            id: "another".into(),
+            kind: OAuthClientKind::Siwc,
+            group_id: "another-group".into(),
+            usable: true,
+        },
+    ]);
+    assert_eq!(candidates[0].0, "active");
+    assert_eq!(candidates[1].0, "another");
+    assert!(filter_route_candidates(candidates, Some(OAuthClientKind::Siwc)).is_err());
 }
 
 #[test]

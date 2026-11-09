@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, visibleAccounts } from "../src/features/relay/accountRoutes";
+import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, preferredAccountRouteConnection, visibleAccounts } from "../src/features/relay/accountRoutes";
 import type { AccountSummary } from "../src/features/relay/api/types";
 
 const accounts = [
@@ -17,6 +17,14 @@ describe("account route inventory", () => {
     expect(expandAccountRouteIds(["siwc", "codex", "separate"], accounts)).toEqual(["codex", "siwc", "separate"]);
     expect(expandAccountRouteIds(["removed"], accounts)).toEqual(["removed"]);
   });
+  test("an older card resolves its saved methods from the current inventory", () => {
+    const outdated = { id: "siwc" } as AccountSummary;
+    expect(accountRouteConnections(outdated, accounts).map((a) => a.id)).toEqual(["codex", "siwc"]);
+  });
+  test("a detached connection cannot regain an old group through a stale card", () => {
+    const detached = { ...accounts[1]!, routeGroupId: null, routeInactive: false };
+    expect(accountRouteConnections(accounts[1]!, [accounts[0]!, detached])).toEqual([detached]);
+  });
 });
 
 const emptyQuota: AccountSummary["quota"] = {
@@ -33,6 +41,17 @@ function metadataAccount(id: string, kind: AccountSummary["oauthClientKind"], ov
     ...overrides,
   } as AccountSummary;
 }
+
+test("a saved method prefers a usable grant over an expired duplicate without hiding either record", () => {
+  const expired = metadataAccount("expired", "siwc", { authState: { state: "requires_reauth", reason: "token_rotation_recovery_required" } });
+  const active = metadataAccount("active", "siwc");
+  const excel = metadataAccount("excel", "excel_bps");
+  const connections = [expired, excel, active];
+  expect(preferredAccountRouteConnection(connections, "siwc")).toBe(active);
+  expect(preferredAccountRouteConnection(connections, "excel_bps")).toBe(excel);
+  expect(preferredAccountRouteConnection([expired], "siwc")).toBe(expired);
+  expect(connections.map(({ id }) => id)).toEqual(["expired", "excel", "active"]);
+});
 
 const primary = { kind: "primary", availableBasisPoints: 7500, explicitlyFull: false, resetAtMs: 5000, windowMinutes: 300, observedAtMs: 1000 } as const;
 

@@ -72,7 +72,6 @@ fn route_group_validation_preserves_membership_and_note_ownership() {
     assert!(validate_account_route_groups(&[]).is_ok());
     for invalid in [
         group(&["codex"], "codex"),
-        group(&["codex", "siwc", "bps", "extra"], "codex"),
         group(&["codex", "codex"], "codex"),
         group(&["", "siwc"], "siwc"),
         group(&["codex", "siwc"], "missing"),
@@ -87,6 +86,14 @@ fn route_group_validation_preserves_membership_and_note_ownership() {
         validate_account_route_groups(&[valid.clone(), group(&["codex", "other"], "other")])
             .is_err()
     );
+    let excessive = AccountRouteGroup {
+        account_ids: (0..=MAX_ROUTE_CONNECTIONS)
+            .map(|index| format!("grant-{index}"))
+            .collect(),
+        selected_account_id: "grant-0".into(),
+        notes_account_id: None,
+    };
+    assert!(validate_account_route_groups(&[excessive]).is_err());
     let with_notes = AccountRouteGroup {
         notes_account_id: Some("codex".into()),
         ..valid
@@ -123,6 +130,83 @@ fn selecting_routes_is_pure_and_rejects_stale_or_associated_connections() {
     assert_eq!(groups[0], original);
     let new_group = select_account_route_group(&[], "codex", "bps", true).unwrap();
     assert_eq!(new_group, group(&["codex", "bps"], "bps"));
+}
+
+#[test]
+fn explicit_association_preserves_duplicate_siwc_grants_and_checks_every_identity() {
+    let existing = group(&["siwc-live", "bps"], "bps");
+    let mut identities = BTreeMap::from([
+        (
+            "siwc-live".into(),
+            identity(OAuthClientKind::Siwc, "registration-one", "subject-one"),
+        ),
+        (
+            "siwc-expired".into(),
+            identity(OAuthClientKind::Siwc, "registration-two", "subject-two"),
+        ),
+        (
+            "bps".into(),
+            identity(OAuthClientKind::ExcelBps, "workspace", "user"),
+        ),
+    ]);
+    let merged = associate_account_route_groups(
+        std::slice::from_ref(&existing),
+        "siwc-expired",
+        "bps",
+        &identities,
+    )
+    .unwrap();
+    assert_eq!(merged.account_ids, ["siwc-live", "bps", "siwc-expired"]);
+    assert_eq!(merged.selected_account_id, "bps");
+    assert!(validate_account_route_groups(&[merged]).is_ok());
+    identities
+        .get_mut("siwc-live")
+        .unwrap()
+        .original_login_email = Some("another@example.test".into());
+    assert!(
+        associate_account_route_groups(
+            std::slice::from_ref(&existing),
+            "siwc-expired",
+            "bps",
+            &identities
+        )
+        .is_err()
+    );
+    identities.remove("siwc-live");
+    assert!(
+        associate_account_route_groups(&[existing], "siwc-expired", "bps", &identities).is_err()
+    );
+}
+
+#[test]
+fn merging_groups_keeps_native_workspace_boundaries_and_rejects_stale_selection() {
+    let groups = vec![
+        group(&["codex", "siwc-one"], "codex"),
+        group(&["bps", "siwc-two"], "bps"),
+    ];
+    let mut identities = BTreeMap::from([
+        (
+            "codex".into(),
+            identity(OAuthClientKind::Codex, "workspace", "user"),
+        ),
+        (
+            "bps".into(),
+            identity(OAuthClientKind::ExcelBps, "other-workspace", "user"),
+        ),
+        (
+            "siwc-one".into(),
+            identity(OAuthClientKind::Siwc, "registration-one", "subject-one"),
+        ),
+        (
+            "siwc-two".into(),
+            identity(OAuthClientKind::Siwc, "registration-two", "subject-two"),
+        ),
+    ]);
+    assert!(associate_account_route_groups(&groups, "codex", "bps", &identities).is_err());
+    identities.get_mut("bps").unwrap().provider_account_id = Some("workspace".into());
+    let merged = associate_account_route_groups(&groups, "codex", "bps", &identities).unwrap();
+    assert_eq!(merged.account_ids, ["codex", "siwc-one", "bps", "siwc-two"]);
+    assert!(associate_account_route_groups(&groups, "siwc-one", "bps", &identities).is_err());
 }
 
 #[test]

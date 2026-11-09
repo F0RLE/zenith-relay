@@ -1,4 +1,4 @@
-import type { AccountSummary } from "./api/types";
+import type { AccountSummary, OAuthClientKind } from "./api/types";
 import type { TFunction } from "i18next";
 import { accountQuotaRefreshState } from "./accountStatus";
 import { accountPlanOption } from "./accountPlans";
@@ -36,10 +36,18 @@ export function visibleAccounts(accounts: AccountSummary[]): AccountSummary[] {
 }
 
 export function accountRouteConnections(account: AccountSummary, accounts: readonly AccountSummary[]): AccountSummary[] {
-  const groupId = account.routeGroupId;
+  const index = accountRouteIndex(accounts);
+  const current = index.byId.get(account.id) ?? account;
+  const groupId = current.routeGroupId;
   // Preserve the caller-owned result array; sorting/removing a result cannot
   // mutate the index used by the other cards.
-  return groupId ? accountRouteIndex(accounts).byGroup.get(groupId)?.slice() ?? [] : [account];
+  return groupId ? index.byGroup.get(groupId)?.slice() ?? [] : [current];
+}
+
+export function preferredAccountRouteConnection(connections: readonly AccountSummary[], kind: OAuthClientKind) {
+  const matches = connections.filter((connection) => (connection.oauthClientKind ?? "codex") === kind);
+  return matches.find((connection) => !connection.recoveryRequired && connection.secretAvailable !== false
+    && connection.authState.state === "active") ?? matches[0];
 }
 
 // Display freshness only; mirrors the core's default QUOTA_STALE_AFTER_MS, not admission.

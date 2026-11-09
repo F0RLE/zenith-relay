@@ -31,6 +31,8 @@ export type AccountMockOptions = {
   accountLabel?: string;
   accountRouteKinds?: Array<NonNullable<AccountSummary["oauthClientKind"]>>;
   accountRoutesGrouped?: boolean;
+  accountRouteGroups?: Array<{ members: number[]; selected: number }>;
+  accountRouteReauthIndexes?: number[];
   accountRouteSelectError?: boolean;
   oauthCompletedRouteKind?: NonNullable<AccountSummary["oauthClientKind"]>;
   accountOAuthClientKind?: AccountSummary["oauthClientKind"];

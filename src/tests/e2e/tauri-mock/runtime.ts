@@ -299,6 +299,16 @@ export function initializeTauriMock(input: MockOptions) {
         } : {});
       }));
     }
+    for (const group of input.accountRouteGroups ?? []) {
+      const groupId = accounts[group.members[0]!]!.id;
+      for (const index of group.members) Object.assign(accounts[index]!, {
+        routeGroupId: groupId, routeInactive: index !== group.selected, inPool: index === group.selected,
+      });
+    }
+    for (const index of input.accountRouteReauthIndexes ?? []) Object.assign(accounts[index]!, {
+      authState: { state: "requires_reauth", reason: "token_rotation_recovery_required" },
+      quotaRefreshStatus: "requires_reauth",
+    });
     const savedAccountModels = new Map(accounts.map((account) => [account.id, [...account.models]]));
     const localRuntime = {
       schemaVersion: 14,
@@ -808,8 +818,14 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "local_account_route_candidates": {
             const current = localRuntime.accounts.find((item) => item.id === args.accountId);
-            const candidates = localRuntime.accounts.filter((item) => !item.routeGroupId && item.id !== args.accountId && item.oauthClientKind !== current?.oauthClientKind
-              && (!args.clientKind || item.oauthClientKind === args.clientKind)).map((item) => item.id);
+            const preferred = new Map<string, typeof current>();
+            for (const item of localRuntime.accounts) {
+              if (item.id === args.accountId || item.oauthClientKind === current?.oauthClientKind || (args.clientKind && item.oauthClientKind !== args.clientKind)) continue;
+              const key = `${item.routeGroupId ?? item.id}:${item.oauthClientKind}`;
+              const existing = preferred.get(key);
+              if (!existing || (existing.authState.state !== "active" && item.authState.state === "active")) preferred.set(key, item);
+            }
+            const candidates = [...preferred.values()].map((item) => item!.id);
             if (args.clientKind && candidates.length > 1) throw { code: "conflict", message: "Multiple saved connections match this account and sign-in method" };
             return candidates;
           }
@@ -817,22 +833,28 @@ export function initializeTauriMock(input: MockOptions) {
             if (input.accountRouteSelectError) throw { code: "conflict", message: "Synthetic route switch rejected" };
             const current = localRuntime.accounts.find((item) => item.id === args.accountId)!;
             const next = localRuntime.accounts.find((item) => item.id === args.connectionId)!;
-            const group = current.routeGroupId ?? current.id;
+            const linked = Boolean(current.routeGroupId && current.routeGroupId === next.routeGroupId);
+            if (current.routeInactive) throw { code: "conflict", message: "The selected account route changed; refresh and try again" };
+            if (!args.attach && !linked) throw { code: "conflict", message: "This route does not belong to the selected account" };
+            const group = current.routeGroupId ?? next.routeGroupId ?? current.id;
             const inPool = current.inPool;
-            const groupIds = localRuntime.accounts.filter((item) => item.id === current.id || item.routeGroupId === group || item.id === next.id).map((item) => item.id);
+            const groupIds = localRuntime.accounts.filter((item) => item.id === current.id || item.id === next.id
+              || (current.routeGroupId && item.routeGroupId === current.routeGroupId)
+              || (next.routeGroupId && item.routeGroupId === next.routeGroupId)).map((item) => item.id);
             for (const task of localRuntime.automations) {
               if (task.accountSelector.kind === "account_ids" && task.accountSelector.values.some((id) => id !== next.id && groupIds.includes(id))) {
                 task.accountSelector.values = [...new Set([...task.accountSelector.values.filter((id) => !groupIds.includes(id)), next.id])];
               }
             }
             for (const item of localRuntime.accounts) {
-              if (item.id === current.id || item.routeGroupId === group || item.id === next.id) {
+              if (groupIds.includes(item.id)) {
                 item.routeGroupId = group;
                 item.routeInactive = item.id !== next.id;
                 item.inPool = item.id === next.id && inPool;
               }
             }
             next.weight = current.weight;
+            localRuntime.gateway.poolRouting.members = localRuntime.gateway.poolRouting.members.filter((member) => member.kind !== "account" || !groupIds.includes(member.id) || member.id === current.id);
             for (const member of localRuntime.gateway.poolRouting.members) if (member.kind === "account" && member.id === current.id) member.id = next.id;
             refreshGatewayModels(localRuntime);
             return null;
