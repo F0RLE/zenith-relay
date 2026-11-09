@@ -613,6 +613,10 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   member; catalog/access discovery stays independent. Incompatible BPS routes
   cannot consume selection capacity ahead of a compatible native route. A BPS-only
   pool still rejects native strict output; no schema or approval check is dropped.
+  Complete paired tool history may release an optional BPS affinity when the
+  current request requires an incompatible feature, including strict output.
+  HTTP and WebSocket use the same exclusions; opaque continuations and unpaired
+  results remain bound to their owner, and saved ownership is not erased.
 - Generation 401 invalidates only its rejected token incarnation and returns
   without another generation. The next request prepares fresh authorization.
   Account-wide 429 and model-access blocks retain separate scopes/deadlines.

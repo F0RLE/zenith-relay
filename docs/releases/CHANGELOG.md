@@ -10,6 +10,12 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- Request and send history share immutable diagnostic snapshots. Detailed
+  route/cache/context observations expire after seven days while core history
+  keeps its 30-day window and lifetime usage totals remain available.
+  Existing records compact in bounded background batches.
+- Build cleanup supports `--incremental` to reclaim Rust incremental caches
+  without deleting compiled dependencies or release executables.
 - Saved account methods remain selectable when a card has an older route snapshot.
   Switching back to a linked Excel/BPS connection reuses its saved grant instead
   of starting another sign-in or reporting a duplicate association.

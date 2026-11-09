@@ -1174,6 +1174,10 @@ origins do not participate.
   Subscription diagnostics include the OAuth client kind, total probe elapsed
   milliseconds (including management admission and optional retries), and a
   validated Cloudflare Ray id when present. Arbitrary header values are omitted.
+  Fixed `transport_failure` categories distinguish request/body timeouts,
+  network/body failures, management admission and stale ownership fences.
+  Stale scopes and invalid origins are not retried; transient failures retain
+  their bounded retry policy. Raw transport error text is never retained.
   HTTP error status and Retry-After take precedence over an unread or truncated
   error body; a broken refusal body cannot trigger a transport retry.
   Subscription metadata must match the requested account's canonical id or an
@@ -2643,6 +2647,18 @@ archiving physical sends and deleting history use exactly that captured batch.
 Startup, every 256 new requests, and a once-per-minute Desktop worker use bounded
 batches. The worker skips a busy writer; aggregate
 totals survive expiration and caches are invalidated after a committed batch.
+
+Schema 46 stores identical routing/tool diagnostic JSON once in an immutable,
+SHA-256-indexed dictionary. Request results and physical sends retain independent
+references, so late usage corrections cannot change a completed logical result.
+Transactional reference cleanup follows replacement, history expiry, clearing and
+account removal. Existing inline records remain readable and convert in batches
+of at most 256 per table at startup and during minute maintenance.
+Verbose route/cache/transport, context-size and BPS-catalog observations expire
+after seven days, independently for each request/send. Core outcomes, request
+timing, tool counts/policy, reported usage and pricing retain the 30-day history
+window; lifetime aggregates remain available. Compaction invalidates report caches
+only after commit. Freed SQLite pages are reused; startup does not run VACUUM.
 
 Usage corrections and mixed state/purge batches are atomic with WAL/FULL durability.
 Unchanged values can skip redundant updates, never request/attempt observations

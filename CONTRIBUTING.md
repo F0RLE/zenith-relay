@@ -245,6 +245,11 @@ environment, then runs TypeScript, Vite, the frontend size gate and Cargo with
 the running app stays untouched. Omit `--no-bundle` to build installers too.
 Keep Tauri options before `--` and extra Cargo arguments after it.
 
+Add `--compact` for concise progress, warnings, errors and elapsed time. Complete
+build output is saved to `target/desktop-build.log`, replacing the previous log.
+The workspace desktop updater uses this mode and retains SHA-256 verification,
+safe replacement and startup checks.
+
 Identical renderer filenames and bytes retain their previous timestamps, allowing
 Cargo to reuse its release output. Changed assets still trigger native work.
 Every build validates the frontend and uses the configured release optimizations
@@ -695,6 +700,10 @@ The default removes only `src/.build`, `src/dist`, and `web/dist`. Add `--all`
 to also remove test reports, Desktop browser captures, Rust targets, and Tauri
 permission schemas. **This includes the locally built release executable.**
 From `src`, the equivalent commands are `bun run clean` and `bun run clean:all`.
+
+Use `bun scripts/maintenance/clean.mjs --incremental` to remove only Rust debug
+incremental caches. Compiled dependencies, release executables and frontend builds
+stay available; the next debug build may take longer.
 
 Paths are anchored to this checkout, not the caller's working directory. All
 targets and their parents inside the checkout are checked before removal;
