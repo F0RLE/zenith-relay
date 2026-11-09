@@ -3,6 +3,7 @@ import { expect, test, type Page } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 
 const driver = readFileSync(new URL("../../../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.cjs", import.meta.url), "utf8");
+const driverInstaller = `(() => {const module = {exports: null}; ${driver};globalThis.__relayAutomaticLogin = module.exports;})()`;
 const locales = ["en", "ru"].map((locale) => JSON.parse(readFileSync(new URL(`../../../../src-tauri/src/local_pool/auth_page_patterns/${locale}.json`, import.meta.url), "utf8")));
 const email = "synthetic@example.test";
 const password = "synthetic-\"\\-password";
@@ -18,12 +19,15 @@ async function formPage(page: Page, html: string, path = "/log-in") {
   });
 }
 
-function runDriver(page: Page, input: Record<string, unknown> = {}) {
-  return page.evaluate(driverScript({ url: page.url(), ...input }));
-}
-
-function driverScript(input: Record<string, unknown>) {
-  return `(() => {const module = {exports: null}; ${driver};return module.exports(${JSON.stringify(locales)},${JSON.stringify({ expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, ...input })});})()`;
+async function runDriver(page: Pick<Page, "evaluate" | "url">, input: Record<string, unknown> = {}) {
+  const payload = { expiresAtMs: Date.now() + 2_000, waitUntilMs: Date.now() + 5_000, url: page.url(), ...input };
+  await page.evaluate(driverInstaller);
+  return page.evaluate(({ patterns, payload }) => {
+    const scope = globalThis as typeof globalThis & {
+      __relayAutomaticLogin: (patterns: unknown[], input: Record<string, unknown>) => string;
+    };
+    return scope.__relayAutomaticLogin(patterns, payload);
+  }, { patterns: locales, payload });
 }
 
 test("a hydrating login form waits within the bounded loading grace", async ({ page }) => {
@@ -171,13 +175,21 @@ test("navigation races, foreign origins and subframes cannot receive notes", asy
   await expect.poll(() => page.frames().length).toBe(2);
   const frame = page.frames()[1];
   await frame.waitForLoadState();
-  expect(await frame.evaluate(driverScript({ url: "https://auth.openai.com/log-in", stage: "email", value: email }))).toBe("manual");
+  expect(await runDriver(frame, { url: "https://auth.openai.com/log-in", stage: "email", value: email })).toBe("manual");
 });
 
 test("detector rechecks the stage immediately before filling", async ({ page }) => {
   await formPage(page, '<form method="post"><input type="email"><button>Continue</button></form>');
   expect(await runDriver(page, { stage: "password", value: password })).toBe("manual");
   await expect(page.locator("input")).toHaveValue("");
+});
+
+test("credential values travel as data rather than executable page source", async ({ page }) => {
+  await formPage(page, '<form method="post"><input type="password" autocomplete="current-password"><button>Continue</button></form>', "/log-in/password");
+  const value = 'synthetic";globalThis.__relayInjected=true;//</script>\u2028';
+  expect(await runDriver(page, { stage: "password", value, email })).toBe("submitted");
+  await expect(page.locator("input")).toHaveValue(value);
+  expect(await page.evaluate(() => "__relayInjected" in globalThis)).toBe(false);
 });
 
 for (const platform of ["windows", "macos", "linux"] as const) {
