@@ -1,6 +1,13 @@
 import { lstatSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+export function incrementalArtifactPaths(repositoryRoot) {
+  return [
+    join(repositoryRoot, "src-tauri", "target", "debug", "incremental"),
+    join(repositoryRoot, "crates", "relay-core", "target", "debug", "incremental"),
+  ];
+}
+
 /** Resolve only Relay artifacts; the caller's working directory is irrelevant. */
 export function artifactPathsToClean(repositoryRoot, includeAllArtifacts = false) {
   const desktopFrontendRoot = join(repositoryRoot, "src");

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { artifactPathsToClean, assertSafeCleanupPaths } from "./artifact-paths.mjs";
+import { artifactPathsToClean, assertSafeCleanupPaths, incrementalArtifactPaths } from "./artifact-paths.mjs";
 
 describe("build artifact cleanup scope", () => {
   const root = resolve("synthetic-workspace", "zenith-relay");
@@ -36,6 +36,26 @@ describe("build artifact cleanup scope", () => {
       const result = spawnSync(process.execPath, [script, option], { encoding: "utf8", windowsHide: true });
       expect(result.status).toBe(status);
     }
+  });
+
+  test("incremental cleanup keeps dependencies, executables, frontend builds and user data", () => {
+    const paths = incrementalArtifactPaths(root);
+    expect(paths).toEqual([
+      join(root, "src-tauri", "target", "debug", "incremental"),
+      join(root, "crates", "relay-core", "target", "debug", "incremental"),
+    ]);
+    expect(() => assertSafeCleanupPaths(root, paths, () => ({
+      isSymbolicLink: () => false, isDirectory: () => true,
+    }))).not.toThrow();
+  });
+
+  test("conflicting cleanup modes exit before touching artifacts", () => {
+    const script = fileURLToPath(new URL("./clean.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "--all", "--incremental"], {
+      encoding: "utf8", windowsHide: true,
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Choose either --all or --incremental");
   });
 
   test("full cleanup includes browser captures without removing all output or documentation images", () => {
