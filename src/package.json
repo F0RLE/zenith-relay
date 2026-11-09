@@ -36,13 +36,13 @@
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-updater": "^2.14.1",
-    "i18next": "^26.5.12",
-    "lucide-react": "^1.66.0",
+    "i18next": "^26.7.2",
+    "lucide-react": "^1.70.0",
     "mdast-util-gfm": "3.1.0",
     "micromark-extension-gfm": "3.0.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-i18next": "^17.1.9",
+    "react-i18next": "^17.1.13",
     "react-markdown": "10.1.0"
   },
   "devDependencies": {
