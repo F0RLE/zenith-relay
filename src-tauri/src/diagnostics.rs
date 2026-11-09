@@ -21,7 +21,7 @@ pub(crate) mod memory;
 mod persist;
 mod redact;
 pub(crate) mod transport;
-use redact::{safe_code, safe_detail, safe_text, truncate_text};
+use redact::{safe_code, safe_detail, safe_operation, safe_text, truncate_text};
 
 const LOGS_DIRECTORY: &str = "logs";
 const ERRORS_DIRECTORY: &str = "errors";

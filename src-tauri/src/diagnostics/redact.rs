@@ -11,6 +11,13 @@ pub(super) fn safe_detail(detail_text: &str) -> String {
     safe_text(detail_text, MAX_TEXT_BYTES)
 }
 
+pub(super) fn safe_operation(operation: &str) -> String {
+    match operation {
+        "account-subscription-probe" => operation.to_string(),
+        _ => safe_text(operation, 120),
+    }
+}
+
 /// Preserve only the small, canonical alphabet used by diagnostic/error
 /// codes.  Running codes through `safe_text` would treat prefixes such as
 /// `source_` as identity-like text and turn useful labels into
@@ -23,7 +30,7 @@ pub(super) fn safe_code(code_text: &str) -> String {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        normalized_code.to_ascii_lowercase()
+        secrets::redact_code_token(&normalized_code.to_ascii_lowercase())
     } else {
         REDACTED.to_string()
     }
@@ -66,6 +73,47 @@ pub(super) fn truncate_text(text: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_operation_names_are_preserved_only_in_the_operation_field() {
+        let operation = "account-subscription-probe";
+        assert_eq!(safe_operation(operation), operation);
+        assert_eq!(safe_operation("account-import"), "account-import");
+        assert_eq!(safe_detail(operation), "account-[redacted]");
+        for value in [
+            "account-subscription-probe-private",
+            "account-subscription-probe_123456",
+            "account-untrustedlongopaqueidentifier",
+            "Bearer account-subscription-probe",
+            "operator@example.test",
+            "https://user:account-subscription-probe@example.test/",
+            r#"{"access_token":"account-subscription-probe"}"#,
+        ] {
+            let redacted = safe_operation(value);
+            assert!(redacted.contains(REDACTED));
+            assert!(!redacted.contains(operation));
+        }
+    }
+
+    #[test]
+    fn error_code_fields_redact_recognized_credential_tokens() {
+        for value in [
+            "sk-synthetic-private-key-12345678",
+            "znt-synthetic-pool-key-12345678",
+            "ghp_synthetic_private_token_12345678",
+            "eyJzeW50aGV0aWMifQ.payload.signature",
+        ] {
+            assert_eq!(safe_code(value), REDACTED);
+        }
+        assert_eq!(
+            safe_code("source_protocol_invalid"),
+            "source_protocol_invalid"
+        );
+        assert_eq!(
+            safe_code("subscription_http_status"),
+            "subscription_http_status"
+        );
+    }
 
     #[test]
     fn subscription_trace_metadata_keeps_validated_ray_ids_without_exposing_bearers() {

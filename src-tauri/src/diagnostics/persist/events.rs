@@ -38,7 +38,7 @@ pub(in crate::diagnostics) fn record_event(
         platform: crate::platform::platform_name(),
         level,
         kind,
-        operation: operation.map(|operation_name| safe_text(operation_name, 120)),
+        operation: operation.map(safe_operation),
         // Error codes are machine-readable labels, not free-form messages.
         // Keep the bounded identifier visible so a user can correlate the
         // red status in the pool with the corresponding diagnostic entry.

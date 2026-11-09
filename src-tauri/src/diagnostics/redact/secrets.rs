@@ -10,6 +10,12 @@ use identity::{
 use keys::redact_sensitive_keys;
 use urls::{redact_bearer_values, redact_sensitive_query_values, redact_url_credentials};
 
+pub(super) fn redact_code_token(token: &str) -> String {
+    let mut redacted = String::with_capacity(token.len());
+    append_redacted_token(&mut redacted, token);
+    redacted
+}
+
 pub(super) fn redact_secrets(raw_text: &str) -> String {
     // Bearer credentials must be removed before generic `authorization: ...`
     // handling; otherwise an unquoted header could leave the token after the
