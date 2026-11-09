@@ -441,6 +441,7 @@ fn optional_response_affinity_is_released_when_owner_needs_reauthentication() {
         &mut optional_affinity,
         "gpt-test",
         &[WireApi::Responses],
+        &std::collections::HashSet::new(),
         2,
     ));
     assert!(optional_affinity.is_none());

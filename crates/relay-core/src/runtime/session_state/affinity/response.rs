@@ -2,6 +2,7 @@ use super::super::super::{AuthenticatedKey, GatewayRuntime, ResponseAffinityBind
 use crate::{NativeResponsesReplayState, RESPONSE_AFFINITY_TTL_MS};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
@@ -257,7 +258,7 @@ impl GatewayRuntime {
     }
 
     /// Release an optional tool binding after its owner is no longer eligible
-    /// or leaves the request's configured routes. Callers must first establish
+    /// or cannot carry the request. Callers must first establish
     /// that the input contains the full tool history and does not depend on an
     /// opaque response id.
     pub(crate) fn release_unroutable_response_affinity(
@@ -266,8 +267,13 @@ impl GatewayRuntime {
         affinity_key: &mut Option<String>,
         model: &str,
         allowed_protocols: &[crate::WireApi],
+        excluded_candidates: &HashSet<String>,
         now_ms: u64,
     ) -> bool {
+        let owner_is_excluded = affinity_key
+            .as_deref()
+            .and_then(|key| self.response_affinity_candidate(key, now_ms))
+            .is_some_and(|candidate| excluded_candidates.contains(&candidate));
         let owner_is_eligible = affinity_key.as_deref().and_then(|affinity_key| {
             self.response_affinity_owner_is_eligible(
                 key,
@@ -286,7 +292,7 @@ impl GatewayRuntime {
                 now_ms,
             )
         });
-        if owner_is_eligible != Some(false) && supports_route != Some(false) {
+        if !owner_is_excluded && owner_is_eligible != Some(false) && supports_route != Some(false) {
             return false;
         }
         // Other branches may still need this owner or its cached replay.

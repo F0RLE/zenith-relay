@@ -21,6 +21,7 @@ mod retry_admission;
 mod routing;
 mod siwc;
 mod structured_output;
+mod structured_routing;
 
 struct AccessReply {
     status: StatusCode,

@@ -75,6 +75,7 @@ pub(super) async fn handle_account_selection_miss(
             response_affinity_key,
             resolved_model,
             &[WireApi::Responses],
+            retry_context.exclusions,
             now_ms(),
         )
     {

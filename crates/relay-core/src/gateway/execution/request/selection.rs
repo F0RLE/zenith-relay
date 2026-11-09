@@ -67,6 +67,7 @@ fn release_unroutable_affinity(input: &mut SelectionMissInput<'_>) -> bool {
             &mut input.state.continuation.response_affinity_key,
             input.resolved_model,
             candidate_protocols(input.client_wire_api),
+            input.retry_context.exclusions,
             now_ms(),
         )
 }

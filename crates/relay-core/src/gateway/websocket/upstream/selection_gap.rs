@@ -44,6 +44,7 @@ pub(super) async fn recover_without_candidate(gap: &mut SelectionGap<'_>) -> Gap
             &mut client_request.response_affinity_key,
             &client_request.resolved_model,
             WEBSOCKET_PROTOCOLS,
+            gap.incompatible,
             now_ms(),
         )
     {
