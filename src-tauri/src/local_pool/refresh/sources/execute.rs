@@ -1,4 +1,6 @@
-use super::{DesktopState, RefreshRead, RefreshReadResult};
+use super::{
+    DesktopState, RefreshRead, RefreshReadResult, SourceCatalogRefreshStatus, SourceModelRefresh,
+};
 use crate::local_pool::{
     commands::connections::ensure_not_gateway_self_source,
     error::{ErrorCode, LocalPoolError, Result},
@@ -90,12 +92,15 @@ pub(super) async fn execute(
                 Vec::new()
             };
             let mut changed = false;
+            let mut catalog_status = SourceCatalogRefreshStatus::Failed;
+            let mut catalog_before = before.models.clone();
             let updated = state
                 .store()?
                 .apply_source_refresh(fence, |source_record| {
                     match source_read.read_value {
                         Ok(discovery) => {
                             let source_before_refresh = source_record.clone();
+                            catalog_before.clone_from(&source_record.models);
                             discovery.apply_catalog(
                                 &mut source_record.base_url,
                                 &mut source_record.models,
@@ -105,6 +110,11 @@ pub(super) async fn execute(
                             );
                             changed = source_catalog_changed(&source_before_refresh, source_record);
                             let failure = discovery.failure_summary();
+                            catalog_status = if failure.is_some() {
+                                SourceCatalogRefreshStatus::Partial
+                            } else {
+                                SourceCatalogRefreshStatus::Complete
+                            };
                             source_record.last_test_status =
                                 Some(if failure.is_some() { "error" } else { "ok" }.into());
                             source_record.last_error = failure;
@@ -134,7 +144,9 @@ pub(super) async fn execute(
             if changed || manual {
                 queue_active_client_catalog_refresh(state);
             }
-            Ok(RefreshRead::SourceModels(Box::new(updated)))
+            Ok(RefreshRead::SourceModels(Box::new(
+                SourceModelRefresh::new(&catalog_before, updated, catalog_status),
+            )))
         }
         RefreshKind::Balance => {
             let stats_read = zenith_relay_core::read_source_provider_stats_with_scope_and_proxy(

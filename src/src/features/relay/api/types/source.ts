@@ -58,6 +58,13 @@ export type SourceProtocolBinding = {
   cacheWriteTtl?: CacheWriteTtl;
 };
 
+export type SourceCatalogRefresh = {
+  sourceId: string;
+  status: "complete" | "partial" | "failed" | "manual";
+  addedModels: number;
+  removedModels: number;
+};
+
 export type SourceSummary = {
   id: string;
   name: string;

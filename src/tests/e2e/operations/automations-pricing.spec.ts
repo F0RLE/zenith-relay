@@ -135,7 +135,7 @@ for (const mode of ["local"] as const) {
     const dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("Example compatible API");
     await dialog.locator(".request-technical-details > summary").click();
-    await expect(dialog).toContainText("Weighted rotation");
+    await expect(dialog).toContainText("Rotation when quota and credits tie");
     await expect(dialog.getByText("Quota at selection", { exact: true })).toHaveCount(0);
   });
 

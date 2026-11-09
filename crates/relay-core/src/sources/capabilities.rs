@@ -147,11 +147,15 @@ pub(super) fn service_protocols(base_url: &str) -> Vec<WireApi> {
 
 pub(super) fn endpoint_type(endpoint_type_text: &str) -> Option<WireApi> {
     match endpoint_type_text {
-        "openai-response" | "responses" | "/v1/responses" => Some(WireApi::Responses),
-        "openai" | "chat_completions" | "chat.completions" | "/v1/chat/completions" => {
-            Some(WireApi::ChatCompletions)
+        "openai-response" | "responses" | "/v1/responses" | "/api/v1/responses" => {
+            Some(WireApi::Responses)
         }
-        "anthropic" | "messages" | "/v1/messages" => Some(WireApi::Messages),
+        "openai"
+        | "chat_completions"
+        | "chat.completions"
+        | "/v1/chat/completions"
+        | "/api/v1/chat/completions" => Some(WireApi::ChatCompletions),
+        "anthropic" | "messages" | "/v1/messages" | "/api/v1/messages" => Some(WireApi::Messages),
         "gemini" | "generateContent" | "streamGenerateContent" => Some(WireApi::Gemini),
         _ => None,
     }

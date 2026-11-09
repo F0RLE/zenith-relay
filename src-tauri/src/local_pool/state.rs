@@ -79,7 +79,7 @@ pub struct DesktopStateOwner {
     failed_usage_writes: Arc<AtomicU64>,
     usage_writer: std::sync::OnceLock<zenith_relay_core::UsageCallback>,
     failed_affinity_writes: Arc<AtomicU64>,
-    catalog_refresh_error: Arc<Mutex<Option<String>>>,
+    catalog_refresh_state: Arc<Mutex<catalog_warning::CatalogRefreshWarnings>>,
     pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
     background_session_active: watch::Sender<bool>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
@@ -174,8 +174,9 @@ impl DesktopState {
         }
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
         let failed_affinity_writes = Arc::new(AtomicU64::new(0));
-        let catalog_refresh_error =
-            Arc::new(Mutex::new(store.gateway().catalog_refresh_error.clone()));
+        let catalog_refresh_state = Arc::new(Mutex::new(
+            catalog_warning::CatalogRefreshWarnings::from_gateway(store.gateway()),
+        ));
         // The native process owns automatic account work. A tray-only startup
         // or a closed WebView must not pause quota, credit, or catalog refresh.
         let (background_session_active, _) = watch::channel(true);
@@ -212,7 +213,7 @@ impl DesktopState {
                 failed_usage_writes,
                 usage_writer: std::sync::OnceLock::new(),
                 failed_affinity_writes,
-                catalog_refresh_error,
+                catalog_refresh_state,
                 client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
                 background_session_active,
                 quota_account_locks: Arc::new(Mutex::new(HashMap::new())),

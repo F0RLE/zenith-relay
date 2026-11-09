@@ -65,6 +65,9 @@ pub struct GatewaySettings {
     pub catalog_refresh_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_refresh_error_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub client_catalog_refresh_failures:
+        BTreeMap<CatalogRefreshClient, ClientCatalogRefreshFailure>,
     #[serde(default)]
     pub hidden_models: Vec<String>,
     #[serde(default)]
@@ -110,6 +113,7 @@ impl Default for GatewaySettings {
             codex_text_models_enabled: false,
             catalog_refresh_error: None,
             catalog_refresh_error_at_ms: None,
+            client_catalog_refresh_failures: BTreeMap::new(),
             hidden_models: Vec::new(),
             model_price_overrides: BTreeMap::new(),
             model_reasoning_allowed_levels: BTreeMap::new(),

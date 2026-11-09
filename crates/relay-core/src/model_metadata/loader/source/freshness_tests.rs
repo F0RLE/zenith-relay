@@ -13,7 +13,7 @@ fn fresh_exact_scope_wins_over_stale_primary_and_retains_gap_provenance() {
         None,
         None,
     ];
-    let payload = merge_payloads(sources.clone(), [true, false, false, false]);
+    let payload = merge_payloads(sources.clone(), [true, false, false, false]).unwrap();
     let catalog = ModelMetadataCatalog::from_metadata_payload(&payload, None, None, false).unwrap();
     let model = catalog.resolve("maker/future").unwrap();
     assert_eq!(model.capabilities.tool_call, Some(true));
@@ -35,7 +35,7 @@ fn fresh_exact_scope_wins_over_stale_primary_and_retains_gap_provenance() {
     );
 
     // A successful revalidation restores primary priority without new bytes.
-    let restored = merge_payloads(sources, [false; 4]);
+    let restored = merge_payloads(sources, [false; 4]).unwrap();
     assert_eq!(restored["maker/future"]["limit"]["output"], 100);
     assert_eq!(restored["maker/future"]["tool_call"], false);
     assert_eq!(restored["maker/future"]["interleaved_system"], false);
@@ -53,7 +53,8 @@ fn fresh_hosted_data_cannot_replace_stale_canonical_limits() {
             None,
         ],
         [true, false, false, false],
-    );
+    )
+    .unwrap();
     assert_eq!(payload["maker/future"]["limit"]["output"], 100);
     assert_eq!(payload["host/maker/future"]["limit"]["output"], 500);
 }

@@ -1,5 +1,5 @@
 use super::order::normalize;
-use super::{MAX_RECORDS, validate_metadata_payload};
+use super::{MAX_RECORDS, ModelMetadataError, validate_metadata_payload};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,10 +34,10 @@ pub(super) fn merge_reference_records(
     mut details: Option<Value>,
     mut openrouter: Option<Value>,
     litellm: Option<Value>,
-) -> BTreeMap<String, Value> {
+) -> Result<BTreeMap<String, Value>, ModelMetadataError> {
     let mut merged_records = BTreeMap::new();
     for (source_id, source_record) in validate_metadata_payload(&primary).unwrap_or_default() {
-        insert(&mut merged_records, &source_id, source_record.clone(), 0);
+        insert(&mut merged_records, &source_id, source_record.clone(), 0)?;
     }
     // The primary validator supports several legacy shapes. Preserve that
     // traversal, but release its tree before merging the auxiliary sources.
@@ -91,7 +91,7 @@ pub(super) fn merge_reference_records(
                     aliases.push(json!(alias));
                 }
             }
-            insert(&mut merged_records, &qualified_id, projected, 3);
+            insert(&mut merged_records, &qualified_id, projected, 3)?;
         }
     }
     drop(details);
@@ -151,7 +151,7 @@ pub(super) fn merge_reference_records(
             if canonical_ids.contains(&normalize(&route_model_id)) {
                 projected_record["canonical_model_id"] = json!(route_model_id);
             }
-            insert(&mut merged_records, &scoped_id, projected_record, 1);
+            insert(&mut merged_records, &scoped_id, projected_record, 1)?;
         }
     }
     drop(openrouter);
@@ -242,9 +242,9 @@ pub(super) fn merge_reference_records(
             &qualified_id,
             Value::Object(projected_record),
             2,
-        );
+        )?;
     }
-    merged_records
+    Ok(merged_records)
 }
 
 fn insert(
@@ -252,11 +252,14 @@ fn insert(
     model_id: &str,
     mut metadata_record: Value,
     priority: u64,
-) {
+) -> Result<(), ModelMetadataError> {
     if !crate::is_valid_model_token(model_id) || !metadata_record.is_object() {
-        return;
+        return Ok(());
     }
     let normalized_model_id = normalize(model_id);
+    if merged_records.len() >= MAX_RECORDS && !merged_records.contains_key(&normalized_model_id) {
+        return Err(ModelMetadataError::InvalidCatalog);
+    }
     metadata_record[IDENTITY_PRIORITY] = json!(priority);
     if metadata_record.get("reasoning").is_some()
         && metadata_record.get("reasoning_source").is_none()
@@ -277,9 +280,10 @@ fn insert(
             .expect("object record")
             .remove(super::provenance::MARKER);
         fill_missing(existing_record, metadata_record);
-    } else if merged_records.len() < MAX_RECORDS {
+    } else {
         merged_records.insert(normalized_model_id, metadata_record);
     }
+    Ok(())
 }
 
 fn fill_missing(target: &mut Value, fallback: Value) {
@@ -311,9 +315,9 @@ fn fill_missing(target: &mut Value, fallback: Value) {
 
 /// Fresh evidence wins within an exact provider/model scope. Last-known stale
 /// records remain available only for missing fields or missing identities.
-pub(super) fn fill_stale_gaps(mut fresh: Value, stale: Value) -> Value {
+pub(super) fn fill_stale_gaps(mut fresh: Value, stale: Value) -> Result<Value, ModelMetadataError> {
     let Some(targets) = fresh.as_object_mut() else {
-        return stale;
+        return Ok(stale);
     };
     if let Value::Object(records) = stale {
         for (id, mut record) in records {
@@ -328,10 +332,12 @@ pub(super) fn fill_stale_gaps(mut fresh: Value, stale: Value) -> Value {
                 fill_missing(target, record);
             } else if targets.len() < MAX_RECORDS {
                 targets.insert(id, record);
+            } else {
+                return Err(ModelMetadataError::InvalidCatalog);
             }
         }
     }
-    fresh
+    Ok(fresh)
 }
 
 #[cfg(test)]
@@ -350,6 +356,7 @@ mod tests {
             openrouter.cloned(),
             litellm.cloned(),
         )
+        .unwrap()
     }
 
     #[test]
@@ -371,7 +378,8 @@ mod tests {
             Some(details),
             Some(router),
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(records.len(), 3);
         assert_eq!(records["vendor/actual"]["aliases"], json!(["vendor/alias"]));
         assert_eq!(

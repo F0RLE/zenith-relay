@@ -730,7 +730,7 @@ export function initializeTauriMock(input: MockOptions) {
           case "test_local_source": return structuredClone(source);
           case "refresh_local_source_data":
             if (input.sourceRefreshError) throw { code: "upstream_error", message: "Source models unavailable" };
-            return structuredClone(localRuntime);
+            return { sourceId: args.sourceId, status: "complete", addedModels: 0, removedModels: 0 };
           case "get_local_source_stats": {
             const configuredStats = input.sourceStatsById?.[String(args.sourceId)];
             if (configuredStats) return structuredClone(configuredStats);

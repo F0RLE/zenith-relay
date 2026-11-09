@@ -1,5 +1,5 @@
 use super::assemble::runtime_from_store;
-use super::{current_time_ms, record_catalog_refresh_result, runtime_account_operational_state};
+use super::{current_time_ms, runtime_account_operational_state};
 use crate::local_pool::{
     error::{ErrorCode, ErrorDiagnostics, LocalPoolError, Result},
     models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
@@ -31,8 +31,11 @@ pub(in crate::local_pool) fn queue_active_client_catalog_refresh(state: &Desktop
     tauri::async_runtime::spawn(async move {
         loop {
             state.client_catalog_refresh.begin_pass();
+            let fence = state.begin_client_catalog_refresh();
             let catalog_refresh_result = profiles::refresh_active_client_catalogs(&state).await;
-            record_catalog_refresh_result(&state, &catalog_refresh_result);
+            if let Some(fence) = fence {
+                state.record_client_catalog_refresh_results(&fence, &catalog_refresh_result);
+            }
             state.oauth_events.emit_state_changed();
             if !state.client_catalog_refresh.finish_pass() {
                 break;

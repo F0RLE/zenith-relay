@@ -9,7 +9,7 @@ use crate::{
     },
     platform::default_codex_home,
 };
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 use url::Url;
 use zenith_relay_core::{
     SourceAdapter, WireApi, providers::chatgpt::configured_codex_client_version, url_has_userinfo,
@@ -126,17 +126,6 @@ pub(in crate::local_pool) enum CodexCatalogRefreshStatus {
     Updated,
     Skipped,
     Deferred,
-}
-
-pub(super) async fn refresh_client_catalogs(
-    opencode: impl Future<Output = LocalResult<()>>,
-    codex: impl Future<Output = LocalResult<CodexCatalogRefreshStatus>>,
-) -> LocalResult<CodexCatalogRefreshStatus> {
-    // These profiles are independent: an invalid OpenCode file must not
-    // prevent Codex from applying or scheduling its own catalog update.
-    let opencode_result = opencode.await;
-    let codex_result = codex.await;
-    codex_result.and_then(|status| opencode_result.map(|()| status))
 }
 
 pub(in crate::local_pool) fn active_catalog_refresh_target(
@@ -398,7 +387,6 @@ fn is_zenith_api_base_url(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     #[test]
     fn context_policy_retains_route_limits_and_does_not_invent_native_windows() {
@@ -461,27 +449,5 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::PoolModelsUnavailable);
         server.abort();
-    }
-    #[tokio::test]
-    async fn opencode_failure_does_not_prevent_codex_catalog_refresh() {
-        let refreshed = Cell::new(false);
-        let catalog_refresh_result = refresh_client_catalogs(
-            async {
-                Err(LocalPoolError::new(
-                    ErrorCode::InvalidState,
-                    "synthetic invalid config",
-                ))
-            },
-            async {
-                refreshed.set(true);
-                Ok(CodexCatalogRefreshStatus::Updated)
-            },
-        )
-        .await;
-        assert!(refreshed.get());
-        assert!(matches!(
-            catalog_refresh_result.unwrap_err().code,
-            ErrorCode::InvalidState
-        ));
     }
 }

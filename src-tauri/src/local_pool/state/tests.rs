@@ -20,6 +20,7 @@ use zenith_relay_core::{
     },
 };
 mod access_blocks;
+mod catalog_warning;
 mod desktop_runtime;
 mod wake_cycles;
 

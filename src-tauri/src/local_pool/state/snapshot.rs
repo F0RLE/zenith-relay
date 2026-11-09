@@ -425,9 +425,7 @@ impl DesktopState {
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
         }
-        if let Some(error) = self.catalog_refresh_warning() {
-            warnings.push(error);
-        }
+        warnings.extend(self.catalog_refresh_warnings());
         Ok(SnapshotBase {
             store_lock_wait,
             gateway,

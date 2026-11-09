@@ -35,7 +35,7 @@ pub(crate) enum RefreshRead {
     },
     /// Only shared with current waiters; credentials never enter observation cache.
     Authorization(Box<PreparedAccountAuthorization>),
-    SourceModels(Box<super::models::ProviderSourceRecord>),
+    SourceModels(Box<sources::SourceModelRefresh>),
     SourceStats(zenith_relay_core::scheduler::refresh::SourceStatsObservation),
     Proxy(Box<super::accounts::proxy::check::ProxyCheckResult>),
 }

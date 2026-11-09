@@ -11,6 +11,11 @@ use axum::{
 use serde_json::{Value, value::RawValue};
 use std::sync::Mutex;
 
+#[path = "tests/capacity.rs"]
+mod capacity;
+#[path = "tests/catalog_validation.rs"]
+mod catalog_validation;
+
 struct CacheDir(PathBuf);
 impl CacheDir {
     fn new() -> Self {

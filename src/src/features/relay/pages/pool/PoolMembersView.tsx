@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert, CircleCheck, CirclePause, Clock3, Coins, Cpu, DollarSign, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
+import { requireCompleteSourceCatalog } from "../../hooks/sourceRefresh";
 import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier } from "../../api/types";
 import { refreshAllAccountQuotas } from "../../accountQuotaRefresh";
 import { useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
@@ -109,7 +110,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, onReauthenticate, supp
   const refreshSourceStats = async (sourceId: string, refreshModels = false, operationManaged = false) => {
     let modelRefreshError: unknown;
     if (refreshModels && mode === "local") {
-      const refreshModels = () => relayCommands.refreshSourceData(sourceId);
+      const refreshModels = async () => requireCompleteSourceCatalog(await relayCommands.refreshSourceData(sourceId));
       if (operationManaged) {
         try { await refreshModels(); } catch (error) { modelRefreshError = error; }
       } else await perform(`source-data-refresh-${sourceId}`, refreshModels, "feedback.refreshed", { backgroundRefresh: true });

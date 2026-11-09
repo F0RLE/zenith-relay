@@ -247,12 +247,6 @@
   background: var(--relay-subtle);
 }
 
-.connection-toolbar-result {
-  color: var(--relay-muted);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
 .account-filter-summary {
   min-height: 30px;
   display: flex;

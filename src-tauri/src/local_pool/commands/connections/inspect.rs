@@ -44,17 +44,22 @@ pub async fn test_local_source(
         .map_err(Into::into)
 }
 
-/// Refresh the source model catalog from the management view without
-/// replacing a manual model list. The UI pairs this operation with the
-/// provider-statistics request so both values are refreshed by one action.
+/// Return the fenced catalog delta; pool actions retain manual lists unless
+/// the caller explicitly requests their replacement. Balance refresh is separate.
 #[tauri::command]
 pub async fn refresh_local_source_data(
     source_id: String,
+    replace_manual: Option<bool>,
     state: State<'_, DesktopState>,
-) -> CommandResult<ProviderSourceRecord> {
-    crate::local_pool::refresh::sources::request_models(&state, &source_id, false)
-        .await
-        .map_err(Into::into)
+) -> CommandResult<crate::local_pool::refresh::sources::SourceCatalogRefresh> {
+    crate::local_pool::refresh::sources::request_model_refresh(
+        &state,
+        &source_id,
+        replace_manual.unwrap_or(false),
+    )
+    .await
+    .map(|refresh| refresh.summary)
+    .map_err(Into::into)
 }
 
 #[tauri::command]

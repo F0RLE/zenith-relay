@@ -55,6 +55,34 @@ fn source_with_catalog(base_url: &str) -> ProviderSourceRecord {
     source
 }
 
+#[test]
+fn source_model_refresh_reports_unique_committed_changes_without_credentials() {
+    let mut previous = source("https://example.test/v1");
+    previous.models = vec!["old".into(), "keep".into(), "keep".into()];
+    let mut updated = previous.clone();
+    updated.models = vec!["keep".into(), "new".into(), "new".into()];
+    let result = SourceModelRefresh::new(
+        &previous.models,
+        updated,
+        SourceCatalogRefreshStatus::Partial,
+    );
+    assert_eq!(result.summary.added_models, 1);
+    assert_eq!(result.summary.removed_models, 1);
+    assert_eq!(
+        serde_json::to_value(result.summary).unwrap(),
+        json!({
+            "sourceId": "synthetic-source", "status": "partial", "addedModels": 1, "removedModels": 1
+        })
+    );
+    let unchanged = SourceModelRefresh::new(
+        &previous.models,
+        previous.clone(),
+        SourceCatalogRefreshStatus::Manual,
+    );
+    assert_eq!(unchanged.summary.added_models, 0);
+    assert_eq!(unchanged.summary.removed_models, 0);
+}
+
 #[tokio::test]
 async fn stats_readers_join_cache_and_project_without_a_second_provider_poll() {
     let state = state();
@@ -387,7 +415,13 @@ async fn partial_catalog_refresh_preserves_failed_history_and_recovers_on_a_vali
         .upsert_source(source.clone())
         .unwrap();
     secret_store::save(&source.secret_ref, "synthetic-key").unwrap();
-    let partial = request_models(&state, &source.id, true).await.unwrap();
+    let refresh = request_model_refresh(&state, &source.id, true)
+        .await
+        .unwrap();
+    assert_eq!(refresh.summary.status, SourceCatalogRefreshStatus::Partial);
+    assert_eq!(refresh.summary.added_models, 1);
+    assert_eq!(refresh.summary.removed_models, 1);
+    let partial = refresh.source;
     assert_eq!(partial.models, ["new-responses", "old-messages"]);
     assert_eq!(partial.protocol_bindings.len(), 2);
     assert_eq!(partial.last_test_status.as_deref(), Some("error"));
@@ -412,7 +446,13 @@ async fn partial_catalog_refresh_preserves_failed_history_and_recovers_on_a_vali
         |route| route.adapter.upstream_protocol(route.wire_api).wire_api() == WireApi::Messages
     ));
     visible.store(true, Ordering::SeqCst);
-    let recovered = request_models(&state, &source.id, true).await.unwrap();
+    let refresh = request_model_refresh(&state, &source.id, true)
+        .await
+        .unwrap();
+    assert_eq!(refresh.summary.status, SourceCatalogRefreshStatus::Complete);
+    assert_eq!(refresh.summary.added_models, 0);
+    assert_eq!(refresh.summary.removed_models, 1);
+    let recovered = refresh.source;
     assert_eq!(recovered.models, ["new-responses"]);
     assert_eq!(recovered.last_test_status.as_deref(), Some("ok"));
     assert!(recovered.last_error.is_none());

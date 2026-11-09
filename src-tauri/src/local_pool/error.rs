@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Io,

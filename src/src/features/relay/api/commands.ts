@@ -53,6 +53,7 @@ import { sanitizeFeedbackError } from "../state/feedback";
 import { createUsagePageReader } from "./usagePage";
 import { measureCommand } from "./commandPerformance";
 import type { WeeklyCapacityReport } from "./types/weeklyCapacity";
+import type { SourceCatalogRefresh } from "./types/source";
 
 export type LocalNetworkAccess = {
   enabled: boolean;
@@ -123,7 +124,7 @@ export const relayCommands = {
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
   checkSourceConnection: (sourceId: string) => invoke<SourceConnectionDiagnostics>("check_local_source_connection", { sourceId }),
-  refreshSourceData: (sourceId: string) => invoke("refresh_local_source_data", { sourceId }),
+  refreshSourceData: (sourceId: string, replaceManual = false) => invoke<SourceCatalogRefresh>("refresh_local_source_data", { sourceId, replaceManual }),
   localSourceStats: (sourceId: string, force = false) => invoke<SourceStats>("get_local_source_stats", { sourceId, force }),
 
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),

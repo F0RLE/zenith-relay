@@ -336,7 +336,7 @@ fn a_successful_read_of_the_same_physical_protocol_supersedes_failed_alias_histo
 fn failure_summaries_redact_request_and_validation_details() {
     let binding = SourceProtocolBinding::legacy(WireApi::Messages, &["private-model-name".into()]);
     let invalid = reqwest::Client::new()
-        .get("http://private-user:private-key@invalid host")
+        .get("https://private-user:private-key@invalid host")
         .build()
         .unwrap_err();
     let discovery = SourceDiscovery {

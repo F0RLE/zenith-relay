@@ -1,6 +1,9 @@
 use super::*;
 use serde_json::json;
 
+#[path = "tests/catalog_paths.rs"]
+mod catalog_paths;
+
 #[test]
 fn explicit_endpoint_exclusions_survive_refresh_reload_and_timestamp_order() {
     let model = "synthetic-model";
