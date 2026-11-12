@@ -44,7 +44,7 @@ pub(super) fn prepare(request: &Value) -> AdapterResult<Cow<'_, Value>> {
     }
     let mut normalized = request.clone();
     let normalized_messages = normalized["messages"].as_array_mut().unwrap();
-    for (index, message) in normalized_messages.iter_mut().enumerate() {
+    for message in normalized_messages {
         let system = message["role"] == "system";
         let assistant = message["role"] == "assistant";
         let user = message["role"] == "user";
@@ -53,7 +53,7 @@ pub(super) fn prepare(request: &Value) -> AdapterResult<Cow<'_, Value>> {
         };
         for block in blocks {
             if changes(block) {
-                if !system || !valid_position(messages, index) {
+                if !system {
                     return Err(invalid("messages[].content[].tool_addition"));
                 }
                 checked(block, &["type", "tool", "cache_control"])?;
@@ -165,35 +165,6 @@ fn definition(tool: &Value) -> AdapterResult<(String, Value, bool)> {
         .name
         .clone();
     Ok((name, normalized, deferred))
-}
-
-fn valid_position(messages: &[Value], index: usize) -> bool {
-    let previous = index.checked_sub(1).and_then(|index| messages.get(index));
-    let follows_turn = previous.is_some_and(|message| {
-        message["role"] == "user"
-            || message["role"] == "assistant"
-                && message
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .is_some_and(|blocks| {
-                        blocks.iter().any(|block| {
-                            matches!(
-                                block["type"].as_str(),
-                                Some(
-                                    "web_search_tool_result"
-                                        | "web_fetch_tool_result"
-                                        | "code_execution_tool_result"
-                                        | "bash_code_execution_tool_result"
-                                        | "text_editor_code_execution_tool_result"
-                                )
-                            )
-                        })
-                    })
-    });
-    follows_turn
-        && messages
-            .get(index + 1)
-            .is_none_or(|message| message["role"] == "assistant")
 }
 
 fn invalid(parameter: &'static str) -> AdapterError {

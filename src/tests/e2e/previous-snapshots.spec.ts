@@ -163,6 +163,42 @@ test("Usage reload hydrates only its selected saved page, not all eight previews
   await expect(page.locator(".usage-page")).toHaveAttribute("aria-busy", "false");
 });
 
+test("Usage ignores retired preview keys and reloads authoritative native history", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
+  await expect.poll(async () => (await savedSnapshots(page, "usage")).length).toBe(1);
+  await page.evaluate(async () => {
+    await new Promise<void>((resolve, reject) => {
+      const open = indexedDB.open("relay.displaySnapshots.v1");
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const transaction = open.result.transaction("usage", "readwrite");
+        const store = transaction.objectStore("usage");
+        const read = store.getAll();
+        read.onsuccess = () => {
+          const first = read.result[0];
+          const query = JSON.parse(first.key);
+          delete query.includeReport;
+          store.delete(first.key);
+          store.put({ ...first, key: JSON.stringify({ ...query, includeFilterOptions: true }) });
+        };
+        transaction.oncomplete = () => { open.result.close(); resolve(); };
+        transaction.onerror = () => reject(transaction.error);
+      };
+    });
+  });
+  await holdSnapshotReads(page, ["get_local_usage_page"]);
+  await page.reload();
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.locator(".usage-page")).toHaveAttribute("aria-busy", "true");
+  await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(0);
+  await releaseSnapshotReads(page);
+  await expect(page.locator(".usage-page")).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator(".usage-request-table tbody tr")).toHaveCount(1);
+});
+
 for (const appearance of [
   { locale: "ru", theme: "dark", width: 840, height: 560 },
   { locale: "en", theme: "light", width: 420, height: 720 },

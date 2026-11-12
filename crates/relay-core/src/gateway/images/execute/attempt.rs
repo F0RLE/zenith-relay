@@ -43,6 +43,7 @@ pub(super) async fn run_selected_attempt(
         lease,
         mut route,
     } = selected_image_route;
+    budget.mark_image_generation();
     let account_route = route.account_id.is_some();
     let upstream_url = image_endpoint_url(route.upstream_url.clone(), endpoint);
     let Some(upstream_url) = upstream_url else {
@@ -129,6 +130,8 @@ pub(super) async fn run_selected_attempt(
     let upstream = match upstream_result {
         Ok(upstream) => {
             route.account_token_generation = upstream.account_token_generation;
+            route.account_token_revision =
+                upstream.authorization_incarnation.token_revision().cloned();
             upstream.response
         }
         Err(error) => {

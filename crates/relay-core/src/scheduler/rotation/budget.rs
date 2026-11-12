@@ -3,10 +3,12 @@
 use super::*;
 
 mod evidence;
+mod recovery;
 mod shared;
 mod waiting;
 
 pub use evidence::{ExecutionEvidence, IdempotencyContract, RetryEvidence};
+pub(crate) use recovery::RetryCandidate;
 pub(crate) use shared::SharedRequestBudget;
 
 #[cfg(test)]
@@ -43,6 +45,7 @@ pub struct RequestBudget {
     persistent_retry: bool,
     rate_limit_deadline: Option<tokio::time::Instant>,
     http_headers_deadline: Option<tokio::time::Instant>,
+    image_generation: bool,
     retry_window_ms: Option<u64>,
 }
 
@@ -86,6 +89,7 @@ impl RequestBudget {
             persistent_retry: false,
             rate_limit_deadline: None,
             http_headers_deadline: None,
+            image_generation: false,
             retry_window_ms: None,
         })
     }

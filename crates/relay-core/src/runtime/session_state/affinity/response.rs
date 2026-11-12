@@ -2,6 +2,7 @@ use super::super::super::{AuthenticatedKey, GatewayRuntime, ResponseAffinityBind
 use crate::{NativeResponsesReplayState, RESPONSE_AFFINITY_TTL_MS};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 const VOLATILE_RESPONSE_PREFIX: &str = "volatile-response:";
 
@@ -55,7 +56,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> crate::AdapterResult<crate::AdapterContinuationState> {
-        crate::poison::mutex(&self.adapter_continuation_store).get(
+        crate::poison::mutex(&self.continuation_state.adapters).get(
             local_key_id,
             response_id,
             candidate_id,
@@ -77,7 +78,7 @@ impl GatewayRuntime {
             return;
         }
         let storage_key = response.continuation.storage_key(&response.response_id);
-        let stored = crate::poison::mutex(&self.adapter_continuation_store).insert_if_stored(
+        let stored = crate::poison::mutex(&self.continuation_state.adapters).insert_if_stored(
             local_key_id,
             storage_key,
             candidate_id,
@@ -96,7 +97,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> Option<NativeResponsesReplayState> {
-        crate::poison::mutex(&self.native_responses_replay_store).get(
+        crate::poison::mutex(&self.continuation_state.native_responses).get(
             local_key_id,
             response_id,
             candidate_id,
@@ -153,7 +154,7 @@ impl GatewayRuntime {
         {
             return;
         }
-        crate::poison::mutex(&self.native_responses_replay_store).insert(
+        crate::poison::mutex(&self.continuation_state.native_responses).insert(
             local_key_id,
             &response_id,
             candidate_id,
@@ -257,7 +258,7 @@ impl GatewayRuntime {
     }
 
     /// Release an optional tool binding after its owner is no longer eligible
-    /// or leaves the request's configured routes. Callers must first establish
+    /// or cannot carry the request. Callers must first establish
     /// that the input contains the full tool history and does not depend on an
     /// opaque response id.
     pub(crate) fn release_unroutable_response_affinity(
@@ -266,8 +267,13 @@ impl GatewayRuntime {
         affinity_key: &mut Option<String>,
         model: &str,
         allowed_protocols: &[crate::WireApi],
+        excluded_candidates: &HashSet<String>,
         now_ms: u64,
     ) -> bool {
+        let owner_is_excluded = affinity_key
+            .as_deref()
+            .and_then(|key| self.response_affinity_candidate(key, now_ms))
+            .is_some_and(|candidate| excluded_candidates.contains(&candidate));
         let owner_is_eligible = affinity_key.as_deref().and_then(|affinity_key| {
             self.response_affinity_owner_is_eligible(
                 key,
@@ -286,7 +292,7 @@ impl GatewayRuntime {
                 now_ms,
             )
         });
-        if owner_is_eligible != Some(false) && supports_route != Some(false) {
+        if !owner_is_excluded && owner_is_eligible != Some(false) && supports_route != Some(false) {
             return false;
         }
         // Other branches may still need this owner or its cached replay.
@@ -350,7 +356,7 @@ impl GatewayRuntime {
             let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
             if invalidated {
                 let route_key = format!("route:{key}");
-                crate::poison::mutex(&self.response_route_affinity).invalidate(&route_key);
+                crate::poison::mutex(&self.continuation_state.routes).invalidate(&route_key);
                 if let Some(store) = self.response_affinity_store.as_ref() {
                     let _ = store.delete(key);
                     let _ = store.delete(&route_key);

@@ -8,6 +8,48 @@ fn rate_limit() -> Value {
 }
 
 #[tokio::test]
+async fn persistent_rate_limit_wait_reuses_its_account_for_json_and_sse() {
+    for stream in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        crate::poison::mutex(&server.state.generation_replies)
+            .push_back((StatusCode::TOO_MANY_REQUESTS, rate_limit()));
+        let events = Arc::new(std::sync::Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let mut runtime = retry_admission::pool_runtime(&server, 2, false).await;
+        runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        runtime.set_route_recovery_enabled(true);
+        let runtime = Arc::new(runtime);
+        let (base, task) = recovery::gateway(runtime.clone()).await;
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&json!({"model":"gpt-test","input":"synthetic input","stream":stream}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.bytes().await.unwrap();
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
+        let events = crate::poison::mutex(&events);
+        let attempts = events
+            .iter()
+            .filter(|event| !event.is_request_completion())
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].http_status, 429);
+        assert!(attempts[1].success);
+        assert_eq!(attempts[0].candidate_id, attempts[1].candidate_id);
+        assert_eq!(attempts[0].account_id, attempts[1].account_id);
+        assert_eq!(attempts[0].request_id, attempts[1].request_id);
+        drop(events);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn disabling_persistent_bps_rate_limit_wait_finishes_with_429_and_final_timing() {
     for stream in [false, true] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;

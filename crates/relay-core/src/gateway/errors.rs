@@ -19,7 +19,9 @@ mod response;
 const UNSTORED_PREVIOUS_RESPONSE_MESSAGE: &str =
     "previous_response_id is not supported: this service does not retain past responses";
 
-pub(super) use classify::{classify_upstream_error, classify_upstream_error_value};
+pub(super) use classify::{
+    classify_upstream_error, classify_upstream_error_value, classify_upstream_error_with_headers,
+};
 pub(crate) use classify::{is_deactivated_workspace, is_deactivated_workspace_value};
 use classify::{normalized_error_text, text_has_any, upstream_error_text};
 
@@ -238,6 +240,7 @@ pub(super) struct FailureState {
     pub(super) cooldown_scope: Option<String>,
     pub(super) retry_at_ms: Option<u64>,
     pub(super) consecutive_failures: u32,
+    pub(super) provider_backoff: Option<crate::scheduler::ProviderBackoff>,
 }
 
 pub(super) fn upstream_failure_message(category: &str) -> &'static str {
@@ -332,12 +335,31 @@ pub(super) fn upstream_event_failure_category(
         Some("response.incomplete") => Some(error_codes::RESPONSE_INCOMPLETE),
         Some("response.cancelled" | "response.canceled") => Some(error_codes::UPSTREAM_CANCELLED),
         Some("response.failed" | "error") => {
+            if let Some(category) = classify::provider_request_terminal_category(
+                upstream_status_from_value(event_payload),
+                event_payload,
+            ) {
+                return Some(category);
+            }
             let classification = classify_upstream_error_value(
-                upstream_status_from_value(event_payload).unwrap_or(StatusCode::BAD_GATEWAY),
+                upstream_status_from_value(event_payload).unwrap_or_else(|| {
+                    if classify::session_budget_exceeded(event_payload) {
+                        StatusCode::BAD_REQUEST
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    }
+                }),
                 event_payload,
             );
             Some(
                 if classification.category == error_codes::UPSTREAM_BAD_GATEWAY
+                    && upstream_status_from_value(event_payload).is_none()
+                    && classify_upstream_error_value(StatusCode::BAD_REQUEST, event_payload)
+                        .category
+                        == error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+                {
+                    error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+                } else if classification.category == error_codes::UPSTREAM_BAD_GATEWAY
                     && upstream_status_from_value(event_payload).is_none()
                 {
                     error_codes::UPSTREAM_TERMINAL

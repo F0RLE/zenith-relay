@@ -27,6 +27,31 @@ fn permitted_protocol_headers_preserve_all_values_and_opaque_bytes() {
 }
 
 #[test]
+fn non_ascii_connection_options_do_not_hide_other_hop_local_fields() {
+    let mut client = HeaderMap::new();
+    client.append(
+        "connection",
+        HeaderValue::from_bytes(b"openai-beta, anthropic-beta, user-agent,\x80").unwrap(),
+    );
+    client.insert("openai-beta", HeaderValue::from_static("synthetic-beta"));
+    client.insert("anthropic-beta", HeaderValue::from_static("synthetic-beta"));
+    client.insert("user-agent", HeaderValue::from_static("synthetic-agent"));
+    for forwarded in [
+        forwarded_responses_headers(&client),
+        forwarded_messages_headers(&client),
+        forwarded_bridge_messages_headers(&client),
+        forwarded_bridge_gemini_headers(&client),
+    ] {
+        for name in ["openai-beta", "anthropic-beta", "user-agent"] {
+            assert!(
+                !forwarded.contains_key(name),
+                "{name} crossed request boundary"
+            );
+        }
+    }
+}
+
+#[test]
 fn connection_options_and_unknown_extensions_are_not_forwarded() {
     let mut client = HeaderMap::new();
     client.append(

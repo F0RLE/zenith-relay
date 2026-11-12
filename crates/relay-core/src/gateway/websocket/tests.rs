@@ -1,4 +1,4 @@
-use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
+use super::events::websocket_retry_headers;
 use super::{
     ClientRequest, EventTerminalOutcome, GatewayFailure, RELAY_ERROR_ORIGIN_HEADER,
     RELAY_UPSTREAM_ORIGIN_HEADER, WEBSOCKET_PROTOCOLS, event_terminal, fallback_event_message,
@@ -17,6 +17,7 @@ use std::sync::Arc;
 mod agent_messages;
 mod client_requests;
 mod frame_contract;
+mod initial_request;
 
 fn runtime() -> GatewayRuntime {
     runtime_with_events(Arc::new(|_| {}))

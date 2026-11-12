@@ -90,32 +90,23 @@ pub(crate) struct CatalogStats {
     pub deferred_search: bool,
 }
 
-pub(crate) struct ToolPolicyResult {
-    pub before: CatalogStats,
-    pub after: CatalogStats,
-    pub outcome: ToolPolicyOutcome,
+pub(crate) struct ToolCatalogSnapshot {
+    pub stats: CatalogStats,
     pub context: Option<crate::usage::RequestContextSize>,
 }
 
-/// Records policy counters and optional sizes without rewriting the request.
-pub(crate) fn apply_tool_policy(
+/// Captures forwarded catalog counters and optional sizes without rewriting the request.
+pub(crate) fn capture_tool_catalog(
     request: &Value,
-    policy: &ToolPolicy,
     diagnostics_enabled: bool,
-) -> Result<ToolPolicyResult, &'static str> {
+) -> ToolCatalogSnapshot {
     let stats = catalog::catalog_stats_with_sizes(request, diagnostics_enabled);
-    let outcome = match policy.mode {
-        ToolPolicyMode::PassThrough => ToolPolicyOutcome::PassThrough,
-        ToolPolicyMode::Automatic => ToolPolicyOutcome::Unchanged,
-    };
-    Ok(ToolPolicyResult {
-        before: stats,
-        after: stats,
-        outcome,
+    ToolCatalogSnapshot {
+        stats,
         context: diagnostics_enabled.then(|| {
             crate::usage::RequestContextSize::capture_with_catalog_bytes(request, stats.bytes)
         }),
-    })
+    }
 }
 
 #[cfg(test)]

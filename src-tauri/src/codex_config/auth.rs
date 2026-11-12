@@ -1,10 +1,10 @@
 use super::{
-    AUTH_FILE, CONFIG_FILE, LEGACY_PROVIDER_ID, PROVIDER_ID, config_uses_zenith_provider,
-    default_codex_home, is_zenith_customer_key,
+    AUTH_FILE, CONFIG_FILE, PROVIDER_ID, config_uses_zenith_provider, default_codex_home,
+    is_zenith_customer_key,
 };
 use crate::{files::unquote_toml_string, key_storage::load_saved_app_key};
 
-/// Read old saved keys for explicit source launches; profile writes use the pool integration.
+/// Read saved keys for explicit source launches; profile writes use the pool integration.
 pub(crate) fn load_api_key_for_launch() -> Option<String> {
     load_saved_app_key()
         .or_else(load_zenith_key_from_codex_config)
@@ -34,8 +34,7 @@ fn load_zenith_key_from_codex_config() -> Option<String> {
     for line in config_text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_zenith = trimmed == format!("[model_providers.{PROVIDER_ID}]")
-                || trimmed == format!("[model_providers.{LEGACY_PROVIDER_ID}]");
+            in_zenith = trimmed == format!("[model_providers.{PROVIDER_ID}]");
             continue;
         }
         if in_zenith && let Some(token_text) = trimmed.strip_prefix("experimental_bearer_token = ")

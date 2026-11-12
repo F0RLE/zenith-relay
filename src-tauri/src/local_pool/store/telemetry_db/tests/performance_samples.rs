@@ -49,12 +49,101 @@ fn stored_samples(database: &TelemetryDb) -> Vec<(String, f64, Option<String>)> 
         .unwrap()
 }
 
-fn with_database(test: impl FnOnce(&TelemetryDb)) {
+pub(super) fn with_database(test: impl FnOnce(&TelemetryDb)) {
     let root = crate::files::test_temp_root("relay-stage-samples");
     let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
     test(&database);
     drop(database);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn command_timings_validate_operation_contexts_without_storing_command_data() {
+    with_database(|database| {
+        let samples = [
+            ("command_save", "update_local_routing:ok"),
+            ("command_save", "set_local_account_enabled:error"),
+            ("command_switch", "apply_local_configuration_preset:ok"),
+            ("command_switch", "select_local_account_route:error"),
+            ("command_refresh", "refresh_local_account_quota:ok"),
+            ("command_refresh", "refresh_all_local_account_quotas:error"),
+        ];
+        for (name, context) in samples {
+            database
+                .record_performance(name, 12.5, Some(context))
+                .unwrap();
+        }
+        let expected =
+            samples.map(|(name, context)| (name.to_owned(), 12.5, Some(context.to_owned())));
+        assert_eq!(stored_samples(database), expected);
+        for (name, context) in [
+            ("command_save", None),
+            ("command_save", Some("refresh_local_account_quota:ok")),
+            ("command_refresh", Some("update_local_routing:ok")),
+            ("command_switch", Some("get_local_runtime_state:ok")),
+            ("command_save", Some("update_local_routing")),
+            ("command_save", Some("update_local_routing:ok:synthetic")),
+            ("command_save", Some("update_private@example.test:ok")),
+            ("command_save", Some("update_Invalid:ok")),
+            (
+                "command_save",
+                Some("update_local_routing:synthetic-error-body"),
+            ),
+        ] {
+            let error = database.record_performance(name, 1.0, context).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidState);
+        }
+        assert_eq!(stored_samples(database), expected);
+    });
+}
+
+#[test]
+fn snapshot_lock_wait_accepts_only_the_fixed_store_context() {
+    with_database(|database| {
+        let samples = [
+            PerformanceSample {
+                name: "snapshot_lock_wait",
+                duration_ms: 0.125,
+                context: Some("store"),
+            },
+            PerformanceSample {
+                name: "full_snapshot_native",
+                duration_ms: 12.0,
+                context: Some("local"),
+            },
+        ];
+        database.record_performance_batch(&samples).unwrap();
+        let expected = stored_samples(database);
+        assert_eq!(expected.len(), 2);
+        assert_eq!(
+            expected[0],
+            ("snapshot_lock_wait".into(), 0.125, Some("store".into()))
+        );
+        assert_eq!(
+            expected[1],
+            ("full_snapshot_native".into(), 12.0, Some("local".into()))
+        );
+        for context in [
+            None,
+            Some("account_synthetic"),
+            Some("store:synthetic"),
+            Some("credentials"),
+        ] {
+            let error = database
+                .record_performance("snapshot_lock_wait", 1.0, context)
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidState);
+        }
+        let invalid_batch = [
+            samples[0],
+            PerformanceSample {
+                context: Some("account_synthetic"),
+                ..samples[0]
+            },
+        ];
+        assert!(database.record_performance_batch(&invalid_batch).is_err());
+        assert_eq!(stored_samples(database), expected);
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -322,7 +411,7 @@ fn snapshot_total_and_stages_commit_or_roll_back_together() {
 }
 
 #[test]
-fn performance_sample_batch_preserves_existing_retention_limit() {
+fn performance_sample_batch_preserves_per_metric_retention_limit() {
     with_database(|database| {
         let samples = (0..2_200)
             .map(|index| PerformanceSample {
@@ -333,8 +422,8 @@ fn performance_sample_batch_preserves_existing_retention_limit() {
             .collect::<Vec<_>>();
         database.record_performance_batch(&samples).unwrap();
         let recorded = stored_samples(database);
-        assert_eq!(recorded.len(), 2_048);
-        assert_eq!(recorded.first().unwrap().1, 152.0);
+        assert_eq!(recorded.len(), 256);
+        assert_eq!(recorded.first().unwrap().1, 1_944.0);
         assert_eq!(recorded.last().unwrap().1, 2_199.0);
     });
 }
@@ -376,7 +465,7 @@ fn measure_snapshot_stage_writes() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(recorded, (5 + 40) * SNAPSHOT_STAGES.len() as i64);
+        assert_eq!(recorded, ((5 + 40) * SNAPSHOT_STAGES.len() as i64).min(256));
         drop(database);
     }
     std::fs::remove_dir_all(root).unwrap();

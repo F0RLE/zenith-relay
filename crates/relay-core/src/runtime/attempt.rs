@@ -26,10 +26,18 @@ pub(crate) struct CandidateLease {
     /// its pending lease finally reaches the wire. Soft prompt affinity is
     /// deliberately excluded: it is a preference, not an owner constraint.
     pub(super) response_owner: Option<(String, u64)>,
+    /// Soft affinity observed at admission fences late completion writes;
+    /// it never restricts dispatch or authorizes an opaque continuation.
+    pub(super) prompt_owner: Option<(String, Option<u64>)>,
     /// Captured under the scheduler lock for a virtual OAuth image route.
     pub(super) image_bridge_revision: Option<(Arc<AtomicU64>, u64)>,
     pub(super) reservation_id: crate::scheduler::ReservationId,
     pub(super) rotation_budget: SharedRequestBudget,
+    /// The authorization used on the wire, retained after WebSocket upgrade
+    /// and replaced under the request-budget lock when a generation is sent.
+    pub(super) dispatched_token_revision: Mutex<Option<TokenDispatchRevision>>,
+    /// Owner-retaining retries keep the rejected credential incarnation.
+    pub(super) retry_token_revision: Option<TokenDispatchRevision>,
     pub(super) rotation_started: AtomicBool,
     pub(super) rotation_settled: AtomicBool,
     pub(super) activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
@@ -72,8 +80,8 @@ impl GatewayRuntime {
         cooldown: Option<CooldownRequest<'_>>,
         shared_bucket: Option<[u8; 32]>,
         now_ms: u64,
-    ) {
-        let _ = lease.settle_rotation_with(observation, now_ms, |scheduler| {
+    ) -> bool {
+        let settled = lease.settle_rotation_with(observation, now_ms, |scheduler| {
             if let Some(request) = cooldown {
                 let shared_bucket = shared_bucket.filter(|_| {
                     self.is_basis_points_account(lease.candidate_id())
@@ -82,7 +90,7 @@ impl GatewayRuntime {
                 });
                 if let Some(bucket) = shared_bucket {
                     use sha2::{Digest, Sha256};
-                    let account = &self.chatgpt_accounts[lease.candidate_id()];
+                    let account = &self.account_state.executors[lease.candidate_id()];
                     let mut digest = Sha256::new();
                     digest.update(account.basis_points_url.as_str().as_bytes());
                     digest.update([0]);
@@ -98,6 +106,7 @@ impl GatewayRuntime {
                 }
             }
         });
+        matches!(settled, Ok(Some(settlement)) if settlement.observation_current)
     }
 
     fn apply_cooldown_locked(
@@ -116,7 +125,11 @@ impl GatewayRuntime {
         candidate_id: &str,
         model: &str,
         now_ms: u64,
-    ) -> (u32, Option<(String, u64)>) {
+    ) -> (
+        u32,
+        Option<(String, u64)>,
+        Option<crate::scheduler::ProviderBackoff>,
+    ) {
         let scheduler = self.lock_scheduler();
         let (streak, circuit_deadline) = scheduler.circuit_state_for(candidate_id, model);
         let cooldown = scheduler
@@ -135,7 +148,8 @@ impl GatewayRuntime {
             // Equal circuit and mandatory deadlines still describe a global
             // block when the provider scoped it to the whole member.
             .max_by_key(|(scope, at)| (*at, scope == "*"));
-        (streak, cooldown)
+        let provider_backoff = scheduler.provider_backoff_for(candidate_id, model, now_ms);
+        (streak, cooldown, provider_backoff)
     }
 }
 

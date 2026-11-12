@@ -118,6 +118,45 @@ async fn canceled_queued_reader_does_not_leak_a_slot() {
     fixture.close().await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn input_lock_wait_yields_and_keeps_the_slot_through_cancellation() {
+    for cancel in [false, true] {
+        let fixture = Fixture::new();
+        let writer_state = fixture.state.clone();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let _store = writer_state.store().unwrap();
+            locked_tx.send(()).unwrap();
+            // The watchdog turns a blocked async poll into a bounded failure.
+            release_rx.recv_timeout(Duration::from_secs(2)).is_err()
+        });
+        locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut reader = Box::pin(super::super::build_local_runtime_state(&fixture.state));
+        assert_pending(reader.as_mut());
+        let mut reader = if cancel {
+            drop(reader);
+            None
+        } else {
+            Some(reader)
+        };
+        let mut waiting = Box::pin(fixture.state.runtime_snapshot_permit());
+        assert_pending(waiting.as_mut());
+        let released = release_tx.send(()).is_ok();
+        let watchdog_fired = writer.join().unwrap();
+        if let Some(reader) = reader.take() {
+            assert!(reader.await.unwrap().accounts.is_empty());
+        }
+        drop(reader);
+        drop(waiting.await.unwrap());
+        fixture.close().await;
+        assert!(
+            released && !watchdog_fired,
+            "input acquisition blocked the async executor"
+        );
+    }
+}
+
 #[tokio::test]
 async fn queued_snapshot_reads_fresh_inputs_and_preserves_projection() {
     let fixture = Fixture::new();
@@ -146,12 +185,76 @@ async fn queued_snapshot_reads_fresh_inputs_and_preserves_projection() {
         runtime,
         std::time::Instant::now(),
         super::super::timing::SnapshotTiming::new(),
+        false,
     )
     .unwrap();
     assert_eq!(
         serde_json::to_value(snapshot).unwrap(),
         serde_json::to_value(expected).unwrap()
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn streaming_projection_uses_captured_policy_without_changing_management_fields() {
+    let fixture = Fixture::new();
+    for streaming in [false, true] {
+        let mut inputs = fixture.state.snapshot_inputs().await.unwrap();
+        let mut source = crate::local_pool::models::synthetic_responses_source();
+        source.id = "synthetic-scoped-controls".into();
+        source.models = vec!["opaque-model".into()];
+        source.enabled = true;
+        source.in_pool = true;
+        source.protocol_config = serde_json::from_value(serde_json::json!({
+            "endpointHint":"responses", "capabilities":[{
+                "modelId":"opaque-model", "upstreamWireApi":"responses",
+                "status":"declared", "origin":"catalog", "checkedAtMs":1,
+                "features":{"streaming":"confirmed","reasoning":"confirmed"},
+                "reasoningEfforts":["low","high"]
+            }]
+        }))
+        .unwrap();
+        inputs
+            .source_secret_available
+            .insert(source.id.clone(), true);
+        inputs.sources = vec![source];
+        inputs
+            .gateway
+            .model_reasoning_allowed_levels
+            .insert("opaque-model".into(), vec!["high".into()]);
+        let snapshot = super::super::project_local_runtime_state(
+            &fixture.state,
+            inputs,
+            None,
+            std::time::Instant::now(),
+            super::super::timing::SnapshotTiming::new(),
+            streaming,
+        )
+        .unwrap();
+        let model = &snapshot.gateway.models[0];
+        assert_eq!(model.id, "opaque-model");
+        assert!(!model.reasoning_configurable);
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(model.reasoning_supported_levels.is_empty());
+        for client in [
+            zenith_relay_core::WireApi::Responses,
+            zenith_relay_core::WireApi::Messages,
+        ] {
+            let route = model
+                .protocol_routes
+                .iter()
+                .find(|route| route.client_wire_api == client)
+                .unwrap();
+            assert_eq!(
+                route.reasoning_efforts,
+                if streaming {
+                    vec!["high"]
+                } else {
+                    vec!["low", "high"]
+                }
+            );
+        }
+    }
     fixture.close().await;
 }
 

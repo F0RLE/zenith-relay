@@ -40,6 +40,87 @@ test("ambiguous saved connections do not create another login or select an arbit
   expect(recorded.some((call) => ["start_codex_oauth", "select_local_account_route"].includes(call.command))).toBe(false);
 });
 
+test("Excel returns after selecting SIWC without another authorization or duplicate account", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["excel_bps", "siwc"] });
+  await openAccounts(page);
+  await page.locator('.account-route-selector > button[data-value="excel_bps"]').click();
+  await page.getByRole("option", { name: "SIWC · Connect", exact: true }).click();
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+  await page.locator('.account-route-selector > button[data-value="siwc"]').click();
+  await page.getByRole("option", { name: "Excel / BPS", exact: true }).click();
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "excel_bps");
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  const recorded = await calls(page);
+  expect(recorded.filter((call) => call.command === "select_local_account_route").at(-1)?.args)
+    .toEqual({ accountId: "account_synthetic_2", connectionId: "account_synthetic_1", attach: false });
+  expect(recorded.some((call) => call.command === "start_codex_oauth")).toBe(false);
+});
+
+test("an outdated route projection reuses the linked Excel grant instead of authorizing it again", async ({ page }) => {
+  await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["siwc", "excel_bps"], accountRoutesGrouped: true });
+  await page.addInitScript(() => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = native.invoke.bind(native);
+    let outdated = true;
+    native.invoke = async (command, args, options) => {
+      const result = await invoke(command, args, options);
+      if (command === "select_local_account_route") outdated = false;
+      if (command === "get_local_runtime_state" && outdated) {
+        const snapshot = result as { accounts: Array<{ oauthClientKind?: string; routeGroupId?: string | null }> };
+        for (const account of snapshot.accounts) if (account.oauthClientKind === "siwc") account.routeGroupId = null;
+      }
+      return result;
+    };
+  });
+  await openAccounts(page);
+  await page.locator('.account-route-selector > button[data-value="siwc"]').click();
+  await page.getByRole("option", { name: "Excel / BPS · Connect", exact: true }).click();
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "excel_bps");
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  const recorded = await calls(page);
+  expect(recorded.filter((call) => call.command === "select_local_account_route").map((call) => call.args))
+    .toEqual([{ accountId: "account_synthetic_1", connectionId: "account_synthetic_2", attach: true }]);
+  expect(recorded.some((call) => call.command === "start_codex_oauth")).toBe(false);
+  await page.locator(".account-route-selector > button").click();
+  await expect(page.getByRole("option", { name: "SIWC", exact: true })).toBeVisible();
+});
+
+test("an expired SIWC duplicate reuses Excel from the existing group and retains every saved grant", async ({ page }) => {
+  await installTauriMock(page, {
+    populated: true, usageActive: false, accountRouteKinds: ["siwc", "excel_bps", "siwc"],
+    accountRouteGroups: [{ members: [0, 1], selected: 1 }], accountRouteReauthIndexes: [2],
+  });
+  await openAccounts(page);
+  await expect(page.locator(".account-card")).toHaveCount(2);
+  const expired = page.locator(".account-card").filter({ has: page.locator('.account-route-selector > button[data-value="siwc"]') });
+  await expect(expired.getByRole("button", { name: "Sign-in required", exact: true })).toBeVisible();
+  await expired.locator(".account-route-selector > button").click();
+  await page.getByRole("option", { name: "Excel / BPS · Connect", exact: true }).click();
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "excel_bps");
+  await page.locator(".account-route-selector > button").click();
+  await page.getByRole("option", { name: "SIWC", exact: true }).click();
+  await expect(page.locator(".account-card")).toHaveCount(1);
+  await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+  await expect(page.getByRole("button", { name: "Sign-in required", exact: true })).toHaveCount(0);
+  const recorded = await calls(page);
+  expect(recorded.filter((call) => call.command === "select_local_account_route").map((call) => call.args)).toEqual([
+    { accountId: "account_synthetic_3", connectionId: "account_synthetic_2", attach: true },
+    { accountId: "account_synthetic_2", connectionId: "account_synthetic_1", attach: false },
+  ]);
+  expect(recorded.some((call) => ["start_codex_oauth", "complete_codex_oauth"].includes(call.command))).toBe(false);
+  const saved = await page.evaluate(async () => {
+    const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<{ accounts: Array<{ id: string; routeGroupId?: string; routeInactive?: boolean; inPool: boolean; authState: { state: string } }> }> } }).__TAURI_INTERNALS__;
+    return (await native.invoke("get_local_runtime_state")).accounts;
+  });
+  expect(saved).toHaveLength(3);
+  expect(new Set(saved.map((account) => account.routeGroupId)).size).toBe(1);
+  expect(saved.filter((account) => !account.routeInactive).map((account) => account.id)).toEqual(["account_synthetic_1"]);
+  expect(saved.filter((account) => account.inPool)).toHaveLength(1);
+  expect(saved[2]!.authState.state).toBe("requires_reauth");
+});
+
 test("the route selector stays locked while saved connections are inspected", async ({ page }) => {
   await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"] });
   await openAccounts(page);
@@ -178,6 +259,54 @@ for (const donor of ["codex", "excel_bps"] as const) {
   });
 }
 
+for (const donor of ["codex", "excel_bps"] as const) {
+  for (const nav of ["Connections", "Pool"] as const) {
+    test(`SIWC linked reset credits use ${donor} from ${nav} without changing the selected route`, async ({ page }) => {
+      await installTauriMock(page, {
+        populated: true, locale: "en", usageActive: false, resetCreditsAvailable: 2,
+        accountRouteKinds: [donor, "siwc"], accountRoutesGrouped: true,
+      });
+      await openAccounts(page);
+      await page.locator(".account-route-selector > button").click();
+      await page.getByRole("option", { name: "SIWC", exact: true }).click();
+      if (nav === "Pool") await page.getByRole("button", { name: "Pool", exact: true }).click();
+      const card = page.locator(nav === "Pool" ? '.pool-member-card[data-member-kind="account"]' : ".account-card");
+      const client = donor === "codex" ? "Codex" : "Excel / BPS";
+      const control = card.locator(".reset-credits-control");
+      await expect(control.locator(".reset-credits-count")).toHaveText("2");
+      await expect(control).toHaveAttribute("data-relay-tooltip", `Reset weekly quota via ${client}`);
+      await control.click();
+      const confirmation = page.getByRole("dialog", { name: `Reset weekly quota via ${client}` });
+      await expect(confirmation).toContainText("SIWC app limits are managed separately");
+      await confirmation.getByRole("button", { name: "Yes, reset", exact: true }).click();
+      await expect(control.locator(".reset-credits-count")).toHaveText("1");
+      await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+      const recorded = await calls(page);
+      expect(recorded.filter((call) => call.command === "consume_local_reset_credit").map((call) => call.args))
+        .toEqual([{ accountId: "account_synthetic_1" }]);
+      expect(recorded.filter((call) => call.command === "select_local_account_route")).toHaveLength(1);
+      const active = await page.evaluate(async () => {
+        const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<{ accounts: Array<{ id: string; routeInactive?: boolean; quota: { resetCreditsAvailable: number | null } }> }> } }).__TAURI_INTERNALS__;
+        const state = await native.invoke("get_local_runtime_state");
+        return state.accounts.find((account) => account.id === "account_synthetic_2");
+      });
+      expect(active?.routeInactive).toBe(false);
+      expect(active?.quota.resetCreditsAvailable).toBeNull();
+    });
+  }
+}
+
+for (const nav of ["Connections", "Pool"] as const) {
+  test(`SIWC without a linked native reset reader keeps availability unknown in ${nav}`, async ({ page }) => {
+    await installTauriMock(page, { populated: true, locale: "en", usageActive: false, accountRouteKinds: ["siwc"] });
+    await openAccounts(page);
+    if (nav === "Pool") await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+    await expect(page.locator(".reset-credits-control")).toHaveCount(0);
+    expect((await calls(page)).some((call) => call.command === "consume_local_reset_credit")).toBe(false);
+  });
+}
+
 test("switching grouped routes keeps the same-plan subscription date and each route's own token", async ({ page }) => {
   const now = Date.UTC(2026, 9, 22, 12);
   await page.clock.install({ time: now });
@@ -285,8 +414,11 @@ for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit", 
         await expect(item.locator('.quota-stack[data-stale="true"]')).toHaveCount(0);
         await expect(item.locator(".account-quota-refresh-state")).toHaveCount(0);
         await expect(item.locator('[data-status="error"]')).toHaveCount(0);
-        await expect(item.locator('[data-status="warning"]')).toHaveCount(scenario === "route-model-error" ? 1 : 0);
+        await expect(item.locator('[data-status="warning"]')).toHaveCount(1);
         if (scenario === "quota-poll-error") {
+          const indicator = item.locator(".account-kind-icon, .pool-member-kind-icon");
+          await expect(indicator).toHaveAttribute("aria-label", /Codex quota exhausted/);
+          await expect(indicator).not.toHaveAttribute("aria-label", /quota_prepare|Update failed/);
           await page.mouse.move(0, 0);
           await item.screenshot({ path: `output/playwright/siwc-quota-owner-${surface.toLowerCase()}.png`, animations: "disabled" });
         }

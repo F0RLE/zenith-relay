@@ -73,7 +73,7 @@ pub(in crate::gateway::streaming) struct DiscoveryProgress {
 
 enum DiscoveryFailure {
     Adapter(AdapterError),
-    Upstream(AttemptFailure),
+    Upstream(Box<AttemptFailure>),
 }
 
 impl From<AdapterError> for DiscoveryFailure {
@@ -297,10 +297,10 @@ impl DiscoveryStream {
                     &self.raw,
                     &self.headers,
                 ));
-            return Err(DiscoveryFailure::Upstream(
+            return Err(DiscoveryFailure::Upstream(Box::new(
                 AttemptFailure::status_with_body(self.status, Some(&self.raw))
                     .with_retry_headers(&self.headers),
-            ));
+            )));
         }
         let bytes = completed_upstream_response(&self.raw, true, expected).map_err(|failure| {
             crate::poison::mutex(&self.progress).upstream_error =
@@ -308,7 +308,7 @@ impl DiscoveryStream {
                     details.http_status = Some(self.status.as_u16());
                     details
                 });
-            DiscoveryFailure::Upstream(failure.failure)
+            DiscoveryFailure::Upstream(Box::new(failure.failure))
         })?;
         let mut terminal: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AdapterError::upstream_response_invalid())?;
@@ -427,7 +427,9 @@ impl DiscoveryStream {
         .await;
         self.update_progress();
         let response = response
-            .map_err(|error| DiscoveryFailure::Upstream(AttemptFailure::authorized_request(error)))?
+            .map_err(|error| {
+                DiscoveryFailure::Upstream(Box::new(AttemptFailure::authorized_request(error)))
+            })?
             .response;
         if let Some(transport) = self
             .event

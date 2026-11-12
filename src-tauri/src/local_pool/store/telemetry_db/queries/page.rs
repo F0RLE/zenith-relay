@@ -10,7 +10,9 @@ const USAGE_LOG_COLUMNS: &str =
      resolved_model, wire_api, transport, success, http_status, error_category, latency_ms,
      ttft_ms, generation_ms, input_tokens, cached_input_tokens,
      cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-     service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
+     service_tier, applied_service_tier,
+     COALESCE(routing_json, (SELECT data_json FROM usage_diagnostics WHERE id = routing_diagnostics_id)),
+     COALESCE(tool_use_json, (SELECT data_json FROM usage_diagnostics WHERE id = tool_diagnostics_id)), error_origin,
      requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
      client_context_id, upstream_error_json, image_usage_json";
 

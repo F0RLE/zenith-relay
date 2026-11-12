@@ -16,7 +16,7 @@ import {
 } from "../src/features/relay/pages/usage/cacheLifetime";
 import type { LocalUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { compactRequestId, formatEndpointKind, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, formatWireApi, prefixErrorOrigin, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, formatEndpointKind, formatErrorCategory, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, formatWireApi, prefixErrorOrigin, requestStatusHint, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 
@@ -83,6 +83,44 @@ const row = (overrides: Partial<UsageRow> = {}): UsageRow => ({
 });
 
 describe("usage data", () => {
+  test("foreground status names retain the specific failure without a redundant prefix", async () => {
+    for (const [locale, translation] of [["ru", ru], ["en", en]] as const) {
+      const i18n = createInstance();
+      await i18n.init({ lng: locale, resources: { [locale]: { translation } } });
+      for (const errorCategory of ["upstream_quota_exhausted", "upstream_error", "upstream_rate_limited"]) {
+        expect(requestStatusHint(row({ success: false, errorCategory }), i18n.t))
+          .toBe(formatErrorCategory(errorCategory, i18n.t));
+      }
+      expect(requestStatusHint(row(), i18n.t)).toBe(translation.common.success);
+      const cancelled = row({ success: false, errorCategory: "client_cancelled" });
+      expect(requestStatusHint(cancelled, i18n.t)).toBe(requestStatusLabel(cancelled, i18n.t));
+    }
+  });
+
+  test("background origin does not override the observed execution result", async () => {
+    for (const requestOrigin of ["activity_summary", "task_title", "memory_extraction", "memory_consolidation"] as const) {
+      expect(requestStatusKind(row({ requestOrigin, success: true }))).toBe("success");
+      expect(requestStatusKind(row({ requestOrigin, success: false, httpStatus: 502 }))).toBe("error");
+      expect(requestStatusKind(row({ requestOrigin, success: false, errorCategory: "client_cancelled" }))).toBe("cancelled");
+      expect(requestStatusKind(row({ requestOrigin, success: false, httpStatus: 200, routing: {
+        reason: "quota_headroom", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
+        inFlightBefore: 0, dispatchesBefore: 0, attemptOutcome: "tool_discovery",
+      } }))).toBe("pending");
+    }
+    for (const requestOrigin of ["blocked_activity_summary", "blocked_task_title", "blocked_memory_extraction", "blocked_memory_consolidation"] as const) {
+      expect(requestStatusKind(row({ requestOrigin, success: false }))).toBe("warning");
+    }
+    for (const [locale, translation] of [["ru", ru], ["en", en]] as const) {
+      const i18n = createInstance();
+      await i18n.init({ lng: locale, resources: { [locale]: { translation } }, initImmediate: false });
+      const background = row({ requestOrigin: "task_title" });
+      expect(requestStatusHint(background, i18n.t)).toBe(`${translation.common.success} · ${translation.codex.taskTitle}`);
+      const failed = row({ requestOrigin: "memory_extraction", success: false, errorCategory: "upstream_rate_limited" });
+      expect(requestStatusHint(failed, i18n.t)).toContain(translation.common.failed);
+      expect(requestStatusHint(failed, i18n.t)).toContain(translation.codex.memoryExtractionTitle);
+    }
+  });
+
   test("client cancellation is distinct from provider failure, including legacy 502 rows", async () => {
     const cancelled = row({ success: false, httpStatus: 502, errorCategory: "client_cancelled" });
     expect(requestStatusKind(cancelled)).toBe("cancelled");
@@ -161,7 +199,7 @@ describe("usage data", () => {
       `claude-fable-5-zenith-${legacySuffix}`,
     ];
     const labels = {
-      backgroundConnection: "ChatGPT", removedAccount: "Removed",
+      removedAccount: "Removed",
       unknownConnection: "Unknown", accountLabels: new Map<string, string>(), sourceLabels: new Map<string, string>(),
       accountDisplayName: (label: string) => label,
     };
@@ -345,7 +383,6 @@ describe("usage data", () => {
       totalTokens: 140,
     };
     const labels = {
-      backgroundConnection: "ChatGPT",
       removedAccount: "Removed account",
       unknownConnection: "Unknown connection",
     };
@@ -357,7 +394,7 @@ describe("usage data", () => {
     })[0]).toMatchObject({
       id: 1,
       attempt: 2,
-      connection: "ChatGPT",
+      connection: "Primary account",
       accountId: "account-1",
       candidateKind: "account",
       candidateKey: "account-1",
@@ -368,6 +405,20 @@ describe("usage data", () => {
       cacheWriteTtl: "45m",
       clientContextId: "client_0123456789abcdef01234567",
     });
+    for (const errorCategory of ["codex_task_title", "codex_activity_summary", "codex_memory_extraction", "codex_memory_consolidation", "codex_background_blocked_task_title"]) {
+      expect(usageRowsFromLocal([{ ...local, errorCategory }], {
+        ...labels, accountLabels: new Map([["account-1", "Primary account"]]), sourceLabels: new Map(),
+      })[0]?.connection).toBe("Primary account");
+      expect(usageRowsFromLocal([{ ...local, errorCategory, accountId: null }], {
+        ...labels, accountLabels: new Map(), sourceLabels: new Map([["source-1", "Primary source"]]),
+      })[0]).toMatchObject({ connection: "Primary source", candidateKind: "source", candidateKey: "source-1" });
+      expect(usageRowsFromLocal([{ ...local, errorCategory }], {
+        ...labels, accountLabels: new Map(), sourceLabels: new Map([["source-1", "Primary source"]]),
+      })[0]?.connection).toBe("Removed account");
+      expect(usageRowsFromLocal([{ ...local, errorCategory, accountId: null }], {
+        ...labels, accountLabels: new Map(), sourceLabels: new Map(),
+      })[0]?.connection).toBe("Unknown connection");
+    }
     const upstreamError = { httpStatus: 422, code: "future_constraint", errorType: "validation_error", message: "Invalid field: temperature", redacted: false, truncated: false };
     for (const success of [false, true]) {
       const localRow = usageRowsFromLocal([{ ...local, success, upstreamError }], {
@@ -386,7 +437,7 @@ describe("usage data", () => {
       reasoningTokens: null, outputTokens: null, totalTokens: null,
     };
     const local = usageRowsFromLocal([{ ...base, createdAt: "2026-08-23T00:00:00Z", sourceId: "source" }], {
-      backgroundConnection: "ChatGPT", removedAccount: "Removed",
+      removedAccount: "Removed",
       unknownConnection: "Unknown", accountLabels: new Map(), sourceLabels: new Map(),
     });
     expect(local[0]).toMatchObject({ model: "vendor/model", requestedModel: "public-alias", routedModel: "vendor/model" });
@@ -394,7 +445,6 @@ describe("usage data", () => {
 
   test("labels deleted account history without collapsing it into an unknown account", () => {
     const labels = {
-      backgroundConnection: "ChatGPT",
       removedAccount: "Removed account",
       unknownConnection: "Unknown connection",
     };

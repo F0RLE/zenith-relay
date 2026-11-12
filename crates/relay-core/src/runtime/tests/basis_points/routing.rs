@@ -164,7 +164,7 @@ async fn websocket_bps_waiting_chat_survives_other_chats_replay_pressure() {
     let bps = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     bps.state.stream_generations.store(true, Ordering::SeqCst);
     let runtime = retry_admission::pool_runtime(&bps, 1, false).await;
-    *crate::poison::mutex(&runtime.native_responses_replay_store) =
+    *crate::poison::mutex(&runtime.continuation_state.native_responses) =
         crate::NativeResponsesReplayStore::with_limits(3, 60_000, 16_384, 49_152);
     let (base, task) = recovery::gateway(Arc::new(runtime)).await;
     let client = retry_admission::bounded_client();
@@ -285,7 +285,7 @@ async fn bps_missing_replay_reports_local_state_loss_without_a_provider_send() {
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
         let first: Value = first.json().await.unwrap();
-        *crate::poison::mutex(&runtime.native_responses_replay_store) =
+        *crate::poison::mutex(&runtime.continuation_state.native_responses) =
             crate::NativeResponsesReplayStore::default();
         let response = client
             .post(format!("{base}/v1/responses"))
@@ -327,7 +327,7 @@ async fn websocket_bps_replay_budget_loss_allows_full_history_recovery() {
     let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
     let captured = events.clone();
     runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
-    *crate::poison::mutex(&runtime.native_responses_replay_store) =
+    *crate::poison::mutex(&runtime.continuation_state.native_responses) =
         crate::NativeResponsesReplayStore::with_limits(4, 60_000, 256, 1_024);
     let (base, task) = recovery::gateway(Arc::new(runtime)).await;
     let client = retry_admission::bounded_client();
@@ -410,7 +410,8 @@ async fn websocket_bps_replay_budget_loss_allows_full_history_recovery() {
 async fn bps_only_runtime(bps: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
     let mut runtime = retry_admission::pool_runtime(bps, 1, true).await;
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .responses_url = native.responses_url.clone();
@@ -497,7 +498,8 @@ async fn websocket_http_handoff_keeps_the_selected_bps_account_in_a_mixed_pool()
     });
     let mut runtime = retry_admission::pool_runtime(&bps, 1, true).await;
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .responses_url = native.responses_url.clone();
@@ -581,7 +583,7 @@ async fn websocket_routes_a_bps_only_model_through_http_without_trying_native_re
                 );
             }
             crate::poison::write(
-                &runtime.chatgpt_accounts["synthetic-account-0"].basis_points_access,
+                &runtime.account_state.executors["synthetic-account-0"].basis_points_access,
             )
             .as_mut()
             .unwrap()

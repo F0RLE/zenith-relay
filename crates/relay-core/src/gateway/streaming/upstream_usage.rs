@@ -1,34 +1,44 @@
 use super::*;
 
 /// Inspect native counters and identity before an adapter changes their representation.
-pub(super) struct UpstreamUsage {
+pub(in crate::gateway) struct UpstreamUsage {
     pending: Vec<u8>,
     event: UsageEvent,
     usage_snapshot: Option<Value>,
+    usage_revision: u64,
     expected_model: Option<String>,
     rejection: Option<&'static str>,
     finished: bool,
     timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
+    observed_started: Option<Instant>,
 }
 
 impl UpstreamUsage {
-    pub(super) fn new(event: UsageEvent, expected_model: Option<String>) -> Self {
+    pub(in crate::gateway) fn new(event: UsageEvent, expected_model: Option<String>) -> Self {
         Self {
             pending: Vec::new(),
             event,
             usage_snapshot: None,
+            usage_revision: 0,
             expected_model,
             rejection: None,
             finished: false,
             timing: None,
+            observed_started: None,
         }
     }
 
     pub(super) fn with_timing(mut self, started: Instant) -> Self {
+        self.observed_started = Some(started);
         self.timing = Some((
             started,
             super::super::response::BufferedResponseTiming::default(),
         ));
+        self
+    }
+
+    pub(super) fn with_observations(mut self, started: Instant) -> Self {
+        self.observed_started = Some(started);
         self
     }
 
@@ -49,6 +59,16 @@ impl UpstreamUsage {
         self.event.applied_service_tier = None;
         if let Some(routing) = self.event.routing.as_mut() {
             routing.upstream_response_model = None;
+            if let Some(timing) = routing
+                .transport
+                .as_mut()
+                .and_then(|transport| transport.stream_response.as_mut())
+            {
+                timing.upstream_reasoning_first_ms = None;
+                timing.upstream_text_first_ms = None;
+                timing.upstream_tool_first_ms = None;
+                timing.upstream_tool_first_complete_ms = None;
+            }
             if let Some(cache) = routing.cache_context.as_mut() {
                 cache.provider = None;
                 cache.provider_response_id = None;
@@ -101,8 +121,11 @@ impl UpstreamUsage {
         Bytes::from(format!("data: {error}\n\n"))
     }
 
-    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
-        let bytes = if self.pending.is_empty() && self.timing.is_none() {
+    pub(in crate::gateway) fn observe(&mut self, bytes: &[u8]) -> bool {
+        let bytes = if self.pending.is_empty()
+            && self.timing.is_none()
+            && self.observed_started.is_none()
+        {
             skip_aligned_response_deltas(bytes)
         } else {
             bytes
@@ -139,6 +162,23 @@ impl UpstreamUsage {
             return;
         }
         if let Some(delta) = super::fast_delta::fast_response_delta(frame) {
+            if let Some(started) = self.observed_started
+                && let Some(transport) = self
+                    .event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+            {
+                transport
+                    .stream_response
+                    .get_or_insert_default()
+                    .observe_delta(
+                        delta.output_text,
+                        delta.tool_arguments,
+                        delta.nonempty_text,
+                        started.elapsed().as_millis() as u64,
+                    );
+            }
             if delta.nonempty_text
                 && let Some((started, timing)) = &mut self.timing
             {
@@ -154,6 +194,18 @@ impl UpstreamUsage {
         if let Some(payload) = parsed.event_payload.as_ref() {
             self.event.observe_response_metadata(payload);
             self.event.tool_use.observe_provider_usage(payload);
+            if let Some(started) = self.observed_started
+                && let Some(transport) = self
+                    .event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+            {
+                let timing = transport.stream_response.get_or_insert_default();
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                timing.observe_reasoning(payload, elapsed_ms);
+                timing.observe_output(payload, elapsed_ms);
+            }
         }
         if parsed.outcome.is_some() {
             // Gemini can report final candidate status before a separate usage chunk.
@@ -173,6 +225,7 @@ impl UpstreamUsage {
             }
         }
         if let Some(usage) = &parsed.usage {
+            self.usage_revision = self.usage_revision.saturating_add(1);
             crate::protocol::merge_usage(&mut self.usage_snapshot, usage);
             if let Some(snapshot) = &self.usage_snapshot {
                 apply_usage(&mut self.event, snapshot);
@@ -191,6 +244,12 @@ impl UpstreamUsage {
         }
     }
 
+    pub(in crate::gateway) fn reported_usage(&self) -> Option<(u64, &Value)> {
+        self.usage_snapshot
+            .as_ref()
+            .map(|usage| (self.usage_revision, usage))
+    }
+
     pub(super) fn apply_to(&self, event: &mut UsageEvent) {
         event
             .tool_use
@@ -201,6 +260,18 @@ impl UpstreamUsage {
             target
                 .upstream_response_model
                 .clone_from(&source.upstream_response_model);
+            if self.observed_started.is_some()
+                && let (Some(source), Some(target)) =
+                    (source.transport.as_ref(), target.transport.as_mut())
+                && (source.stream_response.is_some() || target.stream_response.is_some())
+            {
+                let source = source.stream_response.clone().unwrap_or_default();
+                let target = target.stream_response.get_or_insert_default();
+                target.upstream_reasoning_first_ms = source.upstream_reasoning_first_ms;
+                target.upstream_text_first_ms = source.upstream_text_first_ms;
+                target.upstream_tool_first_ms = source.upstream_tool_first_ms;
+                target.upstream_tool_first_complete_ms = source.upstream_tool_first_complete_ms;
+            }
             if let (Some(source), Some(target)) =
                 (source.cache_context.as_ref(), target.cache_context.as_mut())
             {
@@ -254,6 +325,20 @@ mod tests {
     use super::*;
 
     mod benchmark;
+
+    #[test]
+    fn native_usage_snapshot_retains_reported_cache_writes() {
+        let mut event = crate::gateway::test_support::test_usage_event();
+        let mut capture = UpstreamUsage::new(event.clone(), None);
+        assert!(capture.observe(
+            b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":6,\"output_tokens\":2,\"total_tokens\":12}}\n\n"
+        ));
+        capture.apply_to(&mut event);
+        assert_eq!(event.input_tokens, Some(10));
+        assert_eq!(event.cache_write_input_tokens, Some(6));
+        assert_eq!(event.output_tokens, Some(2));
+        assert_eq!(event.total_tokens, Some(12));
+    }
 
     #[test]
     fn timed_fast_path_ignores_empty_output_and_keeps_cache_metadata() {
@@ -608,6 +693,48 @@ mod tests {
         assert_eq!(event.output_tokens, None);
         assert_eq!(event.tool_use.upstream_tool_call_count, None);
         assert_eq!(event.tool_use.tool_calls_ready_ms, None);
+    }
+
+    #[test]
+    fn native_tool_boundaries_survive_fast_deltas_and_reset_without_client_readiness() {
+        let mut initial = crate::gateway::test_support::test_usage_event();
+        initial.routing = Some(
+            serde_json::from_value(json!({
+                "reason":"only_eligible", "eligibleCandidates":1,
+                "inFlightBefore":0, "dispatchesBefore":0,
+                "transport":{"upstream":"http", "mode":"basis_points"}
+            }))
+            .unwrap(),
+        );
+        let mut capture = UpstreamUsage::new(initial.clone(), None)
+            .with_observations(Instant::now() - Duration::from_millis(100));
+        capture.observe(
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+        );
+        capture.observe(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+        );
+        capture.observe(b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_test\",\"call_id\":\"call_test\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n");
+        let mut event = initial;
+        capture.apply_to(&mut event);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        let timing = transport.stream_response.as_ref().unwrap();
+        assert!(timing.upstream_tool_first_ms.is_some_and(|ms| ms >= 100));
+        assert!(timing.upstream_text_first_ms.is_some_and(|ms| ms >= 100));
+        assert!(
+            timing
+                .upstream_tool_first_complete_ms
+                .is_some_and(|complete| complete >= timing.upstream_tool_first_ms.unwrap())
+        );
+        assert_eq!(event.tool_use.tool_calls_ready_ms, None);
+        assert_eq!(transport.client_first_output_ms, None);
+        capture.reset_generation();
+        capture.apply_to(&mut event);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        let timing = transport.stream_response.as_ref().unwrap();
+        assert_eq!(timing.upstream_text_first_ms, None);
+        assert_eq!(timing.upstream_tool_first_ms, None);
+        assert_eq!(timing.upstream_tool_first_complete_ms, None);
     }
 
     #[test]

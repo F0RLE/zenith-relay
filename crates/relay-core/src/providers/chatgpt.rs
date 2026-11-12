@@ -10,7 +10,7 @@ mod quota_usage;
 mod runtime;
 mod siwc;
 mod siwc_registration;
-pub(crate) use siwc::{prepare_siwc_request, sanitize_siwc_headers};
+pub(crate) use siwc::{prepare_siwc_request, sanitize_siwc_headers, validate_siwc_client_request};
 pub use siwc_registration::{SIWC_ISSUER, SiwcRegistration, valid_siwc_client_id};
 mod token_errors;
 
@@ -34,14 +34,15 @@ pub use codex_release::{
 };
 pub(crate) use models::normalize_basis_points_reasoning_effort;
 pub use models::{
-    AccountModelsClient, BasisPointsModelAccess, CODEX_MODELS_ENDPOINT,
-    MAX_BASIS_POINTS_ACCESS_BYTES, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-    basis_points_access_url, parse_basis_points_model_access,
+    AccountModelsClient, AccountModelsDiscovery, BasisPointsCatalogDiagnostics,
+    BasisPointsModelAccess, BasisPointsModelDiagnostic, BasisPointsModelOutcome,
+    CODEX_MODELS_ENDPOINT, MAX_BASIS_POINTS_ACCESS_BYTES, ModelDiscoveryFailure,
+    ModelDiscoveryFailureCode, basis_points_access_url, parse_basis_points_model_access,
+    parse_basis_points_model_access_with_diagnostics,
 };
 pub use oauth::{
-    BASIS_POINTS_FREE_ACCOUNT_MESSAGE, BASIS_POINTS_OAUTH_CLIENT_ID,
-    BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID, OAuthClientKind,
-    SIWC_BOOTSTRAP_CLIENT_ID, SIWC_RESOURCE,
+    BASIS_POINTS_OAUTH_CLIENT_ID, BASIS_POINTS_OAUTH_REDIRECT_URI, CODEX_OAUTH_CLIENT_ID,
+    OAuthClientKind, SIWC_BOOTSTRAP_CLIENT_ID, SIWC_RESOURCE,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{

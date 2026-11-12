@@ -176,7 +176,8 @@ async fn malformed_downloads_and_failures_never_become_zero_speed_results() {
 
 #[tokio::test]
 async fn parallel_speed_tests_wait_in_order_and_continue_after_failure() {
-    let slot = SPEED_LIMIT.acquire().await.unwrap();
+    let limit = tokio::sync::Semaphore::new(1);
+    let slot = limit.acquire().await.unwrap();
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy = ProxyConfig::parse(&format!(
         "http://synthetic:secret@{}",
@@ -185,14 +186,28 @@ async fn parallel_speed_tests_wait_in_order_and_continue_after_failure() {
     .unwrap();
     drop(closed);
     let started = std::sync::Mutex::new(Vec::new());
-    let mut first = Box::pin(test("proxy_first".into(), &proxy, || {
-        started.lock().unwrap().push(1);
-        true
-    }));
-    let mut second = Box::pin(test("proxy_second".into(), &proxy, || {
-        started.lock().unwrap().push(2);
-        true
-    }));
+    let mut first = Box::pin(test_at(
+        &limit,
+        "proxy_first".into(),
+        &proxy,
+        DOWNLOAD_URL,
+        BUDGET,
+        || {
+            started.lock().unwrap().push(1);
+            true
+        },
+    ));
+    let mut second = Box::pin(test_at(
+        &limit,
+        "proxy_second".into(),
+        &proxy,
+        DOWNLOAD_URL,
+        BUDGET,
+        || {
+            started.lock().unwrap().push(2);
+            true
+        },
+    ));
     assert!(futures_util::poll!(&mut first).is_pending());
     assert!(futures_util::poll!(&mut second).is_pending());
     assert!(started.lock().unwrap().is_empty());
@@ -211,9 +226,11 @@ async fn parallel_speed_tests_wait_in_order_and_continue_after_failure() {
 
 #[tokio::test]
 async fn queued_wait_does_not_consume_the_measurement_budget() {
-    let slot = SPEED_LIMIT.acquire().await.unwrap();
+    let limit = tokio::sync::Semaphore::new(1);
+    let slot = limit.acquire().await.unwrap();
     let (proxy, server, hits) = mock_proxy().await;
     let mut measurement = Box::pin(test_at(
+        &limit,
         "proxy_queued".into(),
         &proxy,
         "http://unreachable.invalid/download",
@@ -236,21 +253,35 @@ async fn queued_wait_does_not_consume_the_measurement_budget() {
 
 #[tokio::test]
 async fn cancelling_a_waiter_and_failed_start_delivery_release_the_queue() {
-    let slot = SPEED_LIMIT.acquire().await.unwrap();
+    let limit = tokio::sync::Semaphore::new(1);
+    let slot = limit.acquire().await.unwrap();
     let (proxy, server, hits) = mock_proxy().await;
-    let mut cancelled = Box::pin(test("proxy_cancelled".into(), &proxy, || {
-        panic!("cancelled waiter must not start")
-    }));
+    let mut cancelled = Box::pin(test_at(
+        &limit,
+        "proxy_cancelled".into(),
+        &proxy,
+        DOWNLOAD_URL,
+        BUDGET,
+        || panic!("cancelled waiter must not start"),
+    ));
     assert!(futures_util::poll!(&mut cancelled).is_pending());
     drop(cancelled);
     drop(slot);
-    let result = test("proxy_disconnected".into(), &proxy, || false).await;
+    let result = test_at(
+        &limit,
+        "proxy_disconnected".into(),
+        &proxy,
+        DOWNLOAD_URL,
+        BUDGET,
+        || false,
+    )
+    .await;
     assert_eq!(
         result.error_code.as_deref(),
         Some(error_codes::PROXY_CHECK_UNAVAILABLE)
     );
     assert_eq!(hits.load(Ordering::SeqCst), 0);
-    assert!(SPEED_LIMIT.try_acquire().is_ok());
+    assert!(limit.try_acquire().is_ok());
     server.abort();
 }
 

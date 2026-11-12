@@ -43,6 +43,9 @@ static LOCAL_SOCKET_LOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 #[path = "support/usage_observations.rs"]
 mod usage_observations;
+#[path = "support/websocket_frames.rs"]
+mod websocket_frames;
+use websocket_frames::receive_websocket_data_with_timeout;
 
 fn reference_metadata_options() -> GatewayRuntimeOptions {
     use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
@@ -76,10 +79,14 @@ mod compaction;
 mod long_requests;
 #[path = "support/memory_policy.rs"]
 mod memory_policy;
+#[path = "support/provider_backoff.rs"]
+mod provider_backoff;
 #[path = "support/request_timezone.rs"]
 mod request_timezone;
 #[path = "support/rotation_policy.rs"]
 mod rotation_policy;
+#[path = "support/runtime_policy.rs"]
+mod runtime_policy;
 
 #[path = "support/auth_refresh.rs"]
 mod auth_refresh;
@@ -107,8 +114,12 @@ mod route_capacity;
 mod route_fallback;
 #[path = "support/transport_matrix.rs"]
 mod transport_matrix;
+#[path = "support/websocket_continuation_guards.rs"]
+mod websocket_continuation_guards;
 #[path = "support/websocket_fallback.rs"]
 mod websocket_fallback;
+#[path = "support/websocket_queue.rs"]
+mod websocket_queue;
 #[path = "support/websocket_retry.rs"]
 mod websocket_retry;
 #[path = "support/websocket_session.rs"]
@@ -381,17 +392,17 @@ async fn register_ready(authority: &TokenAuthority, account_id: &str, access_tok
         .unwrap();
 }
 
-async fn spawn_mixed_gateway(
+async fn spawn_mixed_gateway<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     spawn_mixed_gateway_with_options(
@@ -406,18 +417,18 @@ async fn spawn_mixed_gateway(
     .await
 }
 
-async fn spawn_mixed_gateway_with_options(
+async fn spawn_mixed_gateway_with_options<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
     options: GatewayRuntimeOptions,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     spawn_mixed_gateway_with_agent_identities_and_options(
@@ -461,19 +472,19 @@ async fn spawn_mixed_gateway_with_agent_identities(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn spawn_mixed_gateway_with_agent_identities_and_options(
+async fn spawn_mixed_gateway_with_agent_identities_and_options<R: TokenRefreshAdapter + 'static>(
     sources: Vec<RuntimeSource>,
     accounts: Vec<RuntimeChatGptAccount>,
     keys: Vec<RuntimeMixedLocalKey>,
     authority: Arc<TokenAuthority>,
-    refresh: Arc<RefreshAdapter>,
+    refresh: Arc<R>,
     persistence: Arc<PersistenceAdapter>,
     options: GatewayRuntimeOptions,
     agent_identities: HashMap<String, AgentIdentityCredential>,
 ) -> (
     TestServer,
     Arc<Mutex<Vec<UsageEvent>>>,
-    Arc<RefreshAdapter>,
+    Arc<R>,
     Arc<PersistenceAdapter>,
 ) {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -1064,16 +1075,11 @@ async fn receive_websocket_json_with_timeout(
     socket: &mut reqwest_websocket::WebSocket,
     timeout_duration: Duration,
 ) -> Value {
-    loop {
-        let message = tokio::time::timeout(timeout_duration, socket.next())
-            .await
-            .expect("websocket JSON message timed out")
-            .expect("websocket closed before a JSON message")
-            .expect("websocket message failed");
-        if let ClientWsMessage::Text(text) = message {
-            return serde_json::from_str(&text).unwrap();
-        }
-    }
+    let message = receive_websocket_data_with_timeout(socket, timeout_duration).await;
+    let ClientWsMessage::Text(text) = message else {
+        panic!("expected a text WebSocket JSON message, received {message:?}");
+    };
+    serde_json::from_str(&text).unwrap()
 }
 
 async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {

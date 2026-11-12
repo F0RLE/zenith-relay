@@ -54,6 +54,8 @@ pub(in crate::local_pool) async fn runtime_from_store(
         account_credentials,
     } = state.runtime_inputs().await?;
     let pool_routing = settings.pool_routing_for(&source_records, &account_records);
+    let spend_deadlines =
+        super::spending::account_spend_deadlines(&account_records, current_time_ms());
     let quota_references = super::quota_references::account_quota_references(
         &settings,
         &account_records,
@@ -171,8 +173,6 @@ pub(in crate::local_pool) async fn runtime_from_store(
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
         native_codex_images_only: !settings.codex_text_models_enabled,
-        image_base_model: None,
-        image_pricing_catalog: Some(state.pricing_catalog()),
         model_metadata_catalog: Some(state.model_metadata_loader().catalog_handle()),
         model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
         model_context_policies: settings.model_context_policies.clone(),
@@ -205,6 +205,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_activity_callback(state.runtime_activity_callback());
     runtime.set_codex_catalog_hint_callback(state.runtime_model_catalog_callback());
     runtime.set_account_quota_references(quota_references);
+    runtime.set_account_spend_deadlines(spend_deadlines);
     runtime.set_chatgpt_team_breaker_callback(state.runtime_team_breaker_callback());
     runtime.set_codex_background_tasks_enabled(settings.codex_background_tasks_enabled);
     runtime.set_codex_memory_extraction_enabled(settings.codex_memory_extraction_enabled);

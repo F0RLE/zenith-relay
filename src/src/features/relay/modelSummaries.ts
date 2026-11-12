@@ -147,7 +147,6 @@ function mergeModelSummary(existingSummary: ModelSummary, incomingSummary: Model
   merged.reasoningSupportedLevels = unionReasoningLevels(existingSummary.reasoningSupportedLevels, incomingSummary.reasoningSupportedLevels);
   merged.reasoningAllowedLevels = unionReasoningLevels(existingSummary.reasoningAllowedLevels, incomingSummary.reasoningAllowedLevels);
   merged.reasoningConfigurable = (existingSummary.reasoningConfigurable ?? false) || (incomingSummary.reasoningConfigurable ?? false);
-  merged.reasoningManualFallback = (existingSummary.reasoningManualFallback ?? false) || (incomingSummary.reasoningManualFallback ?? false);
   merged.speedSupported = (existingSummary.speedSupported ?? false) || (incomingSummary.speedSupported ?? false);
   merged.speedTiers = unionArray(existingSummary.speedTiers, incomingSummary.speedTiers);
   merged.speedTier = existingSummary.speedTier ?? incomingSummary.speedTier ?? "standard";
@@ -187,13 +186,25 @@ function mergeProtocolRoutes(
     if (!existingRoute) {
       routes.set(key, {
         ...route,
+        ...(route.tokenLimits ? { tokenLimits: { ...route.tokenLimits } } : {}),
         features: { ...route.features },
         reasoningEfforts: [...route.reasoningEfforts],
       });
       continue;
     }
+    const tokenLimits = existingRoute.tokenLimits || route.tokenLimits
+      ? { ...route.tokenLimits, ...existingRoute.tokenLimits }
+      : undefined;
+    if (tokenLimits && route.tokenLimits) {
+      for (const field of ["context", "input", "output"] as const) {
+        if (tokenLimits[field] == null && route.tokenLimits[field] != null) {
+          tokenLimits[field] = route.tokenLimits[field];
+        }
+      }
+    }
     routes.set(key, {
       ...existingRoute,
+      ...(tokenLimits ? { tokenLimits } : {}),
       features: { ...existingRoute.features, ...route.features },
       reasoningEfforts: unionReasoningLevels(existingRoute.reasoningEfforts, route.reasoningEfforts),
     });

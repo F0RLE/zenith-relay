@@ -21,7 +21,7 @@ impl TelemetryDb {
         }
         // At most one indexed history lookup per known ledger. Never scan request
         // telemetry or the full capacity history during a UI snapshot.
-        let connection = self.lock_report_connection()?;
+        let connection = self.lock_snapshot_connection()?;
         let mut statement = connection.prepare(PROJECTION_SQL).map_err(db_error)?;
         let mut samples = BTreeMap::new();
         for observation in observations.iter().take(MAX_LEDGERS) {

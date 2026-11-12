@@ -159,6 +159,19 @@ impl QuotaSnapshot {
     }
 
     pub fn limiting_reset_at_ms(&self) -> Option<u64> {
+        let mut exhausted = self
+            .primary
+            .iter()
+            .chain(self.secondary.iter())
+            .filter(|window| window.available_basis_points == Some(0))
+            .peekable();
+        if exhausted.peek().is_some() {
+            // Every exhausted window must reopen. An unknown reset must not
+            // turn another window's deadline into a promised recovery time.
+            return exhausted.try_fold(0_u64, |latest, window| {
+                Some(latest.max(window.reset_at_ms?))
+            });
+        }
         self.primary
             .iter()
             .chain(self.secondary.iter())
@@ -228,6 +241,40 @@ mod tests {
             observed_at_ms: 1_000,
             full_transition_fingerprint: None,
             exhaustion_transition_fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn quota_recovery_waits_for_every_exhausted_window() {
+        for (primary_remaining, secondary_remaining, primary_reset, secondary_reset, expected) in [
+            (0, 0, Some(2_000), Some(5_000), Some(5_000)),
+            (0, 0, Some(5_000), Some(2_000), Some(5_000)),
+            (0, 0, None, Some(5_000), None),
+            (0, 0, Some(5_000), None, None),
+            (0, 5_000, Some(2_000), Some(5_000), Some(2_000)),
+            (5_000, 0, Some(2_000), Some(5_000), Some(5_000)),
+            (0, 5_000, None, Some(5_000), None),
+            (5_000, 0, Some(2_000), None, None),
+            (1_000, 5_000, Some(2_000), Some(5_000), Some(2_000)),
+        ] {
+            let mut primary = open_window(QuotaWindowKind::Primary, primary_remaining);
+            let mut secondary = open_window(QuotaWindowKind::Secondary, secondary_remaining);
+            primary.reset_at_ms = primary_reset;
+            secondary.reset_at_ms = secondary_reset;
+            let snapshot = QuotaSnapshot {
+                primary: Some(primary),
+                secondary: Some(secondary),
+                ..Default::default()
+            };
+            assert_eq!(snapshot.limiting_reset_at_ms(), expected);
+            assert_eq!(
+                snapshot.primary.unwrap().available_basis_points,
+                Some(primary_remaining)
+            );
+            assert_eq!(
+                snapshot.secondary.unwrap().available_basis_points,
+                Some(secondary_remaining)
+            );
         }
     }
 

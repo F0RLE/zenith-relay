@@ -1,3 +1,4 @@
+use super::super::errors::RateLimitBodyHint;
 use super::*;
 use crate::ErrorOrigin;
 use crate::error_codes;
@@ -8,14 +9,13 @@ pub(super) async fn send_gateway_error(
     request_id: Option<&str>,
     stream_id: Option<&str>,
 ) {
-    let event = gateway_error_event(failure, request_id, stream_id);
-    if send_message(downstream, Message::Text(event.to_string().into()))
+    if send_request_error(downstream, failure, request_id, stream_id)
         .await
         .is_err()
     {
         return;
     }
-    let _ = send_message(
+    super::io::close_downstream(
         downstream,
         Message::Close(Some(CloseFrame {
             code: if failure.status.is_client_error() {
@@ -27,6 +27,16 @@ pub(super) async fn send_gateway_error(
         })),
     )
     .await;
+}
+
+pub(super) async fn send_request_error(
+    downstream: &mut WebSocket,
+    failure: &GatewayFailure,
+    request_id: Option<&str>,
+    stream_id: Option<&str>,
+) -> Result<(), ()> {
+    let event = gateway_error_event(failure, request_id, stream_id);
+    send_message(downstream, Message::Text(event.to_string().into())).await
 }
 
 pub(super) fn gateway_error_event(
@@ -123,8 +133,19 @@ impl GatewayFailure {
 
     pub(super) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
         if self.status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_at = crate::transport::retry_after_ms(headers, std::time::SystemTime::now())
-                .map(|delay| now_ms().saturating_add(delay));
+            let now = std::time::SystemTime::now();
+            let retry_at = crate::transport::retry_after_ms(headers, now)
+                .map(|delay| crate::unix_time_ms_at(now).saturating_add(delay));
+            self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
+        }
+        self
+    }
+
+    pub(super) fn with_retry_hint(mut self, hint: RateLimitBodyHint) -> Self {
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_at = hint
+                .retry_clock_for_account(self.origin == ErrorOrigin::Account)
+                .map(|clock| clock.not_before_ms);
             self.retry_at_ms = self.retry_at_ms.into_iter().chain(retry_at).max();
         }
         self
@@ -299,7 +320,7 @@ impl GatewayFailure {
     ) -> Self {
         let classification =
             super::super::errors::classify_upstream_error(status, upstream_error_body);
-        let mut failure = Self::classified(status, classification.category, origin)
+        let failure = Self::classified(status, classification.category, origin)
             .with_upstream_error(upstream_error_body.map(|error_body| {
                 crate::usage::UpstreamErrorDetails::from_response_body(
                     Some(status.as_u16()),
@@ -307,10 +328,34 @@ impl GatewayFailure {
                 )
             }));
         if failure.status == StatusCode::TOO_MANY_REQUESTS {
-            failure.retry_at_ms = upstream_error_body
-                .map(rate_limit_body_hint)
-                .and_then(|hint| hint.retry_after_for_account(origin == ErrorOrigin::Account))
-                .map(|delay| now_ms().saturating_add(delay));
+            return failure.with_retry_hint(
+                upstream_error_body
+                    .map(rate_limit_body_hint)
+                    .unwrap_or_default(),
+            );
+        }
+        failure
+    }
+
+    pub(super) fn upstream_status_with_headers(
+        status: StatusCode,
+        upstream_error_body: Option<&[u8]>,
+        headers: &HeaderMap,
+        origin: ErrorOrigin,
+    ) -> Self {
+        let classification = super::super::errors::classify_upstream_error_with_headers(
+            status,
+            upstream_error_body,
+            headers,
+        );
+        let mut failure =
+            Self::upstream_status(status, upstream_error_body, origin).with_retry_headers(headers);
+        failure.status =
+            super::super::errors::canonical_upstream_status(status, classification.category);
+        failure.category = classification.category;
+        failure.message = classification.message;
+        if classification.category == error_codes::UPSTREAM_INVALID_WORKSPACE {
+            failure.retry_at_ms = None;
         }
         failure
     }

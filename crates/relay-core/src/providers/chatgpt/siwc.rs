@@ -1,4 +1,4 @@
-//! SIWC preview contract: preserve options or reject before network dispatch.
+//! SIWC preview request validation and preparation.
 use crate::protocol::AdapterError;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -24,14 +24,14 @@ pub(crate) fn sanitize_siwc_headers(headers: &mut reqwest::header::HeaderMap) {
     }
 }
 
-pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError> {
+/// Client response references are resolved by the runtime before preparation.
+pub(crate) fn validate_siwc_client_request(body: &Value) -> Result<(), AdapterError> {
     let object = body
-        .as_object_mut()
+        .as_object()
         .ok_or_else(|| AdapterError::parameter_unsupported_for("body"))?;
     for field in [
         "background",
         "conversation",
-        "max_output_tokens",
         "max_tool_calls",
         "metadata",
         "moderation",
@@ -46,16 +46,15 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
         "user",
     ] {
         if object.contains_key(field) {
-            return Err(AdapterError::parameter_unsupported_for(field));
+            return Err(AdapterError::siwc_parameter_unsupported_for(field));
         }
     }
-    if object
-        .get("previous_response_id")
-        .is_some_and(|v| !v.is_null())
+    if let Some(limit) = object
+        .get("max_output_tokens")
+        .filter(|limit| !limit.is_null())
+        && !limit.as_u64().is_some_and(|limit| limit > 0)
     {
-        return Err(AdapterError::parameter_unsupported_for(
-            "previous_response_id",
-        ));
+        return Err(AdapterError::invalid_request().with_parameter("max_output_tokens"));
     }
     if object
         .get("store")
@@ -83,14 +82,12 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
     if let Some(tools) = object.get("tools") {
         validate_tools(tools)?;
     }
-    let input = object.entry("input").or_insert_with(|| json!([]));
-    if let Some(text) = input.as_str() {
-        *input = json!([{"role":"user","content":text}]);
-    }
-    let items = input
-        .as_array_mut()
-        .ok_or_else(|| AdapterError::parameter_unsupported_for("input"))?;
-    for item in items.iter() {
+    let items = match object.get("input") {
+        None | Some(Value::String(_)) => &[][..],
+        Some(Value::Array(items)) => items.as_slice(),
+        Some(_) => return Err(AdapterError::parameter_unsupported_for("input")),
+    };
+    for item in items {
         if item.get("role").and_then(Value::as_str) == Some("system") {
             return Err(AdapterError::parameter_unsupported_for("input.role.system"));
         }
@@ -111,6 +108,29 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
             }
         }
     }
+    Ok(())
+}
+
+pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<bool, AdapterError> {
+    validate_siwc_client_request(body)?;
+    if body
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(AdapterError::parameter_unsupported_for(
+            "previous_response_id",
+        ));
+    }
+    let prewarm = body.get("generate") == Some(&Value::Bool(false));
+    let object = body.as_object_mut().expect("validated SIWC body");
+    let limit_omitted = object
+        .remove("max_output_tokens")
+        .is_some_and(|limit| !limit.is_null());
+    let input = object.entry("input").or_insert_with(|| json!([]));
+    if let Some(text) = input.as_str() {
+        *input = json!([{"role":"user","content":text}]);
+    }
+    let items = input.as_array().expect("validated SIWC input");
     let has_tool_history = items
         .iter()
         .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"));
@@ -197,7 +217,7 @@ pub(crate) fn prepare_siwc_request(body: &mut Value) -> Result<(), AdapterError>
     }
     object.insert("store".into(), Value::Bool(false));
     object.insert("stream".into(), Value::Bool(true));
-    Ok(())
+    Ok(limit_omitted)
 }
 
 fn validate_tools(tools: &Value) -> Result<(), AdapterError> {
@@ -230,6 +250,58 @@ fn validate_tools(tools: &Value) -> Result<(), AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn siwc_null_output_limit_means_no_client_cap() {
+        let request = json!({"input":"Synthetic input","max_output_tokens":null});
+        assert!(validate_siwc_client_request(&request).is_ok());
+        let mut prepared = request.clone();
+        assert!(!prepare_siwc_request(&mut prepared).unwrap());
+        assert!(prepared.get("max_output_tokens").is_none());
+        let mut absent = json!({"input":"Synthetic input"});
+        prepare_siwc_request(&mut absent).unwrap();
+        assert_eq!(prepared, absent);
+        assert_eq!(request["max_output_tokens"], Value::Null);
+    }
+
+    #[test]
+    fn output_limit_omission_is_automatic_validated_and_scoped() {
+        for limit in [json!(1), json!(1024)] {
+            let request = json!({"input":"Synthetic input","max_output_tokens":limit,
+                "reasoning":{"effort":"high"},"prompt_cache_options":{"ttl":"30m"}});
+            assert!(validate_siwc_client_request(&request).is_ok());
+            let mut compatible = request.clone();
+            let omitted = prepare_siwc_request(&mut compatible).unwrap();
+            assert!(omitted);
+            assert!(compatible.get("max_output_tokens").is_none());
+            assert_eq!(compatible["reasoning"], request["reasoning"]);
+            assert_eq!(
+                compatible["prompt_cache_options"],
+                request["prompt_cache_options"]
+            );
+        }
+        for limit in [json!(0), json!(-1), json!(1.5), json!("1024"), json!({})] {
+            let mut request = json!({"input":[],"max_output_tokens":limit});
+            let original = request.clone();
+            let error = prepare_siwc_request(&mut request).unwrap_err();
+            assert_eq!(error.parameter(), Some("max_output_tokens"));
+            assert_eq!(error.code(), crate::error_codes::ADAPTER_INVALID_REQUEST);
+            assert_eq!(request, original);
+        }
+        for (field, value) in [
+            ("temperature", json!(0.5)),
+            ("max_tool_calls", json!(2)),
+            ("tools", json!([{"type":"tool_search"}])),
+            ("previous_response_id", json!("synthetic-foreign-response")),
+        ] {
+            let mut request = json!({"input":[],"max_output_tokens":1024});
+            request[field] = value;
+            let original = request.clone();
+            assert!(prepare_siwc_request(&mut request).is_err());
+            assert_eq!(request, original);
+        }
+    }
+
     #[test]
     fn websocket_generate_is_mapped_without_creating_an_unrequested_generation() {
         for generate in [false, true] {
@@ -426,6 +498,33 @@ mod tests {
             ["second", "first"]
         );
     }
+    #[test]
+    fn admission_validation_is_read_only_and_matches_preparation() {
+        for request in [
+            json!({"input":"Synthetic input"}),
+            json!({"input":[],"generate":false}),
+            json!({"input":[],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}),
+            json!({"input":null}),
+            json!({"input":[],"max_output_tokens":1024}),
+            json!({"input":[{"role":"system","content":"Synthetic instructions"}]}),
+            json!({"input":[{"role":"user","content":[{"type":"input_audio"}]}]}),
+            json!({"input":[],"tools":[{"type":"tool_search"}]}),
+        ] {
+            let original = request.clone();
+            let validation = validate_siwc_client_request(&request);
+            assert_eq!(request, original);
+            let mut prepared = request;
+            let preparation = prepare_siwc_request(&mut prepared);
+            assert_eq!(validation.is_ok(), preparation.is_ok());
+            if let Err(error) = validation {
+                let prepared_error = preparation.unwrap_err();
+                assert_eq!(error.code(), prepared_error.code());
+                assert_eq!(error.parameter(), prepared_error.parameter());
+                assert_eq!(prepared, original);
+            }
+        }
+    }
+
     #[test]
     fn rejects_semantic_loss_and_hosted_tools() {
         for field in [

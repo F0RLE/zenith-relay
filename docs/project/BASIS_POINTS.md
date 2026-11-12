@@ -20,6 +20,11 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
   cached briefly. A changed token or failed access read cannot reuse old access.
   Restricted models and account policy are enforced at execution.
+- Debug-mode account refresh and import diagnostics compare the received BPS
+  catalog with the parser's accepted models. Counts cover the complete catalog;
+  at most 64 rows retain a validated model ID, upstream row index and exclusion
+  reason. The local operation log reports omitted rows explicitly and never
+  records provider bodies, credentials or raw account identities.
 - Before rejecting an unknown WebSocket model, refresh scoped BPS access and
   resolve it again. This applies to initial frames and later turns, including
   HTTP fallback; known routes and malformed frames need no discovery I/O.
@@ -192,6 +197,11 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Context sizes, local CPU probes, provider token usage, prompt-cache evidence
   and transport latency are separate measurements. A faster envelope parser
   alone establishes neither smaller requests nor provider/cache improvements.
+- Buffered SSE consumption is retained on the current physical attempt as valid
+  usage frames arrive, before final response assembly or discovery continuation.
+  Cancellation keeps those reported counters; absent counters stay unknown.
+  These observations do not emit another attempt, reset dispatch clocks, grant
+  health/quota evidence or change retry and terminal validation.
 - Paired context sizes describe the client request and the final prepared body,
   after catalog preloads and inline-image replacement. Optional `conversation`
   counters partition conversation bytes into messages, tool calls, tool results,
@@ -229,8 +239,14 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   TTFT/generation accounting remains unchanged. Preparation excludes admission
   and route selection; offsets are not additive stage durations. Readiness is
   observed inside Relay before delivery, not client receipt, tool execution,
-  or the pause before the next request. Buffered replies outside the observed
-  SSE stream do not invent a client-first-output observation. Unobserved stages,
+  or the pause before the next request. Observed upstream SSE retains separate
+  native tool-start/first-complete-item and text-delta
+  observations when available. Native item completion is not permission to
+  execute a client call. The UI separates source offsets, Relay readiness and
+  measured intervals after the first complete item or source terminal; these
+  intervals do not claim pure validation CPU time. Older rows stay unknown.
+  Buffered replies outside the observed SSE stream do not invent a
+  client-first-output observation. Unobserved stages,
   older records, and
   buffered discovery without raw timing evidence leave fields absent; measured
   zero stays zero. Failed/incomplete/cancelled responses do not claim successful
@@ -253,6 +269,15 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   Optional `contextAccountingMs` measures prepared-context accounting after
   attachments, separately from those phases; it is not all diagnostic overhead.
   Support-export phase accounting includes it when observed.
+  Optional `requestPreparation.attachments` separates credential preparation,
+  image validation/cache lookup, and concurrent resolution wall time inside
+  `attachmentsMs`. It counts image parts, existing file references, successful
+  physical uploads and their image bytes, and inline images reused from cache
+  or a shared upload. Shared waiters do not count another upload; image bytes
+  exclude multipart framing. The diagnostic detail is opt-in, contains no IDs
+  or image data, and remains absent in older observations. Its nested timings
+  are not added again to preparation totals. No credential timing is reported
+  when existing file references bypass authorization preparation.
   Schema-3 support exports expose this gap as
   `transport.preparationAccounting.unattributedMs`, computed from observed
   non-overlapping phases only. Initial schema validation is never added twice.
@@ -593,6 +618,10 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   member; catalog/access discovery stays independent. Incompatible BPS routes
   cannot consume selection capacity ahead of a compatible native route. A BPS-only
   pool still rejects native strict output; no schema or approval check is dropped.
+  Complete paired tool history may release an optional BPS affinity when the
+  current request requires an incompatible feature, including strict output.
+  HTTP and WebSocket use the same exclusions; opaque continuations and unpaired
+  results remain bound to their owner, and saved ownership is not erased.
 - Generation 401 invalidates only its rejected token incarnation and returns
   without another generation. The next request prepares fresh authorization.
   Account-wide 429 and model-access blocks retain separate scopes/deadlines.

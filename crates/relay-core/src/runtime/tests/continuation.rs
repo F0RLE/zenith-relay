@@ -85,8 +85,20 @@ fn hot_runtime_replacement_preserves_continuations_and_late_completions() {
                 .is_some()
         );
         assert!(Arc::ptr_eq(
-            &old.adapter_continuation_store,
-            &next.adapter_continuation_store
+            &old.continuation_state.adapters,
+            &next.continuation_state.adapters
+        ));
+        assert!(Arc::ptr_eq(
+            &old.continuation_state.native_responses,
+            &next.continuation_state.native_responses
+        ));
+        assert!(Arc::ptr_eq(
+            &old.continuation_state.routes,
+            &next.continuation_state.routes
+        ));
+        assert!(Arc::ptr_eq(
+            &old.continuation_state.agent_messages,
+            &next.continuation_state.agent_messages
         ));
         assert_eq!(
             next.load_adapter_continuation_state(
@@ -135,6 +147,82 @@ fn hot_runtime_replacement_preserves_continuations_and_late_completions() {
             Err(crate::AdapterError::continuation_missing())
         );
         assert_eq!(format!("{shared:?}"), "RuntimeContinuationStores { .. }");
+    }
+}
+
+#[test]
+fn runtime_session_observations_follow_graph_lifetime() {
+    let options = GatewayRuntimeOptions {
+        continuation_state: Some(RuntimeContinuationStores::default()),
+        ..Default::default()
+    };
+    let old = bridge_runtime(
+        options.clone(),
+        "synthetic-secret",
+        "https://example.test/v1",
+    );
+    let scope = CodexTurnStateScope {
+        local_key_id: "key-1",
+        session_id: "synthetic-session",
+        account_id: "source-1",
+        model: "gpt-test",
+        endpoint: "https://example.test/v1/responses",
+    };
+    let authorization = AuthorizationIncarnation::Source;
+    let names = BTreeSet::from(["synthetic_tool".to_owned()]);
+    let history = serde_json::json!([
+        {"type":"function_call_output", "call_id":"synthetic-call", "output":"synthetic"}
+    ]);
+    let seed = |runtime: &GatewayRuntime| {
+        runtime.note_codex_turn_state(
+            &scope,
+            b"synthetic-state",
+            b"synthetic-credential",
+            &authorization,
+            10,
+        );
+        runtime.basis_points_catalog().remember(
+            "key-1",
+            "gpt-test",
+            &serde_json::json!({"status":"completed", "output":[
+                {"type":"function_call", "call_id":"synthetic-call"}
+            ]}),
+            &names,
+            None,
+            10,
+        );
+    };
+    let has_turn = |runtime: &GatewayRuntime| {
+        runtime.codex_turn_state_matches(
+            &scope,
+            b"synthetic-state",
+            b"synthetic-credential",
+            &authorization,
+            11,
+        )
+    };
+    let catalog = |runtime: &GatewayRuntime| {
+        runtime
+            .basis_points_catalog()
+            .load("key-1", "gpt-test", &history, 11)
+    };
+    seed(&old);
+    old.set_model_display_order(vec!["gpt-test".into()]);
+    old.set_hidden_models(vec!["gpt-test".into()]);
+    old.set_hidden_models(Vec::new());
+    assert!(has_turn(&old));
+    assert_eq!(catalog(&old), names);
+
+    let next = bridge_runtime(options, "synthetic-secret", "https://example.test/v1");
+    old.retire_for_replacement();
+    for late_write in [false, true] {
+        if late_write {
+            seed(&old);
+        }
+        assert!(!has_turn(&next));
+        assert!(catalog(&next).is_empty());
+        assert!(has_turn(&old));
+        assert_eq!(catalog(&old), names);
     }
 }
 

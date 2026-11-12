@@ -28,6 +28,9 @@ const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[path = "support/usage_observations.rs"]
 mod usage_observations;
+#[path = "support/websocket_frames.rs"]
+mod websocket_frames;
+use websocket_frames::receive_websocket_data_with_timeout;
 
 #[path = "support/protocol_matrix.rs"]
 mod protocol_matrix;
@@ -63,6 +66,8 @@ mod protocol_bridges;
 #[path = "support/local_server.rs"]
 mod local_server;
 use local_server::{TestServer, spawn};
+#[path = "support/catalog_endpoints.rs"]
+mod catalog_endpoints;
 #[path = "support/source_discovery.rs"]
 mod source_discovery;
 #[path = "support/stream_limits.rs"]

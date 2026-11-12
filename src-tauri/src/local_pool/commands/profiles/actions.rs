@@ -64,6 +64,9 @@ pub async fn launch_codex_source(
         &profile_dir,
         &response_models,
         &state.model_metadata_catalog(),
+        &source_record
+            .protocol_config
+            .effective_capabilities(&source_record.base_url, &source_record.models),
     )?;
     if catalog.is_none() {
         return Err(LocalPoolError::new(

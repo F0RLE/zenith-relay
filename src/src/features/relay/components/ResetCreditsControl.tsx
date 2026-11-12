@@ -3,7 +3,9 @@ import { Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { AccountSummary } from "../api/types";
+import { accountResetCreditsSource } from "../accountRoutes";
 import { sanitizeFeedbackError } from "../state/feedback";
+import { useRelayState } from "../state/RelayStateProvider";
 import { useConfirm } from "./Ui";
 
 type ResetCreditsControlProps = {
@@ -13,14 +15,24 @@ type ResetCreditsControlProps = {
 
 export function ResetCreditsControl({ account, onCompleted }: ResetCreditsControlProps) {
   const { t } = useTranslation();
+  const { runtime } = useRelayState();
   const confirm = useConfirm();
   const [consuming, setConsuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const availableFromQuota = account.quota.resetCreditsAvailable;
-  if (account.recoveryRequired || availableFromQuota == null || availableFromQuota <= 0) {
+  const source = accountResetCreditsSource(account, runtime?.accounts ?? []);
+  const availableFromQuota = source?.quota.resetCreditsAvailable;
+  if (account.authState.state !== "active" || !account.secretAvailable
+    || account.routingBlockReason === "reauth_required" || account.recoveryRequired
+    || !source || source.authState.state !== "active" || !source.secretAvailable
+    || source.routingBlockReason === "reauth_required" || source.recoveryRequired
+    || availableFromQuota == null || availableFromQuota <= 0) {
     return error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
   }
+
+  const linked = source.id !== account.id;
+  const client = source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex";
+  const title = t(linked ? "accounts.resetCreditsLinkedTitle" : "accounts.resetCreditsTitle", { client });
 
   const errorMessage = (errorValue: unknown) => {
     return sanitizeFeedbackError(errorValue, "reset_credits_failed", t("accounts.resetCreditsLoadFailed")).message;
@@ -28,8 +40,8 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
 
   const consume = async () => {
     if (consuming) return;
-    const accepted = await confirm(t("accounts.resetCreditsConfirm"), {
-      title: t("accounts.resetCreditsTitle"),
+    const accepted = await confirm(t(linked ? "accounts.resetCreditsLinkedConfirm" : "accounts.resetCreditsConfirm", { client }), {
+      title,
       cancelLabel: t("accounts.resetCreditsConfirmNo"),
       confirmLabel: t("accounts.resetCreditsConfirmYes"),
     });
@@ -37,7 +49,7 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
     setConsuming(true);
     setError(null);
     try {
-      const resetCreditResult = await relayCommands.consumeResetCredit(account.id);
+      const resetCreditResult = await relayCommands.consumeResetCredit(source.id);
       // Set the partial-success diagnostic before refreshing the account. The
       // refresh can consume the last available credit and temporarily remove
       // the button from the card; the error must survive that state change.
@@ -63,8 +75,8 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
       className="reset-credits-control"
       data-available="true"
       disabled={consuming}
-      aria-label={`${t("accounts.resetCreditsAvailable", { count: availableFromQuota })} · ${t("accounts.resetCreditsExecute")}`}
-      data-relay-tooltip={t("accounts.resetCreditsTitle")}
+      aria-label={`${t("accounts.resetCreditsAvailable", { count: availableFromQuota })} · ${title}`}
+      data-relay-tooltip={title}
       onClick={() => void consume()}
     >
       <span className="reset-credits-copy">

@@ -125,6 +125,9 @@ pub struct UsageEvent {
     /// from changing a different credential generation of the same account.
     #[serde(skip)]
     pub account_token_generation: Option<u64>,
+    /// Exact in-memory OAuth provenance; never persisted or exported.
+    #[serde(skip)]
+    pub account_token_revision: Option<crate::accounts::TokenDispatchRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_context_id: Option<String>,
     #[serde(default)]
@@ -153,6 +156,16 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// Canonical internal cancellation telemetry, preserving reported usage.
+    pub(crate) fn normalize_client_cancellation(&mut self) {
+        if !self.success && self.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED) {
+            self.http_status = 499;
+            if let Some(routing) = self.routing.as_mut() {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::ClientDisconnected);
+            }
+        }
+    }
+
     pub fn is_request_completion(&self) -> bool {
         self.routing
             .as_ref()
@@ -215,16 +228,9 @@ impl UsageEvent {
                 }
             }
         }
-        let model = [
-            "/response/model",
-            "/message/model",
-            "/model",
-            "/modelVersion",
-        ]
-        .into_iter()
-        .find_map(|path| payload.pointer(path).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|model| crate::catalog::is_valid_model_token(model));
+        let model = crate::protocol::response_models::serving(payload)
+            .map(str::trim)
+            .filter(|model| crate::catalog::is_valid_model_token(model));
         if let (Some(routing), Some(model)) = (self.routing.as_mut(), model) {
             if routing.upstream_response_model.as_deref() == Some(model) {
                 return;
@@ -296,6 +302,7 @@ fn relay_error_category(category: &str) -> bool {
         error_codes::INVALID_REQUEST
             | error_codes::HTTP_HEADERS_TIMEOUT
             | error_codes::HTTP_SEND_START_TIMEOUT
+            | error_codes::SIWC_WEBSOCKET_REQUIRED
             | error_codes::MODEL_NOT_FOUND
             | error_codes::NO_ELIGIBLE_SOURCE
             | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE

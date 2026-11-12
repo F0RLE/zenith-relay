@@ -184,6 +184,7 @@ impl super::client::CodexOAuthClient {
     ) -> Result<PendingSiwcRefresh, zenith_relay_core::accounts::TokenRefreshFailure> {
         use zenith_relay_core::accounts::{
             TokenRefreshFailure as Failure, TokenRefreshFailureKind as Kind,
+            TokenRefreshStage as Stage,
         };
         use zenith_relay_core::providers::chatgpt::{
             token_refresh_failure_kind, token_refresh_provider_error_code,
@@ -197,11 +198,11 @@ impl super::client::CodexOAuthClient {
             ));
         }
         super::parse::validate_token(refresh_token).map_err(|_| invalid())?;
-        if registration
+        if let Some(retry_at_ms) = registration
             .earliest_refresh_at_ms
-            .is_some_and(|at| now_ms < at)
+            .filter(|at| now_ms < *at)
         {
-            return Err(Failure::new(Kind::Transient, "siwc_refresh_too_early"));
+            return Err(Failure::deferred("siwc_refresh_too_early", retry_at_ms));
         }
         let request = self
             .http
@@ -220,11 +221,22 @@ impl super::client::CodexOAuthClient {
                     zenith_relay_core::scheduler::refresh::http::HttpClass::Auth,
                 )
                 .await
-                .map_err(|_| Failure::new(Kind::Transient, "transport"))?;
+                .map_err(|_| {
+                    Failure::new(Kind::Transient, "transport").with_stage(Stage::Transport)
+                })?;
         let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let bytes = super::super::collect_limited(response, super::MAX_TOKEN_RESPONSE_BYTES)
             .await
-            .map_err(|_| invalid())?;
+            .map_err(|_| {
+                invalid()
+                    .with_stage(Stage::ResponseRead)
+                    .with_request_id(request_id.as_deref())
+            })?;
         drop(permit);
         if !status.is_success() {
             let code = token_refresh_provider_error_code(&bytes)
@@ -239,12 +251,21 @@ impl super::client::CodexOAuthClient {
                 }
                 _ => token_refresh_failure_kind(&code),
             };
-            return Err(Failure::new(kind, &code));
+            return Err(Failure::new(kind, &code)
+                .with_stage(Stage::ResponseStatus)
+                .with_request_id(request_id.as_deref()));
         }
         let mut registration = registration.clone();
-        let tokens =
-            tokens::parse(&bytes, &mut registration, true, now_ms).map_err(|_| invalid())?;
-        PendingSiwcRefresh::new(tokens, registration, now_ms).map_err(|_| invalid())
+        let tokens = tokens::parse(&bytes, &mut registration, true, now_ms).map_err(|_| {
+            invalid()
+                .with_stage(Stage::ResponseDecode)
+                .with_request_id(request_id.as_deref())
+        })?;
+        PendingSiwcRefresh::new(tokens, registration, now_ms).map_err(|_| {
+            invalid()
+                .with_stage(Stage::ResponseDecode)
+                .with_request_id(request_id.as_deref())
+        })
     }
 
     pub async fn verify_pending_siwc_refresh(
@@ -254,6 +275,7 @@ impl super::client::CodexOAuthClient {
     ) -> Result<super::OAuthTokenSet, zenith_relay_core::accounts::TokenRefreshFailure> {
         use zenith_relay_core::accounts::{
             TokenRefreshFailure as Failure, TokenRefreshFailureKind as Kind,
+            TokenRefreshStage as Stage,
         };
         let invalid = || {
             Failure::new(
@@ -261,14 +283,17 @@ impl super::client::CodexOAuthClient {
                 "siwc_rotation_identity_invalid",
             )
         };
-        let (tokens, registration) = pending.into_tokens().map_err(|_| invalid())?;
+        let (tokens, registration) = pending
+            .into_tokens()
+            .map_err(|_| invalid().with_stage(Stage::IdentityVerification))?;
         self.verify_siwc_tokens(tokens, registration, None, now_ms)
             .await
             .map_err(|error| {
                 if error.code == OAuthErrorCode::Transport {
                     Failure::new(Kind::Transient, "siwc_identity_verification_unavailable")
+                        .with_stage(Stage::IdentityVerification)
                 } else {
-                    invalid()
+                    invalid().with_stage(Stage::IdentityVerification)
                 }
             })
     }

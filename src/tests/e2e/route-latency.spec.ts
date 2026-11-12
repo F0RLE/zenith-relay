@@ -44,5 +44,6 @@ for (const locale of ["en", "ru"] as const) {
     await expect(quantiles).not.toHaveAttribute("title");
     expect(await dialog.locator(".request-details-list dd").evaluateAll((cells) =>
       cells.every((cell) => cell.scrollWidth <= cell.clientWidth + 1))).toBe(true);
+    await page.screenshot({ path: `output/playwright/route-latency-${locale}.png` });
   });
 }

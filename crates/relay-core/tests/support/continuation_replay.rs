@@ -703,7 +703,11 @@ async fn unknown_websocket_response_owner_is_rejected_before_candidate_selection
     assert!(wrong_state.requests.lock().unwrap().is_empty());
     assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    http_rejection::assert_local_continuation_rejection_transport(
+        &events,
+        zenith_relay_core::UsageTransport::Websocket,
+    );
+    assert_eq!(events[0].resolved_model.as_deref(), Some(MODEL));
 }
 
 #[tokio::test]
@@ -799,7 +803,95 @@ async fn orphaned_websocket_response_is_rejected_without_materialized_history() 
     assert!(transport_state.requests.lock().unwrap().is_empty());
     assert!(limited_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    http_rejection::assert_local_continuation_rejection_transport(
+        &events,
+        zenith_relay_core::UsageTransport::Websocket,
+    );
+}
+
+#[tokio::test]
+async fn later_websocket_continuation_rejection_records_only_the_local_failure() {
+    for http_bridge in [false, true] {
+        let (native, native_state) = spawn_websocket_upstream().await;
+        let (http, http_state) = spawn_upstream(vec![successful_sse_reply()]).await;
+        let (sources, accounts) = if http_bridge {
+            (
+                vec![source("api-source", &http, "synthetic-key", 10)],
+                vec![],
+            )
+        } else {
+            (
+                vec![],
+                vec![account("relay-account", "provider-account", &native, 10)],
+            )
+        };
+        let (gateway, events, _, _) = spawn_mixed_gateway(
+            sources,
+            accounts,
+            vec![mixed_key(None, None)],
+            ready_authority("relay-account", "account-access").await,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let mut socket = reqwest::Client::new()
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        socket
+            .send(ClientWsMessage::Text(
+                json!({"type":"response.create","model":MODEL,"input":"start"}).to_string(),
+            ))
+            .await
+            .unwrap();
+        let completed = receive_websocket_completion(&mut socket).await;
+        assert_eq!(completed["type"], "response.completed");
+        socket
+            .send(ClientWsMessage::Binary(
+                serde_json::to_vec(&json!({
+                    "type":"response.create", "model":MODEL,
+                    "previous_response_id":"orphaned-response",
+                    "input":[{"type":"function_call_output","call_id":"call_1","output":"private synthetic result"}]
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let error = receive_websocket_json(&mut socket).await;
+        assert_eq!(error["type"], "error");
+        assert_eq!(error["error"]["code"], "response_continuation_unavailable");
+        assert_eq!(
+            native_state.requests.lock().unwrap().len(),
+            usize::from(!http_bridge)
+        );
+        assert_eq!(
+            http_state.requests.lock().unwrap().len(),
+            usize::from(http_bridge)
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].success);
+        http_rejection::assert_local_continuation_rejection_transport(
+            &events[1..],
+            zenith_relay_core::UsageTransport::Websocket,
+        );
+        assert_eq!(events[1].resolved_model.as_deref(), Some(MODEL));
+        assert_ne!(events[0].request_id, events[1].request_id);
+        let details = serde_json::to_string(&events[1]).unwrap();
+        assert!(!details.contains("private synthetic result"));
+        assert!(!details.contains("orphaned-response"));
+        assert_eq!(
+            gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight,
+            0
+        );
+    }
 }
 
 #[tokio::test]

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod failure;
 
+pub(crate) use failure::QuotaTransportFailure;
 pub use failure::{QuotaRefreshFailure, classify_quota_http_failure};
 use std::collections::{BTreeSet, HashSet};
 

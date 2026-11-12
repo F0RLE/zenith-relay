@@ -562,7 +562,8 @@ test("runtime retry hints do not turn available accounts into quota pauses", asy
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   const connection = page.locator(".account-card").filter({ hasText: "Personal Plus" });
-  await expect(connection.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
+  await expect(connection.locator(".relay-status-icon")).toHaveAttribute("aria-label", /^In rotation · Retry after .+$/);
+  await expect(connection.locator(".relay-status-icon")).toHaveAttribute("data-status", "ready");
   await expect(connection.getByText("Waiting for quota", { exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();

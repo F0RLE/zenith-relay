@@ -115,8 +115,9 @@ test("source toolbar searches, sorts, updates pool counts and refreshes the comp
   await expect(controls.locator(".relay-status-summary strong")).toHaveText(["3", "2", "0", "0"]);
   await controls.getByRole("button", { name: "Clear selection", exact: true }).click();
   await controls.getByRole("button", { name: "Refresh API data", exact: true }).click();
-  await expect.poll(async () => (await calls(page, "test_local_source")).length).toBe(3);
-  await expect(page.locator(".connection-toolbar-result")).toBeVisible();
+  await expect.poll(async () => (await calls(page, "refresh_local_source_data")).length).toBe(3);
+  await expect(controls.getByRole("button", { name: "Refresh API data", exact: true })).toBeEnabled();
+  await expect(page.locator(".connection-toolbar-result")).toHaveCount(0);
   await expect(cards).toHaveCount(1);
   await search.fill("");
   await expect(cards).toHaveCount(3);
@@ -160,7 +161,7 @@ test("proxy toolbar keeps its filter on selection changes, refreshes and deletes
   expect((await calls(page, "delete_local_stored_proxy")).at(-1)?.args).toEqual({ proxyId: "proxy_synthetic_1" });
 });
 
-test("source refresh disables duplicate actions and reports partial failures", async ({ page }) => {
+test("source refresh disables duplicate actions without an inline summary", async ({ page }, testInfo) => {
   await installTauriMock(page, { populated: true, sourceCount: 3 });
   await openConnections(page);
   await page.getByRole("tab", { name: "Sources", exact: true }).click();
@@ -169,12 +170,14 @@ test("source refresh disables duplicate actions and reports partial failures", a
     const invoke = internals.invoke.bind(internals);
     let held = false;
     internals.invoke = async (command, args, options) => {
-      if (command === "test_local_source") {
+      if (command === "refresh_local_source_data") {
         if (!held) {
           held = true;
           await new Promise<void>((resolve) => window.addEventListener("release-source-refresh", () => resolve(), { once: true }));
         }
-        if (args?.sourceId === "source_synthetic_2") throw new Error("synthetic refresh failure");
+        if (args?.sourceId === "source_synthetic_2") {
+          return { sourceId: args.sourceId, status: "partial", addedModels: 1, removedModels: 1 };
+        }
       }
       return invoke(command, args, options);
     };
@@ -185,9 +188,13 @@ test("source refresh disables duplicate actions and reports partial failures", a
   await expect(refresh).toBeDisabled();
   await expect(controls.getByRole("checkbox")).toBeDisabled();
   await page.evaluate(() => window.dispatchEvent(new Event("release-source-refresh")));
-  await expect(page.locator(".connection-toolbar-result")).toHaveText("Updated: 2 · Errors: 1 · Skipped: 0");
   await expect(refresh).toBeEnabled();
+  await expect(page.locator(".connection-toolbar-result")).toHaveCount(0);
   await expect(page.locator(".source-card")).toHaveCount(3);
+  await page.screenshot({ path: testInfo.outputPath("source-refresh-desktop.png"), animations: "disabled" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".connection-toolbar-result")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("source-refresh-mobile.png"), animations: "disabled" });
 });
 
 test("proxy storage shows loading, a recoverable error, and a working retry", async ({ page }) => {

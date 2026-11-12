@@ -31,20 +31,37 @@ pub(super) use summary::oauth_account_runtime_available;
 pub(crate) async fn build_local_runtime_state(
     state: &DesktopState,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_runtime_state(state, false).await
+}
+
+pub(crate) async fn build_streaming_client_state(
+    state: &DesktopState,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_runtime_state(state, true).await
+}
+
+async fn build_runtime_state(
+    state: &DesktopState,
+    streaming: bool,
+) -> Result<RuntimeStateSnapshot, CommandError> {
     let started = Instant::now();
     let mut timing = timing::SnapshotTiming::new();
     // Bound preparation per state before reading inputs. Waiting callers must
     // project fresh inputs, not queue stale inventories or blocking workers.
     let permit = state.runtime_snapshot_permit().await?;
     timing.mark("worker_queue");
-    let inputs = state.snapshot_inputs().await?;
-    timing.mark("inputs");
-    let runtime = state.gateway.runtime().await;
-    timing.mark("runtime");
     let state = state.clone();
     worker::run(permit, move || {
         timing.mark("worker_dispatch");
-        project_local_runtime_state(&state, inputs, runtime, started, timing)
+        // Store/credential mutex waits belong to the same bounded worker as
+        // projection, not the async command executor. Read inputs before the
+        // runtime handle, preserving the snapshot's existing capture order.
+        let inputs = tauri::async_runtime::block_on(state.snapshot_inputs())?;
+        timing.mark("inputs");
+        timing.record_store_lock_wait(inputs.store_lock_wait);
+        let runtime = tauri::async_runtime::block_on(state.gateway.runtime());
+        timing.mark("runtime");
+        project_local_runtime_state(&state, inputs, runtime, started, timing, streaming)
     })
     .await
 }
@@ -55,6 +72,7 @@ fn project_local_runtime_state(
     runtime: Option<Arc<GatewayRuntime>>,
     started: Instant,
     mut timing: timing::SnapshotTiming,
+    streaming: bool,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let running = inputs.running;
     let routing_order = runtime
@@ -135,6 +153,14 @@ fn project_local_runtime_state(
             runtime: runtime.as_deref(),
         },
     );
+    if streaming {
+        zenith_relay_core::protocol::apply_streaming_model_protocol_routes(
+            &mut models,
+            &source_summaries,
+            &account_summaries,
+            &inputs.gateway.model_reasoning_allowed_levels,
+        );
+    }
     timing.mark("model_configuration");
     let mut display_projection = ModelDisplayProjection::new(&model_metadata);
     display_projection.apply_model_order(&mut models, &inputs.gateway.model_display_order);
@@ -181,7 +207,6 @@ fn project_local_runtime_state(
             visible_model_ids,
             max_retry_candidates: inputs.gateway.max_retry_candidates,
             default_service_tier: inputs.gateway.default_service_tier,
-            image_base_model: inputs.gateway.image_base_model.clone(),
             models,
             model_catalog: display_projection.member_catalog(
                 &source_summaries,

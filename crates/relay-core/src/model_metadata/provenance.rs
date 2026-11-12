@@ -286,6 +286,7 @@ fn normalized_fields() -> impl Iterator<Item = (&'static str, &'static [&'static
             &["/tool_choice", "/supported_parameters"],
         ),
         ("capabilities.streaming", &["/streaming"]),
+        ("capabilities.interleavedSystem", &["/interleaved_system"]),
         (
             "capabilities.serviceTiers",
             &["/service_tiers", "/supported_service_tiers"],

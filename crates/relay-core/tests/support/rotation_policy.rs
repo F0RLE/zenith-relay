@@ -34,7 +34,7 @@ pub(super) fn set_order(gateway: &TestServer, ids: &[&str]) {
     runtime
         .set_pool_routing_policy(
             PoolRoutingPolicy {
-                mode: PoolRoutingMode::InOrder,
+                mode: PoolRoutingMode::RoundRobin,
                 members,
                 ..Default::default()
             },

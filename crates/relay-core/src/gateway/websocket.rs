@@ -24,28 +24,32 @@ use crate::runtime::{
 use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, UsageTransport, WireApi};
 use axum::body::Body;
 use axum::extract::State;
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
+use axum::extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use futures_util::StreamExt;
-use reqwest_websocket::{
-    CloseCode as UpstreamCloseCode, Message as UpstreamMessage, Upgrade,
-    WebSocket as UpstreamWebSocket,
-};
+use reqwest_websocket::{CloseCode as UpstreamCloseCode, Message as UpstreamMessage};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at, sleep_until, timeout};
+use transport::UpstreamWebSocket;
 
 mod bridge;
+mod client_socket;
+mod connection_responses;
+mod event_scope;
 mod events;
 mod failure;
 mod fallback;
 mod io;
+mod multiplex;
 mod request;
+pub(crate) mod transport;
 mod upstream;
 
 use bridge::{bridge, semantic_output_payload, semantic_output_value};
+use client_socket::WebSocket;
 use fallback::bridge_http_fallback;
 #[cfg(test)]
 use fallback::{
@@ -69,6 +73,8 @@ use request::{ClientRequest, PreparedPayload};
 
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
+const MAX_NAMED_STREAMS: usize = 32;
+const MAX_ACTIVE_RESPONSES: usize = 16;
 const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
@@ -98,7 +104,14 @@ pub(super) async fn responses(
         .max_frame_size(MAX_WEBSOCKET_MESSAGE_BYTES)
         .write_buffer_size(64 * 1024)
         .max_write_buffer_size(MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2))
-        .on_upgrade(move |socket| handle_connection(socket, runtime, key, headers))
+        .on_upgrade(move |socket| async move {
+            let socket = WebSocket::new(socket);
+            if runtime.codex_websockets_enabled() {
+                handle_connection(socket, runtime, key, headers).await;
+            } else {
+                multiplex::serve_http(socket, runtime, key, headers).await;
+            }
+        })
 }
 
 async fn handle_connection(
@@ -116,6 +129,9 @@ async fn handle_connection(
         }
     };
 
+    if downstream.note_request_prepared().await.is_err() {
+        return;
+    }
     let request_id = client_request.request_id.clone();
     if let Some(kind) = client_request.background_kind
         && !runtime.codex_background_request_enabled(kind)
@@ -156,16 +172,17 @@ async fn handle_connection(
         }
         return;
     }
-    let fallback_request = client_request.clone();
-    if !runtime.codex_websockets_enabled() {
+    let stream_id = client_request.stream_id.clone();
+    if downstream.is_http_lane() || !runtime.codex_websockets_enabled() {
         bridge_http_fallback(
             downstream,
             runtime,
             key,
             headers,
-            fallback_request,
-            crate::usage::TransportFallbackReason::WebsocketDisabled,
-            None,
+            upstream::HttpFallback::new(
+                client_request,
+                crate::usage::TransportFallbackReason::WebsocketDisabled,
+            ),
         )
         .await;
         return;
@@ -178,46 +195,13 @@ async fn handle_connection(
         client_request,
         true,
         0,
+        None,
     )
     .await
     {
         Ok(ConnectedTransport::Websocket(connected)) => *connected,
         Ok(ConnectedTransport::Http(fallback)) => {
-            bridge_http_fallback(
-                downstream,
-                runtime,
-                key,
-                headers,
-                fallback.request,
-                crate::usage::TransportFallbackReason::WebsocketUnavailable,
-                Some(fallback.reserved_candidate),
-            )
-            .await;
-            return;
-        }
-        Err(failure)
-            if matches!(
-                failure.category,
-                error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
-                    | error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE
-            ) =>
-        {
-            let fallback_reason =
-                if failure.category == error_codes::UPSTREAM_WEBSOCKET_SLOW_HANDSHAKE {
-                    crate::usage::TransportFallbackReason::WebsocketSlowHandshake
-                } else {
-                    crate::usage::TransportFallbackReason::WebsocketUnavailable
-                };
-            bridge_http_fallback(
-                downstream,
-                runtime,
-                key,
-                headers,
-                fallback_request,
-                fallback_reason,
-                None,
-            )
-            .await;
+            bridge_http_fallback(downstream, runtime, key, headers, *fallback).await;
             return;
         }
         Err(failure) => {
@@ -225,7 +209,7 @@ async fn handle_connection(
                 &mut downstream,
                 &failure,
                 Some(&request_id),
-                fallback_request.stream_id.as_deref(),
+                stream_id.as_deref(),
             )
             .await;
             return;
@@ -242,39 +226,61 @@ async fn read_initial_request(
     headers: &HeaderMap,
 ) -> Result<ClientRequest, (GatewayFailure, Option<String>)> {
     let deadline = TokioInstant::now() + INITIAL_MESSAGE_TIMEOUT;
+    let mut heartbeat = interval_at(TokioInstant::now(), WEBSOCKET_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        let remaining = deadline.saturating_duration_since(TokioInstant::now());
-        if remaining.is_zero() {
-            return Err((GatewayFailure::request_timeout(), None));
-        }
-        let message = timeout(remaining, downstream.recv())
-            .await
-            .map_err(|_| (GatewayFailure::request_timeout(), None))?
-            .ok_or_else(|| (GatewayFailure::client_closed(), None))?
-            .map_err(|_| {
-                (
-                    GatewayFailure::invalid_request("invalid WebSocket frame"),
-                    None,
-                )
-            })?;
-        match message {
-            Message::Text(text) => {
-                return ClientRequest::prepare(runtime, key, headers, text.as_bytes(), None)
+        let message = tokio::select! {
+            biased;
+            _ = sleep_until(deadline) => return Err((GatewayFailure::request_timeout(), None)),
+            _ = heartbeat.tick() => {
+                timeout(deadline.saturating_duration_since(TokioInstant::now()),
+                    send_message(downstream, Message::Ping(Default::default())))
                     .await
-                    .map_err(|failure| (failure, ClientRequest::error_stream_id(text.as_bytes())));
+                    .map_err(|_| (GatewayFailure::request_timeout(), None))?
+                    .map_err(|_| (GatewayFailure::client_closed(), None))?;
+                continue;
             }
-            Message::Binary(bytes) => {
-                return ClientRequest::prepare(runtime, key, headers, &bytes, None)
-                    .await
-                    .map_err(|failure| (failure, ClientRequest::error_stream_id(&bytes)));
+            message = downstream.recv() => message,
+        }
+        .ok_or_else(|| (GatewayFailure::client_closed(), None))?
+        .map_err(|_| {
+            (
+                GatewayFailure::invalid_request("invalid WebSocket frame"),
+                None,
+            )
+        })?;
+        match message {
+            message @ (Message::Text(_) | Message::Binary(_)) => {
+                let payload: &[u8] = match &message {
+                    Message::Text(text) => text.as_bytes(),
+                    Message::Binary(bytes) => bytes,
+                    _ => unreachable!("matched a data frame"),
+                };
+                match ClientRequest::prepare(runtime, key, headers, payload, None).await {
+                    Ok(request) => return Ok(request),
+                    Err(failure) => {
+                        if failure::send_request_error(
+                            downstream,
+                            &failure,
+                            None,
+                            ClientRequest::error_stream_id(payload).as_deref(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return Err((GatewayFailure::client_closed(), None));
+                        }
+                    }
+                }
             }
             Message::Ping(payload) => {
-                if send_message(downstream, Message::Pong(payload))
-                    .await
-                    .is_err()
-                {
-                    return Err((GatewayFailure::client_closed(), None));
-                }
+                timeout(
+                    deadline.saturating_duration_since(TokioInstant::now()),
+                    send_message(downstream, Message::Pong(payload)),
+                )
+                .await
+                .map_err(|_| (GatewayFailure::request_timeout(), None))?
+                .map_err(|_| (GatewayFailure::client_closed(), None))?;
             }
             Message::Pong(_) => {}
             Message::Close(_) => return Err((GatewayFailure::client_closed(), None)),

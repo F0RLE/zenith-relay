@@ -101,8 +101,8 @@ pub(super) async fn import_account_item(
             .with_oauth_client_kind(credentials.oauth_client_kind());
         let client_version =
             zenith_relay_core::providers::chatgpt::configured_codex_client_version();
-        let models = client
-            .discover_authorized(
+        let discovery = client
+            .discover_authorized_with_diagnostics(
                 credentials
                     .authorization(issued_at_ms)
                     .map_err(credential_item_error)?,
@@ -119,7 +119,14 @@ pub(super) async fn import_account_item(
                 );
                 model_item_error(error)
             })?;
-        Some(models)
+        if let Some(catalog) = &discovery.basis_points_diagnostics {
+            crate::local_pool::accounts::model_probe::record_catalog(
+                credentials.local_account_id(),
+                proxy.is_some(),
+                catalog,
+            );
+        }
+        Some(discovery.models)
     } else {
         None
     };

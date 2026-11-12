@@ -21,7 +21,7 @@ pub(in crate::gateway) fn has_generation_evidence_bytes(bytes: &[u8]) -> bool {
             || event
                 .event_payload
                 .as_ref()
-                .is_some_and(super::has_generated_tokens)
+                .is_some_and(|payload| has_generation_evidence(payload, None))
         {
             return true;
         }
@@ -54,11 +54,20 @@ pub(in crate::gateway) fn has_complete_rejection_body(bytes: &[u8]) -> bool {
 #[derive(Clone, Copy, Default)]
 pub(in crate::gateway) struct BufferedResponseTiming {
     first_output_ms: Option<u64>,
+    first_reasoning_ms: Option<u64>,
     finished_ms: Option<u64>,
 }
 
 impl BufferedResponseTiming {
     pub(in crate::gateway) fn observe(&mut self, event: &TerminalEvent, elapsed_ms: u64) {
+        if event.valid
+            && self.first_reasoning_ms.is_none()
+            && let Some(payload) = &event.event_payload
+        {
+            let mut observation = crate::usage::StreamResponseDiagnostics::default();
+            observation.observe_reasoning(payload, elapsed_ms);
+            self.first_reasoning_ms = observation.upstream_reasoning_first_ms;
+        }
         // A completed snapshot is not evidence of when its first token arrived.
         if event.valid && event.has_output_delta && !event.is_compaction {
             self.observe_first_output(elapsed_ms);
@@ -75,6 +84,17 @@ impl BufferedResponseTiming {
     }
 
     pub(in crate::gateway) fn apply(&self, event: &mut crate::usage::UsageEvent) {
+        if let Some(reasoning) = self.first_reasoning_ms
+            && let Some(transport) = event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+        {
+            transport
+                .stream_response
+                .get_or_insert_default()
+                .upstream_reasoning_first_ms = Some(reasoning);
+        }
         if self.finished_ms.is_none() && self.first_output_ms.is_none() {
             // A default recorder is also used by transports it does not observe.
             // Do not erase those transports' own timing evidence.
@@ -125,11 +145,15 @@ pub(in crate::gateway) async fn collect_basis_points_response(
     expected_model: Option<&str>,
     started: Instant,
     timing: &mut BufferedResponseTiming,
+    mut pending_usage: Option<super::PendingUsageObservation<'_>>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     let bytes = crate::transport::collect_with_progress(
         upstream,
         crate::transport::basis_points_progress_timeout(),
         |bytes| {
+            if let Some(pending) = pending_usage.as_mut() {
+                pending.observe(bytes);
+            }
             let event = parse_sse_event(bytes);
             timing.observe(&event, started.elapsed().as_millis() as u64);
             should_stop_basis_points_event(&event, expected_model)
@@ -165,6 +189,7 @@ pub(in crate::gateway) async fn collect_upstream_response(
     prewarm: bool,
     started: Instant,
     timing: &mut BufferedResponseTiming,
+    pending_usage: Option<super::PendingUsageObservation<'_>>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     let bytes = read_upstream_body(
         upstream,
@@ -173,6 +198,7 @@ pub(in crate::gateway) async fn collect_upstream_response(
         prewarm,
         started,
         timing,
+        pending_usage,
     )
     .await;
     // Finish at the upstream boundary, before validation or synthetic client SSE.
@@ -191,6 +217,7 @@ async fn read_upstream_body(
     prewarm: bool,
     started: Instant,
     timing: &mut BufferedResponseTiming,
+    mut pending_usage: Option<super::PendingUsageObservation<'_>>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     let is_sse = upstream
         .headers()
@@ -203,15 +230,28 @@ async fn read_upstream_body(
                 .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
         });
     if is_sse && account_stream {
-        let (_, first, mut remaining) = super::super::streaming::bootstrap_observed_stream(
-            upstream,
-            expected_model,
-            false,
-            crate::protocol::sse::MAX_EVENT_BYTES,
-            prewarm,
-            Some(super::super::streaming::StreamBootstrapObservation::Buffered { started, timing }),
-        )
-        .await?;
+        let (_, first, mut remaining) = {
+            let mut observe = |bytes: &[u8]| {
+                if let Some(pending) = pending_usage.as_mut() {
+                    pending.observe(bytes);
+                }
+            };
+            super::super::streaming::bootstrap_observed_stream(
+                upstream,
+                expected_model,
+                false,
+                crate::protocol::sse::MAX_EVENT_BYTES,
+                prewarm,
+                Some(
+                    super::super::streaming::StreamBootstrapObservation::Buffered {
+                        started,
+                        timing,
+                        on_retained_body: Some(&mut observe),
+                    },
+                ),
+            )
+            .await?
+        };
         let mut bytes = first.to_vec();
         let mut inspected = 0;
         loop {
@@ -247,23 +287,31 @@ async fn read_upstream_body(
                     ..AttemptFailure::transport(&error).into()
                 })
             })?;
+            if let Some(pending) = pending_usage.as_mut() {
+                pending.observe(&chunk);
+            }
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     } else {
-        crate::transport::collect_with_progress(upstream, None, |_| false)
-            .await
-            .map_err(|error| {
-                Box::new(StreamBootstrapFailure {
-                    execution: if has_generation_evidence_bytes(&error.bytes) {
-                        crate::scheduler::rotation::ExecutionObservation::accepted()
-                    } else {
-                        crate::scheduler::rotation::ExecutionObservation::unknown()
-                    },
-                    partial_body: error.bytes,
-                    ..AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()
-                })
+        crate::transport::collect_with_progress(upstream, None, |frame| {
+            if let Some(pending) = pending_usage.as_mut() {
+                pending.observe(frame);
+            }
+            false
+        })
+        .await
+        .map_err(|error| {
+            Box::new(StreamBootstrapFailure {
+                execution: if has_generation_evidence_bytes(&error.bytes) {
+                    crate::scheduler::rotation::ExecutionObservation::accepted()
+                } else {
+                    crate::scheduler::rotation::ExecutionObservation::unknown()
+                },
+                partial_body: error.bytes,
+                ..AttemptFailure::stream(error_codes::UPSTREAM_BODY).into()
             })
+        })
     }
 }
 
@@ -291,6 +339,7 @@ pub(in crate::gateway) fn completed_upstream_response(
     }
     let mut offset = 0;
     let mut output_items = Vec::new();
+    let mut malformed_output_index = false;
     let mut saw_generation = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
@@ -298,7 +347,7 @@ pub(in crate::gateway) fn completed_upstream_response(
             || terminal
                 .event_payload
                 .as_ref()
-                .is_some_and(super::has_generated_tokens);
+                .is_some_and(|payload| has_generation_evidence(payload, None));
         if expected_model.is_some_and(|expected| {
             terminal
                 .event_payload
@@ -320,11 +369,12 @@ pub(in crate::gateway) fn completed_upstream_response(
             }));
         }
         if let Some(output_item) = terminal.output_item {
-            let index = terminal
+            let raw_index = terminal
                 .event_payload
                 .as_ref()
-                .and_then(|payload| payload.get("output_index"))
-                .and_then(Value::as_u64);
+                .and_then(|payload| payload.get("output_index"));
+            let index = raw_index.and_then(Value::as_u64);
+            malformed_output_index |= raw_index.is_some() && index.is_none();
             output_items.push((index, output_item));
         }
         match terminal.outcome {
@@ -357,12 +407,19 @@ pub(in crate::gateway) fn completed_upstream_response(
                         .and_then(Value::as_array)
                         .is_some_and(Vec::is_empty)
                     {
-                        response["output"] =
-                            Value::Array(output_items.into_iter().map(|(_, item)| item).collect());
+                        if malformed_output_index {
+                            return Err(invalid_buffered_response());
+                        }
+                        response["output"] = Value::Array(
+                            crate::protocol::response_snapshots::ordered_completed_output(
+                                output_items,
+                            )
+                            .map_err(|_| invalid_buffered_response())?,
+                        );
                     } else if let Some(output) =
                         response.get_mut("output").and_then(Value::as_array_mut)
                     {
-                        crate::protocol::response_snapshots::retain_completed_reasoning_items(
+                        crate::protocol::response_snapshots::reconcile_completed_output(
                             &output_items,
                             output,
                         )

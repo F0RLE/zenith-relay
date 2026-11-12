@@ -92,9 +92,11 @@ async fn siwc_native_catalog_loads_only_requested_tools_and_preserves_roundtrip(
         crate::poison::mutex(&siwc.state.generation_replies)
             .extend([(StatusCode::OK, first), (StatusCode::OK, calls())]);
         *crate::poison::mutex(&siwc.state.generation_body) = answer();
-        let (base, task) = recovery::gateway(runtime(&siwc, &native).await).await;
+        let runtime = runtime(&siwc, &native).await;
+        let (base, task) = recovery::gateway(runtime).await;
         let client = retry_admission::bounded_client();
         let mut payload = request(stream);
+        payload["max_output_tokens"] = json!(1024);
         let result = client
             .post(format!("{base}/v1/responses"))
             .bearer_auth("local-secret")
@@ -135,6 +137,7 @@ async fn siwc_native_catalog_loads_only_requested_tools_and_preserves_roundtrip(
         let bodies = crate::poison::mutex(&siwc.state.generation_bodies);
         assert_eq!(bodies.len(), 3);
         for body in bodies.iter() {
+            assert!(body.get("max_output_tokens").is_none());
             assert!(body.get("metadata").is_none());
             assert!(body.get("model_selection").is_none());
             assert!(body.get("previous_response_id").is_none());
@@ -188,7 +191,8 @@ async fn siwc_native_catalog_websocket_hides_lookup_and_keeps_client_calls() {
         (StatusCode::OK, lookup("resp_ws_lookup")),
         (StatusCode::OK, calls()),
     ]);
-    let (base, task) = recovery::gateway(runtime(&siwc, &native).await).await;
+    let runtime = runtime(&siwc, &native).await;
+    let (base, task) = recovery::gateway(runtime).await;
     let mut socket = retry_admission::bounded_client()
         .get(format!("{base}/v1/responses"))
         .bearer_auth("local-secret")
@@ -201,6 +205,7 @@ async fn siwc_native_catalog_websocket_hides_lookup_and_keeps_client_calls() {
         .unwrap();
     let mut payload = request(true);
     payload["type"] = json!("response.create");
+    payload["max_output_tokens"] = json!(1024);
     socket
         .send(Message::Text(payload.to_string()))
         .await
@@ -222,6 +227,11 @@ async fn siwc_native_catalog_websocket_hides_lookup_and_keeps_client_calls() {
     .unwrap();
     assert_eq!(result["output"], calls()["output"]);
     assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 2);
+    assert!(
+        crate::poison::mutex(&siwc.state.generation_bodies)
+            .iter()
+            .all(|body| body.get("max_output_tokens").is_none())
+    );
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
     task.abort();
 }

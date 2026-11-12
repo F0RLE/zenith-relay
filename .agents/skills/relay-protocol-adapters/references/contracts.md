@@ -11,6 +11,33 @@ changing behavior. Use the links below to locate those contracts.
 | Gemini Generate Content | [API reference](https://ai.google.dev/api/generate-content), [Schema SDK type](https://googleapis.github.io/js-genai/release_docs/interfaces/types.Schema.html), [function calling](https://ai.google.dev/gemini-api/docs/function-calling), [thought signatures](https://ai.google.dev/gemini-api/docs/thought-signatures) | Candidate/part order, function call IDs, native signatures, schema dialect, finish reason and usage metadata |
 | Gemini Interactions, native only | [API reference](https://ai.google.dev/api/interactions), [official Python SDK contract](https://github.com/googleapis/python-genai/tree/c0e9c54915970948258226e565bde6ef6d5c0b94/google/genai/_gaos/types/interactions) | Separate model-create contract; `event_type`, partial lifecycle resources, `previous_interaction_id`, native calls/results and usage. Inspected 2026-10-24. No Generate Content inference or foreign conversion. |
 
+Anthropic's official SDK defines `thinking.display` for
+[adaptive](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/thinking_config_adaptive_param.py)
+and [enabled](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/thinking_config_enabled_param.py)
+thinking as `summarized` or `omitted`. Display is separate from thinking
+effort/budget. Native Messages retains the provider's signature; conversion
+suppresses omitted public summaries while retaining original upstream opaque
+state in Relay's existing scoped checkpoint, never an invented Anthropic signature.
+Keep portable Chat reasoning in that checkpoint as well: its public native text
+has no separate opaque item, but hiding it from the client must not erase it
+from the next upstream tool-result request.
+The [context-editing contract](https://platform.claude.com/docs/en/build-with-claude/context-editing)
+defines `clear_thinking_20251015` with `keep: "all"` as preservation. Accepting
+that exact shape does not grant clearing, compaction or foreign-state replay.
+For explicit summarized display, the official
+[Responses reasoning type](https://github.com/openai/openai-python/blob/main/src/openai/types/shared_params/reasoning.py)
+defines `summary: "auto"`, and the
+[Gemini SDK](https://github.com/googleapis/js-genai/blob/main/src/types.ts)
+defines `ThinkingConfig.includeThoughts`. Chat Completions has no portable
+summary-generation control; reject this explicit request rather than drop it.
+Gemini's flag controls inclusion when thoughts are available; it does not select
+effort or enable thinking. Convert its boolean through the shared display policy.
+Display-only omission can preserve upstream defaults, while display-only inclusion
+can request a Responses summary. Do not create a Messages `thinking` object with
+only `display`, guess an enabling mode/budget, or re-enable an explicit zero budget.
+Unsupported inclusion errors retain the incoming Gemini parameter path. Native
+forwarding preserves the flag unchanged.
+
 Provider-compatible APIs need their own official capability and endpoint
 documentation. OpenAI wire compatibility alone does not establish stateful
 Responses support, tool search, structured outputs, or a reasoning level.
@@ -111,6 +138,11 @@ The pinned sources below preserve the revisions used for individual field-level
 comparisons. They are historical evidence, not newest-version labels or copied
 converters; do not replace their hashes without rechecking the associated claim.
 
+- [Responses input types](https://github.com/openai/openai-python/blob/44b1555aff1c22998c008c84400e7acce39fb928/src/openai/types/responses/response_input_item_param.py)
+  and [reasoning item](https://github.com/openai/openai-python/blob/44b1555aff1c22998c008c84400e7acce39fb928/src/openai/types/responses/response_reasoning_item_param.py):
+  history `status` uses the `in_progress`, `completed`, `incomplete` enum.
+  Validate supplied non-null statuses before foreign conversion instead of
+  silently discarding malformed values. Native forwarding keeps the source item.
 - [Responses nullable output fields](https://github.com/openai/openai-node/blob/17e0f08e83e2381efa075b1bbe9ed5eb7b63a6e1/src/resources/responses/responses.ts):
   message `phase`, reasoning `encrypted_content`, and function/custom tool
   `caller` are optional and nullable. Completed-item comparisons treat omission
@@ -149,6 +181,21 @@ converters; do not replace their hashes without rechecking the associated claim.
   into a foreign target's system field, retaining instruction and user-content
   order separately. SDK acceptance of an inline system role does not justify
   hoisting it past an earlier assistant turn on a different endpoint.
+  The current [mid-conversation system guide](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)
+  and [official system-message type](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/system_message_param.py)
+  permit text-only inline system messages on supported models. Relay uses them
+  only with explicit `interleaved_system` evidence on the selected Messages route;
+  capability exclusions win. A system group follows a user turn and precedes an
+  assistant turn or ends the input. This does not provide a foreign developer
+  role or Gemini system turn, and requires no API-version or beta-header upgrade.
+  The conversion boundary also validates the source Messages contract before
+  lowering tool updates. Consecutive system messages share placement checks;
+  an assistant exception requires a server-tool result as its final block, not
+  merely somewhere in its content. Root and inline system content use Messages
+  text blocks. Null/empty inline sections cannot be silently omitted.
+  Existing text-only client startup bundles before the first assistant retain
+  the initial attachment contract above. That exception does not admit tool
+  changes at other positions or grant later instruction hoisting.
 - [Google SDK](https://github.com/googleapis/js-genai/blob/177ee684ada5d2fd39450e88a9416b301eaa6ff4/src/types.ts):
   optional Content roles, function-call identity and arguments, and calling modes.
   The official [Generate Content protobuf](https://github.com/googleapis/googleapis/blob/bc7e3baa28fbb223fa93782e130260fab8205bfc/google/ai/generativelanguage/v1beta/content.proto)
@@ -177,25 +224,54 @@ Claude Desktop's official [third-party configuration](https://claude.com/docs/th
 defines per-model `maxEffort` as an upper bound, not an enum of allowed efforts.
 Its `modelCatalogUrl` setting is a mirror for Anthropic's signed catalog, not
 an unsigned gateway metadata endpoint: Desktop verifies the adjacent
-`.raw-sig.json` against a built-in key. The installed Desktop 3.1623.3.0 parser
-in `.vite/build/index.chunk-BMtEZi-I.js` inside `app.asar` accepts schema version 1
-and arbitrary `thinking.effort_options`; the reader in
-`.vite/build/index.chunk-TcAEd5wW.js` requires the signature even for custom
-loopback URLs. Parser support alone does not establish an integration path.
+`.raw-sig.json` against a built-in key. Parser support for arbitrary
+`thinking.effort_options` alone does not establish an unsigned integration path.
 Keep supported higher picker choices available while exact sparse menus remain
 unresolved; never silently substitute another incoming effort. Admission uses
 the selected model's executable, pool-allowed route choices and key scope.
 An alias grants no reasoning capability, budget, price, or context window.
 The embedded Code engine also resolves effort independently of Desktop's menu.
-Static inspection of Desktop 3.1623.3.0's Code 2.1.308 shows its effort resolver
-replacing `max`/`xhigh` with `high` when that ID fails the corresponding capability
-lookup, even if the session retains the higher selection. This is observed client
-behavior, not an Anthropic wire guarantee. The official
+Unsupported `max`/`xhigh` can become `high` inside Code even if the session retains
+the higher selection. This is client behavior, not an Anthropic wire guarantee. The official
 [model configuration](https://code.claude.com/docs/en/model-config#customize-pinned-model-display-and-capabilities)
 defines capability declarations for specifically pinned model IDs; it does not
 make a Desktop `maxEffort` cap a capability declaration for every opaque route.
 Never repair this by upgrading all incoming `high` requests or claiming an
-unrelated model's native capabilities. Client-to-wire qualification remains open.
+unrelated model's native capabilities.
+The current official configuration also documents `inferenceModels[].behavesAs`
+(Desktop 4.29.0+) for the actual Claude model behind an unknown ID. Desktop
+4.4212.0.0's `.vite/build/index.chunk-CUttgRYM.js` exports these associations to
+embedded Code as `modelPicker.options`. Recognized version-shaped IDs keep their
+built-in identity, so the existing Relay aliases cannot gain a different identity
+by adding this field alone. It does not describe arbitrary foreign capabilities
+or exact sparse effort sets. Relay uses a publisher-version-gated, version-neutral
+ID only for an Anthropic catalog identity with a supported native effort cap.
+Reclaim verifies the exact generated identity, and unknown client versions retain
+existing identity profiles. Retired Zenith aliases are not compatibility routes.
+The installed-Code loopback check has qualified 2.1.308 and 2.1.309 with actual
+generated profile rows: Max for Opus 4.6, and Max/XHigh for Opus 4.7. Native
+controls and opaque aliases retain the requested model and effort in one
+Messages request and finish a synthetic SSE answer. A 2.1.309 Opus 4.6 XHigh
+control becomes High both with and without an alias. These are exact-version
+client observations, not proof of Desktop picker/settings handoff, provider
+support, sparse menus, or other platforms. The direct fixture never forwards
+traffic. The combined opt-in variant routes the same generated alias through
+Relay's actual in-process gateway to its own synthetic Messages upstream,
+checking the canonical model, exact effort, one physical send and one usage
+record. These text-only variants use empty configuration, no tools or permission
+bypass, synthetic keys and loopback-only endpoints. A separate `--tool-cycle`
+variant enables only one declared synthetic MCP lookup, audits its actual
+execution once, and checks call → result → next answer through native Messages
+and conversion to Responses, Chat and Gemini. It retains model/effort and one usage record per
+generation. The observer buffers the synthetic SSE reply
+and stubs token-count calls, so it establishes neither timing nor token-count
+endpoint behavior. Run them with the intended installed executable as
+described in [CONTRIBUTING.md](../../../../CONTRIBUTING.md#verification).
+The complete synthetic MCP cycle has also passed with installed 2.1.308 and
+2.1.309 through all four upstream protocols. Messages, Responses and Chat use
+those supported Max/XHigh cases; Gemini uses an independently declared High
+case, with no effort substitution. Chat replays its original reasoning text;
+Gemini replays original thought signatures and the paired function result.
 OpenCode's built-in `Default` choice means no variant override, not a model
 effort named `default`; disabling a named variant does not remove that client UI.
 

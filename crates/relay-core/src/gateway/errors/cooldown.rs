@@ -3,12 +3,9 @@ use crate::error_codes;
 
 mod rate_limit;
 
+pub(crate) use rate_limit::{RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value};
 #[cfg(test)]
-pub(crate) use rate_limit::rate_limit_body_hint_at;
-pub(crate) use rate_limit::{
-    RateLimitBodyHint, rate_limit_body_hint, rate_limit_body_hint_value, retry_after_ms,
-    retry_delay_ms,
-};
+pub(crate) use rate_limit::{rate_limit_body_hint_at, retry_after_ms};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn settle_status_failure(
@@ -93,7 +90,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         (
             error_codes::UPSTREAM_RATE_LIMITED,
             RateLimitBodyHint {
-                retry_after_ms: hint.retry_after_for_account(false),
+                retry_clock: hint.explicit_retry_clock,
                 global: false,
                 ..hint
             },
@@ -111,10 +108,10 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         return None;
     }
     let now = crate::unix_time_ms_at(now_system);
-    let header_retry_after_ms = retry_after_ms(headers, now_system);
-    let explicit = header_retry_after_ms.is_some()
-        || hint.retry_after_ms.is_some()
-        || category == error_codes::UPSTREAM_ROUTE_DEGRADED;
+    let provider_clock = hint
+        .with_retry_headers_at(headers, now_system)
+        .retry_clock_for_account(true);
+    let explicit = provider_clock.is_some() || category == error_codes::UPSTREAM_ROUTE_DEGRADED;
     let reason = failure_cooldown_reason(status, category, explicit);
     if reason == CooldownReason::Transient {
         return None;
@@ -158,7 +155,9 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
     } else {
         TRANSIENT_COOLDOWN_MS
     };
-    let mut duration_ms = retry_delay_ms(header_retry_after_ms, hint.retry_after_ms, fallback);
+    let mut duration_ms = provider_clock
+        .map(|clock| clock.not_before_ms.saturating_sub(now))
+        .unwrap_or(fallback);
     if basis_points_rate_limit {
         // Millisecond token-bucket hints must not recycle a saturated BPS route immediately.
         duration_ms =
@@ -176,6 +175,7 @@ pub(crate) fn failure_cooldown(cooldown_input: CooldownInput<'_>) -> Option<Cool
         scope,
         retry_at_ms,
         reason,
+        provider_clock,
     })
 }
 
@@ -215,11 +215,13 @@ pub(crate) fn current_failure_state(
     candidate_id: &str,
     model: &str,
 ) -> FailureState {
-    let (consecutive_failures, cooldown) = runtime.failure_state_for(candidate_id, model, now_ms());
+    let (consecutive_failures, cooldown, provider_backoff) =
+        runtime.failure_state_for(candidate_id, model, now_ms());
     FailureState {
         consecutive_failures,
         retry_at_ms: cooldown.as_ref().map(|(_, at)| *at),
         cooldown_scope: cooldown.map(|(scope, _)| scope),
+        provider_backoff,
     }
 }
 
@@ -237,7 +239,11 @@ pub(crate) fn failure_cooldown_reason(
     explicit_retry_after: bool,
 ) -> CooldownReason {
     if status == StatusCode::TOO_MANY_REQUESTS {
-        return CooldownReason::RateLimit;
+        return if category == error_codes::UPSTREAM_QUOTA_EXHAUSTED {
+            CooldownReason::QuotaExhausted
+        } else {
+            CooldownReason::RateLimit
+        };
     }
     if explicit_retry_after
         || matches!(
@@ -305,6 +311,7 @@ pub(crate) fn settle_image_capability_failure(
             scope,
             retry_at_ms,
             reason: CooldownReason::Mandatory,
+            provider_clock: None,
         }),
         now,
     );
@@ -315,4 +322,7 @@ pub(crate) fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {
     event.cooldown_scope = state.cooldown_scope;
     event.retry_at_ms = state.retry_at_ms;
     event.consecutive_failures = Some(state.consecutive_failures);
+    if let Some(routing) = event.routing.as_mut() {
+        routing.provider_backoff = state.provider_backoff;
+    }
 }

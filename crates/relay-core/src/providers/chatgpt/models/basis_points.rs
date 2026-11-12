@@ -4,6 +4,11 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use url::Url;
 
+mod diagnostics;
+pub use diagnostics::{
+    BasisPointsCatalogDiagnostics, BasisPointsModelDiagnostic, BasisPointsModelOutcome,
+};
+
 pub const BASIS_POINTS_ACCESS_ENDPOINT: &str =
     "https://bps.openai.com/basispoints/api/responses/access";
 pub const MAX_BASIS_POINTS_ACCESS_BYTES: usize = 1024 * 1024;
@@ -103,6 +108,12 @@ pub fn basis_points_access_url(responses_url: &Url) -> Option<Url> {
 pub fn parse_basis_points_model_access(
     bytes: &[u8],
 ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
+    parse_basis_points_model_access_with_diagnostics(bytes).map(|(access, _)| access)
+}
+
+pub fn parse_basis_points_model_access_with_diagnostics(
+    bytes: &[u8],
+) -> Result<(BasisPointsModelAccess, BasisPointsCatalogDiagnostics), ModelDiscoveryFailure> {
     #[derive(Deserialize)]
     struct Envelope {
         allowed: Option<bool>,
@@ -118,8 +129,26 @@ pub fn parse_basis_points_model_access(
     let invalid = || ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidResponse);
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     let allowed = envelope.allowed.ok_or_else(invalid)?;
+    let mut diagnostics = BasisPointsCatalogDiagnostics {
+        access_allowed: allowed,
+        received_models: envelope
+            .model_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.models.as_ref())
+            .map_or(0, Vec::len),
+        ..Default::default()
+    };
     if !allowed {
-        return Ok(BasisPointsModelAccess { models: Vec::new() });
+        if let Some(models) = envelope.model_catalog.and_then(|catalog| catalog.models) {
+            for (row, model) in models.iter().enumerate() {
+                diagnostics.observe(
+                    row,
+                    diagnostics.model_id(model),
+                    BasisPointsModelOutcome::AccessDenied,
+                );
+            }
+        }
+        return Ok((BasisPointsModelAccess { models: Vec::new() }, diagnostics));
     }
     let catalog = envelope.model_catalog.ok_or_else(invalid)?;
     let raw_models = catalog.models.ok_or_else(invalid)?;
@@ -132,34 +161,45 @@ pub fn parse_basis_points_model_access(
         .map(|id| crate::model_id_key(id))
         .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    let models = raw_models
-        .into_iter()
-        // A malformed row does not invalidate the provider's envelope. The
-        // access decision and catalog shape remain authoritative while one
-        // bad model entry is ignored safely.
-        .filter_map(|raw_model| serde_json::from_value::<BasisPointsModel>(raw_model).ok())
-        .filter_map(|mut model| {
-            let normalized_id = model.id.trim();
-            if !crate::is_valid_model_token(normalized_id)
-                || restricted.contains(&crate::model_id_key(normalized_id))
-                || model.available == Some(false)
-                || model.enabled == Some(false)
-                || model.model_picker_enabled == Some(false)
-                || model.policy.as_ref().is_some_and(|policy| {
-                    matches!(
-                        policy.state.as_str(),
-                        "disabled" | "unconfigured" | "denied" | "blocked"
-                    )
-                })
-                || !seen.insert(crate::model_id_key(normalized_id))
-            {
-                return None;
-            }
+    let mut models = Vec::new();
+    for (row, raw_model) in raw_models.into_iter().enumerate() {
+        // Diagnose the same decision that supplies executable access; do not
+        // reconstruct it with a second set of filtering rules.
+        let model_id = diagnostics.model_id(&raw_model);
+        let Ok(mut model) = serde_json::from_value::<BasisPointsModel>(raw_model) else {
+            diagnostics.observe(row, model_id, BasisPointsModelOutcome::MalformedRow);
+            continue;
+        };
+        let normalized_id = model.id.trim();
+        let outcome = if !crate::is_valid_model_token(normalized_id) {
+            BasisPointsModelOutcome::InvalidId
+        } else if restricted.contains(&crate::model_id_key(normalized_id)) {
+            BasisPointsModelOutcome::Restricted
+        } else if model.available == Some(false) {
+            BasisPointsModelOutcome::Unavailable
+        } else if model.enabled == Some(false) {
+            BasisPointsModelOutcome::Disabled
+        } else if model.model_picker_enabled == Some(false) {
+            BasisPointsModelOutcome::PickerDisabled
+        } else if model.policy.as_ref().is_some_and(|policy| {
+            matches!(
+                policy.state.as_str(),
+                "disabled" | "unconfigured" | "denied" | "blocked"
+            )
+        }) {
+            BasisPointsModelOutcome::PolicyBlocked
+        } else if !seen.insert(crate::model_id_key(normalized_id)) {
+            BasisPointsModelOutcome::Duplicate
+        } else {
+            BasisPointsModelOutcome::Accepted
+        };
+        diagnostics.observe(row, model_id, outcome);
+        if outcome == BasisPointsModelOutcome::Accepted {
             model.id = normalized_id.to_string();
-            Some(model)
-        })
-        .collect();
-    Ok(BasisPointsModelAccess { models })
+            models.push(model);
+        }
+    }
+    Ok((BasisPointsModelAccess { models }, diagnostics))
 }
 
 #[cfg(test)]

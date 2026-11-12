@@ -116,12 +116,86 @@ The owning execution paths are `gateway/execution/request/`,
 `gateway/execution/account/`, and `gateway/websocket/`. They share runtime,
 protocol, authorization, and scheduler policy; transport-specific orchestration
 does not grant a different retry or ownership contract.
+Account-only attempts retain explicit outcomes for completion, returned failure,
+repair and candidate-selection retries, and unknown execution. A collected invalid
+or incomplete result stays a failure; an unreadable body stays execution-uncertain.
+Repair exhaustion retains the logical request identity and each physical attempt's
+own reported usage, without another dispatch after an uncertain result.
 
-`request/state.rs` owns request-local retry history and continuation/repair
-state; candidate attempts borrow that owner rather than assembling independent
-mutable flags. Identity, budget, leases and recorded outcomes keep their owners.
+`execution/state.rs` owns request-local retry history and continuation/repair
+state shared by HTTP and account-only controllers. HTTP selection, preparation,
+dispatch, rejection, buffered completion and stream bootstrap borrow that typed
+owner or its retry component. Rejection collection, repair and settlement carry
+the same owner through their stages. Account-only stages retain prepared
+continuation facts instead of deriving them again from a rewritten body.
+Identity, budget, leases and recorded outcomes keep their owners;
+the shared budget remains authoritative for physical dispatch counts.
+With route recovery enabled, proven pre-execution throttling or model-capacity
+rejections first retain the selected candidate in that shared request budget.
+The existing admission queue waits without holding a lease, respecting provider
+cooldowns and exponential request-local pacing with jitter. This preference lasts
+at most 30 seconds, retains its original deadline through retries and transport
+handoffs, and revalidates scope, route permissions and credential incarnation.
+It neither refunds physical dispatches nor materializes opaque history merely
+to escape a temporary rejection. On expiry or invalidation, portable routes
+resume ordinary selection; SIWC requires an explicit structured transient code
+and cannot gain a cross-account fallback from this temporary-error policy.
+Quota, authentication, partial output and uncertain
+execution keep their separate recovery contracts.
+An internal HTTP materialization retry moves its existing state, retaining
+consumed repairs and request-local preparation exclusions.
 `runtime/models.rs` owns model registry and editable model policy while retaining
 separate locks and the shared visibility handle observed by candidate leases.
+`runtime/provider_state.rs` groups the remaining graph-local provider state:
+`RuntimeSourceState` owns connectors, discovery/proxy clients, bindings and
+recovery delays; `RuntimeAccountState` owns account executors, principal groups,
+passive quota and breaker state; `RuntimeProviderMetadata` owns reference-catalog
+handles and existing native-model, transport and refresh-hint observations.
+Each existing lock, cache limit and invalidation retains its boundary. Policy
+edits preserve these owners and shared catalog handles; model policy stays with
+`RuntimeModelState`, and conversation stores remain with their existing owners.
+Source-policy batches validate every participant before publishing scheduler
+rules and recovery delays together. The commit holds the scheduler lock, then
+the recovery-delay map lock, and notifies waiters after releasing both. Recovery
+readers copy their delay and release that map before settling scheduler state.
+Policy-only source/account, visibility and key-scope edits retain the listener
+and runtime graph. Dispatched streams keep their leases and saved continuations;
+pending sends revalidate the current policy. The dispatch's credential revision
+survives policy edits, while a replacement login invalidates it even when token
+generation numbers match.
+Runtime reconstruction derives quota exhaustion and limiting reset timestamps
+from durable quota snapshots. Legacy cooldown maps and failure counts do not
+become hard admission evidence when rebuilding account executors.
+Request routing diagnostics retain an optional `providerBackoff` with the
+normalized provider deadline and its candidate-wide (`*`) or model scope.
+When known, `observedAtMs` retains the local clock used to normalize that exact
+deadline. Equal deadlines retain the earliest known observation. Storage times,
+reads, membership refreshes and shorter hints never replace it; older records
+without an observation time remain unknown.
+HTTP, SSE, WebSocket terminals and deferred discovery retain the paired deadline
+and observation from hint normalization through settlement. Re-reading an already
+normalized `Retry-After` does not renew it; combined observations compare absolute
+deadlines rather than relative durations from different clocks. HTTP error replies
+derive `Retry-After` from the remaining interval. WebSocket body reset hints stay
+with the shared parser instead of becoming synthetic provider headers.
+WebSocket initial-rejection errors carry that normalized `retry_at_ms` through
+retry selection and client error serialization. Subscription reset evidence stays
+bound to account origins; API-source errors use only their explicit retry hints.
+Existing hint parsing and bounds apply; local recovery floors and circuit
+delays remain separate in the effective `retryAtMs`. Absolute `resets_at` values
+retain millisecond precision in both Unix-second and Unix-millisecond forms,
+including resets within the current second. Expired values may fall back to
+explicit relative hints, without reviving an expired deadline. Missing or
+expired provider evidence stays absent. The scheduler settles and reads this evidence under its
+existing lock and credential-revision guards. Confirmed shared-rate buckets
+retain their paired deadline and observation time, without borrowing other limits on the same
+model or extending the clock with inferred group backoff. Desktop usage storage
+preserves it for measurement, without credential provenance. Support exports
+classify the scope and replace model IDs with report-local references; these
+records are not an authority for restoring admission deadlines after restart.
+Policy-only visibility, key-scope and source-model edits leave dispatched native
+WebSocket responses and their leases intact; queued requests check current
+permissions before dispatch, and restored access retains valid connection history.
 
 ## Desktop workspace
 
@@ -189,12 +263,15 @@ are ready, then renders the prepared component directly without a first-use
 Suspense frame. The latest click/mode wins; failed imports retain the current
 screen with a retry action. The interactive metric still waits for a successful initial snapshot
 and paint; revealing navigation does not record backend readiness or health.
-Opening folders, exporting Usage/configuration, previewing a preset and copying
+Opening folders, exporting accounts/Usage/configuration, previewing a preset and copying
 an API key do not reload the full runtime. Applying a preset, rotating a key and
 other runtime mutations retain their refresh. Settings reuse immutable native
 storage roots only within the current renderer; mutable diagnostic settings still
 revalidate. Network observation does not restart for unrelated busy/feedback
 changes, and an older network read cannot undo a completed sharing change.
+Cancelling an account or Usage save dialog settles silently. The account export
+editor keeps its description and selection for retry; success feedback follows
+an actual file save or completed clipboard write.
 ### Diagnostics and native work
 
 Memory monitoring is log-only and debug-gated. Startup, enabling debug and opening
@@ -217,27 +294,68 @@ complete slot after restart. Legacy stage files remain readable; clean exit clea
 stage state. Writes validate their directory boundary. History uses SQLite WAL/FULL
 durability independently of diagnostic files.
 
+The fixed `account-subscription-probe` operation remains readable in JSONL and
+interrupted-stage markers. This exception applies only to the operation field;
+detail values, extended account-like tokens, credentials and free-form text keep
+their existing redaction.
+Recognized credential patterns are redacted from error-code fields as well as
+diagnostic text; canonical error labels remain readable.
+
 Native snapshots, renderer timing writes and blocking configuration, filesystem
 and network-interface reads run off the window thread. Results include completed
 validation and storage errors. Snapshot timing separates native preparation,
 queue/worker waits, IPC, paint and interactive readiness; preparations of at least
-250 ms also record fixed-name stages. A timing batch commits atomically, including
-retention, and contains no account, source, model or credential values.
+250 ms also record fixed-name stages. Every successful native snapshot separately
+records `snapshot_lock_wait` with the fixed context `store`, including zero and
+sub-millisecond waits. It measures acquisition of the local store mutex, excluding
+work performed while holding it, SQLite locks and asynchronous worker queues.
+This wait is a subset of the inclusive input stage and total, not an additive
+projection stage. A timing batch commits atomically, including retention, and
+contains no account, source, model or credential values.
+
+Performance history retains the latest 128 samples per metric, or 256 for the
+multi-stage `snapshot_stage` metric, for up to 30 days and 2,048 rows overall.
+Frequent snapshots cannot evict rare startup, navigation or command timings
+merely by advancing SQLite row IDs. Retention counts actual rows after pruning,
+uses a metric/ID index, and remains atomic with each timing batch. Schema 45
+applies these bounds to existing diagnostic samples without changing request
+history or application settings.
 
 Each Desktop state admits one full runtime snapshot before reading its inputs;
 clones share that bound separately from the setup mutation lock. Cancellation
-retains the slot until blocking work finishes. Routing previews use the current
-inventory/catalog, reuse admission only within that snapshot and never advance
+retains the slot until blocking work finishes. Input capture, including store
+and credential-cache lock waits, runs in the same blocking worker as projection;
+it does not stall the asynchronous command executor. Inputs are read before the
+runtime handle, after admission and worker dispatch. Routing previews use the
+current inventory/catalog, reuse admission only within that snapshot and never advance
 live rotation; ambiguous ranks stop the preview. Presentation indexes and saved
 model ordering provide no route, quota or authorization evidence.
 
 ### Metadata and query caches
 
 Metadata caches persist validated source envelopes rather than the merged JSON
-tree. Immutable catalogs, pricing and indexes can be shared across unchanged
+tree in the current version-2 bundle. Retired single-source caches and auxiliary
+sidecar files are not restored; normal reference refresh rebuilds the cache.
+An invalid cache does not prevent startup. Immutable catalogs, pricing and
+indexes can be shared across unchanged
 revisions; refresh failure retains prior data and updates status. Freshness changes
 recompute metadata winners even after HTTP 304. Within the exact provider/model
 scope, fresh sources win and stale sources only fill missing fields.
+Reference refreshes validate every record's structure and nonempty bounded string
+identity before replacing its source envelope. A mixed valid/malformed response
+retains the previous source revision, models and efforts as stale, including
+after cache reload; other reference sources can still refresh independently.
+Unique scoped identities share the merged catalog's total model limit across
+providers and fresh/stale sources. Overflow rejects the replacement before writing
+the cache or publishing a snapshot; updating an existing identity at the limit
+remains valid. An oversized cached combination retains its source envelopes,
+records an invalid-cache state and schedules startup refresh without exposing a
+partial catalog. Supported primary map/array forms, provider model-key defaults,
+LiteLLM specification/alias records and unknown extension fields remain accepted.
+Source contracts:
+[models.dev](https://models.dev/#api),
+[OpenRouter](https://openrouter.ai/docs/guides/overview/models) and
+[LiteLLM](https://docs.litellm.ai/docs/proxy/model_cost_map).
 
 Provider-specific models.dev, OpenRouter and LiteLLM records retain their hosting
 namespace, including qualified IDs. Canonical presentation links do not import
@@ -292,6 +410,8 @@ Writes coalesce and flush on hiding/leaving; storage failure is non-fatal and
 independent of native durability. Credentials, revealed identities and provider
 error messages are excluded; activity and leases are not restored.
 
+Usage restores only the current exact query key; retired pre-`includeReport`
+preview keys are not reused. Native history remains authoritative.
 Saved previews are display-only. Runtime-dependent actions stay disabled until a
 native snapshot succeeds; navigation, Settings and Help remain usable. Hosted
 does not restore local inventory. Accepted reads/mutations fence late restoration;
@@ -362,6 +482,14 @@ Connections stores accounts, API sources, and proxies. Saving a connection does
 not enable pool membership. Access owns listener/key settings and account
 request policies; Pool owns membership and per-model rules.
 
+Explicit source catalog refresh returns a credential-free summary of model IDs
+added and removed at the fenced commit, rather than comparing a stale renderer
+snapshot. Partial reads report their committed changes and incomplete status;
+failed reads and retained manual lists are distinct from complete refreshes.
+Connections refreshes catalogs and balance without an additional result line.
+Pool refresh keeps manual model lists and does not report incomplete discovery
+as success.
+
 `DesktopCapabilities.accountConnectors` publishes stable connector IDs, provider
 families and sign-in flow kinds for future connection and pool UI. Only the
 existing OpenAI Codex, SIWC and Excel/BPS methods are advertised. Reserved
@@ -407,7 +535,9 @@ enabled. Each evaluation carries a deadline checked in the page before filling
 and submitting, so a delayed evaluation cannot submit after its native timeout.
 An empty hydrating form gets a bounded five-second grace per page/transition;
 CAPTCHA and explicit errors still stop immediately. Each stage is submitted at
-most once. CAPTCHA, errors, consent, social
+most once. Submitter text, input values and accessible labels are checked before
+filling and again before submission; account creation, recovery and authorization
+actions require manual continuation. CAPTCHA, errors, consent, social
 login, unknown forms or a 45-second limit stop automation and reveal the same
 window. Manual resume stops automation without replacing that window; cancel,
 replacement and window destruction fence the task. No unattended completion is
@@ -454,9 +584,18 @@ checkpoints fence an uncertain refresh reply. Received replacements are persiste
 before fallible identity verification, outside usable credentials and authority.
 Restart or cancellation resumes verification of the same protected reply, bound
 to the current registration and credential generation, without refreshing twice.
-An unresolved rotation outcome or invalid checkpoint persists the existing
-reauthentication state with `token_rotation_recovery_required`; it stops automatic
-refresh and pool admission until a newer sign-in. A temporary vault I/O or
+An unresolved SIWC rotation outcome stops further exchanges of that grant, while
+an access token with a known future expiry remains usable in the existing
+`degraded_access_only` state. The durable checkpoint survives restart; reaching
+actual expiry or a confirmed access rejection requires reauthentication with
+`token_rotation_recovery_required`. An invalid checkpoint or received identity
+still requires reauthentication immediately. Provider renewal windows are checked
+before claiming a grant: the authority schedules the next attempt at
+`earliest_refresh_at`, keeps genuinely unexpired access usable, and does not count
+the wait as a failed refresh. New sign-in replaces this scheduling state.
+SIWC renewal diagnostics retain the stage, bounded request ID when supplied, and
+next permitted attempt, without tokens, identities, URLs or response bodies.
+A temporary vault I/O or
 write-verification failure remains retryable and preserves the checkpoint and
 credentials. Request diagnostics distinguish recovery from credential-storage
 unavailability.
@@ -468,37 +607,161 @@ retain the connection rather than revoking a consumed token and claiming success
 Trash is reversible and does not revoke. Remote revocation cannot be undone if
 a subsequent local delete fails: rollback restores local data but closes the
 gateway; that connection needs reauthorization before restarting the gateway.
-SIWC uses account-scoped public `/v1/models` and `/v1/responses` HTTP/SSE,
-`store=false`, complete input history, and terminal `response.completed`.
-An upstream JSON reply to a streaming request goes through the existing bounded
-response collector and terminal/model validation. Valid completed or incomplete
-Responses bodies use the shared SSE encoder and client-protocol adapter; provider
-errors retain their failure semantics. This compatibility path never redispatches
-merely to obtain SSE, and synthetic events do not establish upstream token timing.
+SIWC uses account-scoped public `/v1/models` over HTTP and `/v1/responses` over
+WebSocket, `store=false`, and terminal `response.completed`. Text generations,
+including summary compaction and local catalog rounds, require upstream
+WebSockets independently of the client transport setting. Authentication, token
+renewal and model discovery keep their HTTP transports.
+This policy leaves image-generation operations and image endpoints unchanged;
+images in a text request's input remain intact.
+Identified conversations can retain one authenticated upstream socket per local
+key, account and conversation. The store holds at most 32 retained lanes, expires
+idle lanes after 30 minutes, and replaces sockets older than 55 minutes between turns.
+At capacity, a new conversation reclaims the least recently used unlocked lane;
+busy owners remain isolated and cannot be evicted. A renewed grant or authorization
+revision discards the old lane state.
+Retained idle sockets answer peer pings and send control-only pings every 20 seconds.
+Their task stops on idle/connection expiry, invalid peer frames, transport failure
+or owner removal; resuming a turn transfers the socket back to the same dispatch
+owner. Heartbeats never create generations, refresh credentials or extend the TTL.
+Continuation sends a provider `previous_response_id` and new items only after
+the prepared history exactly matches the previous input and completed output,
+with unchanged request settings. Comparison ignores JSON object key order,
+preserving array order, opaque strings and the outgoing payload. A completed
+reasoning item's omitted `status` is equivalent to `status=completed` only for
+this comparison, matching Codex's typed replay. IDs, ciphertext, summaries,
+unknown fields and non-completed statuses remain part of the proof.
+The same comparison treats absent, null and empty-array reasoning `content` as
+equivalent, matching Codex's `Option` serialization. Nonempty content remains exact.
+Optional nullable message `phase`, reasoning `encrypted_content` and
+function/custom-call `caller` share the completed-snapshot comparison policy.
+For socket comparison only, null and omitted message/function/custom-call
+`encrypted_content`, function/custom-call `namespace` and `async`, and function-call
+`encrypted_function_args` also compare equally. Non-null values, including both
+boolean `async` values and nonempty encrypted data, remain part of the proof.
+This follows the [Codex input model](https://github.com/openai/codex/blob/340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac/codex-rs/protocol/src/models.rs)
+and the public [function-call](https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_function_tool_call.py)
+and [custom-call](https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_custom_tool_call.py)
+types. Normalization never changes the outgoing full-history input.
+The comparison-only cache response ID does not
+change that proof; all caller cache controls remain on the wire. Stored checkpoints
+contain hashes and the response ID, not prompt/tool bodies. Streamed output
+snapshots are reconciled with the shared bounded native-replay capture:
+completed items supply sparse terminal output and retain completed reasoning
+ciphertext. Replacing an indexed snapshot charges only the retained item, within
+the existing 2 MiB and 1,024-item capture limits. Reconstructing sparse output
+from indexed snapshots requires contiguous indices starting at zero; gaps,
+mixed indexed/unindexed items and malformed indices need a complete terminal
+snapshot instead. Interrupted or unmaterialized output cannot establish a checkpoint.
+Buffered account JSON responses use the same sparse-output ordering: duplicate
+indices contribute one unchanged item, while conflicting duplicates cannot
+create repeated tool calls. Conflicting completed-item duplicates also
+permanently disqualify streaming replay; a later valid snapshot cannot restore it.
+Nonempty terminal output must agree with every completed snapshot, including
+tool identity/arguments, message content and reasoning summaries. It cannot hide
+conflicting duplicates or drop completed items. Completed reasoning ciphertext
+keeps its precedence; terminal-only ciphertext remains when none was supplied
+earlier. Unindexed items match unique IDs, or arrival positions for a complete
+unindexed sequence without IDs.
+Omitted replay terminal fields can use observed
+state; explicit invalid IDs/output shapes and conflicting response IDs cannot
+be repaired into a valid checkpoint.
+Changed or unproven history sends the complete input over WebSocket. Context-free turns, busy lanes
+and exhausted retained-lane capacity use isolated full-history sockets without
+sharing continuation state. A failed upgrade returns an error rather than an HTTP
+generation; provider authorization and quota rejections retain their existing error
+semantics. Unknown frame-send outcomes, interrupted streams,
+and failed/incomplete terminals discard the socket without replay. Lease, principal,
+model and token fences still precede generation; handshake and generation debit
+the existing shared budget separately. WebSocket events enter the shared SSE
+pipeline, while diagnostics retain the actual upstream transport and payload size.
+Fresh-socket diagnostics include a bounded reset reason for session isolation,
+expiry, changed authorization, peer closure, pending frames or unproven output.
+Full-history payload diagnostics distinguish missing socket checkpoints, changed
+settings, edited prior input, mismatched output and an absent new suffix.
+With diagnostics enabled, the first mismatched output within the first 32 items
+also reports its output-relative index and fixed field labels. Field proofs stay
+bounded and volatile; item values, client-defined names and hashes are not logged.
+Execution `async` and `encrypted_function_args` differences have their own fixed
+labels rather than being grouped under `other`; their values are never recorded.
+The mismatch also classifies the completed item using fixed kind labels. Documented
+execution, tool catalog, action and image-result fields have separate labels;
+these labels do not make unsupported hosted tools eligible. Unknown fields retain
+the strict comparison. Diagnostics report only added/removed/changed counts and
+whether all observed differences are null omissions/additions, using at most 16
+volatile key/value proofs per item. Truncated proofs explicitly mark incomplete
+counts and cannot claim null-only differences. Neither diagnostic authorizes a
+continuation or retains unknown field names or values.
+Proof selection is independent of JSON key order. Truncated comparisons count
+only proven changes; an unretained field is not reported as added or removed.
+Continuation comparison ignores known client-only attribution/telemetry metadata
+on messages, reasoning and function/custom calls, without rewriting wire input.
+Absent, null and empty-array reasoning content compare equally; nonempty content
+remains exact. Valid top-level `client_metadata` string maps are per-request
+tracing rather than model-prefix settings and remain unchanged on the wire.
+The documented boolean `stream_options.include_obfuscation` changes delivery,
+not the cached prefix, and is likewise preserved on the wire but excluded from
+the continuation proof. Unknown stream controls and malformed values stay strict.
+Tool-result records and unknown extensions remain strict, alongside text, IDs,
+arguments and opaque reasoning. This follows Codex's
+[continuation comparison](https://github.com/openai/codex/blob/340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac/codex-rs/core/src/client.rs#L429-L520)
+and [reasoning serialization](https://github.com/openai/codex/blob/340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac/codex-rs/protocol/src/models.rs#L1858-L1864),
+with a narrower allowlist rather than discarding the metadata object wholesale.
+HTTP/SSE and WebSocket clients keep their existing ingress protocols and shared
+terminal/model validation. Their transport does not select HTTP upstream.
+The socket replay checkpoint also follows the shared error/model guards: any
+observed provider failure or rejected serving model permanently disqualifies
+that response's socket from reuse, even if a later terminal claims completion.
+This does not replace the original client-facing error or authorize a retry.
 Client `previous_response_id` continuations use the same bounded, owner-validated
-native replay as BPS before HTTP preparation, including the client WebSocket
-bridge. The upstream receives the full saved input, completed output and new
-items, never an HTTP response reference. Missing, foreign-key or wrong-model
-replay is rejected before dispatch rather than dropping context or changing
-accounts. The [SIWC inference contract](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
+native replay as BPS before request preparation, including the client WebSocket
+bridge. The executor restores saved input, completed output and new items before
+proving a same-socket delta or sending full-history WebSocket input. Missing,
+foreign-key or wrong-model replay is rejected before dispatch rather than dropping
+context or changing accounts. The [SIWC inference contract](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)
 requires the public API, not ChatGPT backend endpoints; its
 [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
 distinguish stateless HTTP from same-authenticated-connection WebSocket state.
+This is a Relay transport policy, not a claim that OpenAI has no HTTP prompt
+cache. Conversation state and prompt caching are separate: HTTP requires full
+history, while a retained socket can reference its own completed responses.
+The restriction avoids an automatic switch to stateless full-history generation
+after a socket failure, reducing the risk of unnecessary context reprocessing.
+Provider-reported cache hits remain observed usage; the transport guarantees
+neither cache hits nor quota savings.
 Native replay and buffered responses preserve completed reasoning ciphertext
 from `response.output_item.done`, including when the terminal snapshot omits or
 replaces it. The shared snapshot policy also serves protocol conversion; item
 index/identity must match before opaque state can be reused. See the
 [Responses item contract](https://developers.openai.com/api/reference/resources/responses/subresources/input_items/methods/list).
-The client WebSocket `generate` option is not forwarded as an HTTP parameter.
-`generate: true` keeps normal generation; `generate: false` maps to the documented
-Responses `prompt_cache_options.prewarm: true` without changing cache mode or TTL.
-Only an explicitly requested prewarm accepts a completed zero-output SSE response;
+The client WebSocket `generate` option enters the shared request policy as
+`prompt_cache_options.prewarm`. The upstream socket maps explicit prewarm to
+`generate: false`, preserving other cache controls and allowing a completed
+zero-output warmup to establish a same-socket continuation checkpoint.
+An ordinary generation can continue that exact prewarmed input with an empty
+delta; it does not require inventing a new user item or resending the prefix.
+Explicit `prewarm: false` matches the ordinary-generation default for comparison
+only, while its wire value and all cache-lifetime/mode controls remain intact.
+Only an explicitly requested prewarm accepts a completed zero-output response;
 provider failures, missing terminals and empty ordinary generations remain errors.
 JSON and SSE clients retain the provider's warmup usage and can continue using
 the same owner-validated local history. Relay never prewarms ordinary turns by itself.
 See [WebSocket warmup](https://developers.openai.com/api/docs/guides/websocket-mode)
 and [Responses cache prewarm](https://developers.openai.com/api/docs/guides/prompt-caching).
-Unsupported semantic options/tools are rejected, not stripped. SIWC compaction
+Unsupported semantic options/tools are rejected, not stripped. Text route admission
+checks SIWC controls before reserving a candidate. SIWC automatically omits a valid
+client output-token cap, including caps translated from Chat Completions, Messages
+and Gemini, because the SIWC preview does not support `max_output_tokens`.
+There is no compatibility setting; the provider controls the actual response bound,
+so a response may exceed the client's requested cap. A null output-token limit
+means no client cap and is omitted without an omission diagnostic. Malformed caps
+and other unsupported controls still fail validation; model and context checks
+remain unchanged.
+Native Codex, BPS and API-source preparation is unchanged; BPS already omits this
+unsupported field as part of its transport normalization. Diagnostics mark actual omission as
+`requestPreparation.siwcOutputLimitOmitted`. Continuation ownership and complete replay are validated before
+dispatch. A SIWC-only incompatibility returns a local error
+without generation, quota charges, or an account health penalty. SIWC compaction
 uses Relay's existing text-summary bridge on the same `/v1/responses` account
 route, for both compaction triggers and `/v1/responses/compact`. Summary requests
 omit tool declarations and return a Relay-owned portable checkpoint; subsequent
@@ -547,8 +810,8 @@ For stateless Responses, replay complete output including compatible encrypted
 reasoning; current OpenAI APIs return it by default with `store=false`.
 References: https://developers.openai.com/api/docs/guides/prompt-caching
 and https://developers.openai.com/api/docs/guides/reasoning
-Client WebSockets use the existing HTTP bridge; native upstream WebSockets are
-not enabled. An initial SIWC/BPS handoff retains the selected account and its
+Client WebSockets use the shared request executor, which opens SIWC upstream
+WebSockets and preserves the client's lane identity. An initial SIWC/BPS handoff retains the selected account and its
 unstarted reservation; changing transport does not select a second pool member
 or advance rotation twice. The HTTP executor rechecks compatibility and identity,
 and normal dispatch fences still enforce live scope and membership.
@@ -606,7 +869,7 @@ sharing a client registration. Host/client contract:
 https://developers.openai.com/siwc/token-sharing-open-source
 
 Credential authorities remain separate even for the same principal. Local account
-cards can explicitly associate up to one Codex, SIWC and Excel/BPS connection.
+cards can explicitly associate Codex, SIWC and Excel/BPS connections.
 The client badge selects the route in both Accounts and Rotation; only that
 connection joins the pool. Selecting another method first reuses its grouped
 connection or a single eligible saved connection. Rust validates identity and
@@ -620,8 +883,13 @@ Codex/BPS association checks the saved principal and workspace; SIWC association
 checks the original sign-in identity, not a workspace claim or shared allowance.
 Association checks every existing connection, so SIWC cannot bridge mismatched
 Codex/BPS workspaces or principals.
-The user must select the intended workspace during authorization. Existing
-connections are not silently merged. Each route keeps its models, quota,
+The user must select the intended workspace during authorization. Explicit method
+selection can join an existing group when every saved grant's protected identity
+is compatible, including older SIWC registrations of the same account. All grants
+remain saved; an authenticated grant is preferred over a registration requiring
+sign-in. Native workspace/principal checks apply to every member, so SIWC cannot
+bridge incompatible native connections. Connections are not grouped merely by
+editable email or display label. Each route keeps its models, quota,
 authorization and renewal. Common login notes reference one retained credential
 record; other saved notes are not erased. Pool policy, weight and concurrency
 follow the selected connection. A switch fences dispatch and rejects while any
@@ -655,6 +923,14 @@ Without a scheduler snapshot, automatic pool-card ordering uses the same linked
 display observation when fresh; live scheduler ranks and resource evidence remain
 authoritative. Reference observations never transfer provider credits or access.
 Association does not verify SIWC's workspace or equivalent client allowances.
+SIWC cards can show reset credits from a usable, explicitly linked Codex/BPS
+connection, independently of that connection's quota windows. The newest known
+count wins, including zero. Manual reset confirmation identifies the native
+connection; redemption and verification use its account ID and existing fences
+without changing the selected SIWC route or copying counters into its record.
+SIWC app limits remain separate. Native reset HTTP rejects SIWC credentials
+before constructing a request; a standalone SIWC grant does not provide reset
+credit availability or direct redemption support.
 Search, filters and groups use the selected connection's own metadata. A missing
 subscription date can display a linked Codex/BPS date for the same displayed plan,
 with its source in the tooltip; it never changes the saved subscription or access.
@@ -670,6 +946,12 @@ reauthentication remain authoritative. Recovery, unavailable credentials and
 reauthentication exclude reference donors.
 Source, observation time and the workspace/allowance caveat are available on
 hover and keyboard focus, and in accessible labels, without extra info icons.
+The existing top-left card indicator warns for a linked reader's fresh zero
+primary/secondary window or stale data, without an extra visible quota label.
+Its tooltip names the reader and distinguishes exhaustion, including seven-day
+windows, from stale observations. Authorization errors, disabled and recovery
+states keep priority. These display states never change SIWC admission;
+its own reported limit and runtime quota wait remain authoritative.
 Reference data is marked stale
 after 20 minutes (the core default observation bound), or earlier at a reported
 reset/subscription expiry, failed/stale refresh, or missing/future timestamp.
@@ -761,6 +1043,46 @@ Discovery keeps model inventory and executable-route evidence separate. Names,
 requires its own evidence. Refresh reads metadata rather than generating answers.
 Endpoint declarations retain their origin; address/key changes invalidate evidence.
 
+Catalog rows require a nonempty string identity: `id` in the
+[OpenAI](https://github.com/openai/openai-python/blob/main/src/openai/types/model.py)
+and [Anthropic](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/model_info.py)
+model types, or `name` in the
+[Gemini Model](https://github.com/googleapis/googleapis/blob/master/google/ai/generativelanguage/v1beta/model.proto)
+resource. Existing compatible `id`/`name` aliases remain supported. An invalid row
+rejects that binding's catalog rather than producing a partial or empty inventory.
+A genuine empty list remains a successful read; well-formed Gemini models without
+`generateContent` support remain outside its generation inventory. Failed refreshes
+retain stored models, bindings, prices and capability evidence.
+
+Source discovery collects all pages of each binding before accepting its
+inventory, prices or endpoint evidence. Messages uses `last_id`/`has_more` and
+`after_id`, including the [official SDK's optional-flag fallback](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/pagination.py).
+Gemini Models, also used by the Interactions catalog, follows `nextPageToken`
+through `pageToken` under the [Models list contract](https://ai.google.dev/api/models#method:-models.list).
+Its empty protobuf list may omit `models`; an error object is not an empty list.
+All pages share a 4 MiB body budget and 30-second deadline per binding, with
+at most 128 pages and 8 KiB per cursor. Repeated cursors and unsupported pagination
+contracts reject the affected read instead of publishing truncated evidence.
+Credentials, protocol headers and the configured origin remain unchanged;
+cursors are encoded query values, never redirect URLs. Retry-After from later
+pages remains part of the refresh result.
+
+Mixed-source refreshes apply complete binding observations independently. An unread
+scope retains only its previously known inventory and catalog evidence; a failed
+empty binding stays retryable without inheriting another binding's models.
+A successful read of the same upstream protocol supersedes stale alias inventory.
+Prices survive only for wholly unread models, not as a fallback for missing or
+conflicting fresh prices on overlapping models. Previously known route features
+and limits survive absent fields on unread scopes; explicit fresh fields and
+complete scope reads replace their own prior evidence. Operator exclusions remain
+authoritative. Source creation and refresh retain an error status with a redacted
+protocol/HTTP summary for partial results, so monitoring retries instead of marking
+the entire catalog fresh. A later valid empty scope clears its old observations.
+Model-only legacy getters use the same inventory retention without granting routes.
+Root-to-`/v1` resolution rechecks earlier reads at the canonical path using their
+remaining read-time budgets; a partial result cannot relocate the source or
+combine evidence from different API roots.
+
 The renderer preserves Rust's resolved routes, including empty model lists.
 Only an unresolved sole legacy native binding may inherit the source catalog.
 Invalid adapters, duplicate routes, unavailable model references, and cache TTLs
@@ -770,6 +1092,75 @@ Reference metadata supplies model identity, limits, modalities, tools, reasoning
 service tiers, and native-protocol policy. Declared, confirmed, unsupported, and
 unknown evidence stay distinct. Missing limits/capabilities remain unknown;
 participant metadata does not become universal model truth.
+
+The selected endpoint's generation controls use one typed projection in runtime
+preparation and client catalogs. Function-tool, tool-choice, structured-output,
+streaming, reasoning and interleaved-system flags match the merged feature map.
+An explicit deny from either the reference or endpoint remains authoritative;
+declared/confirmed feature evidence may fill unknowns only for that exact route.
+Disabling function tools also excludes parallel calls. An evidenced effort list
+can establish route-local reasoning support, but does not invent a default effort
+or resolve a disjoint reference/route list by choosing a weaker level. The shared
+reference and protocol-specific media contract are unchanged.
+
+Pool catalog routes aggregate endpoint evidence only within the same model,
+client API and upstream API. Each eligible member contributes its own reference/
+endpoint projection; available alternatives union features and valid effort sets.
+A feature is unsupported only when every eligible alternative excludes it;
+unknown alternatives remain distinct from positive evidence. Disabled, draining,
+out-of-pool, credential-unavailable and model-excluded members cannot revive a
+capability. Empty resolved effort intersections do not fall back to reference
+levels. These snapshot-local observations do not change model-wide metadata or
+grant a physical route, and only the projected fields enter client catalogs.
+
+Each projected protocol route carries the most restrictive known token ceilings
+among its eligible alternatives. Limits stay scoped by model, client API and
+upstream API; missing values remain unknown. They do not replace Model Rules'
+reference limits or grant a route. OpenCode constrains its selected SDK group's
+context/input/output with these ceilings while preserving smaller custom windows.
+Sparse renderer catalog merges retain the same route tuple and existing known
+ceilings, filling missing numeric fields without mutating the source summaries.
+
+OpenCode's [generation path is streaming](https://github.com/anomalyco/opencode/blob/810c0eba1a7348036f8bdf61e6632d0c36c6876c/packages/opencode/src/session/llm.ts#L276-L290).
+Its initial pool connection and catalog refresh therefore use a fresh streaming
+view of the same endpoint observations: explicitly non-streaming alternatives are
+removed before aggregating features, efforts or numeric limits. General inventory
+and pool policy fields remain unchanged. Pooled profiles fill unknown generation
+controls from the selected SDK client's resolved alternatives; reference denials
+remain authoritative. Explicit effort lists honor the raw saved policy captured
+with the same snapshot, even when Model Rules has no reference enum. Empty or
+disjoint effort sets stay empty and do not create a default. Both snapshot modes
+perform their projection within the bounded worker. Direct connections choose only
+native, stream-capable SDK bindings; a non-streaming preferred binding cannot hide a usable
+alternative. Unsupported SDK protocols and explicit streaming denials cannot return
+through refresh. A new connection with no compatible streaming model fails before
+replacing the client configuration; refresh can remove stale managed model rows.
+
+The live Codex catalog uses the requesting key's Responses routes that do not
+explicitly exclude streaming, because
+[Codex requests streaming Responses](https://github.com/openai/codex/blob/4980f9585a0a2dea0cdc4bb0cee4e631b75fcf5c/codex-rs/core/src/client.rs#L1166-L1172).
+Models without such routes are omitted from its picker, not generic inventory.
+That same route set supplies API context bounds, efforts, service tiers, and
+image/parallel-call restrictions. A feature is removed only when every remaining
+alternative explicitly excludes it. This projection preserves other modalities
+and native-card ownership; endpoint claims cannot grant image or parallel support
+absent from the existing reference/native projection. Managed reasoning-placeholder
+normalization resolves the key's model prefix and uses the request's streaming mode
+before checking whether the applicable routes expose effort controls.
+
+Direct Codex API profiles use the exact Responses endpoint's controls, effort
+intersection, numeric ceilings and service-tier restrictions. They exclude explicit
+streaming denials and retain independently declared non-image modalities. Generated
+pool and direct catalogs carry their scoped numeric ceilings in Relay's existing
+`relay_context_limits` metadata; Desktop context-policy projection preserves these
+limits instead of replacing them with model-wide input/output maxima. Native cards
+without an evidenced window do not acquire one from that transfer metadata.
+
+An authoritative successful empty catalog refresh removes stale rows from the
+Relay-owned managed catalog using its normal binding, ownership and atomic-write
+checks. Malformed or failed reads preserve the previous catalog. Initial attachment
+still requires compatible models; empty refreshes leave profile authentication,
+configuration and recovery snapshots intact, and a later valid catalog can recover.
 
 Within the same provider/model scope, a declared effort enum takes precedence
 over individual positive effort flags. Nested reasoning and option enums survive
@@ -816,9 +1207,21 @@ take priority over manufacturer defaults. When the source declares the client's
 protocol, use native forwarding before conversion, without a preliminary failed
 conversion or generation probe. Hosted tools and their options stay native;
 declaring a protocol does not independently establish hosted-tool availability.
-Exact negative evidence and an endpoint pin remain authoritative. Missing native
-support uses an available declared upstream through the shared adapter; it does
-not silently remove requested features or emulate search as a client function.
+Discovery accepts the published `endpoints` path list alongside its existing
+endpoint aliases, including OpenRouter's `/api/v1/responses`,
+`/api/v1/chat/completions` and `/api/v1/messages` paths. Earlier explicit fields
+and Gemini generation-method declarations retain precedence. Unrecognized paths
+grant no protocol; endpoint declarations grant no tool, reasoning or cache feature.
+The configured API origin/prefix remains unchanged. Contract:
+[OpenRouter model endpoints](https://openrouter.ai/docs/guides/overview/models#endpoints).
+Exact negative evidence and an endpoint pin remain authoritative. Retained
+endpoint and feature exclusions win over later positive observations, including
+after reload. Complete discovery replaces Catalog-origin evidence only; manual
+exclusions remain until removed or the source identity is invalidated.
+Feature-only Catalog or Manual observations do not establish endpoint support.
+Missing native support uses an available declared upstream through the shared
+adapter; it does not silently remove requested features or emulate search as a
+client function.
 Only without exact source evidence do known identities use the manufacturer
 default from `model_metadata/protocol_policy.rs` and `catalog/protocol-policy.json`:
 OpenAI Responses, Anthropic Messages, Google Gemini, and xAI/Z.ai Chat Completions.
@@ -863,6 +1266,26 @@ runtime candidate because an in-flight request completes. Pending passive quota
 is consumed for persistence under that same fence, so an obsolete completion
 cannot take a newer login's unsaved observation.
 
+HTTP, account-only, compaction, Images and native WebSocket usage retain the exact
+OAuth authority revision as request-local provenance, including quota headers.
+Equal bearer text or generation numbers do not let a replaced registration adopt
+an earlier response. Unknown OAuth provenance remains telemetry-only. The Desktop
+writer acquires the existing credential-writer lock before the revision guard and
+holds both through secret/account/wake persistence; busy or retired ownership does
+not change account state or schedule account-refresh activity. Source/key usage and
+request telemetry remain recorded. Revision handles never enter persisted or
+exported request records.
+
+Runtime OAuth preparation failures retain the exact authority revision observed
+under the token-slot lock. Health changes hold that revision's guard, including
+invalid-header rejection. If a registration is replaced during renewal, preparation
+may read its replacement once before dispatch; repeated replacement returns a
+transient preparation failure. Replacement expiry checks include elapsed renewal
+time rather than reusing the preparation's initial timestamp. The retired refresh
+is not repeated and its result
+cannot mark the new login unhealthy or require its reauthentication. Terminal
+grant failures on the current registration retain their existing sign-in requirement.
+
 Successful native Codex Responses HTTP/WS handshakes may supply `X-Models-Etag`.
 A first or changed version schedules the existing fenced account-model refresh;
 it never grants model access or overrides reference capabilities. Hints accept
@@ -876,6 +1299,9 @@ origins do not participate.
 - Balance, key allowance, subscription allowance, quota windows, and provider
   credits retain their own units and observation times. Unknown is not zero;
   failed reads preserve the last value as stale. Statistics alone grant no route.
+  Recovery from exhausted windows uses the latest reset among all zero windows.
+  If any exhausted window has no reset, the recovery deadline remains unknown;
+  another window's earlier reset does not imply renewed capacity.
 - Access-token expiry and subscription expiry are separate metadata. Imports
   retain supplied access-token expiry and authenticated subscription dates;
   an ID token's expiry does not describe the access token. Missing dates stay
@@ -895,6 +1321,11 @@ origins do not participate.
   `subscriptions`) and content-type category alongside the HTTP status, without
   retaining response bodies, URLs or authorization headers. An HTML refusal
   remains a refusal, not evidence that the account lost model access.
+  A JSON 404 from the optional `subscriptions` lookup preserves the authenticated
+  account metadata and unknown expiry as a partial observation. Its status and
+  normal retry floor remain intact; it is an informational diagnostic rather
+  than an account error. Primary-check failures, challenges and other HTTP
+  refusals retain error diagnostics.
   The documented `cf-mitigated: challenge` response header adds a fixed
   `cloudflare_challenge` diagnostic; absent or unknown values remain unreported.
   HTML alone does not establish the refusal's origin. See Cloudflare's
@@ -902,6 +1333,10 @@ origins do not participate.
   Subscription diagnostics include the OAuth client kind, total probe elapsed
   milliseconds (including management admission and optional retries), and a
   validated Cloudflare Ray id when present. Arbitrary header values are omitted.
+  Fixed `transport_failure` categories distinguish request/body timeouts,
+  network/body failures, management admission and stale ownership fences.
+  Stale scopes and invalid origins are not retried; transient failures retain
+  their bounded retry policy. Raw transport error text is never retained.
   HTTP error status and Retry-After take precedence over an unread or truncated
   error body; a broken refusal body cannot trigger a transport retry.
   Subscription metadata must match the requested account's canonical id or an
@@ -954,8 +1389,15 @@ origins do not participate.
   account without inventing models or blocking the whole account. Independent
   authentication, verification and account-disable failures retain precedence.
   Legacy `blocked` + `models_forbidden` records are repaired to `degraded` on
-  load and discovery, retaining the catalog error until a successful accepted
-  read. Native Codex/BPS empty reads retain their last good inventory. A successful
+  load and discovery. Catalog HTTP failures, including 404, malformed catalog
+  replies and local catalog-preparation failures warn without marking the whole
+  account unhealthy. Saved `unhealthy` records owned only by those catalog
+  failures recover to `degraded` on load or discovery; actual authentication,
+  verification, account blocks and quota restrictions retain precedence.
+  The catalog error remains until a successful accepted read. HTTP 404 has a
+  distinct management code and localized explanation; legacy generic HTTP
+  errors do not invent a missing status. Native Codex/BPS empty reads retain
+  their last good inventory. A successful
   SIWC read with no visible models clears current discovery, including through
   reauthorization's settings merges; its saved baseline remains intact but is
   not routed. Failed discovery preserves the last observation, including an
@@ -1049,7 +1491,10 @@ CLIProxyAPI `8289ec4c71ad914d0612c2776352b76ba3d355a6`,
 `backend/crates/providers/openai/src/transport/endpoints.rs`.
 Synthetic tests do not establish entitlement or charges on a real account.
 
-Explicit cache keys remain stronger than session hints. Observed Claude Code
+Explicit cache keys remain stronger than session hints. Nonblank provider keys
+are opaque: leading/trailing bytes remain distinct in local affinity, matching
+the unchanged upstream value. Whitespace-only values cannot create a binding.
+Observed Claude Code
 child/parent metadata can share soft parent affinity while keeping each child's
 context separate. Without an explicit key or session, HTTP and client WebSocket
 requests may derive a caller-scoped hint from the exact initial instructions and
@@ -1058,6 +1503,62 @@ opening user turn. This bounded (64 KiB), process-salted hint requires at least
 It stores no prompts, creates no provider cache key, and grants no continuation
 ownership. Arbitrary compacted tails without the opening turn are not inferred
 to be the same conversation; stable client/root hints remain necessary there.
+
+Automatic weekly reset redemption defaults to a separate reserve policy. It never
+deprioritizes an account merely for owning a reset. Desktop consults a read-only
+projection of ordinary quota on compatible account routes; missing/stale quota
+is unknown, busy capacity still preserves the reserve, and paid-credit/API
+fallback is not ordinary subscription capacity. Redemption requires a successful
+fresh observation of an exhausted weekly window and a current enabled rule.
+The existing quota cadence bounds expiry urgency and the natural-reset waiting
+window. Fresh reset inventory is checked before POST; unknown inventory never
+becomes a zero or a positive grant. A reset expiring before the next check can
+restore an exhausted week, unless natural recovery comes first. Manual actions
+retain their explicit user-controlled behavior.
+Fresh paid-subscription expiry can also release this reserve when the entitlement
+ends within a weekly window and before natural weekly recovery. The account must
+still have an enabled matching rule and freshly confirmed weekly exhaustion;
+inventory verification, credential fences and ambiguous-redemption protection
+remain unchanged. A reset count is never treated as spendable quota in advance.
+
+Weekly rules can instead opt into a remaining-quota threshold, stored as integer
+basis points from 0 to 10,000. Existing rules and new forms leave this mode off.
+Blank or 0 means exhausted only; 100% never redeems a completely full window.
+Only a successful fresh general secondary weekly observation with a future reset
+date can trigger it, never a primary or supplemental/model-specific window.
+Threshold mode is independent of other accounts' ordinary capacity. Both modes
+reuse the credential fences, fresh reset inventory and redemption coordinator.
+Threshold dispatches persist an unresolved marker before POST. A fresh full
+weekly ledger confirms recovery; ambiguous outcomes block further automatic
+redemptions across restarts. A confirmed threshold reset is not repeated before
+the originally observed weekly deadline, including after rule edits or drifting
+relative reset values. The private consume endpoint chooses the redeemed credit;
+Relay does not invent a client-side credit-selection contract.
+
+Image-generation/edit response headers never update the Codex text-quota ledger.
+Account model manifests are scoped to the authorization incarnation, subscription
+plan and inventory revision that produced them. Late or stale manifests cannot
+restore metadata from replaced credentials or a previous entitlement state.
+Reauthentication retains operator settings and last-known quota before probing,
+but its final settings merge preserves the new grant's quota result.
+
+Request transport diagnostics keep observed upstream HTTP status separate from
+the logical result status and, for returned HTTP streams, the constructed client
+response status. These are not delivery acknowledgements. Connection failures
+come from transport evidence, upstream failures from saved response evidence,
+and local failures from their owning processing boundary. Missing evidence stays
+unknown; status codes and free-form error text alone do not establish origin.
+
+One redemption coordinator covers manual and automatic sends through the
+post-reset quota verification. Persisted per-cycle fingerprints prevent a second
+automatic redemption while a consumed reset's weekly recovery is unconfirmed,
+including after restart. The cycle is recorded before POST; transport failures
+and ambiguous server outcomes retain that fence, while definitive client
+rejections release it. A proven 401 rechecks the reserve policy after renewal.
+Quota exhaustion edges dirty other deferred weekly
+checks through the existing refresh service; they do not introduce polling or
+repeat a generation. Auth/config fences and rule eligibility are rechecked at
+the action boundary. The provider owns actual restoration and reset dates.
 
 Automatic selection first filters compatible, enabled, available members, then
 compares normalized load. Independent work uses the least-loaded members. A
@@ -1075,6 +1576,16 @@ Fresh provider credits are the fallback. Soft health/first-output latency and re
 resolve remaining choices. Wallet prices do not rank members. Missing latency
 does not exclude a member. Soft affinity can yield to a better eligible member;
 opaque response ownership cannot.
+For independent Automatic work, fresh active paid-subscription deadlines apply a
+bounded 1–8x multiplier to the configured request share after load and health
+gates. The signal compares current positive quota headroom with time remaining
+over a seven-day horizon; it is not a demand forecast or a promise to exhaust all
+saved resets. An urgent member can remain in the resource group despite lower
+quota than ordinary alternatives. Primary affinity, ready warm alternatives,
+opaque owners, manual modes, capacity, provider waits and unknown/stale evidence
+keep their existing behavior. Subscription updates replace this soft evidence
+without a restart; removal clears it. Deadline freshness uses the existing
+subscription refresh interval, independently of OAuth expiry and quota headers.
 Routing diagnostics also capture the selected candidate/model/operation's
 first-output latency before the request. A bounded in-memory window retains at
 most 64 successful physical attempts from the previous ten minutes; missing
@@ -1091,6 +1602,22 @@ non-identity Content-Encoding leaves the decoded-body boundary unknown; no raw
 pre-decompression or network-arrival boundary is invented. JSON, native
 WebSocket and old records do not acquire synthetic HTTP SSE phases. Known
 observations survive bootstrap failure without changing retry certainty.
+HTTP SSE observations also separate the first nonempty upstream text delta,
+first native function/custom call activity, and first complete native tool item.
+Native item completion requires a done item with its IDs and string arguments/input;
+it is not validated client-call readiness or evidence that a whole batch is complete.
+Terminal snapshots do not invent these boundaries. Internal discovery generations
+reset them, old records leave them absent, and no tool content is retained.
+With diagnostics enabled, HTTP SSE and native WebSocket responses also retain
+the first typed reasoning item/part or nonempty reasoning delta separately from
+TTFT and first output. Empty reasoning structures establish activity, not visible
+text, completion or retry eligibility. Missing observations remain absent; each
+WebSocket turn and internal catalog generation owns its own observation.
+Successful streaming/account HTTP responses with missing or mislabeled SSE MIME
+types use a bounded 512-byte prefix probe. Recognition stops at an SSE field;
+consumed chunks, response metadata, JSON bodies and body errors are preserved.
+The existing BPS progress guard also covers probing. Undecoded encodings are not
+sniffed, and structured-output validation retains its intentional buffering.
 Proxy checks retain their existing HTTPS-only elapsed time and expose separate
 queue, response-header/body offsets and full-check time (including optional
 location/address work). Header time includes client setup, the shared HTTP gate
@@ -1102,8 +1629,13 @@ or move an opaque continuation to another route.
 After a successful automatic resource rebalance, the durable prompt-cache
 binding follows the warmed member when its fresh quota or credit evidence has
 the same material lead required by admission. Temporary load spillover and
-small resource differences leave the owner unchanged; an older owner's late
-response cannot reverse the move without a new material resource lead.
+small resource differences leave the owner unchanged. Each lease captures the
+prompt-binding revision at admission; a late completion cannot replace a newer
+owner, even if resources changed again while it was running. Completion on the
+current owner can still refresh its expiry. This fence affects affinity writes,
+not dispatch eligibility or mandatory opaque-response ownership. A late successful
+spillover may still become a volatile warm alternative without replacing the
+newer owner or extending its expiry.
 Prompt binding writes, invalidations, and lazy restores are ordered per opaque
 key across runtime replacements without holding the scheduler lock during
 storage I/O. Late refreshes cannot shorten a newer expiry, lazy restoration
@@ -1157,8 +1689,12 @@ left-to-right, then down, ahead of waiting, unavailable and disabled/draining
 members. Card contents retain their normal text direction. Only members with
 active requests get a subtle card outline, without an activity badge; next
 candidates remain neutral. Unranked cards
-use fresh resource headroom in automatic mode and saved order otherwise. Timed
-waits sort by retry time; quota waits, retry cooldowns and occupied capacity keep
+use fresh resource headroom in automatic mode and saved order otherwise. Among
+waiting cards, a fresh exhausted secondary window follows temporary primary-window
+waits, even when its retry time is earlier or runtime timing is absent. Stale or
+unknown counters do not establish that category. Retry time orders members within
+the category; this presentation does not change saved routing or admission.
+Quota waits, retry cooldowns and occupied capacity keep
 distinct labels. Bare unavailable telemetry alone does not override a healthy
 inventory status. New activity invalidates ranks and queues a coalesced lightweight
 scheduler refresh; periodic polling remains the fallback. Active highlighting is
@@ -1179,6 +1715,11 @@ Round-robin mode follows saved member order, skips unavailable/full members,
 and wraps. Equal cycling ignores saved weights and soft affinity. Optional
 weighted cycling uses physical-member request shares; shares are not token or
 spending targets. Equal-credit ties use saved order, not protocol-alias IDs.
+Weighted credit/debt is bounded to 32 current eligible physical-pool rounds,
+both when choosing and when advancing a reservation. Soft sticky work still
+contributes to ordinary weighted accounting without accumulating unbounded debt
+for later independent work. Pool/weight changes use the current bound; equal
+round-robin, hard ownership and recovery admission retain their own rules.
 Failover selects the first ready member in saved priority order, without cycling.
 A due lower-priority recovery route does not displace a healthy primary; a due
 primary recovery still follows the bounded recovery admission policy.
@@ -1188,7 +1729,7 @@ not unlimited provider capacity. Policy saves are serialized and identity-checke
 Rotation policy version three is advertised as `rotation_v3`. Known version-one
 and version-two policies upgrade without changing inventory, member order,
 weights, concurrency limits, or their equal-cycling semantics. Stored `in_order`
-and `round_robin` remain equal cycling; `weighted_round_robin` explicitly opts
+is read as `round_robin` and normalized on startup; `weighted_round_robin` explicitly opts
 into shares, and `failover` explicitly opts into primary/reserve behavior.
 Unknown versions and invalid legacy pairs are rejected, not normalized.
 Portable preset imports may migrate validated legacy policies; direct local
@@ -1202,9 +1743,11 @@ Presets rebase onto current membership and never restore a removed member.
 Policy-only updates retain active leases, continuation owners, resource evidence,
 and cooldowns. No application or gateway restart is required.
 
+The renderer and IPC use only version-three policies; the native store owns
+old-policy migration. Unsupported runtime versions remain non-editable.
 Runtime strategies use explicit names: Automatic, RoundRobin,
-WeightedRoundRobin, and Failover. Legacy saved `in_order` maps to equal
-RoundRobin without changing the stored policy contract. Round-robin cursors
+WeightedRoundRobin, and Failover. `in_order` exists only as an input alias,
+not a separate runtime mode. Round-robin cursors
 survive member changes while their route remains configured; removing the last
 route discards its cursor, including during model-inventory replacement.
 
@@ -1216,6 +1759,27 @@ budgets across HTTP, SSE, WebSocket, and account paths. Retries require:
 - repeatable input and valid continuation ownership;
 - remaining request budget and no client-visible response bytes;
 - provider Retry-After/reset deadlines respected without shortening them.
+
+HTTP `Retry-After` accepts unsigned decimal seconds or a complete HTTP date under
+[RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3).
+Local recovery uses the longest individually valid field if an upstream repeats
+the singleton, independent of field order; invalid fields do not mask valid hints.
+Unrepresentable decimal delays saturate before the owning policy applies its
+existing bounds. This conservative recovery floor does not authorize forwarding
+ambiguous fields, widen failure scope, or make an uncertain request safe to retry.
+Connection-local hints may delay Relay's own upstream connection without being
+forwarded to its client. Token-count errors use the same singleton and connection
+filters as other HTTP responses, retaining their redacted body and no generation
+health or usage effects.
+
+Each dispatched OAuth lease retains the revision of its latest actual send.
+Authorization repair replaces that handle under the same request-budget and
+credential guards as the dispatch debit; a rejected dispatch leaves it unchanged.
+Settlement and cancellation retain the original execution certainty and release
+capacity even after reauthentication. Only a still-current revision can update
+rotation circuits, mandatory/shared cooldowns, first-output latency samples or
+recovery credits. The revision guard spans the scheduler mutation and its
+observation callback; replacement cannot interleave between validation and commit.
 
 With diagnostics enabled, tracked HTTP request/attempt observations include
 optional `requestTiming.waiting` counters for local capacity admission, scheduled
@@ -1271,14 +1835,28 @@ loaded only for a conflicting hint; missing, foreign, expired or model-mismatche
 evidence does not release ownership or authorize a result.
 Partial histories, unpaired results, unresolved references, or foreign ciphertext
 cannot release ownership. Unknown response references return
-`409 response_continuation_unavailable`. Compaction checkpoints explicitly
+`409 response_continuation_unavailable`. Pre-dispatch continuation rejections
+over HTTP, account-only compaction, and WebSocket record one Relay-local failure
+without an upstream attempt, token usage, selected route, or account penalty.
+WebSocket accounting covers the first and later requests, including HTTP-bridged
+connections. The resolved model is retained when already known; diagnostics
+exclude response IDs and tool results.
+Compaction checkpoints explicitly
 replace the predecessor; they are not discarded to force a retry.
 
 Desktop routing-graph replacements reuse the host's bounded volatile adapter
-and native replay stores together with route fingerprints. Late completions
+and native replay stores together with route fingerprints. The runtime retains
+these shared handles and its agent-message cipher in one `RuntimeContinuationStores`
+owner; each store keeps its existing lock and lifetime boundaries. Late completions
 write into the same stores; ownership checks still reject another key, model,
 endpoint, or API-source credential. A new host/process starts empty: conversation state
 is not persisted to recover a restarted application.
+
+Graph-local cache comparisons, Codex turn-state observations and BPS catalog
+preload hints belong to `RuntimeSessionState`. Policy-only updates retain this
+owner; graph replacement starts fresh observations without moving late writes
+from the retired graph. Each store retains its own locks, bounds and expiry;
+host-owned continuation stores remain separate.
 Native replay retains only input history and completed output, not prior tool
 catalogs or request options that replay never reuses. Current-turn instructions,
 tools and controls remain authoritative. Lookups share immutable snapshots;
@@ -1304,6 +1882,9 @@ history; diagnostics retain Relay origin and `adapter_continuation_missing`.
 This does not retry an orphan delta, invent history, or reclassify ownership
 mismatches. See the [Responses WebSocket contract](https://developers.openai.com/api/docs/guides/websocket-mode)
 and [Codex recovery-code handling](https://github.com/openai/codex/blob/f29d55ff0697a88226e8a9811b3c007e5f719cba/codex-rs/codex-api/src/endpoint/responses_websocket.rs).
+Terminal gateway errors flush before a bounded close handshake. Pending control
+frames cannot force an immediate TCP drop that discards the error. Closing does
+not dispatch queued input, replay a generation or retain a finalized request lease.
 Full-history continuation keys compare parsed function-argument objects
 independently of member order, including nested objects in arrays, following
 the [JSON object contract](https://www.rfc-editor.org/rfc/rfc8259#section-4).
@@ -1344,6 +1925,21 @@ payload after the final authorization and payload guards. Connection setup,
 bridge installation, and subsequent turns reuse those diagnostics rather than
 rebuilding the request for telemetry. They are not cached across routes or turns;
 continuation validation still runs immediately before payload preparation.
+
+Native account sockets retain whether the first prepared request declared hosted
+web search, including non-generating prewarm requests. First activation on a
+socket opened without search reconnects before dispatch. A connection-bound
+`previous_response_id` is replaced only with locally retained native history on
+the same owner; missing history produces an explicit continuation error instead
+of moving the opaque reference. Explicit current tool catalogs override historical
+discoveries. API-source sockets, BPS and SIWC keep their existing transport rules.
+
+While an HTTP/SSE fallback or connection setup owns a pending response, a valid
+`response.interrupt` with `mode: discard_partial_items` receives
+`response.interrupt.failed`, preserving its response ID and active stream lane.
+This rejects the unavailable control operation while the original request keeps
+delivering its actual output, terminal and usage. Client disconnect still cancels
+the owned transport and releases capacity.
 
 An optional native WebSocket handshake has a 2-second fast-path budget, shared
 across authorization refreshes. Only new requests without continuation or
@@ -1401,8 +1997,11 @@ writing so send failures retain request diagnostics and release the lease.
 
 Native ChatGPT turn state is scoped to the key, session, account, model, endpoint,
 credential, and authorization incarnation. Client-supplied state cannot establish
-that provenance. Soft root/thread and prompt-cache hints are separately bounded
-and namespaced; they neither authorize state nor transfer an opaque owner.
+that provenance. Observed state from HTTP errors and rejected WebSocket handshakes
+retains the same scope as successful responses; observing it does not authorize
+another dispatch or bypass a credential refresh. Soft root/thread and prompt-cache
+hints are separately bounded and namespaced; they neither authorize state nor
+transfer an opaque owner.
 
 A generic HTTP 400 is terminal, not evidence for rotation or history repair.
 Buffered local errors derived from upstream adapter output carry
@@ -1464,16 +2063,59 @@ errors preserve allowlisted validation parameters and bounded JSON coordinates;
 request bodies and tool argument values are never included.
 Local adapter rejections retain the same safe error details in HTTP and WebSocket
 history, with Relay origin and no invented provider attempt, usage or cooldown.
+Shared and account-only preparation carry typed adapter failures to the execution
+owner; an immediate rejection or exhaustion of incompatible candidates records
+one local failure, while a successful compatible fallback records no local rejection.
 Client cancellation has its own non-successful UI outcome. Historical synthetic
 HTTP 502 cancellation rows receive the same label.
 New client-cancellation telemetry uses HTTP 499 for both HTTP and WebSocket
 requests, preserving reported consumption and the client-disconnected outcome.
+The same normalization covers cancellation before stream ownership is handed off
+and finalization during a recovery wait. Known partial consumption stays recorded;
+missing consumption remains unknown. Cancellation neither invents a send nor
+changes a preceding provider rejection into a client error on its physical attempt.
 A logical cancellation does not inherit the previous attempt's provider error;
 that rejection remains on its physical attempt, with consumption unchanged.
+Account-only compact, search and wake execution share the same request lifetime
+and dispatch budget. Cancelling while waiting for upstream headers or a buffered
+body retains the pending physical send once, with unknown consumption left absent.
+Completed buffered responses retire this owner before client body consumption;
+dropping that completed body does not create another cancellation or usage vote.
+Valid native SSE usage observations amend only the current pending physical attempt
+while account, BPS and discovery responses are buffered, and while streaming
+responses await bootstrap before client handoff. This accounting remains active
+when request diagnostics are disabled. Reported counters survive cancellation
+without another emission,
+clock reset, dispatch or account-state vote. An observation for an older attempt,
+an absent send or a retired request is ignored. Unreported fields remain unknown;
+partial JSON text is not interpreted as reported usage. Native usage snapshots
+retain cache-write input counts alongside cache reads, output and reasoning counts.
+Admitted text-generation responses carry `x-zenith-relay-request-id` for exact
+correlation with the logical history record in both buffered JSON and SSE. This
+Relay-owned header does not replace the provider's own request-ID headers or alter
+the response body. Account-only compact, search and wake responses use the same
+correlation header and request identity.
 
 Relay owns HTTP protocol retries, with reqwest's internal retries disabled.
 HTTP/2 refusals follow the configured failure policy, candidate limit, provider
 cooldowns and uncertain-execution rules.
+
+The explicit `--diagnose-http2-retries` mode qualifies the compiled client and
+normal gateway dispatch against bounded loopback HTTP/2 prior-knowledge peers.
+A default-client positive control exposes protocol-level resends; gateway cases
+compare physical streams with retained usage attempts and one logical request,
+including uncertain resets and HTTP 429 candidate limits. It runs before Desktop
+storage or single-instance initialization, uses only synthetic credentials and
+exports aggregate observations. The [offline check](../../CONTRIBUTING.md#offline-http2-transport-check)
+owns invocation and exit codes. Source-level regressions additionally negotiate
+certificate-verified TLS with `h2` ALPN, directly and through configured
+source-specific HTTP CONNECT proxies. They compare physical streams with usage
+attempts for refused and uncertain resets, HTTP 429 failover and candidate limits.
+The positive control exposes default-client resends, while an unavailable proxy
+cannot bypass to the direct TLS peer. Certificates, routes and keys are synthetic
+and in-memory; the executable diagnostic retains its prior-knowledge scope.
+Provider/proxy combinations and installed-copy acceptance retain their own
+evidence requirements.
 
 Native generation HTTP dispatches can opt into
 `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` (1–1800; unset, zero or invalid disables
@@ -1485,6 +2127,15 @@ bodies and long SSE generation retain their existing behavior. Expiry returns
 `http_headers_timeout` with HTTP 504 and Relay origin, does not cool the account,
 and cannot authorize replay of possibly accepted work. Expired budgets do not
 start another dispatch. BPS progress guards and native WebSocket are separate.
+
+`ZENITH_RELAY_IMAGE_HEADERS_TIMEOUT_SECONDS` (1–1800) can extend an enabled
+general header wait for image generation/edit endpoints and prepared Responses
+requests that permit the native `image_generation` tool. Disabled or more
+restrictive tool choices, historical tools, model names and prompt text cannot
+enable this policy. An unset, invalid or shorter image value retains the general
+limit; an image value alone does not enable a timeout. The selected request
+budget keeps the original deadline across repair and handoff, even when a later
+attempt requests a longer wait. Response-body and SSE progress limits are unchanged.
 
 Routing JSON optionally retains the bounded model ID declared by the raw
 upstream response before protocol or BPS translation. Request details distinguish
@@ -1536,8 +2187,14 @@ from opaque provider state in `AdapterContinuationState` and the bounded volatil
 `AdapterContinuationStore`. No pair-specific runtime or second replay cache is needed.
 
 Native JSON retains object order and arbitrary-precision numbers, not original
-whitespace/escaping. Eligible repeated headers retain their bytes; credentials,
-hop-by-hop fields, and ambiguous state headers are excluded. Native SSE/WS frames
+whitespace/escaping. Allowlisted repeated HTTP headers retain their value bytes
+and per-name order. Both directions exclude credential fields and fields named by
+any `Connection` option, including a value containing unrelated opaque bytes.
+Responses omit duplicate singleton content-type, retry and request-identity fields;
+JSON/SSE factories keep their own content type. Forwarding follows
+[HTTP field ordering](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.3)
+and [connection options](https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1).
+Ambiguous client state headers remain excluded. Native SSE/WS frames
 retain wire bytes except explicit terminal validation, bounded-frame rejection,
 and safe error rewriting. The first valid terminal ends consumption without
 waiting for EOF or trailing data.
@@ -1556,6 +2213,43 @@ Native forwarding retains byte-exact frames; each protocol owns event and termin
 validation. Responses text/tool deltas still require validation, while usage,
 model identity, terminal events and opaque compaction retain their full checks.
 
+Structured context overflow requires HTTP 400 or an error event without an
+embedded HTTP status; explicit authentication, throttling and server statuses
+retain their own classification.
+`invalid_access_program` and `unsupported_access_program` are terminal 400
+request errors; `access_program_not_enabled` is a terminal 403 request refusal.
+Status-less SSE/WS events share these categories. These program refusals neither
+repair history, retry or rotate accounts, nor affect account health or cooldown;
+the requested model/mode is never silently downgraded.
+
+Structured provider `budget_reached` is a terminal session-budget refusal (400),
+distinct from account quota. HTTP requires status 400; SSE/WS also accept an
+error without an embedded HTTP status. Explicit 401/403/429 retain their own
+classification. The first terminal ends the response, retaining known usage;
+later completion events and retry hints cannot revive it. History repairs,
+rotation, cooldown and account penalties do not apply to this refusal.
+
+An explicit 403 `invalid_workspace_selected` is terminal for the request. The
+structured `detail.code`, then `error.code`, takes precedence; only an absent
+body code permits the bounded, validated `x-error-json` identity hint. Ambiguous
+or duplicate-key envelopes and prose alone do not establish this failure.
+Relay returns it without history repair, candidate rotation or account cooldown.
+Transient authorization refresh failures preserve the existing revision-bound
+credentials; this workspace refusal does not turn them into a generic expired login.
+
+Messages identity checks include the `message_start` model, server-side
+`fallback` block boundaries and `usage.iterations` entries of type `fallback_message`.
+Diagnostics retain the last validated serving declaration in
+`upstreamResponseModel`, without changing the requested/resolved route.
+A fallback handoff proves execution even without text or token counters, so
+rejecting a substituted model cannot replay the generation on another member.
+Relay does not inject a fallback policy or enable model substitution. The wire
+reference is [Anthropic refusals and fallback](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback).
+
+Native WebSocket ingress starts serialized Ping heartbeats immediately after
+upgrade, including the wait before the first request. The 30-second heartbeat
+does not extend the fixed 60-second initial-request deadline, dispatch work,
+or consume quota; closure ends that loop without a detached writer.
 Native WebSocket forwarding checks message size, served model, late events,
 usage/replay and safe errors. Committed output disables inapplicable retry parsing,
 not served-model validation. Converted text, reasoning, refusal and argument
@@ -1564,6 +2258,12 @@ Closed Messages blocks reject mutations; deferred Gemini and tool-search calls
 stay behind their output barriers. Numeric normalization preserves exact values
 and does not release unfinished arguments. Service tiers, effort and cancellation
 do not change as a side effect of parsing optimizations.
+Outbound text requests larger than 1 MiB use masked text/continuation frames with
+payloads of at most 1 MiB, retaining one WebSocket message. Each frame awaits
+backpressure within the existing single write deadline. A partial or timed-out send remains
+execution-uncertain and is not replayed. The reqwest client still owns proxies,
+TLS and HTTP upgrade; the native frame layer verifies the handshake and rejects
+unrequested extensions and subprotocols.
 The ChatGPT WebSocket setting controls client ingress and the managed profile,
 not provider transport. Catalog changes do not override it. BPS and converted
 routes use the HTTP executor behind the same client socket; usage records the
@@ -1574,14 +2274,24 @@ This is dispatch provenance, not proof of provider acceptance or execution.
 HTTP content type is taken from the response.
 WS handshake time covers only the upgrade attempt, not auth preparation, queueing,
 or content TTFT; a reused socket and older records leave it absent, not zero.
+Optional `reauth` marks a new native WS attempt whose authorization differs from
+the last successfully opened socket for the same candidate in this client session.
+Both the credential fingerprint and login incarnation participate; failed
+handshakes keep the previous successful baseline. Initial and same-auth opens
+record false; reused turns and HTTP leave it absent. Diagnostics expose only
+the flag, never credential material or its fingerprint.
 These fields share existing routing JSON storage and add no retry or transport policy.
 Optional `codexServerTiming` records allowlisted numeric native
 `responsesapi.websocket_timing` values separately from Relay timings: backend
 overhead, inference, engine TTFT and inter-token intervals. They are not additive
 phases, cache-hit evidence or end-user latency. Missing/invalid measurements stay
 absent. Only an active response may receive a measurement; reused connections
-require an exact response ID, while an ID-less first-response event is accepted.
-Unmatched and late events never attach to the next response. Raw events and IDs
+require an exact response ID, while an ID-less event needs the sole first response.
+Concurrent measurements use their exact response owner and any supplied lane
+must agree. Timing notifications bypass per-response setup buffers and forward
+unchanged without supplying usage, semantic output or generation commitment.
+They cannot disable a safe pre-output repair. Unmatched and late events never
+attach to the next response. Raw events and IDs
 are not retained in this diagnostic object. BPS does not synthesize these values.
 Messages streams finalize native text/thinking snapshots when their block closes
 and append signature fragments in place. Portable deltas still stream immediately;
@@ -1661,6 +2371,14 @@ fields, never provider keys or values.
 
 ### Conversation and routing contracts
 
+- Responses HTTP recognizes the observed Codex Desktop Companion Page envelope:
+  an `agent`-namespaced `function_call_output` containing only `type`, `namespace`,
+  `name`, and `output`, with a valid open-page payload or numbered snapshot header.
+  It preserves the exact text and item order as user input before continuation
+  validation. Call identities, extra envelope fields, malformed context and
+  duplicate JSON members remain outside this compatibility rule. The same
+  bounded body-reading workers handle identity, gzip and zstd requests; other
+  client protocols retain their original inputs.
 - Messages `metadata.user_id` is opaque user attribution, not prompt content.
   Gemini conversions send its stable SHA-256 pseudonym (first 63 hexadecimal
   characters) as the documented `labels.safety_identifier`; null remains absent
@@ -1748,6 +2466,24 @@ fields, never provider keys or values.
   system field, initial system/developer attachments before the first
   assistant turn join that field in instruction order; user content order stays
   unchanged. Do not hoist instructions past an earlier assistant turn.
+  Messages routes with explicit `interleaved_system` support instead retain
+  text-only system messages at their original positions, including after tool
+  results. Each consecutive system group follows a user turn and precedes an
+  assistant turn or ends the input. Leading instructions retain the top-level
+  system field. Reference and exact-route exclusions remain binding; model names
+  and generic Messages support never enable this feature. Nonleading developer
+  roles, invalid placement and unrepresentable content remain explicit errors.
+  This capability does not extend Gemini's roles or qualify live provider support.
+  Converted Messages input validates its own system contract before lowering
+  tool changes: consecutive inline messages form one placement group, following
+  a user turn or an assistant turn ending in a supported server-tool result.
+  After the first assistant turn, the group ends the input or precedes an
+  assistant turn. Existing text-only client startup attachments before that boundary
+  retain their separate instruction/user order; this exception does not admit
+  misplaced tool changes. Root instructions use the top-level field. Root and
+  plain inline sections use Messages text blocks; supported tool changes retain
+  their separate lowering. Null/empty inline content cannot disappear during
+  conversion. Native requests remain pass-through.
   Nullable aliases cannot erase explicit limits;
   conflicting non-null limits fail before transport.
 - Preserve call kind, namespace, declared name, item ID versus `call_id`,
@@ -1757,6 +2493,9 @@ fields, never provider keys or values.
   The shared conversion boundary rejects whitespace-only IDs in history, JSON,
   and streams. Malformed Chat call lists, mixed legacy/current call fields, and
   calls attached to tool-result messages fail instead of being silently discarded.
+  Responses history items validate a supplied non-null `status` against the
+  documented `in_progress`/`completed`/`incomplete` enum before conversion;
+  malformed values report `input.status`. Native forwarding remains unchanged.
   Fresh calls to the same tool, including repeated stateful observations, are
   not suppressed by name or argument equality; replaying an old call is distinct.
 - An explicit client serial-call policy remains binding. HTTP, compaction and
@@ -1774,6 +2513,11 @@ fields, never provider keys or values.
   Its marker does not serialize BPS or API-source calls. Ordinary tool support
   does not establish parallel support. Native catalog transport exclusions and
   reference exclusions win.
+- Explicit `max_output_tokens` remains client-owned for native full/Lite
+  generation over HTTP and WebSocket. An omitted limit stays omitted; an upstream
+  refusal is returned through the existing error policy, without resending the
+  request after dropping its limit. Legacy native `/responses/compact` omits
+  generation limits independently of normal request preparation.
 - Responses custom outputs accept strings and typed content lists, including
   representable images. Empty lists mean no content, not literal `[]`. Untyped
   custom results fail. Chat tool messages cannot carry images.
@@ -1804,6 +2548,25 @@ fields, never provider keys or values.
   uses model evidence; a budget-based model needs a budget. Messages requires an
   output limit: an omitted limit defaults to at most 8,192, capped by a known
   model limit. Explicit incompatible limits fail rather than being rewritten.
+- Messages `thinking.display` supports `summarized` and `omitted` on enabled
+  or adaptive thinking. The display policy does not change effort or budget.
+  Omitted summaries produce no thinking blocks/deltas; visible SSE block indices
+  remain contiguous. Hiding applies only to the public projection. Portable Chat
+  reasoning and original native output stay in scoped continuation state for the
+  next tool-result turn, without fabricated client signatures. Native Messages
+  retains its wire policy.
+  Explicit summarized display requests Responses `reasoning.summary: "auto"`
+  or Gemini `includeThoughts: true`; Chat has no portable summary-generation
+  control and rejects that explicit request instead of discarding it.
+- Gemini `generationConfig.thinkingConfig.includeThoughts` uses the same display
+  policy without changing its exact level/budget or enabling thinking. False
+  hides only client output; null/absence keeps provider defaults. True alone can
+  request a Responses summary without inventing effort. Messages needs an
+  already representable enabled/adaptive thinking control; otherwise explicit
+  summary generation fails with the original Gemini parameter. Zero budgets and
+  known non-reasoning models keep their disabled/default controls. Native Gemini
+  retains the original flag. JSON/SSE tool continuations preserve full portable
+  reasoning and original provider-owned state for both visible and hidden output.
 - Provider ciphertext, Messages signatures/redacted blocks, and Gemini thought
   signatures are replayed unchanged only to their compatible owner. Public
   summaries are not signatures. Missing opaque state cannot be reconstructed
@@ -1829,6 +2592,9 @@ fields, never provider keys or values.
 - Metadata and advisory cache hints follow the target contract. Valid foreign
   cache hints do not promise equivalent TTLs, hits, or pricing. Required context
   edits and unsupported hosted tools are not advisory and must fail.
+  The exact `clear_thinking_20251015` edit with `keep: "all"` preserves the
+  converter's complete history; actual clearing, compaction and unknown controls
+  remain unsupported. This policy does not grant opaque-state ownership.
 - JSON, gzip, and zstd share request decoding. Compressed bodies and identity
   JSON above 64 KiB are decoded and parsed in blocking jobs bounded by available
   CPUs; small identity JSON stays inline. Cancellation retains the worker permit
@@ -1840,9 +2606,97 @@ fields, never provider keys or values.
   WS continuation is limited to the same live connection and owner.
 
 Gemini conversion supports one candidate and drains late usage after a finish
-reason under a deadline. The native WS bridge supports one response and at most
-one named lane per connection; full multi-lane multiplexing remains open.
+reason under a deadline. After upgrading and sending the first request, the native
+WS bridge allows up to 16 active responses, including the default lane, on one
+physical upstream socket. It accepts up to 32 distinct named lanes per client connection.
+Each lane stays FIFO; independent lanes can overlap when their selected route,
+model, headers, search mode and authorization permit reuse of that socket.
+The first response's setup frames remain buffered until generation or a terminal
+event, while other lanes can start before any upstream application event arrives.
+That buffer is bounded to 1,024 frames and 128 MiB. Reported setup usage is retained
+immediately, including on disconnect or overflow, without committing the request
+for retry purposes. Reused lanes keep their existing setup-event delivery.
+The bridge retains each lane's latest response identity, allowing cross-lane forks
+without replacing the socket or losing the source lane.
+Incomplete responses keep only volatile affinity on that connection. Replacing
+or closing the socket clears all lane-local identities and volatile bindings;
+it does not reset the client connection's named-lane count. A request-scoped terminal
+failure preserves sibling requests and queued work, including on the default lane.
+An identifier-free request error belongs to the active default lane, or the sole
+active owner for legacy streams. Explicit connection-limit errors, and unscoped
+errors without an unambiguous owner, end the connection and settle every owner;
+ambiguous response output is rejected rather than assigned to an arbitrary lane.
+Unscoped transport notifications forward without altering lane usage. Failed
+same-lane continuations retire their cached parent; failed cross-lane forks
+preserve the source lane's parent. Route, model and authorization checks still
+govern reuse; portable replay remains the existing owner's responsibility.
+Each active native response owns its candidate lease together with its request,
+usage and replay capture; terminal settlement and cancellation release that
+response's reservation. Explicit upstream lane and response identifiers are
+checked before retries, accounting, model guards or client output, including
+initial buffered events. An event naming an inactive lane or a different response
+from that lane's identified active owner is ignored, including a late cached
+parent arriving before another lane obtains its response ID. Events without a
+lane can use a known active response ID or the active default lane. Identifier-free
+legacy events remain accepted with one owner; ambiguous named-lane output is rejected.
+Requests requiring a replacement socket wait for active owners to drain. Background
+authorization renewal keeps reading active upstream responses and bounded client
+input. Its unsent reservation is separate from dispatched generations; cancellation
+releases that reservation while a started grant rotation finishes persistence.
+Admission rechecks the current route and authorization before dispatch. Replacement
+retains the request identity and budget, and rejects an opaque-only predecessor
+before another upgrade when its authorization incarnation changed. A safe
+pre-execution retry settles its failed attempt and retains its request identity
+and budget while waiting for siblings; new work does not postpone that handoff.
+Handshake and live pre-output rejection borrow one `ConnectRecovery` owner.
+One-shot history and identifier repairs remain consumed across reconnects,
+deferred retries and HTTP fallback. The typed HTTP handoff carries the current
+repaired request, continuation ownership, reset permission, transport reason and
+any existing candidate reservation. HTTP reconsiders transport-specific candidate
+exclusions; physical attempts retain the original request identity and shared
+budget. A slow optional handshake keeps its selected member and one rotation
+step, while retaining source/account attribution on native-only reconnects.
+Exhausting a pre-output retry reports its error without closing the client
+connection, including on the default lane. A queued fork retains its original
+parent's replay history when the source lane advances before dispatch; repair
+does not adopt the source's newer branch. Known usage stays on the physical
+attempt that reported it.
+An unknown disconnect is not replayed. Disconnect settlement releases every
+active owner's lease and retains its own observed usage.
+One client-socket owner retains pending `response.create` frames in per-lane FIFO order
+across native connection preparation, retry and HTTP fallback. The local queue
+allows at most 32 requests and 64 MiB of retained wire data; these are Relay
+resource limits, not provider concurrency limits. Queued requests are prepared
+only after the preceding response in their lane finishes, so continuations resolve against
+completed state and acquire their own current policy, budget and lease. Invalid
+queued JSON, queue overflow and unsupported controls return a local request error
+without cancelling the running response. Invalid initial or follow-up requests,
+missing continuation state and incompatible HTTP-fallback lanes leave the connection
+usable; queued valid requests retain their order. Initial validation errors do
+not extend the first-request deadline. Native-mode HTTP fallback proceeds to the next request
+after a pre-output rejection without replaying the failed request; failure after
+partial output remains connection-terminal. Disconnect drops pending frames
+without dispatching them; control frames remain outside the generation queue.
 HTTP-only transport observations are bounded, expiring, and credential/route-scoped.
+
+When upstream WebSockets are disabled at client connection time, the HTTP bridge
+multiplexes independent client lanes over its existing HTTP request executor.
+It allows 16 active requests, including the default lane, and 32 distinct named
+lanes for the connection lifetime. The shared pending queue retains at most
+32 requests and 64 MiB; busy lanes are skipped without reordering their own
+requests. Each lane prepares its next request after the prior owner settles
+usage and releases its lease. Completed HTTP continuation state can fork across
+lanes under the existing key, route and authorization ownership rules; this does
+not establish same-native-socket opaque continuation support. The connection
+stays HTTP-backed if the upstream WebSocket setting changes while it is open.
+Validation errors and late stream failures stay lane-scoped. One physical client
+reader/writer owns all output and acknowledges writes before each lane advances.
+Controls are bounded separately to eight frames per lane and 16 KiB per frame.
+Disconnect cancels active owners, releases their leases and discards pending
+requests without dispatching them. Native-enabled connections use the shared-socket
+bridge described above; their automatic HTTP fallback remains sequential. A handoff
+drains native owners first and preserves deferred logical retries and pending client
+frames, including their request identities and dispatch budgets.
 
 ### Excel / Basis Points
 
@@ -1950,8 +2804,15 @@ definitions. Historical call kind/namespace remains independent of later catalog
 Messages client-owned discovery validates the complete catalog, then exposes
 non-deferred, explicitly referenced, historically called, or forced tools.
 References must resolve to root definitions in successful paired user results.
-Relay supplies exact schemas once and preserves the discovery marker; it does
-not search, execute tools, emulate hosted search, or promise foreign cache placement.
+Responses conversion places the initial callable catalog before history in a
+developer `additional_tools` item, then introduces deferred schemas once after
+the discovering result or before a retained call when discovery history was
+compacted. The explicit initial item also preserves unused initial definitions
+through SIWC preparation. Forced tools without history load at the end. Requests
+with inline replacements/removals retain their final root catalog authority.
+Other converted APIs use their root callable catalog.
+Relay preserves the discovery marker and does not search, execute tools, emulate
+hosted search, or promise a provider cache hit.
 
 Parallel calls stay in one assistant turn. Every result must match an outstanding
 call before ordinary user text or the next model turn. Unknown/duplicate/missing
@@ -1971,12 +2832,27 @@ Detailed request telemetry is opt-in through the existing Desktop debug mode.
 Without it, request context/schema byte counting, cache-context fingerprints
 and comparisons, BPS catalog size diagnostics, and preparation-stage clocks
 are skipped. The runtime reads the host's
-setting without rebuilding the listener; admitted tool-policy captures retain
-their original mode. The UI hides route, context, and tool diagnostic panels
+setting without rebuilding the listener; each admitted request retains its
+initial diagnostics setting. Forwarded tool catalogs are observed read-only
+after conversion and before transport encoding. Historical tool-policy settings
+remain readable but cannot filter tools or reject a new request.
+The UI hides route, context, and tool diagnostic panels
 outside debug mode, including those in historical rows; history is not erased.
 Token/cache usage, pricing, total latency, TTFT/generation speed, outcomes,
 attempt history, errors, and all authorization/schema/size guards stay active.
 No debug setting changes routing, provider caching, or tool execution policy.
+
+Desktop saves, configuration/route switches, and refresh commands record bounded
+`command_save`, `command_switch`, and `command_refresh` samples in the existing
+local performance store, independently of request debug mode. Each sample spans
+the renderer's IPC dispatch through promise settlement and contains only the
+static command name, `ok`/`error`, and elapsed milliseconds. Arguments, results,
+account identifiers and error text are excluded. Recording uses the existing
+asynchronous SQLite worker without awaiting diagnostic storage or replacing the
+command result. A command that only queues work measures its acknowledgement, not that
+work's eventual completion. These timings include IPC/queueing but exclude later
+snapshot reloads and rendered frames; they are not isolated lock-wait or provider
+latency measurements.
 
 New request diagnostics retain only JSON byte counts for client and prepared
 instructions, conversation, tool catalog, and whole body, across all four APIs.
@@ -2010,11 +2886,19 @@ Older Desktop hosts that omit model/member filter fields use an unfiltered,
 events-free aggregate read for the same period. This compatibility path does
 not substitute current inventory or one page of events; supported empty arrays
 remain empty, and concurrent fallback reads for the same period join in flight.
-Desktop reports run on a blocking worker. A read-only WAL connection pins one
+Desktop usage reports run on a blocking worker. A read-only WAL connection pins one
 snapshot/history revision under a short writer lock, then computes without holding
 up request/state writes. Its 24 MiB pager and the writer's 8 MiB pager share a
 32 MiB budget; in-memory tests retain one connection. Pagination decodes only
 selected rows; aggregates and filter choices use narrow indexed projections.
+
+Weekly-capacity card and chart projections use SQL-only snapshots on that same
+bounded reader. On file-backed databases they read committed observations without
+waiting for the request-writer mutex. SQLite's
+[WAL snapshot isolation](https://sqlite.org/isolation.html) preserves one consistent
+view; transaction cleanup, query-only mode and pager budgets remain unchanged.
+Usage-backed capacity collection still pairs its read with the usage revision
+and retains the existing commit fences.
 
 Logical totals/timings remain separate from physical-send consumption/pricing.
 Price groups preserve member/model/tier/context boundaries; bucket rounding is
@@ -2032,6 +2916,18 @@ archiving physical sends and deleting history use exactly that captured batch.
 Startup, every 256 new requests, and a once-per-minute Desktop worker use bounded
 batches. The worker skips a busy writer; aggregate
 totals survive expiration and caches are invalidated after a committed batch.
+
+Schema 46 stores identical routing/tool diagnostic JSON once in an immutable,
+SHA-256-indexed dictionary. Request results and physical sends retain independent
+references, so late usage corrections cannot change a completed logical result.
+Transactional reference cleanup follows replacement, history expiry, clearing and
+account removal. Existing inline records remain readable and convert in batches
+of at most 256 per table at startup and during minute maintenance.
+Verbose route/cache/transport, context-size and BPS-catalog observations expire
+after seven days, independently for each request/send. Core outcomes, request
+timing, tool counts/policy, reported usage and pricing retain the 30-day history
+window; lifetime aggregates remain available. Compaction invalidates report caches
+only after commit. Freed SQLite pages are reused; startup does not run VACUUM.
 
 Usage corrections and mixed state/purge batches are atomic with WAL/FULL durability.
 Unchanged values can skip redundant updates, never request/attempt observations
@@ -2234,6 +3130,8 @@ prices; this revaluation neither rewrites history nor adds fictitious consumptio
 Snapshot projection reads the persisted calibration and never reprices raw sends.
 Cards show one approximate weekly remaining value or `—`; tooltips identify
 workload/profile count, sample count and pricing coverage.
+Cards requiring reauthentication retain historical API-equivalent usage and
+payback, while hiding quota, reset-credit controls and remaining-value forecasts.
 Forecasts expire at target reset, stale quota or the calibration's next expiry
 even without a new snapshot. Provider-reported dollar balances remain distinct.
 These display-only estimates do not change quota, admission, routing or billing.
@@ -2476,16 +3374,78 @@ remain user-owned and do not block subsequent catalog updates or reconnects.
 Catalog changes publish atomically without stopping requests.
 A client that only loads configuration at startup still needs relaunch; saving
 policy never automatically closes/restarts an application.
+Successful catalog-warning writes publish their in-memory value under the same
+store guard as persistence, keeping concurrent results in the same order across
+memory and restart while preserving unrelated gateway settings. Storage failures
+retain the existing best-effort in-memory warning behavior.
+Claude Desktop, OpenCode and Codex refreshes retain independent outcomes after
+every client is attempted. A peer failure cannot erase Codex's deferred-startup
+state; a standalone Codex success clears only its own warning. Other client
+failures retain a fixed client identity, error code and recording time until
+their own successful refresh or reconnect. Manual reconnects clear only the
+matching client's failure. One background result batch persists and publishes
+all warnings together. Each batch carries per-client in-memory fences: a newer
+batch or matching foreground completion invalidates its older result. Late
+failures cannot undo a successful reconnect, and late successes cannot erase a
+newer failure or restart requirement. Unchanged peers still publish their own
+results; a fully superseded or replayed batch does not write warning state.
+Raw error messages, paths and credentials stay outside
+these warning records; existing Codex warning fields remain readable on upgrade.
+
+The opt-in [installed Codex tool-cycle check](../../CONTRIBUTING.md#installed-codex-tool-cycle)
+uses the actual generated catalog and in-process gateway. It verifies adoption
+of the generated instructions, unchanged model/effort, one audited MCP execution,
+two physical sends and two terminal usage records. A type/content/order digest
+compares the complete multi-part result with the physical upstream, retaining
+client-added execution metadata. Codex 0.167.0-alpha.3.2 passed the native Responses
+SSE case with the fixture's declared Low effort. Isolated config, synthetic keys
+and loopback-only traffic keep this separate from user sessions, Desktop UI,
+foreign-protocol and live-provider acceptance.
+
+The separate, explicitly authorized live-profile mode uses one selected generated
+catalog row and an exact declared effort through an existing authenticated loopback
+Relay provider. The local key remains in the parent observer; the isolated client
+uses a synthetic key. Responses are forwarded incrementally without changing their
+bytes. First-byte, first-text, tool-argument, terminal, whole-client and between-turn
+timings retain their separate meanings. The observer validates the provider's
+actual call identity and complete client result before forwarding the next request.
+Windows Codex 0.167.0-alpha.3.2 has passed the single-MCP and two-function native
+Responses SSE cycles on the BPS `gpt-6.1-sol` High route, including generated
+instruction adoption and two completed generations per cycle. In the two-function
+case one native BPS envelope expanded into two validated client calls; both distinct
+results returned with their original IDs, namespaces and arguments. The check audits
+each tool once and rejects unrelated executable output, duplicate executions and
+swapped or missing results before further generation. Read-only ledger correlation
+confirmed the same account, one recorded physical attempt per generation, terminal token
+usage and cached input on the result turn. These cases do not qualify other models,
+efforts, JSON clients, larger/custom-tool batches, discovery, media, Desktop UI,
+failure recovery or a general latency/cache advantage. Built-in execution remains
+outside this check.
 
 ChatGPT, Claude Desktop, and OpenCode have separate profile ownership and recovery.
 Claude uses a Relay-owned UUID profile in its `Claude-3p` library, preserves foreign
 profiles/selections, and maps stable client-only Claude IDs back to real models.
-An explicit reconnect can repair stale recovery fingerprints using the same
-current-gateway proof as missing-recovery reclamation: endpoint, key, supported
-generated settings and the owned entry must match. The original recovery point
-is retained. Pending snapshots, foreign settings, background refresh and restore
-do not gain permission to adopt an externally changed profile.
+External client configuration edits are allowed. With a valid recovery record,
+explicit reconnect reapplies Relay's connection and model-catalog fields while
+preserving unrelated client preferences, extension settings, renamed entries and
+the original recovery point. Background refresh skips externally changed profile
+bytes instead of overwriting them or reporting an ownership error. Restoration
+retains edited profiles and renamed entries, preserves newer foreign selections,
+and selects the previous profile only if its entry still exists; otherwise it
+clears Relay's selection. Unapplied snapshots consume only their recovery record,
+even after external edits. The additive preservation flag contains no secrets and
+defaults to false for existing recovery records. Missing-recovery reclamation
+still requires the current endpoint/key binding and validated model identities,
+not a display name. Malformed configuration, corrupt recovery/path data and an
+actual concurrent write remain distinct errors, not bans on external editing.
 There is one entry per enabled Messages-routable model, not one per effort.
+Initial connection and refresh use the bounded streaming-client snapshot. Explicit
+streaming denials and impossible conversions do not produce a Desktop entry;
+source-only effort enums honor the same captured raw pool policy and reference
+exclusions. A successful authoritative empty refresh clears the owned model list
+while retaining authentication, foreign profiles and the original recovery point.
+Initial connection still requires at least one usable model before closing or
+writing client state. A failed snapshot keeps the saved profile.
 Desktop's native effort menu is capped at the highest pool-allowed level on a
 Messages route. `maxEffort` cannot remove intermediate holes, and supported
 higher choices are not hidden. Incoming effort selections remain strict:
@@ -2497,9 +3457,46 @@ Desktop can render arbitrary `thinking.effort_options`, but the third-party
 own unsigned metadata. Do not configure a non-working local catalog or claim
 the current picker matches sparse Relay sets. Exact per-model Desktop menus
 remain open work in [ROADMAP.md](ROADMAP.md).
+On verified Desktop 4.29.0+ installations, models resolved from an Anthropic
+catalog record with a supported native effort cap use a version-neutral
+`claude-relay-` route and the documented `behavesAs` identity. The identity comes
+from the catalog's `anthropic/claude-*` source record, not a display name or a
+foreign provider's claim. Desktop passes this association to embedded Code's
+`modelPicker`; it is not an arbitrary effort enum or a capability declaration
+for other vendors. Other models and older clients retain the currently generated
+baseline IDs. An unknown publisher version cannot replace an existing identity
+profile with a weaker baseline; authoritative-empty refresh still clears owned
+entries. Missing-recovery reclaim requires each identity to match the freshly
+generated route and catalog identity exactly. Historical `claude-zenith-` and
+`claude-fable-5-zenith-` aliases are retired; they no longer resolve pool models.
+Windows resolves the registered Desktop package and reads its publisher version
+within one bounded metadata helper. The result must match the exact package
+family and application ID, or the explicitly selected executable. Version
+evidence is read afresh rather than cached across application updates. The
+registered-package path keeps the previous combined discovery/version deadline;
+an explicitly selected binary keeps its existing metadata-read deadline.
+Catalog preparation skips publisher-version helpers when no generated model
+needs an identity association and the owned profile has none. A saved identity
+still requires version evidence before a nonempty replacement, even when the
+new catalog has only other vendors; a failed probe preserves that profile.
 The embedded Code engine has its own model-capability lookup. A Desktop picker
 selection or saved session effort does not prove the effort sent over HTTP:
-unsupported `max`/`xhigh` can become `high` inside that client. Relay records
+unsupported `max`/`xhigh` can become `high` inside that client. Installed Code
+2.1.308 and 2.1.309 have passed generated-profile-to-loopback checks: Opus 4.6
+preserves Max, and Opus 4.7 preserves Max/XHigh, on both native controls and
+opaque Relay aliases. Each case keeps the requested wire model, sends one
+Messages request, and consumes a complete synthetic SSE answer. This qualifies
+the installed Code hop, not Desktop picker/settings handoff or a real provider.
+An opt-in combined fixture also runs the generated alias through Relay's actual
+in-process gateway and a synthetic Messages upstream. It checks the canonical
+upstream model, unchanged Max/XHigh, one physical send and one successful usage
+record per case. Both installed versions passed this combined path for the same
+supported efforts. All endpoints and keys belong to the fixture; it does not use
+the running application's accounts. Its observer buffers the synthetic SSE
+answer and stubs token-count calls locally, so neither stream timing nor the
+token-count endpoint is qualified by this check.
+An Opus 4.6 XHigh control on 2.1.309 becomes High with or without an alias;
+identity mapping does not create missing client capabilities. Relay records
 and validates the received effort; it cannot safely infer a higher UI selection
 from `high` or force every request to the profile's `maxEffort` cap.
 Aliases grant no upstream capabilities, pricing, or context. Catalog overflow fails before
@@ -2515,14 +3512,40 @@ session model for the safety classifier. Enabling Auto requires a separately
 qualified classifier integration, not an alias or an effort capability. See
 the official [Desktop Auto-mode configuration](https://claude.com/docs/third-party/claude-desktop/configuration#automodeenabled)
 and [Code classifier selection](https://code.claude.com/docs/en/permission-modes#default-classifier-model).
-Owned older profiles gain the explicit flag on reconnect/catalog refresh;
-missing-recovery reclamation still rejects explicit foreign capability settings.
+Profiles with retained ownership gain current flags on reconnect/catalog refresh.
+Missing-recovery reclamation requires the complete current generated settings;
+it does not infer defaults for an older profile. Non-UUID profiles are unmanaged:
+Relay preserves their files, entries and previous selection rather than adopting
+or deleting them. Recovery records for retired profile IDs are rejected unchanged.
 
 OpenCode profiles explicitly disable standard SDK reasoning variants that the
 model route does not advertise; omission would let OpenCode restore its built-in
 defaults. Models without evidenced effort levels retain the provider's default
 mode. Refresh can re-enable a newly supported effort, removes stale generated
 variants, and preserves genuinely custom user variants.
+An explicit generated `reasoning: false` also disables every standard SDK effort;
+absence of a generated variant map must not restore built-in reasoning defaults.
+
+Direct OpenCode profiles constrain reference token limits by the exact selected
+source/model/native endpoint's current numeric evidence. Other models and protocols
+cannot supply that restriction, and the shared model catalog stays unchanged.
+They use the same endpoint projection for tool and reasoning flags and intersected
+effort levels. A denial or changed effort list updates only its selected route;
+reference exclusions cannot be revived by a source declaration. Refresh removes
+stale generated variants without selecting another effort for the user.
+Pooled profiles use the eligible alternatives for the selected client API, not
+model-wide flags alone. Direct and pooled profiles remove explicitly unsupported
+image input while retaining separately declared PDF/audio/video modalities.
+Attachment support is disabled only when no non-text input remains; this does
+not add support for undeclared media or qualify the client's actual upload flow.
+Saved custom windows remain preferences within current generated ceilings; refresh
+cannot restore an older larger window over a known bound. Smaller saved windows
+remain intact, including when source bounds later relax. Fresh profiles use current
+evidence. Generated input/output limits fit their configured context window.
+Unknown ceilings do not invent new restrictions. Direct launch and pooled exports
+share the supported SDK protocol set: native Gemini Interactions alone is not an
+OpenCode route, and an empty compatible catalog cannot be reported as a connected
+direct model set. Catalog refresh may still remove obsolete managed entries.
 
 Managed Codex Responses requests using Relay's reserved model aliases treat
 `reasoning.effort: none` as a picker placeholder only when reference metadata
@@ -2569,13 +3592,34 @@ remain intact; a missing key for existing encrypted files requires recovery. Nat
 restore clears the stale fallback file. A locked store or process-only `ephemeral`
 requires recovery rather than guessing credentials.
 Legacy v1 file snapshots remain readable; v1 keyring snapshots lack captured authorization.
-Codex's `auth.lock` coordinates credential changes. The profile undo journal includes
+Codex's `auth.lock` coordinates credential changes. Snapshot capture also rechecks
+`config.toml` and an authoritative `auth.json` after native credential reads.
+Concurrent edits or removal return a retryable `conflict` before storing a snapshot,
+preserving the current files. Keyring-backed capture leaves an unselected fallback
+file undecoded and excludes it from content-conflict checks; `auto` uses that file
+only when the native entry is absent. Completed external edits remain capturable.
+The profile undo journal includes
 native credentials, files and protected binding secrets for conditional error rollback.
 History repair uses the saved effective provider, including custom API providers, and
 preserves rollout content and newer chats. History rollback follows a failed connection
 restore. This in-process rollback is not a durable power-loss transaction.
-OpenCode and Claude retain their separate recovery scopes. Source edits do not upgrade
-an already running binary.
+OpenCode and Claude retain their separate recovery scopes. OpenCode restores its
+saved connection without requiring a current Relay provider entry. Current
+foreign providers, model selections and unrelated preferences remain current,
+including removed preferences; a missing config restores the complete snapshot
+and its original model selection. Semantically unchanged config keeps its bytes.
+A successfully consumed snapshot reports completion even when Relay's entries
+were already removed. Malformed config or recovery data retains the snapshot;
+the command clears only OpenCode's catalog warning after successful recovery.
+Recovery parses captured config bytes before preparing a replacement. Comments
+remain token separators; unterminated comments and empty comma entries are
+rejected. A non-object `provider` value stays untouched rather than being erased
+by the connection merge. Conflicting snapshots or a malformed missing-file
+marker require recovery. Config, snapshot and name bytes are rechecked before
+applying the prepared restore and before consuming its record. Observed changes
+return a conflict with recovery data retained; write failures permit a retry.
+These are optimistic byte checks across independent application writers.
+Source edits do not upgrade an already running binary.
 
 The retired personal-server runtime, management client, deployment templates and
 account-transfer operations are removed. Existing ownership evidence is preserved

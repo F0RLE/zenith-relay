@@ -127,7 +127,7 @@ fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
     assert!(ensure_layout(&root));
     let value = Breadcrumb {
         timestamp: "2026-09-15T12:34:56.000Z".to_string(),
-        operation: "account-import".to_string(),
+        operation: "account-subscription-probe".to_string(),
         stage: "runtime_sync_started".to_string(),
         details: BTreeMap::from([("account".to_string(), "id_synthetic".to_string())]),
     };

@@ -7,15 +7,19 @@ pub(in crate::local_pool::profiles::opencode) fn apply(
     models: &[ModelSummary],
 ) -> Result<(), LocalPoolError> {
     let mut groups = BTreeMap::<WireApi, Vec<ModelSummary>>::new();
-    for model in models
-        .iter()
-        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
-    {
+    for model in models.iter().filter(|model| {
+        model.enabled
+            && model
+                .protocol_routes
+                .iter()
+                .any(|route| supports_sdk(route.client_wire_api) && supports_streaming(route))
+    }) {
         // Keep the old provider/model identifier while it is still a usable
         // route, but never let a converted route pin a model that has a native
         // one: the group's own protocol keeps provider semantics and billing.
         let has_native = WireApi::ALL
             .into_iter()
+            .filter(|protocol| supports_sdk(*protocol))
             .any(|protocol| native(model, protocol));
         let previous_protocol = existing_protocol(config, &model.id, |protocol| {
             if has_native {
@@ -57,10 +61,34 @@ pub(in crate::local_pool::profiles::opencode) fn apply_source(
         )
         .map_err(LocalPoolError::invalid_state)?;
     let mut groups = BTreeMap::<WireApi, Vec<String>>::new();
+    let endpoint_capabilities = source
+        .protocol_config
+        .effective_capabilities(&source.base_url, &source.models);
     let native = routes
         .into_iter()
-        .filter(|binding| binding.adapter == SourceAdapter::Native)
+        .filter(|binding| {
+            binding.adapter == SourceAdapter::Native && supports_sdk(binding.wire_api)
+        })
+        .map(|mut binding| {
+            binding.model_ids.retain(|model| {
+                let endpoint =
+                    source_model_endpoint(model, binding.wire_api, &endpoint_capabilities);
+                metadata
+                    .capabilities_for(model)
+                    .for_route(endpoint)
+                    .streaming
+                    != Some(false)
+            });
+            binding
+        })
+        .filter(|binding| !binding.model_ids.is_empty())
         .collect::<Vec<_>>();
+    if select_connection && native.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "the source has no streaming models supported by OpenCode",
+        ));
+    }
     let model_ids = zenith_relay_core::normalize_model_ids(
         native.iter().flat_map(|binding| binding.model_ids.iter()),
     );
@@ -88,7 +116,7 @@ pub(in crate::local_pool::profiles::opencode) fn apply_source(
     let mut generated_groups = Vec::new();
     for (protocol, _, _) in GROUPS {
         let models = groups.remove(&protocol).unwrap_or_default();
-        let mut configured = model_config_ids(&models, metadata);
+        let mut configured = model_config_ids(&models, metadata, protocol, &endpoint_capabilities);
         // Direct connections cannot execute Relay translations. The SDK must
         // speak the exact native protocol declared by this source.
         for provider_model_config in configured.values_mut() {

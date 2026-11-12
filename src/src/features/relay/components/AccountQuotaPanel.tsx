@@ -13,7 +13,7 @@ export function AccountQuotaPanel({ account, nowMs, onReauthenticate }: { accoun
   const { runtime } = useRelayState();
   const canAutomate = account.oauthClientKind === "excel_bps";
   const status = accountQuotaRefreshState(account);
-  const source = accountMetadataSources(account, runtime?.accounts ?? []).quota;
+  const source = accountMetadataSources(account, runtime?.accounts ?? [], nowMs).quota;
   const linked = source.id !== account.id;
   const hasQuota = Boolean(source.quota.primary || source.quota.secondary || source.quota.supplemental?.some((supplementalQuota) => !isFastSupplementalQuota(supplementalQuota)));
 

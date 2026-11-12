@@ -23,6 +23,24 @@ describe("scalable Desktop localization", () => {
     expect(files.sort()).toEqual(locales.map(locale => `${locale.code}.${locale.format}`).sort());
   });
 
+  test("routing labels match the current scheduler reasons", async () => {
+    const source = readFileSync(new URL("../../crates/relay-core/src/scheduler/selection/snapshot.rs", import.meta.url), "utf8");
+    const body = source.match(/pub enum SelectionReason \{([^}]+)\}/s)?.[1];
+    expect(body).toBeDefined();
+    const reasons = [...body!.matchAll(/^\s*(\w+),\s*$/gm)]
+      .map(([, variant]) => variant.replace(/[A-Z]/g, (letter, offset) => `${offset ? "_" : ""}${letter.toLowerCase()}`))
+      .sort();
+    expect(reasons.length).toBeGreaterThan(0);
+    for (const locale of locales) {
+      const dictionary = flattenTranslations(await loadTranslations(locale.code));
+      const labels = Object.keys(dictionary)
+        .filter(key => key.startsWith("usage.routingReasons."))
+        .map(key => key.slice("usage.routingReasons.".length))
+        .sort();
+      expect(labels).toEqual(reasons);
+    }
+  });
+
   test("preserves scripts, regions and canonical OS spelling", () => {
     const available = [definition("en", []), definition("pt"), definition("pt-BR", ["pt"]), definition("zh-Hans"), definition("zh-Hant"), definition("sr-Latn")];
     expect(canonicalLocale("pt_BR.UTF-8")).toBe("pt-BR");

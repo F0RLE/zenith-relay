@@ -171,6 +171,8 @@ Keep necessary warnings visible; supporting detail belongs in tooltips or Help.
 Ship complete Russian/English variants. Browser
 locale selects the initial language; an explicit user choice wins. Changing locale
 does not restart a payment/login operation or translate machine model IDs/codes.
+Keep source documentation and its example copy in English. Additional languages
+belong in separate locale files or explicitly localized documents.
 Allow longer Russian labels to wrap; never solve overflow by shrinking everything.
 
 Follow architecture's exact money and UTC report definitions. Wallet headlines
@@ -230,7 +232,7 @@ closes on explicit action/Escape and returns focus to its trigger.
 
 ### Owner shell
 
-Reuse the geometry/primitives, with a persistent textual `Owner / Владелец` context
+Reuse the geometry/primitives, with a persistent textual `Owner` context
 and service mode in the header. Group navigation into Overview; Capacity; Customers
 and access; Activity; Settings. No CSS class or selected role grants permissions.
 The customer cabinet is a separate authenticated destination, not an admin preview
@@ -331,8 +333,7 @@ Customer authentication starts through the cabinet's sign-in flow.
    Primary Start action opens `/app/overview` for a verified active session;
    otherwise `/login` continues to that panel after authentication. Never infer
    authentication from a browser preference. Secondary View models scrolls to prices.
-   Example RU headline: `Доступ к моделям. Расходы под контролем.` EN:
-   `Model access. Usage you can understand.` Do not promise unlimited capacity,
+   Example headline: `Model access. Usage you can understand.` Do not promise unlimited capacity,
    fixed availability, free trials or unqualified providers.
 3. How it works: three numbered steps, Sign in and inspect prices; Fund access
    and issue a key; Configure a client and track usage. Explain that model execution
@@ -371,7 +372,7 @@ session. Store only a validated same-origin destination, not arbitrary redirects
 Returning to a protected detail still requires a fresh authorized lookup.
 
 **Composition:** centered surface up to 440 pixels wide: brand/back-to-site;
-`Войти в Relay / Sign in to Relay`; short statement that a new account may be
+`Sign in to Relay`; short statement that a new account may be
 created if registration is open; vertical configured provider buttons; required
 policy/terms disclosure; support and theme/language controls. Do not render empty
 email/password fields, an unsupported password reset or a separate duplicate
@@ -410,7 +411,7 @@ after dismissal. A stored dismissal is a UI preference, not authentication or
 proof of a completed request. The local preview exercises this journey with
 explicit synthetic data; it does not qualify Hosted login or billing.
 
-**Header:** `Обзор / Overview`, short period context, primary Top up; Create key
+**Header:** `Overview`, short period context, primary Top up; Create key
 is secondary unless the account has no key, when the onboarding block highlights it.
 
 **Placement:**
@@ -449,7 +450,7 @@ in that order; collapse secondary breakdowns explicitly, not critical warnings.
 
 ### WS-04 — Usage and safe request detail
 
-**Header:** `Использование / Usage`; Export is the main action, not Generate again.
+**Header:** `Usage`; Export is the main action, not Generate again.
 Below: UTC period and model/key/outcome filters; query summary/as-of; compact
 canonical totals; optional time-series panel; request table; cursor navigation.
 
@@ -486,7 +487,7 @@ current customer's permitted record and does not disclose an unauthorized ID.
 
 ### WS-05 — Models and prices
 
-**Header:** `Модели и цены / Models and prices`; explanatory subtitle says these
+**Header:** `Models and prices`; explanatory subtitle says these
 are the models/prices applicable to this account. Search and supported capability/
 protocol filters precede the list. Group by a clear public model family only where
 the authorized projection provides one; do not infer capability from a name.
@@ -511,7 +512,7 @@ roadmap connectors as available options.
 
 ### WS-06 — API keys
 
-**Header:** `API-ключи / API keys`, primary Create key. A short explanation separates
+**Header:** `API keys`, primary Create key. A short explanation separates
 the Relay inference key from upstream accounts and from customer/owner sessions.
 List columns: name/prefix, status, allowed models/operations, effective limits,
 expiry, last use and Actions. Never fetch a stored full secret for this list.
@@ -543,7 +544,7 @@ values. The mobile key card keeps name/status/scope and an accessible action men
 
 ### WS-07 — Billing, payments and refunds
 
-**Header:** `Баланс и платежи / Balance and payments`; primary Top up. First row
+**Header:** `Balance and payments`; primary Top up. First row
 shows current available funds, request holds and refund holds, with snapshot time
 and explanations. Pending payment amounts are a separate block, not part of funds.
 Below use Payments and Wallet journal tabs, with bounded filters and pagination.
@@ -1151,7 +1152,7 @@ Private routes are not included in public sitemaps/previews and carry appropriat
 no-index intent, which is not a substitute for server authorization/no-store.
 Public social metadata contains only reviewed generic product text and own artwork.
 
-### Core RU and EN wording
+### Core English wording
 
 #### Outcome badges
 
@@ -1161,21 +1162,21 @@ separate from admitted request rows; show a phase only when the API exposes it.
 Customer `active` is a grouping, not another persisted state. Owner detail may show
 finer phases, but it uses the same underlying execution/accounting evidence.
 
-| State dimension | Canonical value | RU / EN caption | Visual meaning |
+| State dimension | Canonical value | English caption | Visual meaning |
 | --- | --- | --- | --- |
-| Execution | `received`, `admitted`, `reserved` | Подготовка / Preparing | Neutral; no claim of provider execution or completion |
-| Execution | `queued` | В очереди / Queued | Informational; bounded wait, not a failed request |
-| Execution | `dispatched`, `streaming` | Выполняется / In progress | Informational; output/terminal evidence is still independent |
-| Execution | `completed` | Завершён / Completed | Success for execution only, not a settlement result |
-| Execution | `incomplete` | Не завершён полностью / Incomplete | Warning with evidenced reason; not automatic refund eligibility |
-| Execution | `failed` | Ошибка выполнения / Failed | Failure; safe cause explanation, not automatic blame on Relay or an account |
-| Execution | `cancelled` | Отменён / Cancelled | Neutral confirmed cancellation; disconnect alone does not select this badge |
-| Execution | `uncertain` | Результат неизвестен / Outcome unknown | Warning; Check status/support, not an inferred retry |
-| Accounting | `none` | Нет записи расчёта / No accounting record | Neutral; no claim that usage was free |
-| Accounting | `held` | Зарезервировано / Held | Informational hold, not a posted additional charge |
-| Accounting | `held_for_reconciliation` | Проверяется расчёт / Reconciling | Pending accounting; retain its actual deadline/basis |
-| Accounting | `settled` | Рассчитано / Settled | Show posted amount and basis; execution may still have failed |
-| Accounting | `released` | Резерв снят / Hold released | Hold release, not a fabricated payment refund or second credit |
+| Execution | `received`, `admitted`, `reserved` | Preparing | Neutral; no claim of provider execution or completion |
+| Execution | `queued` | Queued | Informational; bounded wait, not a failed request |
+| Execution | `dispatched`, `streaming` | In progress | Informational; output/terminal evidence is still independent |
+| Execution | `completed` | Completed | Success for execution only, not a settlement result |
+| Execution | `incomplete` | Incomplete | Warning with evidenced reason; not automatic refund eligibility |
+| Execution | `failed` | Failed | Failure; safe cause explanation, not automatic blame on Relay or an account |
+| Execution | `cancelled` | Cancelled | Neutral confirmed cancellation; disconnect alone does not select this badge |
+| Execution | `uncertain` | Outcome unknown | Warning; Check status/support, not an inferred retry |
+| Accounting | `none` | No accounting record | Neutral; no claim that usage was free |
+| Accounting | `held` | Held | Informational hold, not a posted additional charge |
+| Accounting | `held_for_reconciliation` | Reconciling | Pending accounting; retain its actual deadline/basis |
+| Accounting | `settled` | Settled | Show posted amount and basis; execution may still have failed |
+| Accounting | `released` | Hold released | Hold release, not a fabricated payment refund or second credit |
 
 Estimated settlement and partial/missing usage are separate explanatory badges,
 not new execution states. Refund/payment statuses use their own domain contracts;
@@ -1184,41 +1185,42 @@ never map a provider callback string directly to these request badges.
 #### Shared labels
 
 These are semantic wording baselines, not the final complete translation catalog.
-Every screen/action/state still needs reviewed RU/EN copy before implementation.
+Every screen/action/state still needs reviewed English copy and translations in
+the corresponding locale files before implementation.
 
-| Meaning | Russian | English |
-| --- | --- | --- |
-| Overview | Обзор | Overview |
-| Usage | Использование | Usage |
-| Models/prices | Модели и цены | Models and prices |
-| Inference keys | API-ключи | API keys |
-| Billing | Баланс и платежи | Balance and payments |
-| Account settings | Аккаунт и безопасность | Account and security |
-| Available money | Доступно | Available |
-| Request hold | Зарезервировано для запросов | Held for requests |
-| Refund hold | Зарезервировано для возврата | Held for refunds |
-| Posted customer usage charge | Списано за использование | Posted usage charges |
-| Execution completed | Запрос завершён | Request completed |
-| Execution unknown | Результат выполнения неизвестен | Execution outcome unknown |
-| Pending accounting | Расчёт ещё не завершён | Settlement pending |
-| Estimated accounting | Расчёт по оценке | Estimated settlement |
-| Payment awaiting confirmation | Ожидаем подтверждения платежа | Awaiting payment confirmation |
-| Confirmed wallet credit | Средства зачислены | Funds credited |
-| Refund requested | Запрос на возврат отправлен | Refund requested |
-| Read failed | Не удалось получить данные | Unable to load data |
-| Status check, not repeat | Проверить статус | Check status |
-| Data freshness | Данные на | Data as of |
-| Stale snapshot | Данные устарели | Data is stale |
-| Unknown evidence | Нет подтверждённых данных | No confirmed data |
-| Safe support copy | Скопировать данные для поддержки | Copy safe support details |
-| Saved inventory only | Сохранено, не в пуле | Saved, not in pool |
-| Stop new work and finish existing | Завершение текущих запросов | Draining current requests |
-| Privileged context | Панель владельца | Owner panel |
+| Meaning | English |
+| --- | --- |
+| Overview | Overview |
+| Usage | Usage |
+| Models/prices | Models and prices |
+| Inference keys | API keys |
+| Billing | Balance and payments |
+| Account settings | Account and security |
+| Available money | Available |
+| Request hold | Held for requests |
+| Refund hold | Held for refunds |
+| Posted customer usage charge | Posted usage charges |
+| Execution completed | Request completed |
+| Execution unknown | Execution outcome unknown |
+| Pending accounting | Settlement pending |
+| Estimated accounting | Estimated settlement |
+| Payment awaiting confirmation | Awaiting payment confirmation |
+| Confirmed wallet credit | Funds credited |
+| Refund requested | Refund requested |
+| Read failed | Unable to load data |
+| Status check, not repeat | Check status |
+| Data freshness | Data as of |
+| Stale snapshot | Data is stale |
+| Unknown evidence | No confirmed data |
+| Safe support copy | Copy safe support details |
+| Saved inventory only | Saved, not in pool |
+| Stop new work and finish existing | Draining current requests |
+| Privileged context | Owner panel |
 
 Error sentence order: what is known -> what it means -> safe next action -> safe
-reference. Example: `Статус запроса пока неизвестен. Повторная отправка может создать
-новый платный запрос. Проверьте статус или передайте ID в поддержку.` Its English
-counterpart must carry the same uncertainty, not promise failure or a refund.
+reference. Example: `The request status is still unknown. Sending it again may
+create a new billable request. Check the status or share the request ID with
+support.` Translations must carry the same uncertainty, not promise failure or a refund.
 No accusatory customer wording, raw stack traces, unexplained HTTP-only errors or
 generic Retry labels for actions with different financial consequences.
 

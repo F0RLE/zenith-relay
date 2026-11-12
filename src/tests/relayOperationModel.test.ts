@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FeedbackError } from "../src/features/relay/state/feedback";
-import { captureOperationResult, runRelayOperation } from "../src/features/relay/state/relayOperationModel";
+import { captureOperationResult, OPERATION_CANCELLED, runRelayOperation } from "../src/features/relay/state/relayOperationModel";
 
 const resolvedError = (cause: unknown) => ({
   key: "errors.general",
@@ -8,6 +8,53 @@ const resolvedError = (cause: unknown) => ({
 });
 
 describe("relay operation policy", () => {
+  test("a cancelled action settles without success, errors, follow-up work or reads", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("cancelled"); return OPERATION_CANCELLED; },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.accountExportDownloaded",
+      options: { afterWork: async () => { events.push("follow-up"); }, backgroundRefresh: true },
+      resolveError: (cause) => { events.push("error"); return resolvedError(cause); },
+      setFeedback: () => { events.push("feedback"); },
+      settle: () => { events.push("settled"); },
+    });
+    await Promise.resolve();
+    expect(result).toBeFalse();
+    expect(events).toEqual(["cancelled", "settled"]);
+  });
+
+  test("capturing a result preserves cancellation instead of reporting success", async () => {
+    const events: string[] = [];
+    const result = await captureOperationResult((work) => runRelayOperation({
+      work,
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      resolveError: resolvedError,
+      setFeedback: () => { events.push("feedback"); },
+      settle: () => { events.push("settled"); },
+    }), async () => OPERATION_CANCELLED);
+    expect(result).toEqual({ ok: false, value: OPERATION_CANCELLED });
+    expect(events).toEqual(["settled"]);
+  });
+
+  test("ordinary empty and false results are not treated as cancellation", async () => {
+    for (const value of [undefined, null, false, 0, ""]) {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => value,
+        refresh: async () => { events.push("refresh"); },
+        isCurrent: () => true,
+        resolveError: resolvedError,
+        setFeedback: () => { events.push("feedback"); },
+        settle: () => { events.push("settled"); },
+      });
+      expect(result).toBeTrue();
+      expect(events).toEqual(["refresh", "settled"]);
+    }
+  });
+
   for (const fails of [false, true]) {
     test(`standalone launch ${fails ? "failure" : "success"} never depends on a runtime refresh`, async () => {
       const events: string[] = [];

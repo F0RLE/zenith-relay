@@ -44,12 +44,12 @@ pub use record::{
     recover_model_discovery_state, reduce_account_usage, repair_model_discovery_block,
 };
 pub use routes::{
-    AccountRouteGroup, AccountRouteIdentity, detach_account_route, select_account_route_group,
-    validate_account_route_connection, validate_account_route_groups,
+    AccountRouteGroup, AccountRouteIdentity, associate_account_route_groups, detach_account_route,
+    select_account_route_group, validate_account_route_connection, validate_account_route_groups,
 };
 pub use token_authority::{
     PrepareStatus, PreparedToken, TOKEN_REFRESH_SKEW_MS, TokenAuthority, TokenAuthorityError,
     TokenDispatchRevision, TokenDispatchRevisionGuard, TokenPersistenceAdapter,
     TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
-    TokenRefreshFailureKind, TokenSet, access_token_is_usable,
+    TokenRefreshFailureKind, TokenRefreshStage, TokenSet, access_token_is_usable,
 };

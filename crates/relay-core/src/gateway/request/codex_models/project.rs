@@ -80,6 +80,7 @@ pub(super) fn build_codex_models_response_from_manifests(
     }
 
     let mut models = Vec::with_capacity(visible.len());
+    let mut context_limits = serde_json::Map::new();
     for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
         if !codex_model_is_picker_eligible_for(
             &upstream_id,
@@ -88,15 +89,30 @@ pub(super) fn build_codex_models_response_from_manifests(
             continue;
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
+        // Codex always requests streaming Responses. Non-streaming alternatives
+        // cannot supply picker capabilities, context limits or speed modes.
+        let configured_routes =
+            runtime.client_catalog_routes(key, &upstream_id, WireApi::Responses, true);
+        if configured_routes.is_empty() {
+            continue;
+        }
         // These helpers accept the client-facing model spelling because they
         // resolve the key prefix internally. Passing the already-resolved
         // upstream id would make prefixed keys look like API-only routes.
-        let native_account_ids = runtime.codex_model_native_responses_account_ids(key, &display_id);
+        let native_account_ids = runtime
+            .codex_model_native_responses_account_ids(key, &display_id)
+            .into_iter()
+            .filter(|id| {
+                configured_routes
+                    .iter()
+                    .any(|route| route.account_id.as_deref() == Some(id.as_str()))
+            })
+            .collect::<Vec<_>>();
         let has_native_account_route = !native_account_ids.is_empty();
         let mut capabilities = runtime.model_capabilities(&upstream_id);
         if !has_native_account_route {
             runtime
-                .client_token_limits(key, &upstream_id, WireApi::Responses)
+                .token_limits_for_routes(&configured_routes)
                 .constrain(&mut capabilities);
         }
         let native_entries = upstream_by_model
@@ -147,9 +163,7 @@ pub(super) fn build_codex_models_response_from_manifests(
         // IDs keep reversible aliases; a similar leaf is not the same model.
         // The GPT family rule changes only picker identity, never inventory,
         // route eligibility, or capability evidence.
-        if has_native_account_route
-            || (normalized.starts_with("gpt-") && !upstream_id.contains('/'))
-        {
+        if crate::catalog::codex_model_uses_public_id(&upstream_id, has_native_account_route) {
             catalog_model["slug"] = Value::String(display_id.clone());
         }
         if native_catalog_model.is_some() {
@@ -165,7 +179,7 @@ pub(super) fn build_codex_models_response_from_manifests(
             };
             crate::publish_routed_codex_context(&mut catalog_model, context_limit);
         }
-        let mut supported = runtime.client_reasoning_levels(key, &upstream_id, WireApi::Responses);
+        let mut supported = runtime.reasoning_levels_for_routes(&configured_routes);
         let native_ultra = native_catalog_model.as_ref().is_some_and(|(_, official)| {
             apply_codex_ultra_from_official_model(&mut catalog_model, official, &upstream_id)
         });
@@ -181,23 +195,20 @@ pub(super) fn build_codex_models_response_from_manifests(
                         &upstream_id,
                     )
                 });
-        let ultra_route_available = runtime
-            .configured_executor_routes(key, &upstream_id, &[WireApi::Responses], false)
-            .iter()
-            .any(|route| {
-                let capabilities = runtime
-                    .model_capabilities(&route.source_model)
-                    .for_route(route.route_capability.as_ref());
-                route.adapter.supports_reasoning_effort_for_model(
-                    route.reasoning_mode,
-                    "ultra",
-                    &capabilities,
-                ) && runtime.basis_points_reasoning_available(
-                    &route.candidate_id,
-                    &route.source_model,
-                    "ultra",
-                )
-            });
+        let ultra_route_available = configured_routes.iter().any(|route| {
+            let capabilities = runtime
+                .model_capabilities(&route.source_model)
+                .for_route(route.route_capability.as_ref());
+            route.adapter.supports_reasoning_effort_for_model(
+                route.reasoning_mode,
+                "ultra",
+                &capabilities,
+            ) && runtime.basis_points_reasoning_available(
+                &route.candidate_id,
+                &route.source_model,
+                "ultra",
+            )
+        });
         if (native_ultra || installed_ultra)
             && ultra_route_available
             && !supported.iter().any(|level| level == "ultra")
@@ -222,7 +233,7 @@ pub(super) fn build_codex_models_response_from_manifests(
         // Key scope and transport restrictions narrow the reference modes.
         set_codex_service_tiers(
             &mut catalog_model,
-            &runtime.client_service_tiers(key, &upstream_id, WireApi::Responses),
+            &runtime.service_tiers_for_routes(&upstream_id, &configured_routes),
         );
         sort_supported_reasoning_levels(&mut catalog_model);
         runtime.apply_model_context(
@@ -232,6 +243,21 @@ pub(super) fn build_codex_models_response_from_manifests(
             native_catalog_model.is_some(),
             &capabilities,
         );
+        restrict_catalog_route_features(runtime, &configured_routes, &mut catalog_model);
+        if !has_native_account_route
+            && let Some(slug) = catalog_model.get("slug").and_then(Value::as_str)
+        {
+            let model =
+                crate::catalog::decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_owned());
+            context_limits.insert(
+                crate::model_id_key(&model),
+                json!(crate::ModelTokenLimits {
+                    context: capabilities.context_limit,
+                    input: capabilities.input_limit,
+                    output: capabilities.output_limit,
+                }),
+            );
+        }
         models.push(catalog_model);
     }
 
@@ -239,7 +265,42 @@ pub(super) fn build_codex_models_response_from_manifests(
     if models.is_empty() {
         None
     } else {
-        Some(json!({ "models": models }))
+        Some(json!({ "models": models, "relay_context_limits": context_limits }))
+    }
+}
+
+fn restrict_catalog_route_features(
+    runtime: &GatewayRuntime,
+    routes: &[crate::runtime::ExecutorRoute],
+    model: &mut Value,
+) {
+    use crate::{CapabilityStatus, ProtocolFeature};
+
+    let mut images_denied = !routes.is_empty();
+    let mut tools_denied = !routes.is_empty();
+    for route in routes {
+        let features = runtime
+            .model_capabilities(&route.source_model)
+            .protocol_features_for_route(route.route_capability.as_ref());
+        images_denied &=
+            features.get(&ProtocolFeature::Images) == Some(&CapabilityStatus::Unsupported);
+        tools_denied &=
+            features.get(&ProtocolFeature::FunctionTools) == Some(&CapabilityStatus::Unsupported);
+        if !images_denied && !tools_denied {
+            break;
+        }
+    }
+    // Narrow existing catalog fields only. Unknown evidence never grants a
+    // capability, and an unrelated source/key cannot restore an excluded one.
+    if images_denied
+        && let Some(modalities) = model
+            .get_mut("input_modalities")
+            .and_then(Value::as_array_mut)
+    {
+        modalities.retain(|modality| modality.as_str() != Some("image"));
+    }
+    if tools_denied {
+        model["supports_parallel_tool_calls"] = false.into();
     }
 }
 

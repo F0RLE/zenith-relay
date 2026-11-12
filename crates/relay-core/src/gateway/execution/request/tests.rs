@@ -14,7 +14,7 @@ use serde_json::json;
 
 #[test]
 fn attempt_state_preserves_offset_and_opaque_continuation_ownership() {
-    let state = super::state::AttemptState::new(
+    let state = super::super::state::AttemptState::new(
         7,
         Some("response-owner".into()),
         true,
@@ -38,7 +38,7 @@ fn attempt_state_preserves_offset_and_opaque_continuation_ownership() {
 
 #[test]
 fn materializing_continuation_keeps_retry_history_and_preparation_exclusions() {
-    let mut state = super::state::AttemptState::new(
+    let mut state = super::super::state::AttemptState::new(
         3,
         Some("response-owner".into()),
         true,

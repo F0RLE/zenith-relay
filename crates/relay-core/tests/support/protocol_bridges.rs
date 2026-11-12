@@ -54,13 +54,34 @@ impl ResponseAffinityStore for MemoryAffinityStore {
 
 #[tokio::test]
 async fn responses_bridge_tool_roundtrip_survives_runtime_replacement() {
+    for streaming in [false, true] {
+        for full_history in [false, true] {
+            bridge_tool_cycle_after_replacement(streaming, full_history, true).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_bridge_fresh_runtime_rejects_lost_native_tool_state() {
+    for streaming in [false, true] {
+        for full_history in [false, true] {
+            bridge_tool_cycle_after_replacement(streaming, full_history, false).await;
+        }
+    }
+}
+
+async fn bridge_tool_cycle_after_replacement(
+    streaming: bool,
+    full_history: bool,
+    retain_state: bool,
+) {
     let (upstream, state) = spawn_messages_upstream().await;
     let options = GatewayRuntimeOptions {
         continuation_state: Some(RuntimeContinuationStores::default()),
         response_affinity_store: Some(Arc::new(MemoryAffinityStore::default())),
         ..Default::default()
     };
-    let (first, _) = spawn_messages_bridge_gateway_with_options(
+    let (first, first_events) = spawn_messages_bridge_gateway_with_options(
         &upstream.base_url,
         &state,
         MessagesReasoningMode::Budget,
@@ -72,17 +93,49 @@ async fn responses_bridge_tool_roundtrip_survives_runtime_replacement() {
         .post(format!("{}/v1/responses", first.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
-            "model":"claude-test", "input":"Use the file tool", "reasoning":{"effort":"high"},
+            "model":"claude-test", "input":"Use the file tool", "reasoning":{"effort":"high"}, "stream":streaming,
             "tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}]
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let response: Value = response.json().await.unwrap();
+    let response: Value = if streaming {
+        let body = response.text().await.unwrap();
+        let completed = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .filter(|event| event["type"] == "response.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "{body}");
+        completed[0]["response"].clone()
+    } else {
+        response.json().await.unwrap()
+    };
+    assert_eq!(first_events.lock().unwrap().len(), 1);
+    assert!(first_events.lock().unwrap()[0].success);
     let previous = response["id"].as_str().unwrap();
-    let call_id = response["output"][0]["call_id"].as_str().unwrap();
+    let output = response["output"].as_array().unwrap();
+    let calls = output
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    let call = calls[0];
+    let call_id = call["call_id"].as_str().unwrap();
+    assert_eq!(call["name"], "read_file");
+    assert_eq!(
+        serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+        json!({"path":"/tmp/a"})
+    );
     drop(first);
+
+    let options = if retain_state {
+        options
+    } else {
+        GatewayRuntimeOptions::default()
+    };
 
     let (replacement, events) = spawn_messages_bridge_gateway_with_options(
         &upstream.base_url,
@@ -91,29 +144,95 @@ async fn responses_bridge_tool_roundtrip_survives_runtime_replacement() {
         options,
     )
     .await;
+    let result =
+        json!({"type":"function_call_output", "call_id":call_id, "output":"synthetic result"});
+    let mut request = json!({"model":"claude-test", "input":[result.clone()]});
+    if full_history {
+        let mut history = vec![json!({"role":"user", "content":"Use the file tool"})];
+        history.extend(output.iter().cloned());
+        history.push(result);
+        request["input"] = history.into();
+    } else {
+        request["previous_response_id"] = previous.into();
+    }
     let response = client
         .post(format!("{}/v1/responses", replacement.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model":"claude-test", "previous_response_id":previous,
-            "input":[{"type":"function_call_output", "call_id":call_id, "output":"synthetic result"}]
-        }))
+        .json(&request)
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let response: Value = response.json().await.unwrap();
+    if !retain_state {
+        // Portable output alone cannot replace the adapter's native checkpoint.
+        let (expected_status, code, error_type) = if full_history {
+            (
+                StatusCode::BAD_REQUEST,
+                "adapter_continuation_missing",
+                "relay_adapter",
+            )
+        } else {
+            (
+                StatusCode::CONFLICT,
+                "response_continuation_unavailable",
+                "relay_continuation",
+            )
+        };
+        assert_eq!(status, expected_status, "{response}");
+        assert_eq!(response["error"]["code"], code);
+        assert!(state.requests.lock().unwrap().is_empty());
+        assert!(state.bodies.lock().unwrap().is_empty());
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let event = &recorded[0];
+        assert!(!event.success);
+        assert_eq!(event.http_status, expected_status.as_u16());
+        assert_eq!(event.error_category.as_deref(), Some(code));
+        assert_eq!(event.source_id, "relay");
+        assert_eq!(event.attempt, 0);
+        assert!(event.candidate_id.is_none());
+        assert!(event.account_id.is_none());
+        assert_eq!(
+            event.resolved_model.as_deref(),
+            full_history.then_some("claude-test")
+        );
+        assert!(event.total_tokens.is_none());
+        assert!(event.cooldown_scope.is_none());
+        assert!(event.retry_at_ms.is_none());
+        let details = event.upstream_error.as_ref().unwrap();
+        assert_eq!(details.error_type.as_deref(), Some(error_type));
+        let diagnostic = serde_json::to_string(event).unwrap();
+        assert!(!diagnostic.contains("synthetic result"));
+        assert!(!diagnostic.contains(previous));
+        assert!(!diagnostic.contains(call_id));
+        return;
+    }
+    assert_eq!(status, StatusCode::OK, "{response}");
     assert_eq!(
         response["output"][0]["content"][0]["text"],
         "Tool result received"
     );
     let bodies = state.bodies.lock().unwrap();
     assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["messages"][1]["content"][0]["type"], "tool_use");
-    assert_eq!(
-        bodies[0]["messages"][2]["content"][0]["tool_use_id"],
-        call_id
-    );
+    let messages = bodies[0]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["content"][0]["text"], "Use the file tool");
+    let tool_blocks = messages[1]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["type"] == "tool_use")
+        .collect::<Vec<_>>();
+    assert_eq!(tool_blocks.len(), 1);
+    assert_eq!(tool_blocks[0]["id"], call_id);
+    assert_eq!(tool_blocks[0]["name"], "read_file");
+    assert_eq!(tool_blocks[0]["input"], json!({"path":"/tmp/a"}));
+    if streaming {
+        assert_eq!(messages[1]["content"][0]["text"], "Streaming ");
+    }
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], call_id);
+    assert_eq!(messages[2]["content"][0]["content"], "synthetic result");
     let recorded = events.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert!(recorded[0].success);

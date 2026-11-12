@@ -3,6 +3,90 @@ use std::sync::atomic::Ordering;
 
 struct InvalidGrant;
 
+#[derive(Default)]
+struct ObservedInvalidGrant(AtomicUsize);
+
+impl TokenRefreshAdapter for ObservedInvalidGrant {
+    fn refresh<'a>(
+        &'a self,
+        account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            InvalidGrant
+                .refresh(account_id, refresh_token, now_ms)
+                .await
+        })
+    }
+}
+
+#[tokio::test]
+async fn rejected_refresh_is_not_retried_until_a_new_login_is_registered() {
+    for expires_at_ms in [1, 60_000] {
+        let authority = TokenAuthority::new(1).unwrap();
+        let tokens = TokenSet::new(
+            "synthetic-access",
+            Some("synthetic-refresh".into()),
+            None,
+            Some(expires_at_ms),
+            0,
+            0,
+        )
+        .unwrap();
+        authority
+            .register("account", tokens.clone(), AccountAuthState::Active)
+            .await
+            .unwrap();
+        let refresh = ObservedInvalidGrant::default();
+        let persistence = CapturePersistence::default();
+        assert!(matches!(
+            authority
+                .prepare_and_persist("account", 2, 60_000, &refresh, &persistence)
+                .await,
+            Err(TokenAuthorityError::RequiresReauth(
+                ReauthReason::InvalidGrant
+            ))
+        ));
+        let results = futures_util::future::join_all(
+            (0..32).map(|_| authority.prepare_and_persist("account", 3, 0, &refresh, &persistence)),
+        )
+        .await;
+        assert!(results.into_iter().all(|result| matches!(
+            result,
+            Err(TokenAuthorityError::RequiresReauth(
+                ReauthReason::InvalidGrant
+            ))
+        )));
+        assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+        assert_eq!(authority.tokens("account").await, Some(tokens));
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(persistence.auth_states.lock().unwrap().len(), 1);
+
+        let fresh = TokenSet::new(
+            "synthetic-new-access",
+            Some("synthetic-new-refresh".into()),
+            None,
+            Some(120_000),
+            4,
+            1,
+        )
+        .unwrap();
+        authority
+            .register("account", fresh.clone(), AccountAuthState::Active)
+            .await
+            .unwrap();
+        let prepared = authority
+            .prepare_and_persist("account", 5, 0, &refresh, &persistence)
+            .await
+            .unwrap();
+        assert_eq!(prepared.status, PrepareStatus::Ready);
+        assert_eq!(prepared.tokens, fresh);
+        assert_eq!(refresh.0.load(Ordering::SeqCst), 1);
+    }
+}
+
 struct RotationRecoveryFailure(std::sync::atomic::AtomicUsize);
 
 impl TokenRefreshAdapter for RotationRecoveryFailure {
@@ -511,8 +595,12 @@ async fn expired_access_only_token_never_attempts_refresh() {
         .await
         .unwrap();
 
-    assert!(matches!(
-        authority.prepare("account", 2, 0, &MustNotRefresh).await,
-        Err(TokenAuthorityError::AccessTokenExpired)
-    ));
+    for now_ms in [2, 3, 10, 60_000] {
+        assert!(matches!(
+            authority
+                .prepare("account", now_ms, 0, &MustNotRefresh)
+                .await,
+            Err(TokenAuthorityError::AccessTokenExpired)
+        ));
+    }
 }

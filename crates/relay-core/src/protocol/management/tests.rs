@@ -12,6 +12,7 @@ use crate::{
 };
 use std::sync::Arc;
 mod accounts;
+mod endpoint_projection;
 mod inventory;
 mod pricing;
 mod reasoning;

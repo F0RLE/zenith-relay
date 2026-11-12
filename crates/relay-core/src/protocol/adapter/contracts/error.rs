@@ -130,6 +130,13 @@ impl AdapterError {
         Self::parameter_unsupported().with_parameter(parameter)
     }
 
+    pub(crate) fn siwc_parameter_unsupported_for(parameter: &'static str) -> Self {
+        Self {
+            message: "Sign in with ChatGPT (SIWC) does not support this request parameter; remove it in the client or use a compatible pool route",
+            ..Self::parameter_unsupported_for(parameter)
+        }
+    }
+
     pub fn is_upstream_failure(self) -> bool {
         matches!(
             self.code,

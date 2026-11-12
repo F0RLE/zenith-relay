@@ -63,11 +63,7 @@ async fn check_routing_modes_with_inventory(stored_policy: bool) {
         }
     }
 
-    for mode in [
-        PoolRoutingMode::InOrder,
-        PoolRoutingMode::RoundRobin,
-        PoolRoutingMode::Automatic,
-    ] {
+    for mode in [PoolRoutingMode::RoundRobin, PoolRoutingMode::Automatic] {
         let displayed = super::super::state::build_local_runtime_state(&state)
             .await
             .unwrap()

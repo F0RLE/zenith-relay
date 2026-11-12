@@ -1,3 +1,16 @@
+export function tauriBuildOptions(args) {
+  const separator = args.indexOf("--");
+  let compact = false;
+  const forwarded = args.filter((arg, index) => {
+    if (arg === "--compact" && (separator < 0 || index < separator)) {
+      compact = true;
+      return false;
+    }
+    return true;
+  });
+  return { args: forwarded, compact };
+}
+
 /** Keep Tauri options ahead of Cargo's separator, including unsigned local builds. */
 export function tauriBuildArgs(args, { signingKeyPresent = false } = {}) {
   const separator = args.indexOf("--");

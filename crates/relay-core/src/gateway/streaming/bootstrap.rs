@@ -12,20 +12,42 @@ use axum::body::Bytes;
 use futures_util::StreamExt;
 use std::time::Instant;
 
+type RetainedBodyObserver<'a> = dyn FnMut(&[u8]) + Send + 'a;
+
 pub(in crate::gateway) enum StreamBootstrapObservation<'a> {
     Transport {
         started: Instant,
-        transport: &'a mut crate::usage::TransportDiagnostics,
+        transport: Option<&'a mut crate::usage::TransportDiagnostics>,
+        on_retained_body: Option<&'a mut RetainedBodyObserver<'a>>,
     },
     Buffered {
         started: Instant,
         timing: &'a mut crate::gateway::response::BufferedResponseTiming,
+        on_retained_body: Option<&'a mut RetainedBodyObserver<'a>>,
     },
 }
 
 impl StreamBootstrapObservation<'_> {
+    fn retained(&mut self, bytes: &[u8]) {
+        let (Self::Buffered {
+            on_retained_body, ..
+        }
+        | Self::Transport {
+            on_retained_body, ..
+        }) = self;
+        if let Some(observe) = on_retained_body {
+            observe(bytes);
+        }
+    }
+
     fn body(&mut self, nonempty: bool) {
-        if nonempty && let Self::Transport { started, transport } = self {
+        if nonempty
+            && let Self::Transport {
+                started,
+                transport: Some(transport),
+                ..
+            } = self
+        {
             transport
                 .stream_response
                 .get_or_insert_default()
@@ -35,15 +57,22 @@ impl StreamBootstrapObservation<'_> {
 
     fn event(&mut self, event: &super::events::TerminalEvent) {
         match self {
-            Self::Transport { started, transport } if event.event_payload.is_some() => transport
-                .stream_response
-                .get_or_insert_default()
-                .observe_event(
-                    true,
-                    event.semantic_output,
-                    started.elapsed().as_millis() as u64,
-                ),
-            Self::Buffered { started, timing } => {
+            Self::Transport {
+                started,
+                transport: Some(transport),
+                ..
+            } if event.event_payload.is_some() => {
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let timing = transport.stream_response.get_or_insert_default();
+                timing.observe_event(true, event.semantic_output, elapsed_ms);
+                if let Some(payload) = &event.event_payload {
+                    timing.observe_reasoning(payload, elapsed_ms);
+                    timing.observe_output(payload, elapsed_ms);
+                }
+            }
+            Self::Buffered {
+                started, timing, ..
+            } => {
                 timing.observe(event, started.elapsed().as_millis() as u64);
             }
             Self::Transport { .. } => {}
@@ -167,6 +196,9 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                 }
                 let available = max_buffered_bytes.saturating_sub(buffered.len());
                 let prefix_len = available.min(chunk.len());
+                if decoded && let Some(observation) = observation.as_mut() {
+                    observation.retained(&chunk[..prefix_len]);
+                }
                 buffered.extend_from_slice(&chunk[..prefix_len]);
                 let mut ready_to_forward = false;
                 while let Some(end) = sse_event_end(&buffered[inspected..]) {
@@ -179,7 +211,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                         || event
                             .event_payload
                             .as_ref()
-                            .is_some_and(crate::gateway::response::has_generated_tokens);
+                            .is_some_and(|payload| super::has_generation_evidence(payload, None));
                     if expected_model.is_some_and(|expected| {
                         event.event_payload.as_ref().is_some_and(|served_model| {
                             super::served_model_is_rejected(served_model, expected)
@@ -204,6 +236,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                         }));
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
+                        buffered.truncate(absolute_end);
                         let category = event
                             .error_category
                             .unwrap_or(error_codes::UPSTREAM_TERMINAL);

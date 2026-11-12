@@ -73,6 +73,55 @@ fn report(database: &TelemetryDb, now: u64) -> serde_json::Value {
 }
 
 #[test]
+fn weekly_projection_reads_committed_capacity_without_waiting_for_the_writer() {
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+
+    let (root, database) = database();
+    observe(&database, NOW, 10_000, "plus", "v1");
+    usage(&database, "known", "a", NOW + 30_000, Some(80));
+    observe(&database, NOW + 60_000, 9_500, "plus", "v1");
+    let database = Arc::new(database);
+    let project = |database: &TelemetryDb| {
+        database
+            .weekly_value_projections(&[CapacityObservation {
+                ledger: "synthetic-ledger",
+                account_ids: &["a".into(), "b".into()],
+                plan: "plus",
+                window: &window(NOW + 60_000, 9_500),
+                pricing_revision: "v1",
+                now_ms: NOW + 60_000,
+            }])
+            .map(|projection| (projection, report(database, NOW + 60_000)))
+    };
+    let expected = project(&database).unwrap();
+    assert!(!expected.0.is_empty());
+    assert!(!expected.1["groups"].as_array().unwrap().is_empty());
+    let writer = database.lock_connection().unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history")
+        .unwrap();
+    let (sent, received) = mpsc::channel();
+    let reader = database.clone();
+    let task = std::thread::spawn(move || sent.send(project(&reader)).unwrap());
+    let sampled = received.recv_timeout(Duration::from_secs(5));
+    // Release the writer and join even if the old locking path timed out.
+    writer.execute_batch("ROLLBACK").unwrap();
+    drop(writer);
+    task.join().unwrap();
+    assert_eq!(
+        sampled
+            .expect("capacity projection waited for the writer")
+            .unwrap(),
+        expected
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
     let (root, database) = database();
     observe(&database, NOW, 10_000, "plus", "v1");

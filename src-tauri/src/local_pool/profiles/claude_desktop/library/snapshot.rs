@@ -37,9 +37,10 @@ pub(in super::super) fn create(library: &Path, recovery_path: &Path, name: &str)
         snapshot_name: Some(name),
         created_at_ms: Some(zenith_relay_core::unix_time_ms()),
         pending: true,
+        preserve_profile_on_restore: false,
     };
     if read(&meta_path)? != original_meta {
-        return Err(invalid());
+        return Err(changed());
     }
     write(recovery_path, &serialize(&record)?)?;
     Ok(true)

@@ -1,5 +1,4 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { Ban, Clock3 } from "lucide-react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
@@ -8,8 +7,8 @@ import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { tokenSpeed } from "../../usageSpeed";
 import { usageSpeedSample, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatErrorCategory, formatRequestOrigin, formatTiming, requestStatusKind, requestStatusLabel } from "./usageReportFormat";
-import { UsageModel, CompactNumber, SpeedValue } from "./usageReportParts";
+import { formatTiming, requestStatusHint, requestStatusKind } from "./usageReportFormat";
+import { UsageModel, CompactNumber, SpeedValue, RequestStatusGlyph } from "./usageReportParts";
 import { UsageTableRow, type UsageColumns } from "./UsageTableRow";
 
 type RequestsViewProps = {
@@ -41,16 +40,13 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       label: t("common.status"),
       cell: (row) => {
         const status = requestStatusKind(row);
-        const label = requestStatusLabel(row, t);
-        const reason = status === "cancelled" ? label : row.errorCategory
-          ? formatErrorCategory(row.errorCategory, t)
-          : row.requestOrigin ? formatRequestOrigin(row.requestOrigin, t) : label;
+        const reason = requestStatusHint(row, t);
         return <span className="usage-request-status">
           <span className="usage-request-result" data-relay-tooltip={reason}>
             <StatusIcon
               status={status === "success" ? "ready" : status === "pending" || status === "cancelled" ? "info" : status}
               label={reason}
-            >{status === "pending" ? <Clock3 aria-hidden /> : status === "cancelled" ? <Ban aria-hidden /> : null}</StatusIcon>
+            ><RequestStatusGlyph row={row} /></StatusIcon>
           </span>
         </span>;
       },

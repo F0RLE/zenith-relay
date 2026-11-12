@@ -1,8 +1,9 @@
 use crate::local_pool::error::LocalPoolError;
 use serde_json::{Map, Value, json};
 use zenith_relay_core::{
+    CapabilityStatus, ModelEndpointCapability, ProtocolFeature, WireApi,
     model_metadata::{ModelCapabilities, ModelMetadataCatalog},
-    protocol::ModelSummary,
+    protocol::{ModelProtocolRoute, ModelSummary},
 };
 
 /// Use the canonical management projection consumed by the UI. It already
@@ -14,9 +15,8 @@ pub(super) fn model_ids(models: &[ModelSummary]) -> Vec<ModelSummary> {
         .filter(|model| {
             model.enabled
                 && model.protocol_routes.iter().any(|route| {
-                    super::protocols::GROUPS
-                        .iter()
-                        .any(|(protocol, _, _)| *protocol == route.client_wire_api)
+                    super::protocols::supports_sdk(route.client_wire_api)
+                        && super::protocols::supports_streaming(route)
                 })
         })
         .cloned()
@@ -41,7 +41,8 @@ pub(super) fn capability_config(
     if let (Some(context_limit), Some(output_limit)) =
         (capabilities.context_limit, capabilities.output_limit)
     {
-        capability_json["limit"] = json!({"context": context_limit, "output": output_limit});
+        capability_json["limit"] =
+            json!({"context": context_limit, "output": output_limit.min(context_limit)});
         if let Some(input) = capabilities.input_limit {
             capability_json["limit"]["input"] = json!(input.min(context_limit));
         }
@@ -54,13 +55,69 @@ pub(super) fn capability_config(
                 .collect(),
         );
     }
+    if capabilities.attachment == Some(false) {
+        restrict_image_input(&mut capability_json);
+    }
     capability_json
 }
 
+pub(super) fn restrict_capability_config(
+    configured: &mut Value,
+    unsupported: impl Fn(ProtocolFeature) -> bool,
+) {
+    for (field, feature) in [
+        ("tool_call", ProtocolFeature::FunctionTools),
+        ("reasoning", ProtocolFeature::Reasoning),
+    ] {
+        if unsupported(feature) {
+            configured[field] = false.into();
+        }
+    }
+    if unsupported(ProtocolFeature::Images) {
+        restrict_image_input(configured);
+    }
+}
+
+fn restrict_image_input(configured: &mut Value) {
+    let Some(input) = configured
+        .pointer_mut("/modalities/input")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    input.retain(|mode| {
+        !mode
+            .as_str()
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("image"))
+    });
+    let text_only = input.iter().all(|mode| {
+        mode.as_str()
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("text"))
+    });
+    if text_only {
+        configured["attachment"] = false.into();
+    }
+}
+
+#[cfg(test)]
 pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
+    model_config_for_scope(models, None)
+}
+
+pub(super) fn model_config_for_protocol(
+    models: &[ModelSummary],
+    protocol: WireApi,
+) -> Map<String, Value> {
+    model_config_for_scope(models, Some(protocol))
+}
+
+fn model_config_for_scope(
+    models: &[ModelSummary],
+    protocol: Option<WireApi>,
+) -> Map<String, Value> {
     models
         .iter()
-        .map(|model| {
+        .filter_map(|model| {
             let mut capabilities = model.catalog_capabilities.clone().unwrap_or_else(|| {
                 if model.catalog_input_modalities.is_empty() && model.catalog_provider.is_none() {
                     ModelCapabilities::unknown_model()
@@ -90,7 +147,16 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
                             .map_or(capabilities.context_limit, |windows| windows.maximum_tokens),
                     );
             }
-            let supported_levels = if model.reasoning_supported_levels.is_empty() {
+            if let Some(protocol) = protocol {
+                capabilities = ModelProtocolRoute::capabilities_for_client(
+                    &model.protocol_routes,
+                    protocol,
+                    &capabilities,
+                )?;
+            }
+            let supported_levels = if protocol.is_some() {
+                &capabilities.reasoning_effort_levels
+            } else if model.reasoning_supported_levels.is_empty() {
                 &model.catalog_reasoning_effort_levels
             } else {
                 &model.reasoning_supported_levels
@@ -102,10 +168,10 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            (
+            Some((
                 model.id.clone(),
                 capability_config(&model.id, &capabilities, &levels),
-            )
+            ))
         })
         .collect()
 }
@@ -113,18 +179,39 @@ pub(super) fn model_config(models: &[ModelSummary]) -> Map<String, Value> {
 pub(super) fn model_config_ids(
     models: &[String],
     metadata: &ModelMetadataCatalog,
+    protocol: WireApi,
+    endpoint_capabilities: &[ModelEndpointCapability],
 ) -> Map<String, Value> {
     models
         .iter()
         .filter(|model| !model.trim().is_empty())
-        .map(|model| {
-            let capabilities = metadata.capabilities_for(model);
-            (
-                model.clone(),
-                capability_config(model, &capabilities, &capabilities.reasoning_effort_levels),
-            )
+        .filter_map(|model| {
+            let endpoint = source_model_endpoint(model, protocol, endpoint_capabilities);
+            let capabilities = metadata.capabilities_for(model).for_route(endpoint);
+            if capabilities.streaming == Some(false) {
+                return None;
+            }
+            let features = capabilities.protocol_features_for_route(endpoint);
+            let mut configured =
+                capability_config(model, &capabilities, &capabilities.reasoning_effort_levels);
+            restrict_capability_config(&mut configured, |feature| {
+                features.get(&feature) == Some(&CapabilityStatus::Unsupported)
+            });
+            Some((model.clone(), configured))
         })
         .collect()
+}
+
+pub(super) fn source_model_endpoint<'a>(
+    model: &str,
+    protocol: WireApi,
+    endpoint_capabilities: &'a [ModelEndpointCapability],
+) -> Option<&'a ModelEndpointCapability> {
+    let model = zenith_relay_core::model_id_key(model);
+    endpoint_capabilities.iter().find(|endpoint| {
+        endpoint.upstream_wire_api == protocol
+            && zenith_relay_core::model_id_key(&endpoint.model_id) == model
+    })
 }
 
 #[cfg(test)]

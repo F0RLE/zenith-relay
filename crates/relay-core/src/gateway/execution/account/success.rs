@@ -81,6 +81,9 @@ pub(super) fn complete_account_response(
         None,
         started.elapsed().as_millis() as u64,
     );
+    if let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+    }
     populate_tokens(&mut event, &bytes);
     let expected_model = runtime
         .block_degraded_routes_enabled()
@@ -161,11 +164,7 @@ pub(super) fn complete_account_response(
     if completed {
         let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
-        runtime.bind_prompt_affinity(
-            prompt_affinity_key.as_deref(),
-            &route.candidate_id,
-            now_ms(),
-        );
+        runtime.bind_prompt_affinity_for_lease(prompt_affinity_key.as_deref(), lease, now_ms());
         bind_responses_turn(
             runtime,
             &key.id,
@@ -177,6 +176,9 @@ pub(super) fn complete_account_response(
         );
     } else {
         lease.settle_rotation_terminal(now_ms());
+    }
+    if completed && let Some(routing) = event.routing.as_mut() {
+        routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     emit_usage(runtime, event);
     if let Some(stream_body) = basis_points_stream {
@@ -222,7 +224,7 @@ fn account_response(
         AccountEndpoint::Wake => ResponseCompletion::for_protocol(crate::WireApi::Responses, &body),
         AccountEndpoint::Compact => {
             let compacted = super::super::super::compaction::compaction_document(&body)
-                .map_err(|failure| Box::new(failure.into()))?;
+                .map_err(|failure| Box::new((*failure).into()))?;
             if siwc_route {
                 bytes = compacted;
             }

@@ -1,52 +1,101 @@
-use super::upstream::await_while_client_connected;
+use super::upstream::{HttpFallback, await_while_client_connected};
 use super::*;
+
+pub(super) async fn resume_http_fallback(
+    mut downstream: WebSocket,
+    runtime: Arc<GatewayRuntime>,
+    key: AuthenticatedKey,
+    headers: HeaderMap,
+    mut stream_id: Option<String>,
+) {
+    if let Some(request) =
+        next_http_request(&mut downstream, &runtime, &key, &headers, &mut stream_id).await
+    {
+        bridge_http_fallback(
+            downstream,
+            runtime,
+            key,
+            headers,
+            HttpFallback::new(
+                request,
+                crate::usage::TransportFallbackReason::ExistingHttpBridge,
+            ),
+        )
+        .await;
+    }
+}
+
+pub(super) async fn serve_http_fallback_once(
+    downstream: &mut WebSocket,
+    runtime: Arc<GatewayRuntime>,
+    headers: &HeaderMap,
+    handoff: HttpFallback,
+) -> bool {
+    let request_id = handoff.request.request_id.clone();
+    let stream_id = handoff.request.stream_id.clone();
+    let mut visible = false;
+    let Err(failure) =
+        serve_http_fallback_request(downstream, runtime, headers, handoff, &mut visible).await
+    else {
+        return true;
+    };
+    if failure.category == error_codes::CLIENT_CANCELLED {
+        return false;
+    }
+    if !visible || downstream.is_http_lane() {
+        return super::failure::send_request_error(
+            downstream,
+            &failure,
+            Some(&request_id),
+            stream_id.as_deref(),
+        )
+        .await
+        .is_ok();
+    }
+    let _ = send_message(
+        downstream,
+        Message::Close(Some(CloseFrame {
+            code: close_code::ERROR,
+            reason: "upstream stream ended after output".into(),
+        })),
+    )
+    .await;
+    false
+}
 
 pub(super) async fn bridge_http_fallback(
     mut downstream: WebSocket,
     runtime: Arc<GatewayRuntime>,
     key: AuthenticatedKey,
     headers: HeaderMap,
-    mut client_request: ClientRequest,
-    mut transport_fallback: crate::usage::TransportFallbackReason,
-    mut reserved_candidate: Option<super::super::execution::ReservedCandidate>,
+    mut handoff: HttpFallback,
 ) {
-    let mut stream_id = client_request.stream_id.clone();
+    let mut stream_id = handoff.request.stream_id.clone();
     loop {
-        let mut client_visible_output = false;
-        if let Err(failure) = serve_http_fallback_request(
-            &mut downstream,
-            runtime.clone(),
-            &headers,
-            &client_request,
-            transport_fallback,
-            reserved_candidate.take(),
-            &mut client_visible_output,
-        )
-        .await
-        {
-            if !client_visible_output {
-                let request_id = Some(client_request.request_id.as_str());
-                send_gateway_error(
-                    &mut downstream,
-                    &failure,
-                    request_id,
-                    client_request.stream_id.as_deref(),
-                )
-                .await;
-            } else if failure.category != "client_closed" {
-                let _ = send_message(
-                    &mut downstream,
-                    Message::Close(Some(CloseFrame {
-                        code: close_code::ERROR,
-                        reason: "upstream stream ended after output".into(),
-                    })),
-                )
-                .await;
-            }
+        if !serve_http_fallback_once(&mut downstream, runtime.clone(), &headers, handoff).await {
             return;
         }
 
-        transport_fallback = crate::usage::TransportFallbackReason::ExistingHttpBridge;
+        let Some(next_request) =
+            next_http_request(&mut downstream, &runtime, &key, &headers, &mut stream_id).await
+        else {
+            return;
+        };
+        handoff = HttpFallback::new(
+            next_request,
+            crate::usage::TransportFallbackReason::ExistingHttpBridge,
+        );
+    }
+}
+
+async fn next_http_request(
+    downstream: &mut WebSocket,
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    headers: &HeaderMap,
+    stream_id: &mut Option<String>,
+) -> Option<ClientRequest> {
+    loop {
         let next_request_result = timeout(WEBSOCKET_IDLE_TIMEOUT, async {
             loop {
                 let message = downstream.recv().await?;
@@ -54,10 +103,10 @@ pub(super) async fn bridge_http_fallback(
                     return None;
                 };
                 match message {
-                    Message::Text(text) => return Some(Some(text.to_string().into_bytes())),
-                    Message::Binary(bytes) => return Some(Some(bytes.to_vec())),
+                    Message::Text(text) => return Some(text.to_string().into_bytes()),
+                    Message::Binary(bytes) => return Some(bytes.to_vec()),
                     Message::Ping(ping_payload) => {
-                        if send_message(&mut downstream, Message::Pong(ping_payload))
+                        if send_message(downstream, Message::Pong(ping_payload))
                             .await
                             .is_err()
                         {
@@ -66,46 +115,59 @@ pub(super) async fn bridge_http_fallback(
                     }
                     Message::Pong(_) => {}
                     Message::Close(frame) => {
-                        let _ = send_message(&mut downstream, Message::Close(frame)).await;
+                        let _ = send_message(downstream, Message::Close(frame)).await;
                         return None;
                     }
                 }
             }
         })
         .await;
-        let Ok(Some(Some(next_request_payload))) = next_request_result else {
-            return;
+        let Ok(Some(next_request_payload)) = next_request_result else {
+            return None;
         };
-        let next_client_request =
-            match ClientRequest::prepare(&runtime, &key, &headers, &next_request_payload, None)
+        let next_client_request = match ClientRequest::prepare(
+            runtime,
+            key,
+            headers,
+            &next_request_payload,
+            None,
+        )
+        .await
+        {
+            Ok(client_request) => client_request,
+            Err(failure) => {
+                super::failure::send_request_error(
+                    downstream,
+                    &failure,
+                    None,
+                    ClientRequest::error_stream_id(&next_request_payload).as_deref(),
+                )
                 .await
-            {
-                Ok(client_request) => client_request,
-                Err(failure) => {
-                    send_gateway_error(&mut downstream, &failure, None, None).await;
-                    return;
-                }
-            };
+                .ok()?;
+                continue;
+            }
+        };
         if let Some(next_stream_id) = next_client_request.stream_id.as_deref() {
             if let Some(expected) = stream_id.as_deref() {
                 if expected != next_stream_id {
                     let failure = GatewayFailure::invalid_request(
                         "only one WebSocket stream_id is supported per connection",
                     );
-                    send_gateway_error(
-                        &mut downstream,
+                    super::failure::send_request_error(
+                        downstream,
                         &failure,
                         Some(&next_client_request.request_id),
                         next_client_request.stream_id.as_deref(),
                     )
-                    .await;
-                    return;
+                    .await
+                    .ok()?;
+                    continue;
                 }
             } else {
-                stream_id = Some(next_stream_id.to_string());
+                *stream_id = Some(next_stream_id.to_string());
             }
         }
-        client_request = next_client_request;
+        return Some(next_client_request);
     }
 }
 
@@ -113,11 +175,16 @@ async fn serve_http_fallback_request(
     downstream: &mut WebSocket,
     runtime: Arc<GatewayRuntime>,
     client_headers: &HeaderMap,
-    client_request: &ClientRequest,
-    transport_fallback: crate::usage::TransportFallbackReason,
-    reserved_candidate: Option<super::super::execution::ReservedCandidate>,
+    handoff: HttpFallback,
     client_visible_output: &mut bool,
 ) -> Result<(), GatewayFailure> {
+    let HttpFallback {
+        request: client_request,
+        reserved_candidate,
+        recovery,
+        reason: transport_fallback,
+        ..
+    } = handoff;
     let mut headers = client_headers.clone();
     for header_name in [
         "connection",
@@ -151,15 +218,19 @@ async fn serve_http_fallback_request(
             transport: crate::UsageTransport::Websocket,
             transport_fallback: Some(transport_fallback),
             service_tier_policy: client_request.service_tier_policy.clone(),
+            recovery,
         });
     let upstream_response = await_while_client_connected(
         downstream,
-        execute_reserved_client_request(
+        // A native-socket handoff runs inside the live bridge. Keep the HTTP
+        // executor's state machine off that already nested request stack.
+        Box::pin(execute_reserved_client_request(
             Arc::clone(&runtime),
             http_request,
             WireApi::Responses,
             reserved_candidate,
-        ),
+        )),
+        client_request.stream_id.as_deref(),
     )
     .await?;
     // The HTTP executor already knows whether the selected route belongs to an
@@ -175,6 +246,7 @@ async fn serve_http_fallback_request(
         let error_body = await_while_client_connected(
             downstream,
             axum::body::to_bytes(upstream_response.into_body(), MAX_WEBSOCKET_ERROR_BYTES),
+            client_request.stream_id.as_deref(),
         )
         .await?
         .ok();
@@ -190,8 +262,12 @@ async fn serve_http_fallback_request(
 
     let mut response_body_stream = upstream_response.into_body().into_data_stream();
     let mut pending = Vec::new();
-    while let Some(chunk) =
-        await_while_client_connected(downstream, response_body_stream.next()).await?
+    while let Some(chunk) = await_while_client_connected(
+        downstream,
+        response_body_stream.next(),
+        client_request.stream_id.as_deref(),
+    )
+    .await?
     {
         let chunk = chunk.map_err(|_| GatewayFailure::transport(stream_origin))?;
         pending.extend_from_slice(&chunk);

@@ -7,11 +7,13 @@ use crate::local_pool::{
     models::{GatewaySettings, LocalAccountRecord},
     state::DesktopState,
 };
+use std::collections::BTreeMap;
 use tauri::State;
 use zenith_relay_core::{
     CandidateRuntimeSnapshot, ModelRules,
     accounts::{
-        AccountRouteIdentity, select_account_route_group, validate_account_route_connection,
+        AccountRouteGroup, AccountRouteIdentity, associate_account_route_groups,
+        select_account_route_group,
     },
     automations::WakeTask,
     providers::chatgpt::OAuthClientKind,
@@ -19,6 +21,12 @@ use zenith_relay_core::{
 
 fn conflict(message: &'static str) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::Conflict, message)
+}
+
+fn route_is_linked(gateway: &GatewaySettings, current: &str, next: &str) -> bool {
+    gateway
+        .account_route_group(current)
+        .is_some_and(|group| group.account_ids.iter().any(|id| id == next))
 }
 
 fn copy_route_settings(destination: &mut LocalAccountRecord, source: &LocalAccountRecord) {
@@ -111,18 +119,66 @@ fn route_group_connections<'a>(
         .collect()
 }
 
+#[cfg(test)]
 fn validate_route_connection(
     connections: &[(&LocalAccountRecord, StoredCodexCredentials)],
     candidate: &LocalAccountRecord,
     credentials: &StoredCodexCredentials,
 ) -> Result<()> {
-    validate_account_route_connection(
+    zenith_relay_core::accounts::validate_account_route_connection(
         connections
             .iter()
             .map(|(record, credentials)| route_identity(record, credentials)),
         &route_identity(candidate, credentials),
     )
     .map_err(conflict)
+}
+
+fn route_association_plan<'a>(
+    gateway: &GatewaySettings,
+    current: &str,
+    next: &str,
+    connections: impl IntoIterator<Item = (&'a LocalAccountRecord, &'a StoredCodexCredentials)>,
+) -> Result<AccountRouteGroup> {
+    let identities = connections
+        .into_iter()
+        .map(|(record, credentials)| {
+            (
+                record.account.id.clone(),
+                route_identity(record, credentials),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    associate_account_route_groups(&gateway.account_routes, current, next, &identities)
+        .map_err(conflict)
+}
+
+struct SavedRouteCandidate {
+    id: String,
+    kind: OAuthClientKind,
+    group_id: String,
+    usable: bool,
+}
+
+fn preferred_route_candidates(
+    candidates: impl IntoIterator<Item = SavedRouteCandidate>,
+) -> Vec<(String, OAuthClientKind)> {
+    let mut preferred: Vec<SavedRouteCandidate> = Vec::new();
+    for candidate in candidates {
+        if let Some(existing) = preferred.iter_mut().find(|existing| {
+            existing.group_id == candidate.group_id && existing.kind == candidate.kind
+        }) {
+            if !existing.usable && candidate.usable {
+                *existing = candidate;
+            }
+        } else {
+            preferred.push(candidate);
+        }
+    }
+    preferred
+        .into_iter()
+        .map(|candidate| (candidate.id, candidate.kind))
+        .collect()
 }
 
 #[tauri::command]
@@ -136,22 +192,58 @@ pub async fn local_account_route_candidates(
         (store.accounts().to_vec(), store.gateway().clone())
     };
     let candidates = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>> {
+        if !gateway.account_route_is_selected(&account_id) {
+            return Err(conflict(
+                "The selected account route changed; refresh and try again",
+            ));
+        }
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let connections = route_group_connections(&accounts, &gateway, &account_id, &credentials)?;
         filter_route_candidates(
-            accounts
-                .iter()
-                .filter(|account| {
-                    account.recovery.is_none()
-                        && gateway.account_route_group(&account.account.id).is_none()
-                        && account.account.id != account_id
-                })
-                .filter_map(|account| {
-                    let candidate = credentials.load(&account.account.id).ok().flatten()?;
-                    validate_route_connection(&connections, account, &candidate)
-                        .is_ok()
-                        .then(|| (account.account.id.clone(), candidate.oauth_client_kind()))
-                }),
+            preferred_route_candidates(
+                accounts
+                    .iter()
+                    .filter(|account| {
+                        account.recovery.is_none() && account.account.id != account_id
+                    })
+                    .filter_map(|account| {
+                        let candidate = credentials.load(&account.account.id).ok().flatten()?;
+                        let kind = candidate.oauth_client_kind();
+                        if client_kind.is_some_and(|requested| requested != kind) {
+                            return None;
+                        }
+                        let destination = route_group_connections(
+                            &accounts,
+                            &gateway,
+                            &account.account.id,
+                            &credentials,
+                        )
+                        .ok()?;
+                        route_association_plan(
+                            &gateway,
+                            &account_id,
+                            &account.account.id,
+                            connections
+                                .iter()
+                                .chain(&destination)
+                                .map(|(record, credentials)| (*record, credentials)),
+                        )
+                        .ok()?;
+                        Some(SavedRouteCandidate {
+                            id: account.account.id.clone(),
+                            kind,
+                            group_id: gateway
+                                .account_route_group(&account.account.id)
+                                .and_then(|group| group.account_ids.first())
+                                .cloned()
+                                .unwrap_or_else(|| account.account.id.clone()),
+                            usable: matches!(
+                                account.account.auth_state,
+                                zenith_relay_core::accounts::AccountAuthState::Active
+                            ),
+                        })
+                    }),
+            ),
             client_kind,
         )
     })
@@ -177,6 +269,7 @@ fn filter_route_candidates(
     Ok(candidates)
 }
 
+#[cfg(test)]
 fn select_records(
     accounts: &mut [LocalAccountRecord],
     gateway: &mut GatewaySettings,
@@ -185,18 +278,30 @@ fn select_records(
     attach: bool,
     next_kind: OAuthClientKind,
 ) -> Result<Vec<String>> {
+    let attach = attach && !route_is_linked(gateway, current, next);
+    let group = select_account_route_group(&gateway.account_routes, current, next, attach)
+        .map_err(conflict)?;
+    select_group_records(accounts, gateway, current, next_kind, group)
+}
+
+fn select_group_records(
+    accounts: &mut [LocalAccountRecord],
+    gateway: &mut GatewaySettings,
+    current: &str,
+    next_kind: OAuthClientKind,
+    group: AccountRouteGroup,
+) -> Result<Vec<String>> {
     if !gateway.account_route_is_selected(current) {
         return Err(conflict(
             "The selected account route changed; refresh and try again",
         ));
     }
+    let next = group.selected_account_id.as_str();
     let source = accounts
         .iter()
         .find(|a| a.account.id == current)
         .cloned()
         .ok_or_else(|| conflict("Account route was not found"))?;
-    let group = select_account_route_group(&gateway.account_routes, current, next, attach)
-        .map_err(conflict)?;
     let destination = accounts
         .iter_mut()
         .find(|a| a.account.id == next)
@@ -217,9 +322,12 @@ fn select_records(
     if let Some(policy) = &mut gateway.pool_routing {
         group.retarget_pool_routing(policy, current, next_kind);
     }
-    gateway
-        .account_routes
-        .retain(|existing| !existing.account_ids.iter().any(|id| id == current));
+    gateway.account_routes.retain(|existing| {
+        !existing
+            .account_ids
+            .iter()
+            .any(|id| group.account_ids.contains(id))
+    });
     let ids = group.account_ids.clone();
     gateway.account_routes.push(group);
     gateway.validate().map_err(LocalPoolError::invalid_state)?;
@@ -259,6 +367,9 @@ pub async fn select_local_account_route(
         let store = state.store()?;
         (store.accounts().to_vec(), store.gateway().clone())
     };
+    // The renderer may still have the snapshot from before association.
+    // Existing membership is authoritative; another group's connection remains an attach.
+    let attach = attach && !route_is_linked(&old_gateway, &account_id, &connection_id);
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let owner = credentials
         .require(&account_id)
@@ -274,26 +385,46 @@ pub async fn select_local_account_route(
         .iter()
         .find(|a| a.account.id == connection_id)
         .ok_or_else(|| conflict("Account route was not found"))?;
-    if attach {
+    let group = if attach {
         if owner.oauth_client_kind() != OAuthClientKind::Codex {
             crate::local_pool::accounts::records::require_pool_account(owner_record)?;
         }
-        let connections =
+        let mut connections =
             route_group_connections(&old_accounts, &old_gateway, &account_id, &credentials)?;
-        validate_route_connection(&connections, destination, &next_credentials)?;
-    }
+        connections.extend(route_group_connections(
+            &old_accounts,
+            &old_gateway,
+            &connection_id,
+            &credentials,
+        )?);
+        route_association_plan(
+            &old_gateway,
+            &account_id,
+            &connection_id,
+            connections
+                .iter()
+                .map(|(record, credentials)| (*record, credentials)),
+        )?
+    } else {
+        select_account_route_group(
+            &old_gateway.account_routes,
+            &account_id,
+            &connection_id,
+            false,
+        )
+        .map_err(conflict)?
+    };
     if next_credentials.oauth_client_kind() != OAuthClientKind::Codex {
         crate::local_pool::accounts::records::require_pool_account(destination)?;
     }
     let mut accounts = old_accounts.clone();
     let mut gateway = old_gateway.clone();
-    let ids = select_records(
+    let ids = select_group_records(
         &mut accounts,
         &mut gateway,
         &account_id,
-        &connection_id,
-        attach,
         next_credentials.oauth_client_kind(),
+        group.clone(),
     )?;
     if attach
         && let Some(group) = gateway
@@ -333,13 +464,15 @@ pub async fn select_local_account_route(
         let previous_gateway = store.gateway().clone();
         let mut current = previous.clone();
         let mut current_gateway = previous_gateway.clone();
-        select_records(
+        if current_gateway.account_routes != old_gateway.account_routes {
+            return Err(conflict("Account connections changed; refresh and try again").into());
+        }
+        select_group_records(
             &mut current,
             &mut current_gateway,
             &account_id,
-            &connection_id,
-            attach,
             next_credentials.oauth_client_kind(),
+            group,
         )?;
         if let Some(group) = current_gateway
             .account_routes

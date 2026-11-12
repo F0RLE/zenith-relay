@@ -190,7 +190,7 @@ impl DiscoverySession {
         if self.is_native() {
             return;
         }
-        runtime.basis_points_catalog_store.remember(
+        runtime.basis_points_catalog().remember(
             local_key_id,
             &self.model,
             response,

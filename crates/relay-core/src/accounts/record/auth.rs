@@ -117,15 +117,19 @@ pub fn automatic_quota_monitoring_eligible(enabled: bool, auth_state: AccountAut
 }
 
 /// Older discovery failures could persist a whole-account block. Repair only
-/// that exact legacy state; keep the catalog error until a successful read.
+/// catalog-owned states; keep the catalog error until a successful read.
 /// Authentication and explicit account-disable failures remain authoritative.
 pub fn repair_model_discovery_block(
     auth_state: AccountAuthState,
     health: &mut AccountHealthState,
     last_error_code: Option<&str>,
 ) -> bool {
-    if *health != AccountHealthState::Blocked
-        || last_error_code != Some(error_codes::MODELS_FORBIDDEN)
+    let catalog_owned_state = match *health {
+        AccountHealthState::Blocked => last_error_code == Some(error_codes::MODELS_FORBIDDEN),
+        AccountHealthState::Unhealthy => last_error_code.is_some_and(catalog_monitoring_failure),
+        _ => false,
+    };
+    if !catalog_owned_state
         || auth_state.requires_fresh_login()
         || auth_state == AccountAuthState::Error
     {
@@ -133,6 +137,29 @@ pub fn repair_model_discovery_block(
     }
     *health = AccountHealthState::Degraded;
     true
+}
+
+fn catalog_monitoring_failure(code: &str) -> bool {
+    matches!(
+        code,
+        error_codes::MODELS_FORBIDDEN
+            | error_codes::MODELS_HTTP_STATUS
+            | error_codes::MODELS_ENDPOINT_NOT_FOUND
+            | error_codes::MODELS_INVALID_RESPONSE
+            | error_codes::MODELS_RESPONSE_TOO_LARGE
+            | error_codes::MODELS_UPSTREAM
+            | error_codes::MODELS_TIMEOUT
+            | error_codes::MODELS_TRANSPORT
+            | error_codes::MODELS_RATE_LIMITED
+            | error_codes::MODELS_INVALID_CLIENT_VERSION
+            | error_codes::MODELS_INVALID_ENDPOINT
+            | error_codes::MODELS_PREPARE
+            | error_codes::MODELS_CLIENT_INIT
+            | error_codes::MODELS_STORAGE
+            | error_codes::MODELS_SECRET_STORE
+            | error_codes::MODELS_PROXY_UNAVAILABLE
+            | error_codes::MODELS_PROFILE_RESTORE
+    )
 }
 
 /// Applies the common terminal state for a failed account model discovery.
@@ -168,7 +195,7 @@ pub fn apply_model_discovery_failure(
         && (!discovery_owned_error
             || *health == AccountHealthState::Blocked
             || retryable
-            || code == error_codes::MODELS_FORBIDDEN)
+            || catalog_monitoring_failure(code))
     {
         return;
     }
@@ -184,10 +211,10 @@ pub fn apply_model_discovery_failure(
             }
             *health = AccountHealthState::Unhealthy;
         }
-        error_codes::MODELS_FORBIDDEN => {
-            // A model catalog endpoint can be forbidden while the account's
+        _ if catalog_monitoring_failure(code) => {
+            // A model catalog endpoint can fail while the account's
             // normal inference and quota endpoints remain usable. Keep this
-            // scoped to discovery so a catalog permission issue does not
+            // scoped to discovery so a catalog availability issue does not
             // remove an otherwise working account from the pool. Preserve a
             // stronger, independently observed account state.
             if !matches!(

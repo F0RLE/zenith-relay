@@ -1,6 +1,16 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+/// Graph-local session observations. Each store retains its own lock and limits;
+/// policy-only updates keep this owner, while graph replacement creates a new one.
+#[derive(Default)]
+pub(super) struct RuntimeSessionState {
+    pub(super) siwc_sockets: siwc_socket::SocketStore,
+    pub(super) cache_context: cache_context::CacheContextStore,
+    codex_turns: CodexTurnStateStore,
+    tool_catalog: tool_catalog::ToolCatalogStore,
+}
+
 /// Host-owned volatile conversation state. Clone the handles when replacing a
 /// routing graph, not the conversations. A new host/process starts with empty
 /// conversations; durable hosts may restore their protected agent-carrier key.
@@ -8,7 +18,7 @@ use sha2::{Digest, Sha256};
 pub struct RuntimeContinuationStores {
     pub(in crate::runtime) agent_messages: Arc<crate::protocol::agent_messages::AgentMessageCipher>,
     pub(in crate::runtime) adapters: Arc<Mutex<crate::AdapterContinuationStore>>,
-    pub(in crate::runtime) native_responses: Arc<Mutex<crate::NativeResponsesReplayStore>>,
+    pub(in crate::runtime) native_responses: Arc<Mutex<NativeResponsesReplayStore>>,
     pub(in crate::runtime) routes: Arc<Mutex<crate::scheduler::AffinityCache>>,
 }
 
@@ -27,12 +37,16 @@ impl Default for RuntimeContinuationStores {
 }
 
 impl GatewayRuntime {
+    pub(crate) fn basis_points_catalog(&self) -> &tool_catalog::ToolCatalogStore {
+        &self.session_state.tool_catalog
+    }
+
     pub(crate) fn agent_message_context(
         &self,
         local_key_id: &str,
     ) -> crate::protocol::agent_messages::AgentMessageContext {
         crate::protocol::agent_messages::AgentMessageContext::new(
-            self.agent_message_cipher.clone(),
+            self.continuation_state.agent_messages.clone(),
             local_key_id,
         )
     }
@@ -224,7 +238,8 @@ impl GatewayRuntime {
         authorization: &AuthorizationIncarnation,
         now_ms: u64,
     ) {
-        self.codex_turn_state_store
+        self.session_state
+            .codex_turns
             .note(scope, state, credential, authorization, now_ms);
     }
 
@@ -236,7 +251,8 @@ impl GatewayRuntime {
         authorization: &AuthorizationIncarnation,
         now_ms: u64,
     ) -> bool {
-        self.codex_turn_state_store
+        self.session_state
+            .codex_turns
             .contains(scope, state, credential, authorization, now_ms)
     }
 }
@@ -295,6 +311,16 @@ mod turn_state_tests {
         assert!(!store.contains(
             &CodexTurnStateScope {
                 session_id: "other-thread",
+                ..scope
+            },
+            b"state-a",
+            b"credential",
+            &authorization,
+            11
+        ));
+        assert!(!store.contains(
+            &CodexTurnStateScope {
+                endpoint: "https://other.invalid/backend-api/codex/responses",
                 ..scope
             },
             b"state-a",

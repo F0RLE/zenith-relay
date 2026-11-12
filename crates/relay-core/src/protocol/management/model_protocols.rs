@@ -5,6 +5,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod projection;
+use projection::{EndpointEvidence, EndpointEvidenceIndex};
+
 /// Executable paths, independent from advisory model metadata and prices.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,9 +18,22 @@ pub struct ModelProtocolRoute {
     pub features: BTreeMap<ProtocolFeature, CapabilityStatus>,
     #[serde(default)]
     pub reasoning_efforts: Vec<String>,
+    /// Most restrictive known ceilings among this route's eligible alternatives.
+    #[serde(default, skip_serializing_if = "crate::ModelTokenLimits::is_empty")]
+    pub token_limits: crate::ModelTokenLimits,
 }
 
 impl ModelProtocolRoute {
+    /// Combine only executable streaming alternatives for the selected client.
+    /// The reference remains authoritative for explicit model-wide exclusions.
+    pub fn capabilities_for_client(
+        routes: &[Self],
+        client: WireApi,
+        reference: &crate::model_metadata::ModelCapabilities,
+    ) -> Option<crate::model_metadata::ModelCapabilities> {
+        projection::capabilities_for_client(routes, client, reference)
+    }
+
     pub(super) fn project_reasoning(&mut self, fallback: &[String]) {
         if self.features.get(&ProtocolFeature::Reasoning) == Some(&CapabilityStatus::Unsupported) {
             self.reasoning_efforts.clear();
@@ -42,6 +58,7 @@ impl ModelProtocolRoute {
 #[derive(Default)]
 pub(super) struct ModelProtocolIndex {
     routes: BTreeMap<String, Vec<ModelProtocolRoute>>,
+    endpoint_evidence: EndpointEvidenceIndex,
     cache_write_models: BTreeSet<String>,
     service_tiers: BTreeMap<String, Vec<crate::DefaultServiceTier>>,
 }
@@ -56,9 +73,7 @@ impl ModelProtocolIndex {
                 allowed: source.allowed_models.iter().cloned().collect(),
                 excluded: source.excluded_models.iter().cloned().collect(),
             };
-            let route_capabilities = source
-                .protocol_config
-                .effective_capabilities(&source.base_url, &source.models);
+            let route_capabilities = projection::source_endpoints(source);
             for binding in source.routed_bindings() {
                 let upstream = binding
                     .adapter
@@ -72,15 +87,12 @@ impl ModelProtocolIndex {
                         index.cache_write_models.insert(key.clone());
                     }
                     if enabled && rules.allows(&model) {
-                        let declared = route_capabilities
-                            .iter()
-                            .find(|route| {
-                                route.upstream_wire_api == upstream
-                                    && crate::model_id_key(&route.model_id) == key
-                            })
-                            .and_then(|route| route.service_tiers.as_deref());
+                        let endpoint = route_capabilities
+                            .get(&key)
+                            .and_then(|endpoints| endpoints.get(&upstream));
+                        let declared = endpoint.and_then(|route| route.service_tiers.as_deref());
                         index.insert_service_tiers(&key, upstream, false, declared);
-                        index.insert(key, binding.wire_api, upstream);
+                        index.insert(key, binding.wire_api, upstream, endpoint.cloned());
                     }
                 }
             }
@@ -105,14 +117,22 @@ impl ModelProtocolIndex {
                     None,
                 );
                 for client in WireApi::ALL_NATIVE {
-                    index.insert(crate::model_id_key(model), client, WireApi::Responses);
+                    index.insert(crate::model_id_key(model), client, WireApi::Responses, None);
                 }
             }
         }
         index
     }
 
-    fn insert(&mut self, model: String, client: WireApi, upstream: WireApi) {
+    fn insert(
+        &mut self,
+        model: String,
+        client: WireApi,
+        upstream: WireApi,
+        endpoint: EndpointEvidence,
+    ) {
+        self.endpoint_evidence
+            .observe(&model, client, upstream, endpoint);
         let routes = self.routes.entry(model).or_default();
         if routes
             .iter()
@@ -126,6 +146,7 @@ impl ModelProtocolIndex {
             // Reference metadata fills semantic fields after physical paths.
             features: BTreeMap::new(),
             reasoning_efforts: Vec::new(),
+            token_limits: Default::default(),
         });
     }
 
@@ -134,6 +155,28 @@ impl ModelProtocolIndex {
             .get(&crate::model_id_key(model))
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(super) fn projected_routes_for(
+        &self,
+        model: &str,
+        reference: &crate::model_metadata::ModelCapabilities,
+    ) -> Vec<ModelProtocolRoute> {
+        let mut routes = self.routes_for(model);
+        self.endpoint_evidence
+            .project(model, &mut routes, reference, false);
+        routes
+    }
+
+    fn projected_streaming_routes_for(
+        &self,
+        model: &str,
+        reference: &crate::model_metadata::ModelCapabilities,
+    ) -> Vec<ModelProtocolRoute> {
+        let mut routes = self.routes_for(model);
+        self.endpoint_evidence
+            .project(model, &mut routes, reference, true);
+        routes
     }
 
     pub(super) fn has_cache_write_pricing(&self, model: &str) -> bool {
@@ -187,6 +230,32 @@ pub fn apply_model_protocol_routes(
     let index = ModelProtocolIndex::new(sources, accounts);
     for model in models {
         model.protocol_routes = index.routes_for(&model.id);
+    }
+}
+
+/// Project catalog-enriched models for streaming generation without changing
+/// generic inventory, model-wide metadata or the caller's pool policies.
+pub fn apply_streaming_model_protocol_routes(
+    models: &mut [ModelSummary],
+    sources: &[SourceSummary],
+    accounts: &[AccountSummary],
+    reasoning_policies: &BTreeMap<String, Vec<String>>,
+) {
+    let index = ModelProtocolIndex::new(sources, accounts);
+    for model in models {
+        let reference = model
+            .catalog_capabilities
+            .clone()
+            .unwrap_or_else(crate::model_metadata::ModelCapabilities::unknown_model);
+        model.protocol_routes = index.projected_streaming_routes_for(&model.id, &reference);
+        if let Some(allowed) = crate::reasoning_policy_levels(reasoning_policies, &model.id) {
+            let allowed = crate::canonicalize_reasoning_levels(allowed);
+            for route in &mut model.protocol_routes {
+                route
+                    .reasoning_efforts
+                    .retain(|effort| allowed.contains(effort));
+            }
+        }
     }
 }
 
@@ -354,6 +423,7 @@ mod tests {
                 upstream_wire_api: upstream,
                 features: BTreeMap::new(),
                 reasoning_efforts: Vec::new(),
+                token_limits: Default::default(),
             };
             route.project_reasoning(&fallback);
             assert_eq!(route.reasoning_efforts, expected);

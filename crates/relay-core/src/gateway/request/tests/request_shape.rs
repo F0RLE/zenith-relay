@@ -64,6 +64,25 @@ fn native_account_reasoning_and_speed_selections_are_opaque() {
     assert_eq!(request["reasoning"]["summary"], "detailed");
     assert_eq!(request["reasoning"]["context"], "client_selected");
 }
+
+#[test]
+fn native_account_generation_preserves_the_client_output_limit() {
+    for responses_lite in [false, true] {
+        for limit in [1, 64, 8_192, 131_072] {
+            let mut request = json!({
+                "input": "synthetic request",
+                "max_output_tokens": limit,
+                "reasoning": {"effort":"high"}
+            });
+            normalize_account_request(request.as_object_mut().unwrap(), responses_lite);
+            assert_eq!(request["max_output_tokens"], limit);
+            assert_eq!(request["reasoning"]["effort"], "high");
+        }
+        let mut request = json!({"input":"synthetic request"});
+        normalize_account_request(request.as_object_mut().unwrap(), responses_lite);
+        assert!(request.get("max_output_tokens").is_none());
+    }
+}
 #[test]
 fn responses_lite_forces_all_turns_reasoning_context_without_losing_effort() {
     let mut request = json!({

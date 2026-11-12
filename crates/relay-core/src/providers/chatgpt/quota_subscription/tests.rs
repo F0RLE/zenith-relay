@@ -20,6 +20,7 @@ use std::sync::{
 use url::Url;
 
 mod authorization_probe;
+mod failures;
 mod partial;
 mod probe;
 mod transport;

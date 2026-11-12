@@ -1,6 +1,69 @@
 use super::*;
 
 #[tokio::test]
+async fn siwc_transient_rate_limit_retries_its_grant_without_switching_accounts() {
+    for client_stream in [false, true] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let next = AccessServer::start(json!([]), false).await;
+        siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        crate::poison::mutex(&siwc.state.generation_replies).push_back((
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error":{"code":"rate_limit_exceeded","type":"tokens",
+                "message":"Synthetic temporary rate limit"}}),
+        ));
+        let runtime = runtime(&siwc, &next).await;
+        runtime.set_route_recovery_enabled(true);
+        let (base, task) = recovery::gateway(runtime.clone()).await;
+        let response = retry_admission::bounded_client()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&json!({"model":"gpt-test","input":"Synthetic input",
+                "stream":client_stream,"prompt_cache_key":"synthetic-stable-cache"}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(next.state.generation_requests.load(Ordering::SeqCst), 0);
+        let bodies = crate::poison::mutex(&siwc.state.generation_bodies);
+        assert_eq!(bodies[0]["input"], bodies[1]["input"]);
+        assert!(bodies[0]["prompt_cache_key"].is_string());
+        assert_eq!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+        drop(bodies);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn siwc_transient_retry_expiry_preserves_429_without_cross_account_fallback() {
+    let siwc = AccessServer::start(json!([]), false).await;
+    let next = AccessServer::start(json!([]), false).await;
+    *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::TOO_MANY_REQUESTS;
+    *crate::poison::mutex(&siwc.state.generation_body) = json!({"error":{
+        "code":"rate_limit_exceeded","type":"tokens","message":"Synthetic temporary limit"
+    }});
+    let runtime = runtime(&siwc, &next).await;
+    runtime.set_route_recovery_enabled(true);
+    runtime.set_route_recovery_window_ms(50);
+    let (base, task) = recovery::gateway(runtime).await;
+    let response = retry_admission::bounded_client()
+        .post(format!("{base}/v1/responses"))
+        .bearer_auth("local-secret")
+        .json(&json!({"model":"gpt-test","input":"Synthetic input","stream":false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+    assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(next.state.generation_requests.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
 async fn siwc_quota_without_structured_proof_never_replays() {
     for client_stream in [false, true] {
         for upstream_stream in [false, true] {
@@ -51,7 +114,8 @@ async fn assert_no_replay(error: &str, client_stream: bool, upstream_stream: boo
     let mut runtime = runtime(&siwc, &next).await;
     Arc::get_mut(&mut runtime)
         .unwrap()
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .oauth_client_kind = OAuthClientKind::Siwc;

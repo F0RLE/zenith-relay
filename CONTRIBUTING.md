@@ -245,6 +245,17 @@ environment, then runs TypeScript, Vite, the frontend size gate and Cargo with
 the running app stays untouched. Omit `--no-bundle` to build installers too.
 Keep Tauri options before `--` and extra Cargo arguments after it.
 
+Add `--compact` for concise progress, warnings, errors and elapsed time. Complete
+build output is saved to `target/desktop-build.log`, replacing the previous log.
+The workspace desktop updater uses this mode and retains SHA-256 verification,
+safe replacement and startup checks.
+It reports `GatewayApiAvailable` separately from `GatewayOwnership`: unavailable
+listener metadata does not make a responding API unavailable. The credential-free
+API probe rejects redirects and foreign responses and has a total one-second
+read deadline. `-RequireGateway` still requires both a responding Relay API and
+a listener owned by the newly launched process; unknown or foreign ownership
+fails strict startup verification.
+
 Identical renderer filenames and bytes retain their previous timestamps, allowing
 Cargo to reuse its release output. Changed assets still trigger native work.
 Every build validates the frontend and uses the configured release optimizations
@@ -258,6 +269,9 @@ For the Windows workspace's build-and-restart shortcut, use the parent
 Use one owner per subject. The [documentation index](docs/README.md#find-the-right-document)
 lists the owning guides; its [repository tree](docs/README.md#repository-tree)
 separates source directories from generated local artifacts.
+
+Maintain architecture, design and contributor documentation in English. Keep
+translated guides and UI copy in separate locale-specific files.
 
 `AGENTS.md` owns repository guidance; legal terms stay in `LICENSE` and the
 Contributor Agreement. Keep screenshots under `docs/screenshots/`.
@@ -278,15 +292,18 @@ PR or commit in the entry when the change is ready for review. When publishing
 a tag, move the shipped entries into a dated version section and leave
 `Unreleased` available for the next cycle.
 
-Use the same localized layout in `Unreleased` and dated releases: the version
-heading, `<!-- relay-notes:en -->`, the complete English notes, then
-`<!-- relay-notes:ru -->` and the complete Russian notes. Keep `### Changed` /
-`### Изменения` and, when needed, `### Fixed` / `### Исправления` inside each
-locale block. Group longer lists with `####` topic headings; keep both locales
-aligned by topic, changes, and PR/commit references. Do not append a second
-summary or leave changes outside the locale blocks: the updater omits unmarked
-text once locale markers are present. The release workflow extracts one version
-section before the updater selects its locale.
+Keep English notes in `CHANGELOG.md` and Russian notes in
+[CHANGELOG.ru.md](docs/releases/CHANGELOG.ru.md). Additional translations use
+`docs/releases/CHANGELOG.<locale>.md`. Keep each translated version heading and
+date identical to English. Use `### Changed` and, when needed, `### Fixed`, with
+translated headings in each locale file. Group longer lists with `####` topic
+headings; align translations by topic, changes and PR/commit references.
+
+Source changelogs contain plain Markdown, without locale markers. The release
+workflow runs `bun scripts/release/build-release-notes.mjs <version-or-tag>` to
+assemble the requested version from these files. It adds `relay-notes:<locale>`
+markers only to the generated release body, with English first. The updater's
+exact-locale, base-language and English fallback behavior stays unchanged.
 
 Keep the audience boundary explicit: changelog entries and updater notes are
 for users. Do not put test counts, CI job status, formatter or audit output,
@@ -297,11 +314,11 @@ and unfinished or live-provider acceptance gates in `docs/project/ROADMAP.md`.
 Group fixes by the behavior a user observes, rather than adding a bullet for
 each patch. Buffer allocation, file moves and dependency-version inventories
 belong in code or contributor guidance, not release notes. Preserve release
-headings, locale markers and references when condensing an existing section.
+headings and references when condensing an existing section.
 
 Stable release tags must have a matching dated section in
-`docs/releases/CHANGELOG.md`. The
-release workflow fails when that section is missing instead of publishing an
+each maintained changelog. The release workflow fails on missing or empty
+translations, duplicate versions or inconsistent dates instead of publishing an
 automatically generated pull-request list as user-facing notes.
 
 Define stable error codes in `crates/relay-core/src/error_codes.rs` and reuse its
@@ -398,6 +415,18 @@ checks. Use the actual PR target and fetch it first; omit the option to use each
 check's normal local default. Packaging, publication, Desktop restarts and
 installed-app acceptance are separate steps.
 
+### Public metadata contract check
+
+Deterministic metadata regressions run with the core tests. To validate current
+public models.dev, OpenRouter and LiteLLM responses through the actual loader:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib public_reference_sources_pass_atomic_refresh_validation -- --ignored --nocapture
+~~~
+
+This explicit network check uses isolated temporary state and no accounts or
+credentials. It qualifies catalog loading, not provider generation or route access.
+
 ### Required CI and dependency maintenance
 
 The Build workflow checks pull requests and pushes to `main` and `release/**`.
@@ -418,11 +447,82 @@ uses that same snapshot for both Cargo audits. Both frontend packages run
 `bun audit`. A new advisory can fail CI without a source change; investigate
 and remediate it rather than pinning an old database to obtain a passing check.
 
+Desktop pins two reviewed upstream changes pending published releases:
+
+- `proc-macro-error2`: [PR #14](https://github.com/GnomedDev/proc-macro-error-2/pull/14),
+  commit `53ff94b61c678593158db1a3d50269c6f0de0db7`, fixes the private `proc_macro`
+  re-export. Its attribute macro uses the same revision.
+- `i18n-config`: merged [PR #176](https://github.com/kellpossible/cargo-i18n/pull/176),
+  commit `2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4`, replaces unmaintained
+  `basic-toml` with `toml` for localization build configuration.
+
+Script checks enforce immutable, credential-free Git sources, matching manifest
+and lockfile revisions, and the maintained parser. `age` and the Codex authorization
+encryption format stay unchanged. Replace each pin when a reviewed published
+release includes its fix; keep dependency audits and compiler checks enabled.
+
+The current Linux dependency families retain these upstream constraints:
+
+| Advisory | Dependency owner and required migration |
+| --- | --- |
+| [RUSTSEC-2024-0370](https://rustsec.org/advisories/RUSTSEC-2024-0370.html) | Tauri's GTK 0.18 family uses `proc-macro-error` 1 through `glib-macros` and `gtk3-macros`. The separate `proc-macro-error2` override does not replace it. |
+| [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) | GTK 0.18 retains `glib` 0.18. The published fix requires `glib` 0.20 or newer, so qualify a coordinated Tauri/GTK migration rather than mixing incompatible GTK types. |
+| [RUSTSEC-2026-0370](https://rustsec.org/advisories/RUSTSEC-2026-0370.html), [0371](https://rustsec.org/advisories/RUSTSEC-2026-0371.html), [0372](https://rustsec.org/advisories/RUSTSEC-2026-0372.html) | Linux keyring/Secret Service and Tauri plugins require zbus 5. Its standalone `zvariant`, `zbus_names` and derive crates moved into zbus 6; migrate their parent integrations together and verify credential-store compatibility. |
+
+These paths are absent from the Windows dependency graph but remain relevant to
+Linux delivery. They are unresolved upstream constraints, not false positives or
+audit suppressions. Recheck published parent constraints before a platform
+upgrade; qualify Linux credential access with an unlocked Secret Service.
+
 Private vulnerability reporting and CodeQL default setup are repository settings,
 not local workflow files. Changes to checked-in workflows and maintenance rules
 take effect on GitHub only after they reach the relevant branch. Installer
 builds still require a manual run or version-tag push; publication remains
 restricted to version-tag pushes.
+
+### Offline HTTP/2 transport check
+
+On Windows, build the executable without replacing the running app, then run
+the bounded diagnostic from the repository root:
+
+~~~powershell
+bun run app:build --no-bundle
+$exe = (Resolve-Path .\src-tauri\target\release\zenith-relay.exe).Path
+Get-FileHash -LiteralPath $exe -Algorithm SHA256
+& $exe --diagnose-http2-retries | Out-Host
+~~~
+
+The mode exits before Desktop, single-instance, credential-store or database
+initialization. It uses fresh in-memory sources and synthetic keys with fixed
+loopback HTTP/2 prior-knowledge peers. A default reqwest client is the positive
+retry control. Normal gateway dispatch then checks refused and uncertain resets,
+HTTP 429 failover, candidate limits, one logical identity and one usage attempt
+per physical send. No saved accounts, sources or proxies are loaded or changed.
+All work has a 20-second deadline; listeners and child tasks are cancelled on exit.
+
+Output is one JSON line with aggregate observations and fixed error codes.
+Exit 0 requires every invariant to pass; invalid arguments, setup, timeout,
+accounting/retry mismatches or output failures return 2. For installed-copy
+qualification, repeat with that exact executable after updating to a build that
+supports this flag and retain its SHA-256 with the result. Scope is the compiled
+HTTP/2 client and gateway accounting; qualify TLS/ALPN, configured proxies, live
+pool load and provider behavior separately.
+
+Source-level transport regressions also exercise certificate-verified TLS with
+negotiated `h2` ALPN, directly and through source-specific HTTP CONNECT proxies:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib runtime::http2_diagnostic::tests
+~~~
+
+The TLS suite uses freshly generated in-memory certificates and bounded loopback
+peers, without prior knowledge or certificate-verification bypasses. It counts
+HTTP/2 streams and CONNECT tunnels, compares real gateway dispatches with usage
+attempts, and checks refused/uncertain resets, HTTP 429 failover, candidate limits
+and an unavailable proxy with no direct bypass. A default-client positive control
+must expose protocol-level resends. The TLS matrix has a 30-second deadline;
+individual fixture connections and gateway calls are bounded separately.
+These tests do not qualify an installed binary or a real provider/proxy combination.
 
 ### Subscription proxy diagnostics
 
@@ -620,6 +720,10 @@ to also remove test reports, Desktop browser captures, Rust targets, and Tauri
 permission schemas. **This includes the locally built release executable.**
 From `src`, the equivalent commands are `bun run clean` and `bun run clean:all`.
 
+Use `bun scripts/maintenance/clean.mjs --incremental` to remove only Rust debug
+incremental caches. Compiled dependencies, release executables and frontend builds
+stay available; the next debug build may take longer.
+
 Paths are anchored to this checkout, not the caller's working directory. All
 targets and their parents inside the checkout are checked before removal;
 links, non-directories, or unreadable metadata abort cleanup. Removal errors
@@ -660,11 +764,26 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 
 ### Protocol optimization probes
 
-These opt-in probes use synthetic inputs and loopback, not provider quota. Compare
+The local probes use synthetic inputs and loopback, not provider quota. Compare
 the same machine, build profile and fixtures before/after; preserve unrelated
 dirty work. Report results in chat or review, not this guide. Local CPU, bytes and
 mock timings do not establish installed-app memory, provider TTFT, cache hits or
 billing savings. Keep ordinary correctness/continuation tests passing.
+
+#### SIWC live cache comparison
+
+`bun scripts/maintenance/siwc-cache-probe.mjs --help` describes a separate live
+probe. It requires explicit authorization and `--allow-requests MODEL EFFORT`;
+it consumes provider quota for at most six synthetic generations with no retries.
+Supply a current SIWC `accessToken` and optional account `proxyUrl` as JSON through
+stdin from an authorized in-memory credential source, never command arguments,
+checked-in fixtures or a plaintext file. Preserve the account's configured proxy.
+HTTP and a persistent WebSocket use isolated cache cohorts with the same model,
+reasoning and tool cycle. The probe uses HTTP only for this explicitly authorized
+comparison, independently of the runtime's WebSocket-only SIWC generation policy.
+Output contains bounded timing/byte/usage observations,
+not credentials, prompts or response IDs. Cache hits do not prove billing savings.
+Use `bun test ./scripts/maintenance/siwc-cache-probe.test.mjs` for offline checks.
 
 #### BPS discovery continuation probe
 
@@ -703,6 +822,137 @@ Historical catalog preparation:
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_catalog_history_preparation -- --ignored --nocapture --test-threads=1
 bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --locked --lib measure_bps_large_history_preparation -- --ignored --nocapture --test-threads=1
 ~~~
+
+Claude catalog preparation with 200 synthetic models and the installed client's
+publisher metadata (Desktop 4.29.0+ on Windows or macOS):
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay measure_catalog_preparation_and_publisher_probe -- --ignored --nocapture --test-threads=1
+~~~
+
+This reads version metadata without opening the client, changing its profiles,
+or sending provider requests. Compare preparation time and publisher-probe count;
+these measurements do not establish live response latency.
+
+Installed Claude Code capability-to-wire qualification, using model rows produced
+by Relay's actual profile generator:
+
+~~~powershell
+$env:ZENITH_CLAUDE_CODE_BIN = 'C:\path\to\installed\claude.exe'
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay installed_claude_code_preserves_generated_identity_and_native_effort -- --ignored --nocapture --test-threads=1
+~~~
+
+Select the exact executable for the intended Desktop/Code version, not an
+unrelated newer installation. The test starts an isolated CLI process with
+`--bare`, no tools or permission bypass, an empty temporary profile and a synthetic
+key. It sends only to its loopback fixture and checks unchanged model IDs,
+exact effort, one generation request per case, and a complete synthetic SSE
+answer. Each child has time/output limits; temporary profiles are removed after
+the run. It does not close Desktop, read working accounts, or establish actual
+Desktop picker/settings handoff or real-provider acceptance. Keep unsupported
+effort controls separate: Code may downgrade a native model's unsupported level
+even without a Relay alias.
+
+To qualify the same installed executable through Relay's actual in-process
+gateway, generated profile rows, and a synthetic Messages upstream:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay installed_claude_code_roundtrips_generated_identity_through_gateway -- --ignored --nocapture --test-threads=1
+~~~
+
+Use the same explicit `ZENITH_CLAUDE_CODE_BIN`. The fixture owns both loopback
+servers and synthetic keys; it never attaches to the running Relay or a real
+provider. It checks the client alias, canonical upstream model, exact effort,
+one physical request and one successful usage record per case. The bounded
+observer buffers the synthetic SSE reply; this is not a TTFT/latency benchmark.
+Client token-count calls remain local fixture replies, not token-count endpoint
+qualification. Desktop UI handoff, sparse menus and real-provider acceptance
+remain separate.
+
+For the installed client's complete synthetic tool cycle through native Messages
+and explicitly declared Responses, Chat Completions and Gemini upstreams:
+
+~~~powershell
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay installed_claude_code_completes_gateway_tool_cycle -- --ignored --nocapture --test-threads=1
+~~~
+
+This opts in only the fixture's deterministic `mcp__relay_contract__lookup` tool.
+Built-in tools stay disabled and the strict MCP configuration contains only that
+local stdio server. `--allowedTools` authorizes that exact synthetic tool, not a
+general permission bypass. Its loopback audit callback uses a fresh per-case
+capability and must occur between the two generations. A successful case needs
+one audited execution, the original call ID/name/arguments and result in order,
+two physical sends, matching effort and terminal usage on both sends. The fixture
+server negotiates MCP 2025-11-25 and exits on EOF or its deadline; it is not a
+general MCP implementation. Each synthetic endpoint declares its own protocol
+support, without relaxing native-protocol admission. Messages, Responses and Chat
+cases use the declared Max/XHigh levels; the Gemini case declares and requests
+High. This is an independent supported-level case, not a substituted Max/XHigh.
+The Chat case checks reasoning replay, and Gemini checks original thought
+signatures and function-call/result association. A non-opt-in unit check also
+validates the foreign fixtures and fragmented streams without launching Code.
+Other tool types, real provider behavior, streaming latency and Desktop UI remain
+separate checks.
+
+#### Installed Codex tool cycle
+
+Qualify an explicitly selected Codex executable through a generated Relay catalog,
+the in-process gateway and a synthetic native Responses upstream:
+
+~~~powershell
+$env:ZENITH_CODEX_BIN = 'C:\path\to\installed\codex.exe'
+bun scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked --bin zenith-relay installed_codex_completes_gateway_tool_cycle -- --ignored --nocapture --test-threads=1
+~~~
+
+The driver uses an empty temporary `CODEX_HOME`, strict inline config, ephemeral
+sessions and a read-only sandbox. User config, project instructions, remote
+discovery, plugins, telemetry and updates stay outside the fixture. Its only MCP
+server exposes the deterministic lookup tool; all generation and audit traffic
+stays on loopback with synthetic keys. Any unexpected connection fails the check.
+The test requires positive adoption of the generated instructions, unchanged model
+and declared Low effort, one audited execution, two physical requests and two
+terminal usage records. A content/type/order digest checks every text part of the
+client's tool result at the physical upstream, including client-added metadata.
+Codex 0.167.0-alpha.3.2 passed this native Responses SSE case. The observer forwards
+SSE bytes incrementally with backpressure and reports first-byte, first-text,
+tool-argument and terminal timing separately. A synthetic upstream is not a
+provider-latency benchmark. This mode leaves working accounts and the running
+Relay untouched.
+
+For an explicitly authorized real-provider check, select an existing Codex profile,
+one model from its generated catalog and an exact declared effort:
+
+~~~powershell
+$cli = (Get-Command codex.exe -CommandType Application | Select-Object -First 1).Source
+$profile = Join-Path $HOME '.codex\config.toml'
+bun scripts/check/check-codex-wire.mjs --cli "$cli" --profile "$profile" --model "<generated catalog ID>" --effort high --allow-provider-requests
+~~~
+
+This mode makes real generation requests through the selected profile's
+authenticated loopback `/v1` provider. Its local key stays in the parent process;
+the isolated client receives a synthetic observer key. Only the selected catalog
+row is copied into temporary state. The check requires two generation requests,
+one audited MCP execution, the original dynamic call identity and complete result,
+two completed SSE responses, and the exact final acknowledgement. Unknown
+connections, extra generations and unrelated built-in execution fail qualification.
+The output distinguishes `live_gateway` from synthetic modes and reports client
+cycle and between-request time. Match its Relay request IDs against retained
+usage/attempt records before claiming physical-send counts or accounting acceptance.
+
+Add `--scenario parallel` to qualify two independent MCP functions in the first
+response and both distinct results in the next request. Each tool has its own audit
+and expected result. The check preserves namespaces, dynamic call IDs and argument
+strings, and accepts independently returned result order. Duplicate executions,
+swapped/missing results, a serial-only first response, explicit disabled parallel
+policy and unrelated executable output fail qualification. A rejected audit blocks
+the next provider generation. The ordinary single-function scenario remains the
+default. Effort comes from the selected catalog row and is checked unchanged on
+the wire; the installed client's strict configuration must also accept it.
+
+Qualification remains specific to the selected client version, model, effort and
+route. JSON clients, other tool kinds, larger batches, media, foreign protocols,
+Desktop UI handoff and provider failure/recovery need their own checks. A cache hit
+on the next turn is an observation, not a matched cold/warm performance comparison.
 
 Prepared BPS prefix reuse and opt-in debug fingerprinting:
 
@@ -850,7 +1100,7 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 4. Run the relevant checks and regenerate screenshots if their UI changed.
 5. Review the diff for secret leakage, stale Help wording, and generated-file
    noise.
-6. Update <code>docs/releases/CHANGELOG.md</code> for user-visible behavior, or state in the
+6. Update the English changelog and its separate translations for user-visible behavior, or state in the
    PR why no entry is needed.
 7. Verify contributor consent and rights, required checks, and the applicable
    CODEOWNER review. Target the development/release branch designated by the
@@ -921,14 +1171,15 @@ The updater changelog is read from the GitHub Release body. In the published
 Release, put each translation after a <code>relay-notes:&lt;locale&gt;</code>
 marker. A section continues until the next marker. A pull request note can stay
 in the contributor's own language and can include a screenshot; add the locale
-markers when publishing the Release, not in the pull request.
+markers when publishing the Release, not in the pull request or source changelogs.
+The release workflow generates these blocks from the separate changelog files.
 
 ~~~markdown
 <!-- relay-notes:en -->
 - English changes
 
 <!-- relay-notes:ru -->
-- Изменения на русском
+- [Russian translation of the changes]
 ~~~
 
 Use lowercase locale codes. For a new language, add another section such as

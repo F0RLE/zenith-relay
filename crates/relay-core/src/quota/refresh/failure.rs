@@ -1,6 +1,33 @@
 use crate::error::{normalize_error_code, safe_error_code};
 use crate::error_codes;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QuotaTransportFailure {
+    StaleScope,
+    InvalidOrigin,
+    AdmissionFull,
+    AdmissionTimeout,
+    Timeout,
+    Network,
+    BodyTimeout,
+    BodyTransport,
+}
+
+impl QuotaTransportFailure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleScope => "stale_scope",
+            Self::InvalidOrigin => "invalid_origin",
+            Self::AdmissionFull => "admission_full",
+            Self::AdmissionTimeout => "admission_timeout",
+            Self::Timeout => "timeout",
+            Self::Network => "network",
+            Self::BodyTimeout => "body_timeout",
+            Self::BodyTransport => "body_transport",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuotaRefreshFailure {
     pub code: String,
@@ -10,6 +37,7 @@ pub struct QuotaRefreshFailure {
     endpoint_stage: Option<&'static str>,
     response_format: Option<&'static str>,
     response_mitigation: Option<&'static str>,
+    transport_failure: Option<QuotaTransportFailure>,
     cf_ray: Option<Box<str>>,
 }
 
@@ -23,6 +51,7 @@ impl QuotaRefreshFailure {
             endpoint_stage: None,
             response_format: None,
             response_mitigation: None,
+            transport_failure: None,
             cf_ray: None,
         }
     }
@@ -45,6 +74,10 @@ impl QuotaRefreshFailure {
 
     pub fn response_mitigation(&self) -> Option<&'static str> {
         self.response_mitigation
+    }
+
+    pub fn transport_failure(&self) -> Option<&'static str> {
+        self.transport_failure.map(QuotaTransportFailure::as_str)
     }
 
     pub fn cf_ray(&self) -> Option<&str> {
@@ -82,6 +115,11 @@ impl QuotaRefreshFailure {
 
     pub(crate) fn with_response_mitigation(mut self, mitigation: Option<&'static str>) -> Self {
         self.response_mitigation = mitigation;
+        self
+    }
+
+    pub(crate) fn with_transport_failure(mut self, failure: QuotaTransportFailure) -> Self {
+        self.transport_failure = Some(failure);
         self
     }
 

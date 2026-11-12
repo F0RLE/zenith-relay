@@ -31,55 +31,76 @@ pub(super) fn record_subscription_failure(
     failure: &QuotaRefreshFailure,
     elapsed: Duration,
 ) {
-    // Optional metadata failure is diagnostic, not an account/quota rejection.
-    crate::diagnostics::record_error(
-        "account-subscription-probe",
-        Some(&failure.code),
-        "account subscription check failed",
-        &[
-            ("account", crate::diagnostics::hash_identifier(account_id)),
-            (
-                "request_route",
-                if prepared.proxy.is_some() {
-                    "configured_proxy"
-                } else {
-                    "client_default"
-                }
-                .into(),
-            ),
-            (
-                "http_status",
-                failure
-                    .http_status()
-                    .map_or_else(|| "none".into(), |status| status.to_string()),
-            ),
-            ("retryable", failure.retryable.to_string()),
-            (
-                "retry_after_ms",
-                failure
-                    .retry_after_ms()
-                    .map_or_else(|| "unreported".into(), |delay| delay.to_string()),
-            ),
-            ("elapsed_ms", elapsed.as_millis().to_string()),
-            (
-                "oauth_client_kind",
-                format!("{:?}", prepared.oauth_client_kind),
-            ),
-            ("cf_ray", failure.cf_ray().unwrap_or("unreported").into()),
-            (
-                "endpoint_stage",
-                failure.endpoint_stage().unwrap_or("unknown").into(),
-            ),
-            (
-                "response_format",
-                failure.response_format().unwrap_or("unknown").into(),
-            ),
-            (
-                "response_mitigation",
-                failure.response_mitigation().unwrap_or("unreported").into(),
-            ),
-        ],
-    );
+    let details = &[
+        ("code", failure.code.clone()),
+        ("account", crate::diagnostics::hash_identifier(account_id)),
+        (
+            "request_route",
+            if prepared.proxy.is_some() {
+                "configured_proxy"
+            } else {
+                "client_default"
+            }
+            .into(),
+        ),
+        (
+            "http_status",
+            failure
+                .http_status()
+                .map_or_else(|| "none".into(), |status| status.to_string()),
+        ),
+        ("retryable", failure.retryable.to_string()),
+        (
+            "retry_after_ms",
+            failure
+                .retry_after_ms()
+                .map_or_else(|| "unreported".into(), |delay| delay.to_string()),
+        ),
+        ("elapsed_ms", elapsed.as_millis().to_string()),
+        (
+            "oauth_client_kind",
+            format!("{:?}", prepared.oauth_client_kind),
+        ),
+        ("cf_ray", failure.cf_ray().unwrap_or("unreported").into()),
+        (
+            "endpoint_stage",
+            failure.endpoint_stage().unwrap_or("unknown").into(),
+        ),
+        (
+            "response_format",
+            failure.response_format().unwrap_or("unknown").into(),
+        ),
+        (
+            "response_mitigation",
+            failure.response_mitigation().unwrap_or("unreported").into(),
+        ),
+        (
+            "transport_failure",
+            failure.transport_failure().unwrap_or("unreported").into(),
+        ),
+    ];
+    if optional_expiry_missing(failure) {
+        crate::diagnostics::record_operation(
+            "account-subscription-probe",
+            "optional subscription expiry is unavailable",
+            details,
+        );
+    } else {
+        crate::diagnostics::record_error(
+            "account-subscription-probe",
+            Some(&failure.code),
+            "account subscription check failed",
+            details,
+        );
+    }
+}
+
+fn optional_expiry_missing(failure: &QuotaRefreshFailure) -> bool {
+    failure.code == error_codes::SUBSCRIPTION_HTTP_STATUS
+        && failure.endpoint_stage() == Some("subscriptions")
+        && failure.http_status() == Some(404)
+        && failure.response_format() == Some("json")
+        && failure.response_mitigation().is_none()
 }
 
 pub(super) fn apply_subscription_read(

@@ -1,9 +1,11 @@
+mod catalog_refresh;
 mod gateway;
 mod participant;
 mod snapshot;
 
 pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
 
+pub use catalog_refresh::{CatalogRefreshClient, ClientCatalogRefreshFailure};
 pub use gateway::{BindScope, GatewaySettings};
 #[cfg(test)]
 pub(crate) use participant::synthetic_responses_source;
@@ -28,6 +30,38 @@ pub const MAX_LOCAL_ACCOUNTS: usize = 1_024;
 mod tests {
     use super::*;
     use zenith_relay_core::protocol::MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;
+
+    #[test]
+    fn retired_siwc_output_limit_setting_preserves_other_gateway_settings() {
+        let expected = GatewaySettings {
+            enabled: true,
+            port: 15432,
+            ..GatewaySettings::default()
+        };
+        let canonical = serde_json::to_value(&expected).unwrap();
+        assert!(canonical.get("siwcOutputLimitCompatibility").is_none());
+        for enabled in [false, true] {
+            let mut stored = canonical.clone();
+            stored["siwcOutputLimitCompatibility"] = serde_json::json!(enabled);
+            let restored: GatewaySettings = serde_json::from_value(stored).unwrap();
+            assert_eq!(restored, expected);
+            assert_eq!(serde_json::to_value(restored).unwrap(), canonical);
+        }
+    }
+
+    #[test]
+    fn existing_gateway_warning_fields_load_without_client_failures() {
+        let mut stored = serde_json::to_value(GatewaySettings::default()).unwrap();
+        assert!(stored.get("clientCatalogRefreshFailures").is_none());
+        stored["catalogRefreshError"] = "model_catalog_refresh_deferred:codex_running".into();
+        stored["catalogRefreshErrorAtMs"] = serde_json::Value::Null;
+        let restored: GatewaySettings = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            restored.catalog_refresh_error.as_deref(),
+            Some("model_catalog_refresh_deferred:codex_running")
+        );
+        assert!(restored.client_catalog_refresh_failures.is_empty());
+    }
 
     #[test]
     fn gateway_settings_ignore_retired_transport_flag_without_losing_current_settings() {

@@ -235,9 +235,8 @@ fn upgrade_saved_gateway(
     sources: &[ProviderSourceRecord],
     accounts: &[LocalAccountRecord],
 ) -> Result<()> {
-    // A saved current policy can still coexist with obsolete scalar fields from an
-    // older build. Remove them on disk without changing any active controls.
-    let remove_legacy_controls = database
+    // Rewrite obsolete fields and mode aliases without changing active controls.
+    let normalize_saved_fields = database
         .state_json(STATE_GATEWAY)?
         .and_then(|gateway_state_text| {
             serde_json::from_str::<serde_json::Value>(&gateway_state_text).ok()
@@ -255,6 +254,11 @@ fn upgrade_saved_gateway(
                     ]
                     .iter()
                     .any(|key| gateway_state_fields.contains_key(*key))
+                        || gateway_state_fields
+                            .get("poolRouting")
+                            .and_then(|policy| policy.get("mode"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("in_order")
                 })
         });
     let upgrade_policy = !gateway
@@ -268,7 +272,7 @@ fn upgrade_saved_gateway(
             .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         gateway.pool_routing = Some(policy);
     }
-    if upgrade_policy || remove_legacy_controls {
+    if upgrade_policy || normalize_saved_fields {
         database.replace_state_json(&[(STATE_GATEWAY, serialize_state(gateway)?)])?;
     }
     Ok(())

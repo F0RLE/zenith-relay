@@ -91,8 +91,9 @@ impl TelemetryDb {
             HOUR_MS
         };
         let rows = {
-            // Use the existing WAL report reader, not the request writer during aggregation.
-            let connection = self.lock_report_connection()?;
+            // Persisted capacity shares the WAL reader; usage-revision and
+            // in-memory totals synchronization belongs to usage reports.
+            let connection = self.lock_snapshot_connection()?;
             let mut statement = connection.prepare(
                 "SELECT payload_json FROM weekly_capacity_history WHERE observed_at_ms >= ?1 AND observed_at_ms <= ?2
                  ORDER BY observed_at_ms DESC LIMIT ?3",

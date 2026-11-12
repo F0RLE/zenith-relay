@@ -1,6 +1,7 @@
 use crate::error_codes;
 mod account;
 mod codex_models;
+mod codex_page_context;
 mod headers;
 mod identity;
 mod normalization;
@@ -45,6 +46,7 @@ pub(super) use headers::{
 pub(in crate::gateway) use identity::history_affinity_fingerprint;
 pub(super) use identity::{client_context_fingerprint, client_request_identity};
 mod codex_reasoning;
+pub(in crate::gateway) use codex_page_context::normalize_codex_page_context;
 pub(in crate::gateway) use codex_reasoning::normalize_codex_reasoning_placeholder;
 pub(in crate::gateway) use normalization::coerce_responses_input_array;
 pub(super) use normalization::{

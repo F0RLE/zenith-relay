@@ -16,6 +16,7 @@ fn input(model_policy: WakeModelPolicy) -> WakeAutomationInput {
         account_selector: AccountSelector::AllEligible,
         model_policy,
         trigger: WakeTrigger::QuotaFull,
+        weekly_reset_remaining_basis_points: None,
         jitter_seconds: 60,
         max_attempts_per_cycle: 1,
     }
@@ -70,6 +71,30 @@ fn legacy_manual_input_creates_an_automatic_task() {
     let task = build_task("automatic_wake".into(), input, 10, 20).unwrap();
     assert_eq!(task.execution_policy, WakeExecutionPolicy::Automatic);
     assert_eq!(task.trigger, WakeTrigger::QuotaFull);
+}
+
+#[test]
+fn weekly_threshold_is_validated_in_rust_and_absent_by_default() {
+    let legacy: WakeAutomationInput = serde_json::from_value(serde_json::json!({
+        "name": "Weekly reset",
+        "accountSelector": { "kind": "all_eligible" },
+        "modelPolicy": { "kind": "lightest_supported" },
+        "trigger": { "kind": "weekly" }
+    }))
+    .unwrap();
+    assert_eq!(legacy.weekly_reset_remaining_basis_points, None);
+    for threshold in [0, 1, 2_000, 10_000, 10_001] {
+        let mut candidate = input(WakeModelPolicy::LightestSupported);
+        candidate.trigger = WakeTrigger::Weekly;
+        candidate.weekly_reset_remaining_basis_points = Some(threshold);
+        assert_eq!(
+            build_task("threshold".into(), candidate, 1, 1).is_ok(),
+            threshold <= 10_000
+        );
+    }
+    let mut non_weekly = input(WakeModelPolicy::LightestSupported);
+    non_weekly.weekly_reset_remaining_basis_points = Some(0);
+    assert!(build_task("threshold".into(), non_weekly, 1, 1).is_err());
 }
 
 #[test]
@@ -151,7 +176,11 @@ fn countdown_changes_request_a_shared_refresh_only_for_selected_pool_accounts() 
 
     task.trigger = WakeTrigger::Weekly;
     schedule_countdown_refresh(&task, &state).unwrap();
-    assert!(!changes.has_changed().unwrap());
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    task.weekly_reset_remaining_basis_points = Some(2_000);
+    schedule_countdown_refresh(&task, &state).unwrap();
+    assert!(changes.has_changed().unwrap());
     drop(changes);
     drop(state);
     std::fs::remove_dir_all(root).unwrap();

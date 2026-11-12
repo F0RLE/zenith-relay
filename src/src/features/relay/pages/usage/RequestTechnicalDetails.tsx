@@ -19,6 +19,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
   const routing = row.routing;
   const transport = routing?.transport;
   const payload = transport?.requestPayload;
+  const attachments = transport?.requestPreparation?.attachments;
   // Schema validation is included in bodyMs, so preparation parts are not additive.
   const preparationTimings = [
     ["preparationBodyTime", transport?.requestPreparation?.bodyMs],
@@ -28,21 +29,34 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
     ["preparationAttachmentsTime", transport?.requestPreparation?.attachmentsMs],
   ] as const;
   // These are dispatch-relative offsets, not durations to add to preparation.
-  const responseTimings = ([
+  const sourceTimings = ([
     ["responseHeadersTime", transport?.responseHeadersMs],
     ["decodedBodyFirstTime", transport?.streamResponse?.decodedBodyFirstMs],
     ["sseJsonFirstTime", transport?.streamResponse?.sseJsonFirstMs],
+    ["upstreamReasoningFirstTime", transport?.streamResponse?.upstreamReasoningFirstMs],
     ["upstreamOutputFirstTime", transport?.streamResponse?.upstreamOutputFirstMs],
-    ["clientFirstOutputTime", transport?.clientFirstOutputMs],
+    ["upstreamTextFirstTime", transport?.streamResponse?.upstreamTextFirstMs],
+    ["upstreamToolFirstTime", transport?.streamResponse?.upstreamToolFirstMs],
+    ["upstreamToolFirstCompleteTime", transport?.streamResponse?.upstreamToolFirstCompleteMs],
     ["upstreamResponseTime", transport?.upstreamResponseMs],
-    ["clientResponseReadyTime", transport?.clientResponseReadyMs],
   ] as const)
     // Keep measured zero; buffered replies can emit their first output after collection.
     .flatMap(([label, milliseconds]) => milliseconds == null ? [] : [[label, milliseconds] as const])
     .sort(([, left], [, right]) => left - right);
+  const relayTimings = ([
+    ["clientFirstOutputTime", transport?.clientFirstOutputMs],
+    ["toolCallsReadyTime", row.toolUse?.toolCallsReadyMs],
+    ["clientResponseReadyTime", transport?.clientResponseReadyMs],
+  ] as const).flatMap(([label, milliseconds]) => milliseconds == null ? [] : [[label, milliseconds] as const]);
+  const interval = (start: number | null | undefined, end: number | null | undefined) =>
+    start != null && end != null && end >= start ? end - start : null;
+  const toolIntervals = ([
+    ["sourceAfterFirstToolTime", interval(transport?.streamResponse?.upstreamToolFirstCompleteMs, transport?.upstreamResponseMs)],
+    ["relayToolProcessingTime", interval(transport?.upstreamResponseMs, row.toolUse?.toolCallsReadyMs)],
+  ] as const).flatMap(([label, milliseconds]) => milliseconds == null ? [] : [[label, milliseconds] as const]);
   const hasPreparationTimings = preparationTimings.some(([, milliseconds]) => milliseconds != null);
-  const hasPreparation = transport?.requestPreparationMs != null || hasPreparationTimings;
-  const hasTimings = hasPreparation || responseTimings.length > 0;
+  const hasPreparation = transport?.requestPreparationMs != null || hasPreparationTimings || attachments != null;
+  const hasTimings = hasPreparation || sourceTimings.length > 0 || relayTimings.length > 0;
   const requestFailed = requestStatusKind(row) === "error";
   const toolUse = row.toolUse;
   const hasTools = toolUse && (toolUse.clientToolCount > 0 || toolUse.forwardedToolCount > 0 || toolUse.toolCallCount > 0
@@ -72,7 +86,10 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       {hasErrorMetadata || separateEndpoint || observedTier ? <RequestSection title={t(hasErrorMetadata ? "usage.requestSections.failure" : "usage.requestSections.response")} className="request-response-section">
         <dl className="request-details-list request-technical-fields">
           {requestFailed ? <>
-            {row.httpStatus != null ? field("usage.httpStatus", row.httpStatus) : null}
+            {row.httpStatus != null ? field("usage.resultStatus", row.httpStatus) : null}
+            {transport?.downstreamHttpStatus != null ? field("usage.downstreamHttpStatus", transport.downstreamHttpStatus) : null}
+            {transport?.upstreamHttpStatus != null ? field("usage.observedUpstreamHttpStatus", transport.upstreamHttpStatus) : null}
+            {field("usage.failureEvidence", transport?.failureKind ? t(`usage.failureKinds.${transport.failureKind}`) : t("common.unknown"))}
             {row.errorOrigin ? field("usage.errorOrigin", formatErrorOrigin(row.errorOrigin, t)) : null}
             {row.errorCategory ? field("usage.errorCategory", <code>{row.errorCategory}</code>) : null}
             {row.upstreamError?.httpStatus != null && row.upstreamError.httpStatus !== row.httpStatus
@@ -97,7 +114,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             {transport.fallbackReason ? field("usage.transportFallback", t(`usage.transportFallbackReasons.${transport.fallbackReason}`)) : null}
             {transport.responseFormat ? field("usage.upstreamResponseFormat", t(`usage.transportResponseFormats.${transport.responseFormat}`)) : null}
             {transport.handshakeMs != null ? field("usage.handshakeMs", formatDurationMs(transport.handshakeMs, i18n.language, t)) : null}
-            {transport.connectionReused != null ? field("usage.connectionReuse", t(transport.connectionReused ? "usage.connectionReused" : "usage.connectionOpened")) : null}
+            {transport.connectionReused != null ? field("usage.connectionReuse", t(transport.connectionReused ? "usage.connectionReused" : transport.reauth ? "usage.connectionReauthenticated" : "usage.connectionOpened")) : null}
           </> : null}
         </dl>
         <dl className="request-details-list request-route-stats">
@@ -106,13 +123,16 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             ? field("usage.quotaAtSelection", `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`) : null}
           {field("usage.inFlightAtSelection", routing.inFlightBefore)}
           {field("usage.dispatchesBefore", routing.dispatchesBefore)}
-          <RouteLatencyDetails diagnostics={routing.routeLatency} />
         </dl>
+        {routing.routeLatency ? <dl className="request-details-list request-route-latency">
+          <RouteLatencyDetails diagnostics={routing.routeLatency} />
+        </dl> : null}
       </RequestSection> : null}
       {debugEnabled && payload ? <RequestSection title={t("usage.requestSections.payload")} className="request-payload-section">
         <dl className="request-details-list request-technical-fields">
           {field("usage.requestPayloadMode", t(`usage.requestPayloadModes.${payload.mode}`))}
           {payload.fullRequestReason ? field("usage.fullRequestReason", t(`usage.fullRequestReasons.${payload.fullRequestReason}`)) : null}
+          {transport?.requestPreparation?.siwcOutputLimitOmitted ? field("usage.siwcOutputLimitOmitted", t("common.enabled")) : null}
           {field("usage.requestPayloadBytes", contextBytes(payload.jsonBytes, payload.bodyBytes))}
           {field("usage.requestEncoding", payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed"))}
           {payload.compressionMs != null ? field("usage.requestCompressionTime", formatDurationMs(payload.compressionMs, i18n.language, t)) : null}
@@ -129,12 +149,35 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             {preparationTimings.map(([label, milliseconds]) => milliseconds != null
               ? field(`usage.${label}`, formatDurationMs(milliseconds, i18n.language, t)) : null)}
           </dl> : null}
+          {attachments && attachments.imageCount > 0 ? <RequestDisclosure title={t("usage.attachmentDetails.title")} className="request-attachment-details">
+            <dl className="request-details-list request-technical-fields">
+              {attachments.credentialMs != null ? field("usage.attachmentDetails.credentialTime", formatDurationMs(attachments.credentialMs, i18n.language, t)) : null}
+              {field("usage.attachmentDetails.stagingTime", formatDurationMs(attachments.stagingMs, i18n.language, t))}
+              {field("usage.attachmentDetails.resolveTime", formatDurationMs(attachments.resolveMs, i18n.language, t))}
+              {field("usage.attachmentDetails.images", attachments.imageCount)}
+              {field("usage.attachmentDetails.fileReferences", attachments.fileReferences)}
+              {field("usage.attachmentDetails.uploaded", attachments.uploadedImages)}
+              {field("usage.attachmentDetails.reused", attachments.reusedImages)}
+              {field("usage.attachmentDetails.uploadedBytes", formatContextBytes(attachments.uploadedBytes, i18n.language))}
+            </dl>
+          </RequestDisclosure> : null}
         </div> : null}
-        {responseTimings.length > 0 ? <div className="request-response-timings">
-          <h4>{t("usage.requestSections.afterDispatch")}</h4>
-          <dl className="request-details-list request-timing-metrics">
-            {responseTimings.map(([label, milliseconds]) => field(`usage.${label}`, `+${formatDurationMs(milliseconds, i18n.language, t)}`))}
-          </dl>
+        {sourceTimings.length > 0 || relayTimings.length > 0 ? <div className="request-response-timings">
+          {sourceTimings.length > 0 ? <section className="request-timing-group" aria-label={t("usage.requestSections.sourceTimings")}>
+            <h4 tabIndex={0} data-relay-tooltip={t("usage.requestSections.afterDispatch")}>{t("usage.requestSections.sourceTimings")}</h4>
+            <dl className="request-details-list request-timing-metrics">
+              {sourceTimings.map(([label, milliseconds]) => field(`usage.${label}`, `+${formatDurationMs(milliseconds, i18n.language, t)}`))}
+            </dl>
+          </section> : null}
+          {relayTimings.length > 0 ? <section className="request-timing-group" aria-label={t("usage.requestSections.relayTimings")}>
+            <h4 tabIndex={0} data-relay-tooltip={t("usage.requestSections.afterDispatch")}>{t("usage.requestSections.relayTimings")}</h4>
+            <dl className="request-details-list request-timing-metrics">
+              {relayTimings.map(([label, milliseconds]) => field(`usage.${label}`, `+${formatDurationMs(milliseconds, i18n.language, t)}`))}
+            </dl>
+          </section> : null}
+          {toolIntervals.length > 0 ? <dl className="request-details-list request-tool-intervals">
+            {toolIntervals.map(([label, milliseconds]) => field(`usage.${label}`, formatDurationMs(milliseconds, i18n.language, t)))}
+          </dl> : null}
         </div> : null}
       </RequestSection> : null}
       {debugEnabled && hasContext ? <RequestSection title={t("usage.contextSize.title")} className={`request-context-section${!hasTools ? " request-technical-wide" : ""}`}>
@@ -165,7 +208,6 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
             {field("usage.toolCallsReturned", toolUse.toolCallCount)}
             {toolUse.requestedParallelToolCalls != null ? field("usage.requestedParallelTools", t(toolUse.requestedParallelToolCalls ? "common.yes" : "common.no")) : null}
             {toolUse.upstreamToolCallCount != null ? field("usage.upstreamToolCalls", toolUse.upstreamToolCallCount) : null}
-            {toolUse.toolCallsReadyMs != null ? field("usage.toolCallsReadyTime", formatDurationMs(toolUse.toolCallsReadyMs, i18n.language, t)) : null}
             {toolUse.toolChoice && toolUse.toolChoice !== "auto"
               ? field("usage.toolChoice", formatToolChoice(toolUse.toolChoice, t))
               : null}

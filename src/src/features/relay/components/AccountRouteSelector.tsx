@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { AccountSummary, OAuthClientKind } from "../api/types";
-import { accountRouteConnections } from "../accountRoutes";
+import { accountRouteConnections, preferredAccountRouteConnection } from "../accountRoutes";
 import { useAccountSignIn } from "../hooks/useAccountSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
 import { OptionMenu } from "./Ui";
@@ -15,7 +15,7 @@ export function AccountRouteSelector({ account }: { account: AccountSummary }) {
   const signIn = useAccountSignIn();
   const accounts = runtime?.accounts ?? [];
   const connections = accountRouteConnections(account, accounts);
-  const connectionFor = (kind: OAuthClientKind) => connections.find((connection) => (connection.oauthClientKind ?? "codex") === kind);
+  const connectionFor = (kind: OAuthClientKind) => preferredAccountRouteConnection(connections, kind);
   const active = runtime?.gateway.routingOrder?.some((candidate) =>
     connections.some((connection) => connection.id === candidate.candidateId) && ((candidate.activeRequestCount ?? 0) > 0 || candidate.inFlight > 0),
   );

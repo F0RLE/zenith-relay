@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { useTooltip } from "./Ui";
-import { isTooltipFocusSuppressed } from "./ui/focus";
+import { hasTooltipKeyboardFocus, isTooltipFocusSuppressed } from "./ui/focus";
 
 const hintSelector = "[data-relay-tooltip]";
 const controlSelector = "button, input, select, textarea, a, summary, [tabindex]";
@@ -43,7 +43,8 @@ export function AppTooltips() {
       const anchor = hintTarget(event.target);
       const text = anchor ? hintLabel(anchor) : "";
       if (!anchor || !text) {
-        hide();
+        // Focus-driven scrolling can move ordinary content under a stationary pointer.
+        if (keyboard || !hasTooltipKeyboardFocus(anchorRef.current)) hide();
         return;
       }
       if (!keyboard && event instanceof MouseEvent && hintTarget(event.relatedTarget) === anchor) return;
@@ -56,7 +57,7 @@ export function AppTooltips() {
     const onOut = (event: MouseEvent) => {
       const anchor = anchorRef.current;
       if (event.relatedTarget instanceof Node && anchor?.contains(event.relatedTarget)) return;
-      if (anchor?.contains(document.activeElement) && document.activeElement?.matches(":focus-visible")) return;
+      if (hasTooltipKeyboardFocus(anchor)) return;
       hide();
     };
     // Capture runs before React's component handlers: the more specific custom

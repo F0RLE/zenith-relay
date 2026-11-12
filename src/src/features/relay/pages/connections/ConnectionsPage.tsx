@@ -86,10 +86,9 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           : view === "automations" ? "automation" : null,
     );
   };
-  const { report: sourceRefreshReport, refresh: refreshSourceData, refreshOne: refreshSingleSource } = useSourceRefresh({
+  const { refresh: refreshSourceData, refreshOne: refreshSingleSource } = useSourceRefresh({
     mode,
     sources: runtime?.sources ?? [],
-    resetKey: `${mode}:${view}`,
     perform,
     refreshStats: refreshSourceStats,
   });
@@ -122,7 +121,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
           </>
         }
       />
-      {view === "sources" ? <SourcesList query={query} onQuery={setQuery} sourceStats={sourceStats} refreshReport={sourceRefreshReport ? t("sources.refreshResult", sourceRefreshReport) : null} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} onRefreshAll={() => refreshSourceData()} /> : null}
+      {view === "sources" ? <SourcesList query={query} onQuery={setQuery} sourceStats={sourceStats} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} onRefresh={refreshSingleSource} onRefreshSelected={refreshSourceData} onRefreshAll={() => refreshSourceData()} /> : null}
       {view === "accounts" ? (
         <AccountsTable
           query={query}

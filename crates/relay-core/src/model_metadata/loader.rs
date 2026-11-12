@@ -84,11 +84,29 @@ impl ModelMetadataCatalogLoader {
         let path = path.into();
         let max_age_ms = max_age_ms.max(1);
         let now = crate::unix_time_ms();
-        let (states, parsed) = cache::read_states(&path, now, max_age_ms);
+        let (mut states, parsed) = cache::read_states(&path, now, max_age_ms);
         // Consume the already-validated trees instead of retaining all sources
         // alongside the merged records. The immutable raw envelopes stay intact.
         let merged_catalog_payload =
-            merge_payloads(parsed, source::stale_sources(&states, now, max_age_ms));
+            match merge_payloads(parsed, source::stale_sources(&states, now, max_age_ms)) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    // Valid individual envelopes may exceed the combined budget.
+                    // Keep their bytes for recovery, but never publish a subset.
+                    for state in &mut states {
+                        if let Some(mut envelope) = state.envelope.take() {
+                            envelope.stale = true;
+                            *state = SourceState::new(
+                                Some(envelope),
+                                Some(ModelMetadataError::InvalidCache),
+                                now,
+                                max_age_ms,
+                            );
+                        }
+                    }
+                    serde_json::json!({})
+                }
+            };
         let catalog = catalog_from_payload(
             &states,
             &merged_catalog_payload,
@@ -264,8 +282,8 @@ impl ModelMetadataCatalogLoader {
             Err(error) => {
                 // Do not leave sources stuck in Updating if building the
                 // merged catalog fails before the write path is reached.
-                // This is rare (the current JSON value is already validated),
-                // but the state machine must recover from every fallible step.
+                // Individually valid sources can exceed the combined model
+                // budget; their partial merge must not replace the snapshot.
                 let mut failed = cached_states.clone();
                 let failure_at = crate::unix_time_ms();
                 for (source_index, source_state) in failed.iter_mut().enumerate() {

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub(crate) use crate::unix_time_ms as now_ms;
 pub(crate) use errors::{basis_points_transport_rejected, failure_category_affects_account_state};
+pub(crate) use streaming::NativeReplayCapture;
 
 mod auth;
 mod catalog;
@@ -29,7 +30,7 @@ mod response;
 mod streaming;
 mod token_count;
 mod turn_state;
-mod websocket;
+pub(crate) mod websocket;
 
 /// Read-only cache accounting; report categories individually, separate from RSS.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -295,6 +296,7 @@ pub(crate) mod test_support {
             candidate_id: Some("source".into()),
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             routing: None,
             requested_model: Some("model".into()),

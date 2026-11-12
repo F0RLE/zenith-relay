@@ -26,8 +26,13 @@ fn cancelled_usage_is_normalized_for_non_streaming_emitters_without_rewriting_pr
     }
     let events = events.lock().unwrap();
     assert_eq!(events[0].http_status, 499);
+    assert_eq!(events[0].error_origin(), Some(crate::ErrorOrigin::Relay));
     assert_eq!(events[0].total_tokens, Some(17));
+    let mut repeated = events[0].clone();
+    repeated.normalize_client_cancellation();
+    assert_eq!(repeated, events[0]);
     assert_eq!(events[1].http_status, 503);
+    assert_eq!(events[1].error_origin(), Some(crate::ErrorOrigin::Provider));
     assert_eq!(
         events[1].error_category.as_deref(),
         Some(error_codes::UPSTREAM_UNAVAILABLE)

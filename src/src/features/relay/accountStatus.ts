@@ -152,7 +152,6 @@ export function accountErrorTranslationKey(code: string) {
   if (normalized === "siwc_rotation_store_unavailable" || normalized === "account_credential_store_unavailable") return "accounts.errors.rotationStorageUnavailable";
   if (/token_rotation_recovery_required|account_rotation_recovery_required|siwc_rotation_(outcome_unknown|checkpoint_invalid|recovery_required)/.test(normalized)) return "accounts.errors.tokenRotationRecovery";
   if (normalized === "siwc_plan_use_disabled") return "accounts.errors.siwcPlanUseDisabled";
-  if (normalized === "basis_points_free_account_unsupported") return "accounts.errors.basisPointsFreeUnsupported";
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return "accounts.errors.reusedRefreshToken";
   if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return "accounts.errors.expiredRefreshToken";
   if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return "accounts.errors.invalidatedRefreshToken";
@@ -164,6 +163,8 @@ export function accountErrorTranslationKey(code: string) {
   if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return "accounts.errors.blocked";
   if (normalized === "upstream_forbidden") return "usage.errorCategories.upstream_forbidden";
   if (normalized === "models_forbidden") return "accounts.importFailureReasons.modelsForbidden";
+  if (normalized === "models_endpoint_not_found") return "accounts.errors.modelsEndpointNotFound";
+  if (normalized === "models_http_status") return "accounts.importFailureReasons.modelsHttpStatus";
   const endpointPermission = normalized === "quota_forbidden" || normalized === "subscription_forbidden";
   if (normalized === "subscription_forbidden") return "accounts.errors.blocked";
   if (!endpointPermission && /forbidden|blocked/.test(normalized)) return "accounts.errors.blocked";

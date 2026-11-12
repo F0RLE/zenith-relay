@@ -14,8 +14,10 @@ mod parse;
 mod request;
 pub(crate) use basis_points::normalize_basis_points_reasoning_effort;
 pub use basis_points::{
-    BASIS_POINTS_ACCESS_ENDPOINT, BasisPointsModelAccess, MAX_BASIS_POINTS_ACCESS_BYTES,
+    BASIS_POINTS_ACCESS_ENDPOINT, BasisPointsCatalogDiagnostics, BasisPointsModelAccess,
+    BasisPointsModelDiagnostic, BasisPointsModelOutcome, MAX_BASIS_POINTS_ACCESS_BYTES,
     basis_points_access_url, parse_basis_points_model_access,
+    parse_basis_points_model_access_with_diagnostics,
 };
 pub use failure::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 
@@ -25,6 +27,12 @@ const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 const MAX_MODELS: usize = 4_096;
 const MAX_MODELS_RESPONSE_BYTES: usize = crate::transport::MAX_MODEL_CATALOG_BODY_BYTES;
+
+#[derive(Clone, Debug)]
+pub struct AccountModelsDiscovery {
+    pub models: Vec<String>,
+    pub basis_points_diagnostics: Option<BasisPointsCatalogDiagnostics>,
+}
 
 #[derive(Clone)]
 pub struct AccountModelsClient {
@@ -137,6 +145,17 @@ impl AccountModelsClient {
         chatgpt_account_id: &str,
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
+        self.discover_authorized_with_diagnostics(authorization, chatgpt_account_id, client_version)
+            .await
+            .map(|discovery| discovery.models)
+    }
+
+    pub async fn discover_authorized_with_diagnostics(
+        &self,
+        authorization: HeaderValue,
+        chatgpt_account_id: &str,
+        client_version: &str,
+    ) -> Result<AccountModelsDiscovery, ModelDiscoveryFailure> {
         parse::validate_account_id(chatgpt_account_id)?;
         let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
         let siwc = self.client_kind == super::OAuthClientKind::Siwc;
@@ -180,6 +199,7 @@ impl AccountModelsClient {
                 match status.as_u16() {
                     401 => (ModelDiscoveryFailureCode::Unauthorized, false),
                     403 => (ModelDiscoveryFailureCode::Forbidden, false),
+                    404 => (ModelDiscoveryFailureCode::EndpointNotFound, false),
                     429 => (ModelDiscoveryFailureCode::RateLimited, true),
                     _ if status.is_server_error() => (ModelDiscoveryFailureCode::Upstream, true),
                     _ => (ModelDiscoveryFailureCode::HttpStatus, false),
@@ -193,13 +213,19 @@ impl AccountModelsClient {
             });
         }
 
-        if basis_points {
-            parse_basis_points_model_access(&models_response_body).map(|access| access.model_ids())
+        let (models, basis_points_diagnostics) = if basis_points {
+            let (access, diagnostics) =
+                parse_basis_points_model_access_with_diagnostics(&models_response_body)?;
+            (access.model_ids(), Some(diagnostics))
         } else if siwc {
-            parse::parse_siwc_models(&models_response_body)
+            (parse::parse_siwc_models(&models_response_body)?, None)
         } else {
-            parse::parse_models(&models_response_body)
-        }
+            (parse::parse_models(&models_response_body)?, None)
+        };
+        Ok(AccountModelsDiscovery {
+            models,
+            basis_points_diagnostics,
+        })
     }
 }
 

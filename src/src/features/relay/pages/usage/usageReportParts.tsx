@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { Bot } from "lucide-react";
+import { Ban, Bot, CircleAlert, CircleCheck, Clock3 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { formatTokenSpeed } from "../../usageSpeed";
 import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import type { UsageRow } from "./usageData";
-import { formatReasoningEffort } from "./usageReportFormat";
+import { formatReasoningEffort, requestStatusKind } from "./usageReportFormat";
 import type { ApiEquivalentSummary } from "../../api/types";
 import { formatUsageApiEquivalent } from "./usageFormatting";
 
@@ -34,16 +34,21 @@ export function SpeedValue({ value, locale, unit }: { value: number | null; loca
   return <span className="usage-speed-value" data-relay-tooltip={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
 }
 
-export function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort" | "requestOrigin"> }) {
+export function RequestStatusGlyph({ row }: { row: Pick<UsageRow, "success" | "requestOrigin" | "errorCategory" | "httpStatus" | "routing"> }) {
+  const status = requestStatusKind(row);
+  const Icon = row.requestOrigin ? Bot : status === "success" ? CircleCheck
+    : status === "pending" ? Clock3 : status === "cancelled" ? Ban : CircleAlert;
+  return <Icon aria-hidden />;
+}
+
+export function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort"> }) {
   const { t } = useTranslation();
   const requested = row.requestedReasoningEffort;
   const effective = row.effectiveReasoningEffort;
   const effort = effective ?? requested;
   const changed = Boolean(requested && effective && requested !== effective);
-  const requestOrigin = row.requestOrigin;
   return <span className="usage-model-value">
     <code>{row.model ?? "-"}</code>
-    {requestOrigin ? <span className="usage-request-origin" data-relay-tooltip={t("codex.backgroundRequestHint")}><Bot aria-hidden /></span> : null}
     {effort ? <small data-relay-tooltip={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
   </span>;
 }

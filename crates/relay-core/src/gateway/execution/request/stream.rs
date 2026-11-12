@@ -1,3 +1,4 @@
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::prelude::*;
 use super::recovery::{
     LegacyCallIdRepair, adapter_error_response, mark_adapter_failure, recover_stale_tool_history,
@@ -52,14 +53,7 @@ pub(super) struct OpenStreamInput<'a> {
     pub(super) stream: bool,
     pub(super) resolved_model: &'a str,
     pub(super) selected_error_origin: ErrorOrigin,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) response_affinity_key: &'a mut Option<String>,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
 }
 
 /// Open a client SSE response, or repair a bootstrap failure before any output
@@ -93,15 +87,26 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         stream,
         resolved_model,
         selected_error_origin,
-        repairs,
-        tried,
-        has_unpaired_tool_output,
-        requires_affinity_owner,
-        response_affinity_key,
-        last_failure,
-        last_failure_origin,
-        last_preserved_upstream_error,
+        state,
     } = stream_input;
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                has_unpaired_tool_output,
+                requires_affinity_owner,
+                response_affinity_key,
+                ..
+            },
+    } = state;
     let legacy_call_id_repair_attempted = &mut repairs.legacy_call_id;
     let native_replay_attempted = &mut repairs.native_replay;
     let stale_tool_history_recovered = &mut repairs.stale_tool_history;
@@ -111,6 +116,24 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
         requested_model,
         prompt_affinity_key,
     };
+    let mut pending_usage = crate::gateway::response::PendingUsageObservation::new(
+        runtime,
+        usage_event(
+            UsageAttempt {
+                request_id: &request_id,
+                attempt,
+                local_key_id: &key.id,
+                route: &route,
+                reasoning_effort: Some(&reasoning_effort),
+                requested_model: &requested_model,
+                tool_use: tool_use.clone(),
+            },
+            false,
+            status.as_u16(),
+            None,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
     let expected_model = (route.account_id.is_some() && runtime.block_degraded_routes_enabled())
         .then_some(route.source_model.as_str());
     let prewarm = route.account_transport == crate::runtime::AccountTransport::Siwc
@@ -118,16 +141,17 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
             .upstream_body()
             .pointer("/prompt_cache_options/prewarm")
             == Some(&Value::Bool(true));
-    let observation = route
-        .routing
-        .as_mut()
-        .and_then(|routing| routing.transport.as_mut())
-        .map(
-            |transport| crate::gateway::streaming::StreamBootstrapObservation::Transport {
-                started,
-                transport,
-            },
-        );
+    let mut observe = |bytes: &[u8]| pending_usage.observe(bytes);
+    let observation = Some(
+        crate::gateway::streaming::StreamBootstrapObservation::Transport {
+            started,
+            transport: route
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut()),
+            on_retained_body: Some(&mut observe),
+        },
+    );
     let opened = crate::gateway::streaming::bootstrap_observed_stream(
         upstream,
         expected_model,
@@ -308,7 +332,8 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             let terminal = failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(&route, failure.status, &failure)
+                || (route_forbids_fallback(&route, failure.status, &failure)
+                    && !lease.has_transient_retry())
                 || failure.execution.certainty != ExecutionCertainty::NotSent;
             if let Some(routing) = event.routing.as_mut() {
                 routing.attempt_outcome = Some(if terminal {

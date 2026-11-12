@@ -30,7 +30,7 @@ async fn siwc_preserves_explicit_cache_boundaries_and_configuration_updates() {
                         json!({"mode":"explicit","ttl":"12h"});
                     input[2]["output"][0]["prompt_cache_breakpoint"] = json!({"mode":"explicit"});
                 }
-                let options = json!({"mode":"explicit","ttl":"30m","prewarm":false,"comparison_response_id":null});
+                let options = json!({"mode":"explicit","ttl":if marked { "12h" } else { "30m" },"prewarm":false,"comparison_response_id":null});
                 let response = client.post(format!("{base}/v1/responses"))
                     .bearer_auth("local-secret")
                     .header("x-codex-session-id", "synthetic-policy-session")
@@ -68,7 +68,14 @@ async fn siwc_preserves_explicit_cache_boundaries_and_configuration_updates() {
                     for policy in [&diagnostics.client_policy, &diagnostics.upstream_policy] {
                         let policy = policy.as_ref().unwrap();
                         assert_eq!(policy.mode, CachePolicyMode::Explicit);
-                        assert_eq!(policy.ttl, CachePolicyTtl::ThirtyMinutes);
+                        assert_eq!(
+                            policy.ttl,
+                            if turn == 0 {
+                                CachePolicyTtl::ThirtyMinutes
+                            } else {
+                                CachePolicyTtl::TwelveHours
+                            }
+                        );
                         assert_eq!(policy.prewarm, CachePrewarm::Disabled);
                         assert_eq!(policy.key, CacheKeyPresence::Present);
                         assert_eq!(policy.breakpoints.explicit, (turn * 2) as u32);

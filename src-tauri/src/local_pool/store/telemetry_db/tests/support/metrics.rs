@@ -119,6 +119,12 @@ fn diagnostic_report_explains_preparation_remainder_without_adding_nested_valida
             json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":21,"serializationMs":40,"attachmentsMs":2175,"contextAccountingMs":10}),
             5,
         ),
+        (
+            json!({"bodyMs":139,"schemaValidationMs":22,"catalogMs":21,"serializationMs":40,"attachmentsMs":2175,"contextAccountingMs":10,
+                "attachments":{"credentialMs":100,"stagingMs":25,"resolveMs":2050,"imageCount":3,"fileReferences":1,"uploadedImages":1,"uploadedBytes":1024,"reusedImages":1,
+                    "fileId":"private-attachment-sentinel"}}),
+            5,
+        ),
     ] {
         let report = preparation_report(Some(2408), phases);
         let transport = &report["finalRequest"]["routing"]["transport"];
@@ -129,6 +135,7 @@ fn diagnostic_report_explains_preparation_remainder_without_adding_nested_valida
         assert_eq!(accounting["unattributedMs"], 23);
         assert_eq!(accounting["observedPhaseCount"], phase_count);
         assert_eq!(accounting["status"], "consistent");
+        assert!(!report.to_string().contains("private-attachment-sentinel"));
     }
 }
 

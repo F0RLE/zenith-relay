@@ -26,6 +26,57 @@ use zenith_relay_core::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceCatalogRefreshStatus {
+    Complete,
+    Partial,
+    Failed,
+    Manual,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCatalogRefresh {
+    pub source_id: String,
+    pub status: SourceCatalogRefreshStatus,
+    pub added_models: usize,
+    pub removed_models: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SourceModelRefresh {
+    pub source: ProviderSourceRecord,
+    pub summary: SourceCatalogRefresh,
+}
+
+impl SourceModelRefresh {
+    fn new(
+        previous: &[String],
+        source: ProviderSourceRecord,
+        status: SourceCatalogRefreshStatus,
+    ) -> Self {
+        let before: BTreeSet<_> = previous
+            .iter()
+            .map(|model| zenith_relay_core::model_id_key(model))
+            .collect();
+        let after: BTreeSet<_> = source
+            .models
+            .iter()
+            .map(|model| zenith_relay_core::model_id_key(model))
+            .collect();
+        Self {
+            summary: SourceCatalogRefresh {
+                source_id: source.id.clone(),
+                status,
+                added_models: after.difference(&before).count(),
+                removed_models: before.difference(&after).count(),
+            },
+            source,
+        }
+    }
+}
+
 pub(super) fn reconcile(
     state: &DesktopState,
     store: &LocalPoolStore,
@@ -86,7 +137,7 @@ fn register(
                     let refresh_read = execute::execute(&state, &fence, job.kind, job.manual).await;
                     let outcome = match &refresh_read {
                         Ok(RefreshRead::SourceModels(source))
-                            if source.last_test_status.as_deref() == Some("ok") =>
+                            if source.summary.status == SourceCatalogRefreshStatus::Complete =>
                         {
                             RefreshOutcome::Success
                         }
@@ -132,13 +183,27 @@ pub(crate) async fn request_models(
     id: &str,
     replace_manual: bool,
 ) -> Result<ProviderSourceRecord> {
+    request_model_refresh(state, id, replace_manual)
+        .await
+        .map(|refresh| refresh.source)
+}
+
+pub(crate) async fn request_model_refresh(
+    state: &DesktopState,
+    id: &str,
+    replace_manual: bool,
+) -> Result<SourceModelRefresh> {
     let fence = {
         let _mutation = state.setup_guard().await;
         let activity = super::active_members(state).await;
         let store = state.store()?;
         let (source, fence) = store.source_refresh_scope(id)?;
         if !replace_manual && source.last_test_status.as_deref() == Some("manual") {
-            return Ok(source);
+            return Ok(SourceModelRefresh::new(
+                &source.models,
+                source.clone(),
+                SourceCatalogRefreshStatus::Manual,
+            ));
         }
         register(
             state,

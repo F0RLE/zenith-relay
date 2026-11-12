@@ -36,7 +36,11 @@ pub async fn create_local_source(
             // An authenticated, valid empty catalog is a successful source
             // state. It remains editable and simply contributes zero routes
             // until a later refresh exposes models.
-            Ok(discovery) => (discovery, "ok", None),
+            Ok(discovery) => {
+                let failure = discovery.failure_summary();
+                let status = if failure.is_some() { "error" } else { "ok" };
+                (discovery, status, failure)
+            }
             Err(error) => {
                 let error = core_error(error);
                 (
@@ -65,6 +69,7 @@ pub async fn create_local_source(
                 resolved_base_url: None,
                 detected_model_prices: BTreeMap::new(),
                 capabilities: Vec::new(),
+                ..Default::default()
             },
             "manual",
             None,

@@ -12,6 +12,7 @@ mod revision;
 
 pub use failure::{
     TokenAuthorityError, TokenPersistenceFailure, TokenRefreshFailure, TokenRefreshFailureKind,
+    TokenRefreshStage,
 };
 use revision::DispatchRevisionState;
 pub use revision::{TokenDispatchRevision, TokenDispatchRevisionGuard};
@@ -105,6 +106,14 @@ pub struct PreparedToken {
     pub(crate) dispatch_revision: TokenDispatchRevision,
 }
 
+/// Preparation failures carry the credential revision that produced them.
+/// Callers may update runtime health only while that revision is current.
+#[derive(Debug)]
+pub(crate) struct TokenPreparationFailure {
+    pub(crate) error: TokenAuthorityError,
+    pub(crate) revision: Option<TokenDispatchRevision>,
+}
+
 impl PreparedToken {
     /// Identifies the exact credential incarnation used by an upstream request.
     pub fn dispatch_revision(&self) -> &TokenDispatchRevision {
@@ -117,6 +126,7 @@ struct TokenSlot {
     auth_state: AccountAuthState,
     persistence_pending: bool,
     auth_state_persistence_pending: bool,
+    refresh_deferred_until_ms: Option<u64>,
 }
 
 struct TokenSlotEntry {
@@ -172,6 +182,7 @@ impl TokenSlot {
             auth_state,
             persistence_pending: false,
             auth_state_persistence_pending: false,
+            refresh_deferred_until_ms: None,
         }
     }
 }

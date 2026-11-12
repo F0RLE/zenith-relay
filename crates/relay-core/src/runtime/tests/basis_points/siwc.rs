@@ -1,5 +1,6 @@
 use super::*;
 
+mod admission;
 mod cache_context;
 mod cache_policy;
 mod catalog;
@@ -7,20 +8,32 @@ mod continuation;
 mod errors;
 mod inventory;
 mod json;
+mod output_limits;
 mod reasoning;
 mod streaming;
+mod transport;
+pub(super) mod upstream;
 mod warmup;
 
 async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRuntime> {
+    siwc.state
+        .websocket_generations
+        .store(true, Ordering::SeqCst);
+    native
+        .state
+        .websocket_generations
+        .store(true, Ordering::SeqCst);
     let mut runtime = retry_admission::pool_runtime(siwc, 1, true).await;
     let account = runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-0")
         .unwrap();
     account.oauth_client_kind = OAuthClientKind::Siwc;
     account.responses_url = siwc.responses_url.clone();
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-1")
         .unwrap()
         .responses_url = native.responses_url.clone();
@@ -28,7 +41,7 @@ async fn runtime(siwc: &AccessServer, native: &AccessServer) -> Arc<GatewayRunti
 }
 
 #[tokio::test]
-async fn siwc_uses_sse_upstream_for_both_client_modes_and_preserves_tool_history() {
+async fn siwc_uses_websocket_upstream_for_both_client_modes_and_preserves_tool_history() {
     for (stream, debug) in [(false, false), (true, false), (false, true), (true, true)] {
         let siwc = AccessServer::start(json!([]), false).await;
         let native = AccessServer::start(json!([]), false).await;
@@ -110,6 +123,11 @@ async fn siwc_uses_sse_upstream_for_both_client_modes_and_preserves_tool_history
         assert_eq!(bodies[0]["input"][1], input[0]);
         assert_eq!(bodies[0]["input"][2], input[1]);
         assert_eq!(siwc.state.access_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            siwc.state.http_generation_requests.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(siwc.state.websocket_requests.load(Ordering::SeqCst), 1);
         assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
         task.abort();
     }
@@ -210,7 +228,11 @@ async fn siwc_compaction_rejects_foreign_state_and_never_falls_back_after_dispat
             *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::NOT_FOUND;
             *crate::poison::mutex(&siwc.state.generation_body) =
                 json!({"error":{"code":"route_not_found","message":"Synthetic rejection"}});
-            let runtime = runtime(&siwc, &native).await;
+            let usage = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+            let captured = usage.clone();
+            let mut runtime = runtime(&siwc, &native).await;
+            Arc::get_mut(&mut runtime).unwrap().usage =
+                Arc::new(move |event| crate::poison::mutex(&captured).push(event));
             runtime.set_route_recovery_enabled(true);
             let (base, task) = recovery::gateway(runtime).await;
             let mut input = vec![json!({"type":"compaction_trigger"})];
@@ -239,6 +261,22 @@ async fn siwc_compaction_rejects_foreign_state_and_never_falls_back_after_dispat
                 "{endpoint}"
             );
             assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+            if foreign_checkpoint {
+                let usage = crate::poison::mutex(&usage);
+                assert_eq!(usage.len(), 1, "{endpoint}");
+                let event = &usage[0];
+                assert_eq!(event.http_status, 400);
+                assert_eq!(event.source_id, "relay");
+                assert_eq!(event.attempt, 0);
+                assert!(event.candidate_id.is_none());
+                assert!(event.total_tokens.is_none());
+                assert!(event.cooldown_scope.is_none());
+                assert!(
+                    !serde_json::to_string(event)
+                        .unwrap()
+                        .contains("foreign-synthetic")
+                );
+            }
             task.abort();
         }
     }
@@ -285,7 +323,8 @@ async fn siwc_quota_rejection_before_output_rotates_to_the_next_pool_account() {
             let mut runtime = runtime(&exhausted, &next).await;
             Arc::get_mut(&mut runtime)
                 .unwrap()
-                .chatgpt_accounts
+                .account_state
+                .executors
                 .get_mut("synthetic-account-1")
                 .unwrap()
                 .oauth_client_kind = OAuthClientKind::Siwc;
@@ -372,8 +411,12 @@ async fn siwc_quota_after_output_does_not_replay_on_another_account() {
 }
 
 #[tokio::test]
-async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
+async fn siwc_handshake_rejection_never_replays_repairs_or_changes_billing() {
     for (status, code) in [
+        (StatusCode::BAD_REQUEST, "invalid_access_program"),
+        (StatusCode::BAD_REQUEST, "unsupported_access_program"),
+        (StatusCode::FORBIDDEN, "access_program_not_enabled"),
+        (StatusCode::FORBIDDEN, "invalid_workspace_selected"),
         (
             StatusCode::UNAUTHORIZED,
             "subscription_sharing_invalid_user",
@@ -382,7 +425,10 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
             StatusCode::FORBIDDEN,
             "subscription_sharing_user_not_eligible",
         ),
-        (StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded"),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "synthetic_unknown_rate_limit",
+        ),
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "subscription_sharing_usage_unavailable",
@@ -408,9 +454,10 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
     ] {
         let siwc = AccessServer::start(json!([]), false).await;
         let native = AccessServer::start(json!([]), false).await;
-        *crate::poison::mutex(&siwc.state.generation_status) = status;
-        *crate::poison::mutex(&siwc.state.generation_body) =
-            json!({"error":{"code":code,"message":"Synthetic rejection"}});
+        *crate::poison::mutex(&siwc.state.websocket_upgrade_reply) = Some(AccessReply {
+            status,
+            body: json!({"error":{"code":code,"message":"Synthetic rejection"}}),
+        });
         let runtime = runtime(&siwc, &native).await;
         runtime.set_route_recovery_enabled(true);
         let (base, task) = recovery::gateway(runtime.clone()).await;
@@ -420,7 +467,7 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
             .json(&json!({"model":"gpt-test","input":"Synthetic input","stream":false}))
             .send()
             .await
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{code}: {error}"));
         assert_eq!(response.status(), status);
         assert_eq!(
             response.json::<Value>().await.unwrap()["error"]["code"],
@@ -428,7 +475,17 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
         );
         assert_eq!(
             siwc.state.generation_requests.load(Ordering::SeqCst),
+            0,
+            "{code}"
+        );
+        assert_eq!(
+            siwc.state.websocket_requests.load(Ordering::SeqCst),
             1,
+            "{code}"
+        );
+        assert_eq!(
+            siwc.state.http_generation_requests.load(Ordering::SeqCst),
+            0,
             "{code}"
         );
         assert_eq!(
@@ -451,13 +508,17 @@ async fn siwc_rejection_never_replays_repairs_or_changes_billing() {
 #[tokio::test]
 async fn siwc_eligibility_refusal_does_not_block_a_later_client_request() {
     let siwc = AccessServer::start(json!([]), false).await;
+    siwc.state
+        .websocket_generations
+        .store(true, Ordering::SeqCst);
     *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::FORBIDDEN;
     *crate::poison::mutex(&siwc.state.generation_body) = json!({"error":{
         "code":"subscription_sharing_user_not_eligible","message":"Synthetic eligibility refusal"
     }});
     let mut runtime = retry_admission::pool_runtime(&siwc, 1, false).await;
     let account = runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("synthetic-account-0")
         .unwrap();
     account.oauth_client_kind = OAuthClientKind::Siwc;
@@ -490,7 +551,7 @@ async fn siwc_eligibility_refusal_does_not_block_a_later_client_request() {
 }
 
 #[tokio::test]
-async fn siwc_local_rejection_does_not_switch_to_native() {
+async fn siwc_unsupported_temperature_selects_a_compatible_route_without_losing_the_value() {
     let siwc = AccessServer::start(json!([]), false).await;
     let native = AccessServer::start(json!([]), false).await;
     let runtime = runtime(&siwc, &native).await;
@@ -503,9 +564,13 @@ async fn siwc_local_rejection_does_not_switch_to_native() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 0);
-    assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        crate::poison::mutex(&native.state.generation_bodies)[0]["temperature"],
+        0.3
+    );
     task.abort();
 }
 
@@ -542,9 +607,10 @@ async fn siwc_admission_detail_survives_without_billing_fallback() {
     let runtime = runtime(&siwc, &native).await;
     let (base, task) = recovery::gateway(runtime).await;
     let client = retry_admission::bounded_client();
-    *crate::poison::mutex(&siwc.state.generation_status) = StatusCode::FORBIDDEN;
-    *crate::poison::mutex(&siwc.state.generation_body) =
-        json!({"detail":"Synthetic region restriction"});
+    *crate::poison::mutex(&siwc.state.websocket_upgrade_reply) = Some(AccessReply {
+        status: StatusCode::FORBIDDEN,
+        body: json!({"detail":"Synthetic region restriction"}),
+    });
     let response = client
         .post(format!("{base}/v1/responses"))
         .bearer_auth("local-secret")
@@ -557,7 +623,12 @@ async fn siwc_admission_detail_survives_without_billing_fallback() {
         response.json::<Value>().await.unwrap(),
         json!({"detail":"Synthetic region restriction"})
     );
-    assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(siwc.state.websocket_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        siwc.state.http_generation_requests.load(Ordering::SeqCst),
+        0
+    );
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
     task.abort();
 }

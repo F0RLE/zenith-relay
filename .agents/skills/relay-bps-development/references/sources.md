@@ -1,8 +1,9 @@
 # BPS source map
 
 Use the section matching the task, not the entire list. These are research
-entrypoints, not dependencies or a server specification. The observations below
-were inspected on 2026-10-31; pinned third-party revisions and asset hashes are
+entrypoints, not dependencies or a server specification. The frontend snapshot
+below was refreshed on 2026-11-05; third-party references were inspected on
+2026-10-31. Pinned third-party revisions and asset hashes are
 historical evidence and must not be presented as a permanently current release.
 
 ## Local owners and official comparison contracts
@@ -44,9 +45,14 @@ filename, extension path, or root-page 404 as a stable API contract.
 
 ### Inspected frontend snapshot
 
-[Public client asset](https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/assets/x-square-CcpsIMjh.js):
-6,719,991 bytes; SHA-256
-`053c4f9b174e64454fc185c561c408806f87d4f238befc14a228d80bb8107a6f`.
+[Public client asset](https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/assets/x-square-B_-jh0MM.js),
+SHA-256 `e7d27638b63a2f78e5c049e1ade619578077563efd42d86cd014dd152f5a7859`.
+Located through the current manifest, entrypoint and module imports on
+2026-11-05. ChatGPT authorization still uses
+`https://bps.openai.com/basispoints/api/responses/access?include_models=true`;
+the alternate `/access` rewrite belongs to API-key mode, not ChatGPT OAuth.
+This public-client observation does not prove an authenticated route is healthy
+or explain an individual proxy/account's HTTP 404.
 
 Useful search anchors, rather than unstable minified offsets:
 

@@ -1,5 +1,6 @@
 use super::*;
 
+mod consistency;
 mod credentials;
 mod managed;
 

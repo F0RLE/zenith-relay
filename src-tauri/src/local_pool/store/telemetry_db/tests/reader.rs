@@ -5,6 +5,44 @@ use std::{
 };
 
 #[test]
+fn sql_snapshot_keeps_committed_rows_stable_and_releases_after_errors() {
+    let root = crate::files::test_temp_root("relay-sql-reader");
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    database
+        .record(&aggregate_test_event("before", 1, 10, 0, None, 1))
+        .unwrap();
+    {
+        let read = database.lock_snapshot_connection().unwrap();
+        let count = || {
+            read.query_row("SELECT COUNT(*) FROM request_logs", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(count(), 1);
+        database
+            .record(&aggregate_test_event("during", 1, 20, 0, None, 2))
+            .unwrap();
+        assert_eq!(count(), 1);
+        assert!(read.execute("DELETE FROM request_logs", []).is_err());
+        assert!(
+            read.prepare("SELECT * FROM synthetic_missing_table")
+                .is_err()
+        );
+    }
+    let read = database.lock_snapshot_connection().unwrap();
+    assert_eq!(
+        read.query_row("SELECT COUNT(*) FROM request_logs", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(read);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn report_snapshot_does_not_block_recording_and_keeps_one_revision() {
     let root = crate::files::test_temp_root("relay-reader");
     let database = Arc::new(TelemetryDb::open(&root.join("usage.sqlite")).unwrap());

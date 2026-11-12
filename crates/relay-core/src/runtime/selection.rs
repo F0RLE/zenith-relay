@@ -4,6 +4,7 @@ use crate::scheduler::rotation::{RotationOperation, SharedRequestBudget};
 use crate::{Selection, SelectionRequest, scheduler::CooldownReason};
 
 mod capacity;
+mod retry;
 mod route;
 
 impl GatewayRuntime {

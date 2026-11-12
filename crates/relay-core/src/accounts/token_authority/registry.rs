@@ -112,6 +112,7 @@ impl TokenAuthority {
             auth_state: replacement_auth_state,
             persistence_pending: false,
             auth_state_persistence_pending: false,
+            refresh_deferred_until_ms: None,
         };
         Ok(true)
     }
@@ -201,15 +202,15 @@ impl TokenAuthority {
         &self,
         account_id: &str,
         generation: u64,
+        revision: &TokenDispatchRevision,
         observe: impl FnOnce(AccountAuthState) -> T,
     ) -> Option<T> {
         let entry = lock(&self.slots).get(account_id.trim()).cloned()?;
         let slot = entry.try_lock()?;
-        if slot.tokens.generation() != generation {
+        if slot.tokens.generation() != generation || *revision != entry.snapshot() {
             return None;
         }
         let registered = self.current_slots(account_id, &entry).ok()?;
-        let revision = entry.snapshot();
         let _revision_guard = revision.guard()?;
         drop(registered);
         // The slot lock prevents token/auth changes; the existing revision

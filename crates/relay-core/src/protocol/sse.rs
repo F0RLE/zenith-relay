@@ -29,6 +29,7 @@ pub(crate) fn take_event(pending: &mut Vec<u8>) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     std::iter::from_fn(move || {
         if bytes.is_empty() {
             return None;
@@ -155,6 +156,13 @@ mod fragmentation_tests;
 #[cfg(test)]
 mod tests {
     use super::{consume_frames, event_data, event_end, lines};
+
+    #[test]
+    fn initial_utf8_bom_does_not_hide_the_first_sse_field() {
+        let frame = b"\xef\xbb\xbfdata: {\"synthetic\":true}\r\n\r\n";
+        assert_eq!(event_data(frame).as_ref(), b"{\"synthetic\":true}");
+        assert_eq!(event_end(frame), Some(frame.len()));
+    }
 
     #[test]
     fn data_preserves_empty_lines_and_only_strips_one_optional_space() {

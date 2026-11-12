@@ -213,12 +213,13 @@
   width: 100%;
   max-width: 100%;
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(20px, 1fr) minmax(0, auto) minmax(20px, 1fr);
   align-items: center;
   gap: 8px;
 }
 
 .reset-credits-status-icon {
+  justify-self: start;
   width: 14px;
   height: 14px;
   color: var(--relay-accent-hover);
@@ -228,7 +229,7 @@
   min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
-  text-align: left;
+  text-align: center;
   color: inherit;
   font-size: 11px;
   font-weight: 500;
@@ -237,6 +238,7 @@
 
 .reset-credits-count {
   display: inline-grid;
+  justify-self: end;
   min-width: 20px;
   height: 18px;
   place-items: center;

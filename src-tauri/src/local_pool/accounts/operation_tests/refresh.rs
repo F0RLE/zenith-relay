@@ -228,6 +228,34 @@ fn successful_model_refresh_recovers_a_transient_auth_error() {
     assert_eq!(account.account.health, AccountHealthState::Healthy);
     assert_eq!(account.account.last_error_code, None);
 }
+
+#[test]
+fn model_catalog_not_found_preserves_inventory_quota_and_pool_membership() {
+    let mut account = account_record("synthetic-models-not-found");
+    let before = account.clone();
+    let failure = ModelDiscoveryFailure {
+        code: ModelDiscoveryFailureCode::EndpointNotFound,
+        retryable: false,
+        retry_after_ms: None,
+        http_status: Some(404),
+    };
+    assert!(!apply_model_discovery(&mut account, Err(failure)));
+    assert_eq!(account.account.health, AccountHealthState::Degraded);
+    assert_eq!(account.account.auth_state, before.account.auth_state);
+    assert_eq!(
+        account.account.last_error_code.as_deref(),
+        Some("models_endpoint_not_found")
+    );
+    assert_eq!(account.effective_models(), before.effective_models());
+    assert_eq!(account.discovered_models, before.discovered_models);
+    assert_eq!(account.account.quota, before.account.quota);
+    assert_eq!(account.account.in_pool, before.account.in_pool);
+    assert_eq!(account.account.enabled, before.account.enabled);
+    assert_eq!(
+        account.account.token_generation,
+        before.account.token_generation
+    );
+}
 #[test]
 fn model_refresh_detects_provider_order_changes() {
     let mut account = account_record("account_model_order");

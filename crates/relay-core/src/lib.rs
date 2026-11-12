@@ -67,7 +67,7 @@ pub mod usage;
 pub use catalog::{
     CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH, MAX_MODEL_LIST_LEN, ModelContextPolicy,
     ModelIdListError, ModelRegistry, ModelRules, apply_codex_ultra_from_official_model,
-    canonicalize_reasoning_levels, claude_desktop_model_alias,
+    canonicalize_reasoning_levels, claude_desktop_catalog_model_alias, claude_desktop_model_alias,
     claude_desktop_reasoning_model_alias, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, codex_model_is_picker_eligible_for,
     decode_codex_model_alias, deserialize_model_reasoning_allowed_levels, is_degraded_route_model,
@@ -105,13 +105,14 @@ pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{ProxyConfig, normalize_proxy_url, proxy_reference_id};
 pub use request_timezone::{is_valid_timezone, normalize_timezone};
 pub use runtime::{
-    DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions, IMAGE_API_MODEL,
-    PoolAccess, PoolParticipant, RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL,
-    RESPONSE_AFFINITY_DELETE_EXPIRED_SQL, RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL,
-    RESPONSE_AFFINITY_UPSERT_SQL, ResponseAffinityBinding, ResponseAffinityStore,
-    RuntimeActivitySnapshot, RuntimeCandidatePolicy, RuntimeContinuationStores, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
-    changed_runtime_source_policy_updates, normalize_image_base_model,
+    DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions,
+    Http2DispatchObservation, Http2RetryDiagnostic, IMAGE_API_MODEL, PoolAccess, PoolParticipant,
+    RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
+    RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
+    RuntimeCandidatePolicy, RuntimeContinuationStores, RuntimeLocalKey, RuntimeMixedLocalKey,
+    RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
+    changed_runtime_source_policy_updates, diagnose_http2_retries, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
     pool_dispatch_permission_changed,
 };
@@ -143,15 +144,16 @@ pub use scheduler::{
     CandidateQuotaReference, CandidateQuotaState, CandidateResourceHeadroom,
     CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS,
     PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, PoolScheduler,
-    QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS, RoutingDiagnostics, RuntimeCandidate,
-    Selection, SelectionReason, SelectionRequest, account_candidate_health, resolve_pool_routing,
+    ProviderBackoff, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS, RoutingDiagnostics,
+    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, account_candidate_health,
+    resolve_pool_routing,
 };
 pub use sources::{
     CacheWriteTtl, CapabilityOrigin, CapabilityStatus, ConnectionProbeObservation,
     ConnectionProbeStatus, LocalGatewayKey, MAX_SOURCE_RECOVERY_DELAY_SECONDS,
     ModelEndpointCapability, ModelTokenLimits, ProtocolFeature, ProviderSource, SourceBalanceKind,
-    SourceCatalogEvidence, SourceCatalogRecord, SourceConnectionDiagnostics, SourceConnector,
-    SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
+    SourceCatalogEvidence, SourceCatalogFailure, SourceCatalogRecord, SourceConnectionDiagnostics,
+    SourceConnector, SourceDiscovery, SourceProbeInput, SourceProbeResult, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProtocolConfig, SourceProtocolResolution, SourceProviderStats,
     SourceRead, SourceStatsAmount, SourceStatsCurrency, SourceStatsProvider, SourceStatsStatus,
     SourceTransportIdentity, SourceTransportRecord, WireApi, apply_source_priorities,

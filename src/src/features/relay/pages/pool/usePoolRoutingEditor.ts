@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { PoolRoutingPolicy, PoolRoutingSnapshot } from "../../api/types";
+import type { PoolRoutingPolicy } from "../../api/types";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { applyPoolRoutingEdits, persistPoolRoutingEdits, readRoutingRuntime, type PoolRoutingEdit } from "./poolRoutingEdits";
 import { supportsRotationEditing } from "./rotationModes";
@@ -16,22 +16,19 @@ export function usePoolRoutingEditor(onClose: () => void) {
   const [policy, setPolicy] = useState(base.current);
   const [saving, setSaving] = useState(false);
   const [errorKey, setErrorKey] = useState<string | null>(null);
-  const applyPending = (snapshot: PoolRoutingSnapshot): PoolRoutingSnapshot => snapshot.version !== 1
-    ? applyPoolRoutingEdits(snapshot, pending.current)
-    : snapshot;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
     base.current = currentPolicy ?? EMPTY_POLICY;
-    setPolicy(applyPending(base.current));
+    setPolicy(applyPoolRoutingEdits(base.current, pending.current));
   }, [currentPolicy]);
 
   const edit = (change: PoolRoutingEdit) => {
     if (!supportsRotationEditing(currentPolicy, runtime?.capabilities.features ?? [])) return;
     pending.current.push(change);
-    setPolicy((draftPolicy) => draftPolicy.version !== 1 ? applyPoolRoutingEdits(draftPolicy, [change]) : draftPolicy);
+    setPolicy((draftPolicy) => applyPoolRoutingEdits(draftPolicy, [change]));
     setErrorKey(null);
     if (task.current) return;
     setSaving(true);

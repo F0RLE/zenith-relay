@@ -35,6 +35,7 @@ const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 pub(super) type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
 mod basis_points;
+pub(in crate::gateway) use basis_points::guard_progress;
 mod bridge;
 mod completion;
 mod diagnostics;
@@ -42,12 +43,13 @@ mod events;
 mod fast_delta;
 mod replay;
 mod upstream_usage;
+pub(in crate::gateway) use upstream_usage::UpstreamUsage;
 
 pub(in crate::gateway) use fast_delta::{FastResponseDelta, fast_response_delta_json};
 
 use bridge::bridge_adapter_stream;
 
-pub(super) use replay::NativeReplayCapture;
+pub(crate) use replay::NativeReplayCapture;
 
 pub(super) use events::{
     TerminalEvent, TerminalOutcome, has_generation_evidence, has_output_delta, has_semantic_output,
@@ -130,7 +132,7 @@ impl StreamExecution {
         let expected_model = (route.account_id.is_some()
             && runtime.block_degraded_routes_enabled())
         .then_some(source_model.clone());
-        let initial_event = usage_event(
+        let mut initial_event = usage_event(
             UsageAttempt {
                 request_id: &request_id,
                 attempt,
@@ -145,13 +147,22 @@ impl StreamExecution {
             None,
             0,
         );
+        if initial_event.transport == crate::UsageTransport::Http
+            && let Some(transport) = initial_event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.downstream_http_status = Some(status.as_u16());
+        }
         let mut first = first;
         let upstream_usage = (!adapter_is_passthrough
             || basis_points_request.is_some()
             || discovery.is_some())
         .then(|| {
             let mut capture =
-                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone());
+                upstream_usage::UpstreamUsage::new(initial_event.clone(), expected_model.clone())
+                    .with_observations(started);
             if basis_points_request.is_some() || discovery.is_some() {
                 capture = capture.with_timing(started);
             }

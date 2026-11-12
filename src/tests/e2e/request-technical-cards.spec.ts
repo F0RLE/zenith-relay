@@ -76,8 +76,13 @@ for (const scenario of [
     await expect(details.locator(".request-technical-grid > section")).toHaveCount(6);
     await expect(details.locator(".request-payload-section")).toContainText("Zstd");
     await expect(details.locator(".request-preparation-details")).toContainText(scenario.locale === "ru" ? "0 мс" : "0 ms");
-    await expect(details.locator(".request-timing-metrics dd")).toHaveText(
-      [20, 128, 420, 428].map((value) => `+${value} ${scenario.locale === "ru" ? "мс" : "ms"}`),
+    const timingGroups = details.locator(".request-timing-metrics");
+    await expect(timingGroups).toHaveCount(2);
+    await expect(timingGroups.nth(0).locator("dd")).toHaveText(
+      [20, 420].map((value) => `+${value} ${scenario.locale === "ru" ? "мс" : "ms"}`),
+    );
+    await expect(timingGroups.nth(1).locator("dd")).toHaveText(
+      [128, 236, 428].map((value) => `+${value} ${scenario.locale === "ru" ? "мс" : "ms"}`),
     );
     await expect(details.locator(".request-context-section")).toContainText("8 / 311");
     await expect(details.locator(".request-tool-details")).toContainText("311");

@@ -38,6 +38,7 @@ async fn full_responses_is_default_for_account_requests() {
     let mut request = json!({
         "model": MODEL,
         "input": "preserve parallel tools",
+        "max_output_tokens": 73,
         "parallel_tool_calls": true,
         "reasoning": {"effort": "high"},
         "tools": [{
@@ -80,6 +81,10 @@ async fn full_responses_is_default_for_account_requests() {
             policies[index / 2].map(Value::Bool).as_ref()
         );
         assert_eq!(sent.body["reasoning"]["effort"], "high");
+        assert_eq!(
+            sent.body.get("max_output_tokens"),
+            (index % 2 == 0).then(|| json!(73)).as_ref()
+        );
         assert!(sent.body["reasoning"].get("context").is_none());
         assert_eq!(sent.body["tools"][0]["name"], "lookup");
     }
@@ -135,11 +140,12 @@ async fn websocket_continuations_default_to_full_and_follow_explicit_lite_metada
         (Some(true), Some(false)),
         (None, None),
     ];
-    for (parallel, lite) in policies {
+    for (index, (parallel, lite)) in policies.into_iter().enumerate() {
         let mut request = json!({
             "type": "response.create",
             "model": MODEL,
             "input": "preserve the selected tool policy",
+            "max_output_tokens": 64 + index,
             "reasoning": {"effort": "high"},
             "tools": [{
                 "type": "function", "name": "lookup",
@@ -188,6 +194,7 @@ async fn websocket_continuations_default_to_full_and_follow_explicit_lite_metada
             parallel.or(lite.then_some(false)).map(Value::Bool).as_ref()
         );
         assert_eq!(sent["reasoning"]["effort"], "high");
+        assert_eq!(sent["max_output_tokens"], 64 + index);
         assert_eq!(sent["tools"][0]["name"], "lookup");
         assert_eq!(
             sent["reasoning"].get("context").and_then(Value::as_str),
@@ -246,6 +253,7 @@ async fn mixed_responses_routes_default_to_full_and_preserve_explicit_client_lit
     let request_body = json!({
         "model": OFFICIAL_CODEX_MODEL,
         "input": "keep the full Responses contract",
+        "max_output_tokens": 321,
         "parallel_tool_calls": true,
         "reasoning": {"effort": "high"}
     });
@@ -283,6 +291,12 @@ async fn mixed_responses_routes_default_to_full_and_preserve_explicit_client_lit
             .all(|request| request.path == "/v1/models")
     );
     let requests = account_state.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.path == "/v1/responses")
+            .all(|request| request.body["max_output_tokens"] == 321)
+    );
     let response_requests = requests
         .iter()
         .filter(|request| request.path == "/v1/responses")

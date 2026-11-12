@@ -361,7 +361,7 @@ fn ordered_policy(ids: &[&str]) -> zenith_relay_core::PoolRoutingPolicy {
         PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
     };
     PoolRoutingPolicy {
-        mode: PoolRoutingMode::InOrder,
+        mode: PoolRoutingMode::RoundRobin,
         members: ids
             .iter()
             .map(|id| PoolRoutingMember {

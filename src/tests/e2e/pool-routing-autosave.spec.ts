@@ -44,7 +44,7 @@ for (const mode of ["local"] as const) {
   });
 }
 
-test("rotation serializes rapid edits, preserves numeric focus and waits before header close", async ({ page }) => {
+test("rotation serializes rapid edits without waiting for timing writes and preserves focus before close", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   const dialog = await openPoolRotation(page);
@@ -55,6 +55,10 @@ test("rotation serializes rapid edits, preserves numeric focus and waits before 
     let active = 0;
     scope.__routingPeak = 0;
     scope.__TAURI_INTERNALS__.invoke = async (command, args) => {
+      if (command === "record_local_performance_sample" && args?.name === "command_save"
+          && args?.context === "update_local_routing:ok") {
+        return new Promise<void>(() => undefined);
+      }
       if (command !== "update_local_routing") return invoke(command, args);
       scope.__routingPeak = Math.max(scope.__routingPeak, ++active);
       try {
@@ -104,6 +108,19 @@ test("rotation rolls back a failed save and accepts the next edit", async ({ pag
   await expect(dialog.locator(".pool-routing-editor")).toHaveAttribute("aria-busy", "false");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await expect(dialog.getByRole("radio", { name: "Round robin", exact: true })).toHaveAttribute("aria-checked", "true");
+  const samples = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__.filter(call => call.command === "record_local_performance_sample"
+    && call.args.name === "command_save"
+    && String(call.args.context).startsWith("update_local_routing:")).map(call => call.args));
+  expect(samples.map(sample => sample.context)).toEqual([
+    "update_local_routing:error", "update_local_routing:ok",
+  ]);
+  for (const sample of samples) {
+    expect(Object.keys(sample).sort()).toEqual(["context", "durationMs", "name"]);
+    expect(Number.isFinite(sample.durationMs)).toBe(true);
+    expect(sample.durationMs).toBeGreaterThanOrEqual(0);
+  }
 });
 
 test("pointer drag highlights the target and Escape cancels without saving", async ({ page }) => {

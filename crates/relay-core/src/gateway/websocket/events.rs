@@ -3,7 +3,6 @@ use super::super::errors::{
     previous_response_not_found_value, rate_limit_body_hint_value, upstream_event_failure_category,
     upstream_failure_status, upstream_status_from_value,
 };
-use super::super::now_ms;
 use crate::error_codes;
 use axum::http::header::{HeaderName, HeaderValue, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
@@ -74,6 +73,10 @@ pub(super) fn event_terminal(event_payload: &Value) -> EventTerminal {
         );
     }
     let status = upstream_status_from_value(event_payload);
+    let now = std::time::SystemTime::now();
+    let headers = websocket_retry_headers(event_payload);
+    let body_hint =
+        rate_limit_body_hint_value(event_payload, now).with_retry_headers_at(&headers, now);
     EventTerminal {
         upstream_error: (outcome == Some(EventTerminalOutcome::Failure))
             .then(|| crate::usage::UpstreamErrorDetails::from_value(None, event_payload)),
@@ -85,8 +88,8 @@ pub(super) fn event_terminal(event_payload: &Value) -> EventTerminal {
         response: event_payload.get("response").cloned(),
         status,
         error_category,
-        headers: websocket_retry_headers(event_payload),
-        body_hint: rate_limit_body_hint_value(event_payload, std::time::SystemTime::now()),
+        headers,
+        body_hint,
         previous_response_not_found: previous_response_not_found_value(event_payload),
         deactivated_workspace: is_deactivated_workspace_value(event_payload),
     }
@@ -137,21 +140,7 @@ pub(super) fn resolved_terminal_failure(terminal: &EventTerminal) -> (StatusCode
 
 pub(super) fn websocket_retry_headers(event_payload: &Value) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let retry_after = websocket_reset_delay_seconds(event_payload, now_ms() / 1_000)
-        .map(|seconds| seconds.to_string())
-        .or_else(|| {
-            event_payload
-                .pointer("/headers/retry-after")
-                .or_else(|| event_payload.pointer("/headers/retry_after"))
-                .or_else(|| event_payload.pointer("/body/headers/retry-after"))
-                .or_else(|| event_payload.pointer("/body/error/resets_in_seconds"))
-                .or_else(|| event_payload.pointer("/error/resets_in_seconds"))
-                .and_then(|header_value| match header_value {
-                    Value::String(header_text) => Some(header_text.clone()),
-                    Value::Number(header_number) => Some(header_number.to_string()),
-                    _ => None,
-                })
-        });
+    let retry_after = websocket_header_value(event_payload, "retry-after");
     if let Some(retry_header_value) = retry_after
         .filter(|retry_text| retry_text.len() <= 128)
         .and_then(|retry_text| HeaderValue::from_str(&retry_text).ok())
@@ -195,25 +184,4 @@ fn websocket_header_value(event_payload: &Value, header_name: &str) -> Option<St
         Value::Number(header_number) => Some(header_number.to_string()),
         _ => None,
     })
-}
-
-pub(super) fn websocket_reset_delay_seconds(
-    event_payload: &Value,
-    now_seconds: u64,
-) -> Option<u64> {
-    let reset_at = event_payload
-        .pointer("/body/error/resets_at")
-        .or_else(|| event_payload.pointer("/response/error/resets_at"))
-        .or_else(|| event_payload.pointer("/error/resets_at"))?;
-    let mut reset_at = reset_at.as_u64().or_else(|| {
-        reset_at
-            .as_str()
-            .and_then(|reset_text| reset_text.parse().ok())
-    })?;
-    if reset_at > 10_000_000_000 {
-        reset_at /= 1_000;
-    }
-    reset_at
-        .checked_sub(now_seconds)
-        .filter(|seconds| *seconds > 0)
 }

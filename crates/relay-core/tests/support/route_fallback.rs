@@ -1,6 +1,114 @@
 use super::*;
 
 #[tokio::test]
+async fn reset_reserve_uses_fresh_compatible_ordinary_quota_without_spending_a_lease() {
+    for (scenario, expected) in [
+        ("available", Some(true)),
+        ("exhausted", Some(false)),
+        ("unknown", None),
+        ("stale", None),
+        ("credit_fallback", Some(false)),
+        ("credit_only_unknown", None),
+        ("stale_with_credits", None),
+        ("disabled", Some(false)),
+        ("draining", Some(false)),
+        ("other_model", Some(false)),
+    ] {
+        let (upstream, observed) = spawn_upstream(vec![]).await;
+        let now = current_time_ms();
+        let quota_snapshot = |primary: u16, secondary: u16, at: u64| {
+            serde_json::from_value(json!({
+            "updatedAtMs":at,
+            "primary":{"kind":"primary","availableBasisPoints":primary,"observedAtMs":at,"windowMinutes":300,"resetAtMs":now+18_000_000},
+            "secondary":{"kind":"secondary","availableBasisPoints":secondary,"observedAtMs":at,"windowMinutes":10080,"resetAtMs":now+604_800_000}
+        })).unwrap()
+        };
+        let mut target = account("reset-target", "synthetic-target", &upstream, 0);
+        target.quota_updated_at_ms = Some(now);
+        target.quota_snapshot = quota_snapshot(10_000, 0, now);
+        let mut alternative = account(
+            "reset-alternative",
+            "synthetic-alternative",
+            &upstream,
+            5_000,
+        );
+        alternative.quota_updated_at_ms = Some(now);
+        alternative.quota_snapshot = quota_snapshot(5_000, 10_000, now);
+        match scenario {
+            "exhausted" => {
+                alternative.quota = CandidateQuota::Exhausted;
+                alternative.quota_snapshot = quota_snapshot(0, 0, now);
+            }
+            "unknown" => {
+                alternative.quota = CandidateQuota::Unknown;
+                alternative.quota_snapshot = Default::default();
+            }
+            "stale" => {
+                alternative.quota = CandidateQuota::Stale;
+                alternative.quota_updated_at_ms = None;
+                alternative.quota_snapshot = quota_snapshot(
+                    5_000,
+                    10_000,
+                    now - zenith_relay_core::scheduler::QUOTA_STALE_AFTER_MS - 1,
+                );
+            }
+            "disabled" => alternative.enabled = false,
+            "draining" => alternative.draining = true,
+            "other_model" => alternative.models = vec!["synthetic-other-model".into()],
+            "credit_fallback" | "credit_only_unknown" | "stale_with_credits" => {
+                alternative.quota = CandidateQuota::CreditFallback;
+                alternative.quota_snapshot = match scenario {
+                    "credit_fallback" => quota_snapshot(0, 0, now),
+                    "stale_with_credits" => quota_snapshot(
+                        5_000,
+                        10_000,
+                        now - zenith_relay_core::scheduler::QUOTA_STALE_AFTER_MS - 1,
+                    ),
+                    _ => Default::default(),
+                };
+                alternative.quota_snapshot.available_credits_micro_units = Some(10_000_000);
+                alternative.quota_snapshot.updated_at_ms = Some(now);
+                alternative.quota_snapshot.provider_credits_available = true;
+                alternative.quota_snapshot.provider_credits_observed_at_ms = Some(now);
+            }
+            _ => {}
+        }
+        let authority = ready_authority("reset-target", "synthetic-target-access").await;
+        register_ready(
+            &authority,
+            "reset-alternative",
+            "synthetic-alternative-access",
+        )
+        .await;
+        let (gateway, events, _, _) = spawn_mixed_gateway(
+            vec![],
+            vec![target, alternative],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let runtime = gateway.runtime.as_ref().unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                runtime.ordinary_quota_alternative_available("reset-target", now),
+                expected,
+                "{scenario}"
+            );
+        }
+        assert!(
+            runtime
+                .candidate_runtime_order()
+                .iter()
+                .all(|candidate| candidate.dispatches == 0 && candidate.in_flight == 0)
+        );
+        assert!(observed.requests.lock().unwrap().is_empty());
+        assert!(events.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn account_non_stream_client_buffers_codex_stream_response() {
     let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data(
@@ -39,7 +147,7 @@ async fn account_non_stream_client_buffers_codex_stream_response() {
     assert_eq!(requests[0].body["store"], false);
     assert_eq!(requests[0].body["stream"], true);
     assert!(requests[0].body["input"].is_array());
-    assert!(requests[0].body.get("max_output_tokens").is_none());
+    assert_eq!(requests[0].body["max_output_tokens"], 16);
     drop(requests);
     let events = events.lock().unwrap();
     assert!(events[0].success);

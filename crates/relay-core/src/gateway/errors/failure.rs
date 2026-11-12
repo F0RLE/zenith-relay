@@ -60,8 +60,8 @@ impl AttemptFailure {
             HealthObservation::CountableTransient {
                 provider_not_before_ms: cooldown.map(|request| request.retry_at_ms).or_else(|| {
                     self.cooldown_hint
-                        .retry_after_ms
-                        .map(|delay| now_ms.saturating_add(delay))
+                        .retry_clock_for_account(true)
+                        .map(|clock| clock.not_before_ms)
                 }),
             }
         } else if self.execution.certainty
@@ -71,7 +71,7 @@ impl AttemptFailure {
         } else {
             HealthObservation::ClientError
         };
-        runtime.settle_rotation_failure(
+        let current = runtime.settle_rotation_failure(
             lease,
             AttemptObservation {
                 execution: self.execution,
@@ -81,6 +81,23 @@ impl AttemptFailure {
             self.cooldown_hint.shared_bucket,
             now_ms,
         );
+        if current
+            && runtime.route_recovery_enabled()
+            && (!runtime.is_siwc_account(lease.candidate_id())
+                || self.cooldown_hint.explicit_transient_rejection)
+            && self.execution.certainty == crate::scheduler::rotation::ExecutionCertainty::NotSent
+            && matches!(
+                self.category,
+                error_codes::UPSTREAM_RATE_LIMITED
+                    | error_codes::UPSTREAM_OVERLOADED
+                    | error_codes::UPSTREAM_MODEL_CAPACITY
+            )
+        {
+            lease.prefer_transient_retry(
+                !runtime.is_siwc_account(lease.candidate_id()),
+                runtime.route_recovery_window_ms(),
+            );
+        }
     }
 
     pub(crate) fn authorized_request(error: AuthorizedRequestError) -> Self {
@@ -92,6 +109,7 @@ impl AttemptFailure {
             AuthorizedRequestError::ModelAccess(failure) => {
                 let rate_limited = failure.code
                     == crate::providers::chatgpt::ModelDiscoveryFailureCode::RateLimited;
+                let observed = now_ms();
                 Self {
                     execution: ExecutionObservation::not_sent(),
                     status: if rate_limited {
@@ -106,7 +124,12 @@ impl AttemptFailure {
                         "Basis Points model access could not be verified"
                     },
                     cooldown_hint: RateLimitBodyHint {
-                        retry_after_ms: failure.retry_after_ms,
+                        retry_clock: failure.retry_after_ms.map(|delay| {
+                            crate::scheduler::ProviderClock::new(
+                                observed.saturating_add(delay),
+                                None,
+                            )
+                        }),
                         global: rate_limited,
                         ..Default::default()
                     },
@@ -116,7 +139,7 @@ impl AttemptFailure {
                 execution: ExecutionObservation::not_sent(),
                 status: StatusCode::NOT_ACCEPTABLE,
                 category: error_codes::UPSTREAM_MODEL_UNSUPPORTED,
-                message: "Basis Points access does not include this model",
+                message: "Selected model is absent from this account's verified Basis Points catalog",
                 cooldown_hint: Default::default(),
             },
             AuthorizedRequestError::ReasoningUnavailable => Self {
@@ -129,6 +152,20 @@ impl AttemptFailure {
             AuthorizedRequestError::ProgressTimeout => {
                 Self::stream(error_codes::STREAM_IDLE_TIMEOUT)
             }
+            AuthorizedRequestError::WebsocketSend => Self {
+                execution: ExecutionObservation::unknown(),
+                status: StatusCode::BAD_GATEWAY,
+                category: error_codes::UPSTREAM_TRANSPORT,
+                message: "Upstream WebSocket transmission failed; execution may have started",
+                cooldown_hint: Default::default(),
+            },
+            AuthorizedRequestError::WebsocketRequired { status, message } => Self {
+                execution: ExecutionObservation::not_sent(),
+                status,
+                category: error_codes::SIWC_WEBSOCKET_REQUIRED,
+                message,
+                cooldown_hint: Default::default(),
+            },
             AuthorizedRequestError::SendStartTimeout => Self {
                 execution: ExecutionObservation::unknown(),
                 status: StatusCode::GATEWAY_TIMEOUT,
@@ -209,6 +246,24 @@ impl AttemptFailure {
 
     pub(crate) fn status_with_body(status: StatusCode, response_body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, response_body);
+        Self::from_classification(status, response_body, classification)
+    }
+
+    pub(crate) fn status_with_headers(
+        status: StatusCode,
+        response_body: Option<&[u8]>,
+        headers: &HeaderMap,
+    ) -> Self {
+        let classification =
+            super::classify_upstream_error_with_headers(status, response_body, headers);
+        Self::from_classification(status, response_body, classification).with_retry_headers(headers)
+    }
+
+    fn from_classification(
+        status: StatusCode,
+        response_body: Option<&[u8]>,
+        classification: super::classify::UpstreamErrorClassification,
+    ) -> Self {
         Self {
             execution: if response_body
                 .is_some_and(crate::gateway::response::has_generation_evidence_bytes)
@@ -239,15 +294,9 @@ impl AttemptFailure {
     }
 
     pub(crate) fn with_retry_headers(mut self, headers: &HeaderMap) -> Self {
-        let header_delay = super::cooldown::retry_after_ms(headers, std::time::SystemTime::now());
-        self.cooldown_hint.explicit_retry_after_ms = header_delay
-            .into_iter()
-            .chain(self.cooldown_hint.explicit_retry_after_ms)
-            .max();
-        self.cooldown_hint.retry_after_ms = header_delay
-            .into_iter()
-            .chain(self.cooldown_hint.retry_after_ms)
-            .max();
+        self.cooldown_hint = self
+            .cooldown_hint
+            .with_retry_headers_at(headers, std::time::SystemTime::now());
         self
     }
 
@@ -367,6 +416,8 @@ fn rejection_execution(status: StatusCode, category: &str) -> ExecutionObservati
                 | error_codes::UPSTREAM_TRANSPORT_CONNECT
                 | error_codes::UPSTREAM_USAGE_NOT_INCLUDED
                 | error_codes::UPSTREAM_SIWC_NOT_ELIGIBLE
+                | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+                | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
                 | error_codes::UPSTREAM_MODEL_UNAVAILABLE
                 | error_codes::UPSTREAM_MODEL_UNSUPPORTED
                 | error_codes::UPSTREAM_MODEL_NOT_FOUND

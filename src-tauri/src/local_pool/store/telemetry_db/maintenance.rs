@@ -15,6 +15,7 @@ impl TelemetryDb {
             .map_err(db_error)?;
         // The final statement clears the exact captured batch.
         let removed = transaction.changes();
+        let compacted = super::diagnostics::compact(&transaction)?;
         let capacity_removed = transaction.execute(
             "DELETE FROM weekly_capacity_history WHERE observed_at_ms < (unixepoch('now') - 30 * 86400) * 1000", [],
         ).map_err(db_error)? as u64;
@@ -26,10 +27,10 @@ impl TelemetryDb {
             self.capacity_revision
                 .fetch_add(1, std::sync::atomic::Ordering::Release);
         }
-        if removed > 0 {
+        if removed > 0 || compacted > 0 {
             self.clear_cached_usage_totals()?;
             self.invalidate_usage_cache();
         }
-        Ok(removed + capacity_removed)
+        Ok(removed + capacity_removed + compacted)
     }
 }

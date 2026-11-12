@@ -1,7 +1,8 @@
 use super::persist;
 use super::settings::is_debug_enabled;
 use super::{
-    Breadcrumb, FrontendDiagnosticInput, MAX_STACK_BYTES, SESSION_ACTIVE, safe_detail, safe_text,
+    Breadcrumb, FrontendDiagnosticInput, MAX_STACK_BYTES, SESSION_ACTIVE, safe_detail,
+    safe_operation, safe_text,
 };
 use chrono::{SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
@@ -19,7 +20,7 @@ pub(crate) fn breadcrumb(operation: &str, operation_stage: &str, details: &[(&st
     }
     let breadcrumb = Breadcrumb {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        operation: safe_text(operation, 120),
+        operation: safe_operation(operation),
         stage: safe_text(operation_stage, 120),
         details: diagnostic_details,
     };

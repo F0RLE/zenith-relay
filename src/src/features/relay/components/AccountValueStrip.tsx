@@ -29,25 +29,27 @@ function AccountValueMetric({ title, state, children }: { title: string; state?:
 export function AccountValueStrip({ account }: { account: AccountSummary }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const nowMs = useRelativeTimeClock(remainingValueDeadlines(account.quotaWindowUsage));
+  const showRemaining = account.authState.state === "active" && account.secretAvailable
+    && !account.recoveryRequired && account.routingBlockReason !== "reauth_required";
+  const nowMs = useRelativeTimeClock(showRemaining ? remainingValueDeadlines(account.quotaWindowUsage) : []);
   const { purchaseCostMicroUsd: purchaseCost, remainingApiEquivalent, payback, approximate } = buildAccountValueProjection(
     account.apiEquivalent,
-    account.quota,
-    account.quotaWindowUsage,
+    showRemaining ? account.quota : undefined,
+    showRemaining ? account.quotaWindowUsage : undefined,
     account.purchaseCostMicroUsd,
     nowMs,
   );
   const paybackTitle = accountPaybackHint(account.apiEquivalent, purchaseCost, locale, t);
 
-  return <dl className="account-value-strip" data-columns={3}>
+  return <dl className="account-value-strip" data-columns={showRemaining ? 3 : 2}>
     <AccountValueMetric title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}>
       <dt>{t("accounts.accountValue.used")}</dt>
       <dd>{formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale, approximate)}</dd>
     </AccountValueMetric>
-    <AccountValueMetric title={remainingValueHint(remainingApiEquivalent, locale, t)}>
+    {showRemaining ? <AccountValueMetric title={remainingValueHint(remainingApiEquivalent, locale, t)}>
       <dt>{t(remainingApiEquivalent && !remainingApiEquivalent.approximate ? "accounts.accountValue.remainingDirect" : "accounts.accountValue.remaining")}</dt>
       <dd>{formatRemainingApiEquivalent(remainingApiEquivalent, locale)}</dd>
-    </AccountValueMetric>
+    </AccountValueMetric> : null}
     <AccountValueMetric title={paybackTitle} {...(payback != null && payback >= 1 ? { state: "paid" } : {})}>
       <dt>{t("accounts.accountValue.payback")}</dt>
       <dd>{formatAccountPayback(payback, locale, approximate)}</dd>

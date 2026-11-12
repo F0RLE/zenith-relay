@@ -7,11 +7,13 @@ async fn file_references_skip_credential_reads_without_skipping_validation() {
             "type":"input_image", "file_id":if valid { " file-existing " } else { " " },
             "image_url":null, "detail":"high"
         }]}]});
+        let mut diagnostics = AttachmentPreparationDiagnostics::default();
         let staged = stage_input_images_with_credentials(
             &body,
             "https://example.test/reference-only/attachments",
             "reference-only-test",
             async { panic!("file references must not read account credentials") },
+            Some(&mut diagnostics),
         )
         .await;
         if !valid {
@@ -22,6 +24,9 @@ async fn file_references_skip_credential_reads_without_skipping_validation() {
             panic!("valid reference must be staged");
         };
         assert!(credential.is_none());
+        assert_eq!(diagnostics.image_count, 1);
+        assert_eq!(diagnostics.file_references, 1);
+        assert!(diagnostics.credential_ms.is_none());
         assert!(
             resolve_input_images(&mut body, jobs, |_| async {
                 panic!("file references must not upload")
@@ -43,6 +48,7 @@ async fn inline_cache_hits_still_read_the_current_credential() {
     }]}]});
     let reads = std::sync::atomic::AtomicUsize::new(0);
     for (generation, cached) in [(31, false), (31, true), (32, false)] {
+        let mut diagnostics = AttachmentPreparationDiagnostics::default();
         let Ok((jobs, credential)) = stage_input_images_with_credentials(
             &body,
             "https://example.test/credential-stage/attachments",
@@ -54,6 +60,7 @@ async fn inline_cache_hits_still_read_the_current_credential() {
                     owner: AuthorizationIncarnation::Source,
                 })
             },
+            Some(&mut diagnostics),
         )
         .await
         else {
@@ -64,6 +71,9 @@ async fn inline_cache_hits_still_read_the_current_credential() {
             Some([generation; 32])
         );
         assert_eq!(matches!(&jobs[0].job, ImageJob::File(_)), cached);
+        assert_eq!(diagnostics.image_count, 1);
+        assert_eq!(diagnostics.file_references, 0);
+        assert!(diagnostics.credential_ms.is_some());
         if let ImageJob::Upload(image) = &jobs[0].job {
             remember_file_id(image.source_key.unwrap(), "file-staged".into());
         }

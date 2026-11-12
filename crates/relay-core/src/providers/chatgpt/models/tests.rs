@@ -62,11 +62,6 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
             false,
         ),
         (
-            ModelDiscoveryFailureCode::BasisPointsFreeAccountUnsupported,
-            "basis_points_free_account_unsupported",
-            false,
-        ),
-        (
             ModelDiscoveryFailureCode::Forbidden,
             "models_forbidden",
             false,
@@ -74,6 +69,11 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
         (
             ModelDiscoveryFailureCode::HttpStatus,
             "models_http_status",
+            false,
+        ),
+        (
+            ModelDiscoveryFailureCode::EndpointNotFound,
+            "models_endpoint_not_found",
             false,
         ),
         (
@@ -131,6 +131,53 @@ fn discovery_failure_codes_keep_the_management_contract_stable() {
     for (code, management_code, authentication_failure) in cases {
         assert_eq!(code.management_code(), management_code);
         assert_eq!(code.is_authentication_failure(), authentication_failure);
+    }
+}
+
+#[tokio::test]
+async fn model_catalog_not_found_keeps_http_evidence_without_retry_or_auth_failure() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    for kind in [
+        super::super::OAuthClientKind::Codex,
+        super::super::OAuthClientKind::ExcelBps,
+        super::super::OAuthClientKind::Siwc,
+    ] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (endpoint, server) = spawn(Router::new().route(
+            "/backend-api/codex/models",
+            get({
+                let requests = requests.clone();
+                move || {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    async { (StatusCode::NOT_FOUND, "synthetic-private-provider-body") }
+                }
+            }),
+        ))
+        .await;
+        let failure = AccountModelsClient::with_endpoint(endpoint)
+            .unwrap()
+            .with_oauth_client_kind(kind)
+            .discover(
+                "synthetic-access",
+                "synthetic-account",
+                super::super::CODEX_MODELS_CLIENT_VERSION,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, ModelDiscoveryFailureCode::EndpointNotFound);
+        assert_eq!(failure.http_status, Some(404));
+        assert_eq!(failure.code.management_code(), "models_endpoint_not_found");
+        assert!(!failure.retryable);
+        assert!(!failure.code.is_authentication_failure());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let diagnostic = format!("{failure:?} {failure}");
+        assert!(!diagnostic.contains("synthetic-private-provider-body"));
+        assert!(!diagnostic.contains("synthetic-access"));
+        server.abort();
     }
 }
 
@@ -364,6 +411,41 @@ async fn bps_discovery_keeps_custom_fixture_endpoint_and_uses_access_contract() 
     server.abort();
 }
 
+#[tokio::test]
+async fn bps_discovery_returns_catalog_decisions_from_the_same_access_response() {
+    let (mut endpoint, server) = spawn(Router::new().route(
+        "/basispoints/api/responses/access",
+        get(|| async {
+            Json(json!({
+                "allowed":true,
+                "model_catalog":{"models":[
+                    {"id":"gpt-synthetic-new"},
+                    {"id":"gpt-synthetic-picker", "model_picker_enabled":false}
+                ]}
+            }))
+        }),
+    ))
+    .await;
+    endpoint.set_path("/basispoints/api/responses/access");
+    let discovery = AccountModelsClient::with_endpoint(endpoint)
+        .unwrap()
+        .with_oauth_client_kind(super::super::OAuthClientKind::ExcelBps)
+        .discover_authorized_with_diagnostics(
+            reqwest::header::HeaderValue::from_static("Bearer synthetic-access"),
+            "synthetic-account",
+            "ignored",
+        )
+        .await
+        .unwrap();
+    assert_eq!(discovery.models, ["gpt-synthetic-new"]);
+    let diagnostics = discovery.basis_points_diagnostics.unwrap();
+    assert_eq!(diagnostics.received_models, 2);
+    assert_eq!(diagnostics.accepted_models, 1);
+    assert_eq!(diagnostics.models[1].outcome.as_str(), "picker_disabled");
+    assert!(!format!("{diagnostics:?}").contains("synthetic-access"));
+    server.abort();
+}
+
 async fn successful_basis_points_access(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
     assert_eq!(
         headers
@@ -420,4 +502,21 @@ async fn spawn(router: Router) -> (Url, tokio::task::JoinHandle<()>) {
         Url::parse(&format!("http://{address}/backend-api/codex/models")).unwrap(),
         server,
     )
+}
+
+#[test]
+fn codex_discovery_preserves_provider_order_independently_of_default_priorities() {
+    let models = super::parse::parse_models(
+        br#"{"models":[
+        {"slug":"synthetic-zeta","priority":10,"is_default":false},
+        {"slug":"synthetic-alpha","priority":0,"is_default":true},
+        {"slug":"synthetic-zeta","priority":-1},
+        {"slug":"synthetic-middle","priority":1}
+    ]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        models,
+        ["synthetic-zeta", "synthetic-alpha", "synthetic-middle"]
+    );
 }

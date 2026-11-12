@@ -1,6 +1,86 @@
 use super::*;
 use zenith_relay_core::quota::{QuotaRefreshResult, SubscriptionInput};
 
+#[tokio::test]
+async fn optional_expiry_404_keeps_partial_metadata_and_distinct_failure_diagnostics() {
+    use axum::{Json, Router, http::StatusCode, routing::get};
+    use serde_json::json;
+    for (check_missing, status, content_type, mitigation, optional_missing) in [
+        (false, StatusCode::NOT_FOUND, "application/json", None, true),
+        (true, StatusCode::NOT_FOUND, "application/json", None, false),
+        (false, StatusCode::NOT_FOUND, "text/html", None, false),
+        (
+            false,
+            StatusCode::NOT_FOUND,
+            "application/json",
+            Some("challenge"),
+            false,
+        ),
+        (
+            false,
+            StatusCode::FORBIDDEN,
+            "application/json",
+            None,
+            false,
+        ),
+        (
+            false,
+            StatusCode::TOO_MANY_REQUESTS,
+            "application/json",
+            None,
+            false,
+        ),
+        (
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "application/json",
+            None,
+            false,
+        ),
+    ] {
+        let app = Router::new()
+            .route("/check", get(move || async move {
+                (if check_missing { StatusCode::NOT_FOUND } else { StatusCode::OK },
+                    Json(json!({"accounts": [{"account": {"id": "synthetic-account", "plan_type": "plus"}}]})))
+            }))
+            .route("/subscriptions", get(move || async move {
+                let mut response = axum::http::Response::builder()
+                    .status(status)
+                    .header("content-type", content_type);
+                if let Some(value) = mitigation {
+                    response = response.header("cf-mitigated", value);
+                }
+                response.body(axum::body::Body::from("{}" )).unwrap()
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = CodexSubscriptionClient::with_endpoints(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            format!("{base}/check").parse().unwrap(),
+            format!("{base}/subscriptions").parse().unwrap(),
+        )
+        .unwrap();
+        let result = client
+            .read_authorized(
+                HeaderValue::from_static("Bearer synthetic-subscription-test"),
+                "synthetic-account",
+                10_000,
+            )
+            .await;
+        server.abort();
+        let failure = if check_missing {
+            result.unwrap_err()
+        } else {
+            let read = result.unwrap();
+            assert_eq!(read.metadata.plan_type.as_deref(), Some("plus"));
+            assert_eq!(read.metadata.active_until_ms, None);
+            read.fallback_failure.unwrap()
+        };
+        assert_eq!(optional_expiry_missing(&failure), optional_missing);
+    }
+}
+
 #[test]
 fn independent_subscription_read_survives_an_empty_quota_reply() {
     let mut quota = QuotaRefreshOutcome::Updated(Box::default());

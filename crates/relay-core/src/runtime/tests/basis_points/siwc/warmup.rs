@@ -44,6 +44,12 @@ async fn siwc_http_prewarm_accepts_an_empty_completed_response_without_losing_us
 
 #[tokio::test]
 async fn siwc_websocket_generate_false_warms_up_and_continues_without_an_error() {
+    for append in [false, true] {
+        websocket_warmup_continuation(append).await;
+    }
+}
+
+async fn websocket_warmup_continuation(append: bool) {
     let siwc = AccessServer::start(json!([]), false).await;
     let native = AccessServer::start(json!([]), false).await;
     siwc.state.stream_generations.store(true, Ordering::SeqCst);
@@ -52,6 +58,7 @@ async fn siwc_websocket_generate_false_warms_up_and_continues_without_an_error()
     let mut socket = retry_admission::bounded_client()
         .get(format!("{base}/v1/responses"))
         .bearer_auth("local-secret")
+        .header("x-codex-session-id", "synthetic-warmup-session")
         .upgrade()
         .send()
         .await
@@ -72,7 +79,9 @@ async fn siwc_websocket_generate_false_warms_up_and_continues_without_an_error()
                     "input_tokens_details":{"cached_tokens":24,"cache_write_tokens":4}}});
             json!({"type":"response.create","model":"gpt-test","generate":true,
                 "previous_response_id":"resp_synthetic_siwc_warmup",
-                "input":[{"role":"user","content":"Synthetic question"}]})
+                "input":if append {
+                    json!([{"role":"user","content":"Synthetic question"}])
+                } else { json!([]) }})
         };
         socket
             .send(Message::Text(payload.to_string()))
@@ -115,7 +124,32 @@ async fn siwc_websocket_generate_false_warms_up_and_continues_without_an_error()
     );
     assert!(sent[1].get("previous_response_id").is_none());
     assert_eq!(sent[1]["input"][0], sent[0]["input"][0]);
-    assert_eq!(sent[1]["input"][1]["content"], "Synthetic question");
+    if append {
+        assert_eq!(sent[1]["input"][1]["content"], "Synthetic question");
+    } else {
+        assert_eq!(sent[1]["input"], sent[0]["input"]);
+    }
+    let wire = crate::poison::mutex(&siwc.state.websocket_bodies);
+    assert_eq!(wire.len(), 2);
+    assert_eq!(wire[0]["generate"], false);
+    assert_eq!(
+        wire[1]["previous_response_id"],
+        "resp_synthetic_siwc_warmup"
+    );
+    assert!(wire[1].get("generate").is_none());
+    assert_eq!(
+        wire[1]["input"],
+        if append {
+            json!([{"role":"user","content":"Synthetic question"}])
+        } else {
+            json!([])
+        }
+    );
+    assert_eq!(siwc.state.websocket_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        siwc.state.http_generation_requests.load(Ordering::SeqCst),
+        0
+    );
     assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
     task.abort();
 }

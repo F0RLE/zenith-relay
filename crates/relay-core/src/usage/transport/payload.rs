@@ -16,6 +16,11 @@ pub enum FullRequestReason {
     ProtocolConversion,
     /// A fact about this payload, not an inferred client decision or cache miss.
     NoPreviousResponseId,
+    SocketCheckpointUnavailable,
+    SocketSettingsChanged,
+    SocketHistoryChanged,
+    SocketOutputChanged,
+    SocketNoNewInput,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,12 +30,83 @@ pub enum RequestContentEncoding {
     Zstd,
 }
 
+/// Fixed labels only: never serialize client-defined keys or item values.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayField {
+    Type,
+    Id,
+    Status,
+    Role,
+    Content,
+    Summary,
+    EncryptedContent,
+    Phase,
+    Name,
+    Namespace,
+    Arguments,
+    EncryptedArguments,
+    EncryptedFunctionArgs,
+    Async,
+    CallId,
+    Caller,
+    Input,
+    Output,
+    Metadata,
+    Execution,
+    Tools,
+    Action,
+    Author,
+    Recipient,
+    Result,
+    RevisedPrompt,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketUnknownFieldChanges {
+    pub added: u32,
+    pub removed: u32,
+    pub changed: u32,
+    pub null_only: bool,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketOutputMismatch {
+    /// Relative to the completed response output, not the entire conversation.
+    pub output_index: u32,
+    pub fields: Vec<SocketReplayField>,
+    /// Only fixed item-kind labels and aggregate changes; never item values or keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_kind: Option<SocketReplayItemKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_fields: Option<SocketUnknownFieldChanges>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayItemKind {
+    Message,
+    Reasoning,
+    FunctionCall,
+    CustomToolCall,
+    WebSearchCall,
+    ToolSearchCall,
+    ToolSearchOutput,
+    Other,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPayloadDiagnostics {
     pub mode: RequestPayloadMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_request_reason: Option<FullRequestReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_output_mismatch: Option<SocketOutputMismatch>,
     pub json_bytes: u64,
     pub body_bytes: u64,
     pub content_encoding: RequestContentEncoding,
@@ -70,6 +146,7 @@ impl RequestPayloadDiagnostics {
                 TransportMode::ProtocolConversion => FullRequestReason::ProtocolConversion,
                 TransportMode::Native => FullRequestReason::NoPreviousResponseId,
             }),
+            socket_output_mismatch: None,
             json_bytes: bytes.len() as u64,
             body_bytes: bytes.len() as u64,
             content_encoding: RequestContentEncoding::Identity,
@@ -98,7 +175,25 @@ impl ExecutorRoute {
             .as_mut()
             .and_then(|routing| routing.transport.as_mut())
         {
-            transport.http_version = Some(format!("{:?}", response.version()));
+            if let Some(socket) = response
+                .extensions()
+                .get::<crate::runtime::siwc_socket::SocketDiagnostics>()
+            {
+                socket.observe(transport);
+            } else {
+                if transport.upstream == crate::UsageTransport::Websocket {
+                    transport.upstream = crate::UsageTransport::Http;
+                    transport.handshake_ms = None;
+                    transport.connection_reused = None;
+                    transport.connection_reset_reason = None;
+                    transport.response_format = None;
+                    transport.fallback_reason = (self.client_transport
+                        == crate::UsageTransport::Websocket)
+                        .then_some(super::TransportFallbackReason::ExistingHttpBridge);
+                }
+                transport.http_version = Some(format!("{:?}", response.version()));
+                transport.upstream_http_status = Some(response.status().as_u16());
+            }
             transport.request_payload = response
                 .extensions()
                 .get::<RequestPayloadDiagnostics>()
@@ -124,14 +219,29 @@ impl ExecutorRoute {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_socket_mismatch_defaults_optional_diagnostics() {
+        let restored: SocketOutputMismatch =
+            serde_json::from_value(serde_json::json!({"outputIndex":0,"fields":["other"]}))
+                .unwrap();
+        assert_eq!(restored.item_kind, None);
+        assert_eq!(restored.unknown_fields, None);
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::json!({"outputIndex":0,"fields":["other"]})
+        );
+    }
+
+    #[test]
     fn payload_timings_preserve_missing_legacy_fields_and_measured_zero() {
         let mut observed = RequestPayloadDiagnostics::identity(b"{}", TransportMode::Native);
         let legacy = serde_json::to_value(&observed).unwrap();
         assert!(legacy.get("compressionUs").is_none());
         assert!(legacy.get("httpSendToHeadersMs").is_none());
+        assert!(legacy.get("socketOutputMismatch").is_none());
         let restored: RequestPayloadDiagnostics = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.compression_us, None);
         assert_eq!(restored.http_send_to_headers_ms, None);
+        assert_eq!(restored.socket_output_mismatch, None);
         observed.compression_ms = Some(0);
         observed.compression_us = Some(420);
         observed.http_send_to_headers_ms = Some(0);

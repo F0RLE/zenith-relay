@@ -1,28 +1,60 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result as LocalResult};
 use serde_json::{Value, json};
-use zenith_relay_core::protocol::ModelSummary;
+use zenith_relay_core::{
+    WireApi,
+    model_metadata::ModelCapabilities,
+    protocol::{ModelProtocolRoute, ModelSummary},
+};
 
 const MAX_INFERENCE_MODELS: usize = 200;
 
 /// A Desktop cap is not an effort enum and cannot remove intermediate holes.
 /// Keep supported higher choices visible; admission rejects unsupported values
 /// without silently replacing the user's selected effort.
-fn native_effort_cap(model: &ModelSummary) -> Option<&'static str> {
+fn native_effort_cap(
+    model: &ModelSummary,
+    capabilities: &ModelCapabilities,
+) -> Option<&'static str> {
     ["low", "medium", "high", "xhigh", "max"]
         .into_iter()
         .rfind(|effort| {
-            model
-                .reasoning_allowed_levels
+            capabilities
+                .reasoning_effort_levels
                 .iter()
                 .any(|level| level == *effort)
-                && model.protocol_routes.iter().any(|route| {
-                    route.client_wire_api == zenith_relay_core::WireApi::Messages
-                        && route.reasoning_efforts.iter().any(|level| level == *effort)
-                })
+                && ((!model.reasoning_configurable && model.reasoning_allowed_levels.is_empty())
+                    || model
+                        .reasoning_allowed_levels
+                        .iter()
+                        .any(|level| level == *effort))
         })
 }
 
-pub(super) fn inference_models(models: &[ModelSummary]) -> LocalResult<Vec<Value>> {
+#[cfg(test)]
+fn inference_models(models: &[ModelSummary]) -> LocalResult<Vec<Value>> {
+    inference_models_for_client(models, false)
+}
+
+fn catalog_claude_identity(model: &ModelSummary) -> Option<&str> {
+    if model.catalog_provider.as_deref() != Some("anthropic") {
+        return None;
+    }
+    let identity = model
+        .catalog_source_model_id
+        .as_deref()?
+        .strip_prefix("anthropic/")?;
+    (identity
+        .strip_prefix("claude-")
+        .is_some_and(|name| !name.is_empty())
+        && !identity.contains('/')
+        && zenith_relay_core::is_valid_model_token(identity))
+    .then_some(identity)
+}
+
+pub(super) fn inference_models_for_client(
+    models: &[ModelSummary],
+    supports_model_identity: bool,
+) -> LocalResult<Vec<Value>> {
     // The management projection already applies membership, visibility and pool order.
     // Expose enabled models with an executable Messages-facing route, including
     // bridges to every supported native upstream. The gateway routes
@@ -32,17 +64,35 @@ pub(super) fn inference_models(models: &[ModelSummary]) -> LocalResult<Vec<Value
     // only for a representable native scale, without changing the real model.
     let entries: Vec<_> = models
         .iter()
-        .filter(|model| {
-            model.enabled
-                && model
-                    .protocol_routes
-                    .iter()
-                    .any(|route| route.client_wire_api == zenith_relay_core::WireApi::Messages)
-        })
-        .map(|model| {
+        .filter(|model| model.enabled)
+        .filter_map(|model| {
+            let reference =
+                model
+                    .catalog_capabilities
+                    .clone()
+                    .unwrap_or_else(|| ModelCapabilities {
+                        reasoning: model.catalog_reasoning,
+                        reasoning_effort_levels: model.catalog_reasoning_effort_levels.clone(),
+                        ..ModelCapabilities::unknown_model()
+                    });
+            let capabilities = ModelProtocolRoute::capabilities_for_client(
+                &model.protocol_routes,
+                WireApi::Messages,
+                &reference,
+            )?;
+            if capabilities.streaming == Some(false) {
+                return None;
+            }
             let label = model.catalog_name.as_deref().unwrap_or(&model.id);
-            let cap = native_effort_cap(model);
-            let name = if cap.is_some() {
+            let cap = native_effort_cap(model, &capabilities);
+            let identity = if supports_model_identity && cap.is_some() {
+                catalog_claude_identity(model)
+            } else {
+                None
+            };
+            let name = if identity.is_some() {
+                zenith_relay_core::claude_desktop_catalog_model_alias(&model.id)
+            } else if cap.is_some() {
                 zenith_relay_core::claude_desktop_reasoning_model_alias(&model.id)
             } else {
                 zenith_relay_core::claude_desktop_model_alias(&model.id)
@@ -54,7 +104,10 @@ pub(super) fn inference_models(models: &[ModelSummary]) -> LocalResult<Vec<Value
             if let Some(cap) = cap {
                 entry["maxEffort"] = json!(cap);
             }
-            entry
+            if let Some(identity) = identity {
+                entry["behavesAs"] = json!(identity);
+            }
+            Some(entry)
         })
         .collect();
     if entries.len() > MAX_INFERENCE_MODELS {
@@ -86,6 +139,12 @@ pub(super) fn gateway_config(origin: &str, secret: &str, models: Vec<Value>) -> 
         "autoModeEnabled": false,
     })
 }
+
+#[cfg(test)]
+mod scoped_catalog;
+
+#[cfg(test)]
+mod identity;
 
 #[cfg(test)]
 mod tests {
@@ -151,9 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_or_unsupported_native_reasoning_does_not_advertise_a_picker() {
+    fn empty_or_non_native_pool_efforts_do_not_advertise_a_picker() {
         for levels in [vec![], vec!["none".into(), "ultra".into()]] {
             let mut configured = model("upstream/model", true, WireApi::Messages);
+            configured.reasoning_configurable = true;
             configured.reasoning_allowed_levels = levels;
             configured.protocol_routes[0].reasoning_efforts =
                 vec!["low".into(), "medium".into(), "high".into(), "ultra".into()];
@@ -188,7 +248,7 @@ mod tests {
         }
     }
 
-    fn model(id: &str, enabled: bool, protocol: WireApi) -> ModelSummary {
+    pub(super) fn model(id: &str, enabled: bool, protocol: WireApi) -> ModelSummary {
         serde_json::from_value(json!({
             "id": id, "enabled": enabled, "memberCount": 1,
             "inputMicroUsdPerMillion": null, "cachedInputMicroUsdPerMillion": null,

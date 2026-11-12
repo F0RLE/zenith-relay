@@ -35,7 +35,7 @@ pub(super) fn missing_legacy_endpoint(status: StatusCode, response_body: &[u8]) 
     }
 }
 
-fn request_body(request_json: &Value) -> Result<Vec<u8>, AttemptFailure> {
+fn request_body(request_json: &Value) -> Result<Vec<u8>, Box<AttemptFailure>> {
     let mut request_json = request_json.clone();
     let input_items = request_json
         .get_mut("input")
@@ -55,15 +55,15 @@ fn request_body(request_json: &Value) -> Result<Vec<u8>, AttemptFailure> {
     Ok(bytes)
 }
 
-fn invalid_stream() -> AttemptFailure {
-    AttemptFailure::classified_with_hint(
+fn invalid_stream() -> Box<AttemptFailure> {
+    Box::new(AttemptFailure::classified_with_hint(
         StatusCode::BAD_GATEWAY,
         error_codes::COMPACTION_RESPONSE_INVALID,
         Default::default(),
-    )
+    ))
 }
 
-fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
+fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, Box<AttemptFailure>> {
     let mut completed_response = None;
     let mut capture = NativeReplayCapture::default();
     while let Some(end) = sse_event_end(bytes) {
@@ -84,13 +84,13 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
             event.outcome,
             Some(TerminalOutcome::Failure | TerminalOutcome::Incomplete)
         ) {
-            return Err(AttemptFailure::classified_with_hint(
+            return Err(Box::new(AttemptFailure::classified_with_hint(
                 event.error_status.unwrap_or(StatusCode::BAD_GATEWAY),
                 event
                     .error_category
                     .unwrap_or(error_codes::COMPACTION_RESPONSE_INVALID),
                 event.cooldown_hint,
-            ));
+            )));
         }
         if let Some(event_response) = event
             .response
@@ -125,7 +125,9 @@ fn compact_output(mut bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
 
 /// Codex compact response. Retained tail items stay in `output`; exactly one
 /// encrypted compaction checkpoint is required.
-pub(super) fn compaction_document(compaction_response: &Value) -> Result<Vec<u8>, AttemptFailure> {
+pub(super) fn compaction_document(
+    compaction_response: &Value,
+) -> Result<Vec<u8>, Box<AttemptFailure>> {
     if compaction_response
         .get("status")
         .is_some_and(|status_value| status_value != "completed")
@@ -190,7 +192,7 @@ pub(super) async fn execute(
     lease: &crate::runtime::CandidateLease,
 ) -> Result<(HeaderMap, Vec<u8>), Box<(AttemptFailure, HeaderMap)>> {
     let request_body =
-        request_body(client_request).map_err(|failure| Box::new((failure, HeaderMap::new())))?;
+        request_body(client_request).map_err(|failure| Box::new((*failure, HeaderMap::new())))?;
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
@@ -213,19 +215,21 @@ pub(super) async fn execute(
         .await
         .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;
     route.account_token_generation = upstream.account_token_generation;
+    route.account_token_revision = upstream.authorization_incarnation.token_revision().cloned();
     let upstream_response = upstream.response;
     let status = upstream_response.status();
     let mut headers = upstream_response.headers().clone();
     let response_bytes = crate::transport::collect(upstream_response)
         .await
-        .map_err(|_| Box::new((invalid_stream(), headers.clone())))?;
+        .map_err(|_| Box::new((*invalid_stream(), headers.clone())))?;
     if !status.is_success() {
-        let mut failure = AttemptFailure::status_with_body(status, Some(&response_bytes));
+        let mut failure =
+            AttemptFailure::status_with_headers(status, Some(&response_bytes), &headers);
         super::errors::apply_degraded_route_policy(runtime, &mut failure);
         return Err(Box::new((failure, headers)));
     }
     let compacted_body =
-        compact_output(&response_bytes).map_err(|failure| Box::new((failure, headers.clone())))?;
+        compact_output(&response_bytes).map_err(|failure| Box::new((*failure, headers.clone())))?;
     for header_name in [
         "content-length",
         "content-encoding",
@@ -273,6 +277,37 @@ mod tests {
         assert_eq!(response_json["usage"]["input_tokens"], 12);
         assert_eq!(response_json["output"][0]["type"], "compaction");
         assert!(compaction_document(&json!({"status": "incomplete", "output": []})).is_err());
+    }
+
+    #[test]
+    fn native_compaction_preserves_format_and_ordered_configuration_items() {
+        let request = json!({"model":"synthetic-model", "input":[
+            {"type":"configuration_update","configuration":{"synthetic_extension":true}},
+            {"role":"user","content":"Synthetic retained context"}
+        ], "text":{"format":{"type":"json_schema","name":"synthetic_output","strict":true,
+            "schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}},
+            "tools":[{"type":"function","name":"synthetic_lookup","parameters":{"type":"object","properties":{}}}],
+            "tool_choice":"none", "reasoning":{"effort":"high"}});
+        let encoded: Value = serde_json::from_slice(&request_body(&request).ok().unwrap()).unwrap();
+        assert_eq!(
+            &encoded["input"].as_array().unwrap()[..2],
+            request["input"].as_array().unwrap()
+        );
+        for field in ["text", "tools", "tool_choice", "reasoning"] {
+            assert_eq!(
+                encoded[field], request[field],
+                "native {field} is not a local-summary option"
+            );
+        }
+        let mut routed = request.as_object().unwrap().clone();
+        assert!(prepare_routed_compaction_request(&mut routed));
+        for field in ["text", "tools", "tool_choice", "reasoning"] {
+            assert_eq!(routed[field], request[field]);
+        }
+        assert_eq!(
+            &routed["input"].as_array().unwrap()[..2],
+            request["input"].as_array().unwrap()
+        );
     }
 
     #[test]

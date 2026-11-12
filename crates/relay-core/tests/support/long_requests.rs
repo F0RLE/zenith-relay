@@ -55,6 +55,7 @@ async fn deferred_http_upstream(
     let server = spawn(
         Router::new()
             .route("/v1/responses", post(deferred_http))
+            .route("/v1/responses/compact", post(deferred_http))
             .with_state(state.clone()),
     )
     .await;
@@ -197,6 +198,88 @@ async fn http_client_cancellation_releases_a_request_waiting_for_first_output() 
     })
     .await
     .expect("cancelled HTTP request retained its lease before output");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled HTTP send was not recorded");
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].http_status, 499);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("client_cancelled")
+    );
+    assert_eq!(
+        events[0].error_origin(),
+        Some(zenith_relay_core::ErrorOrigin::Relay)
+    );
+    assert_eq!(events[0].input_tokens, None);
+    assert_eq!(events[0].output_tokens, None);
+    assert!(!events[0].is_request_completion());
+}
+
+#[tokio::test]
+async fn account_compact_cancellation_records_the_pending_physical_send() {
+    for before_headers in [true, false] {
+        let (upstream, state, _sender) = deferred_http_upstream(false).await;
+        let (gateway, events) = gateway_for_long_request(&upstream, true).await;
+        let url = format!("{}/v1/responses/compact", gateway.base_url);
+        let pending = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(url)
+                .bearer_auth(LOCAL_KEY)
+                .json(&json!({"model":MODEL,"input":[{"role":"user","content":"Synthetic context to compact"}]}))
+                .send()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), state.entered.notified())
+            .await
+            .expect("compact request did not reach the physical upstream");
+        if !before_headers {
+            state.headers.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), state.body_polled.notified())
+                .await
+                .expect("compact response body was not polled");
+        }
+        assert_held(&gateway, &events);
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight != 0
+                || events.lock().unwrap().is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled compact send was not released and recorded");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].attempt, 1);
+        assert_eq!(events[0].account_id.as_deref(), Some("slow-account"));
+        assert_eq!(events[0].http_status, 499);
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some("client_cancelled")
+        );
+        assert_eq!(events[0].input_tokens, None);
+        assert_eq!(events[0].output_tokens, None);
+        assert_eq!(
+            events[0].error_origin(),
+            Some(zenith_relay_core::ErrorOrigin::Relay)
+        );
+        assert_eq!(
+            events[0].routing.as_ref().unwrap().attempt_outcome,
+            Some(zenith_relay_core::AttemptOutcome::ClientDisconnected)
+        );
+        assert!(!events[0].is_request_completion());
+        assert!(!events[0].affects_account_state());
+        assert_eq!(events[0].retry_at_ms, None);
+    }
 }
 
 #[tokio::test]

@@ -2,6 +2,9 @@ import type { FeedbackError } from "./feedback";
 
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
+/** A user-cancelled action settles without feedback, follow-up work or refresh. */
+export const OPERATION_CANCELLED = Symbol("relay-operation-cancelled");
+
 export type PerformOptions = {
   /** Finish a dependent step before refreshing, only while the operation is current. */
   afterWork?: () => Promise<unknown>;
@@ -48,8 +51,8 @@ export async function runRelayOperation({
   settle,
 }: RelayOperationInput): Promise<boolean> {
   try {
-    await work();
-    if (!isCurrent()) return false;
+    const result = await work();
+    if (!isCurrent() || result === OPERATION_CANCELLED) return false;
     if (options?.afterWork) {
       await options.afterWork();
       if (!isCurrent()) return false;
@@ -109,6 +112,7 @@ export async function captureOperationResult<T>(
   const ok = await run(async () => {
     operationResult = await work();
     captured = true;
+    return operationResult;
   });
   return { ok, value: captured ? operationResult : undefined };
 }

@@ -1,3 +1,4 @@
+use super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::prelude::*;
 use super::recovery::mark_adapter_failure;
 use super::recovery::{
@@ -33,17 +34,11 @@ pub(super) struct BufferedCompletionInput<'a> {
     pub(super) client_wire_api: WireApi,
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
     pub(super) has_previous_response_id: bool,
     pub(super) basis_points_request: &'a Option<super::super::basis_points::PreparedClientRequest>,
     pub(super) stream: bool,
     pub(super) adapter_request: PreparedAdapterRequest,
-    pub(super) tried: &'a mut HashSet<String>,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) prompt_affinity_key: &'a Option<String>,
@@ -76,17 +71,11 @@ pub(super) async fn complete_buffered_response(
         client_wire_api,
         request,
         adapter_is_passthrough,
-        repairs,
-        requires_affinity_owner,
-        has_unpaired_tool_output,
-        last_failure,
-        last_failure_origin,
-        last_preserved_upstream_error,
+        state,
         has_previous_response_id,
         basis_points_request,
         stream,
         adapter_request,
-        tried,
         selected_error_origin,
         response_affinity_hit,
         prompt_affinity_key,
@@ -94,6 +83,23 @@ pub(super) async fn complete_buffered_response(
         client_stream,
         forwarded_headers,
     } = input;
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                requires_affinity_owner,
+                has_unpaired_tool_output,
+                ..
+            },
+    } = state;
     let native_replay_attempted = &mut repairs.native_replay;
     let usage = |success, http_status, error_category| {
         usage_event(
@@ -250,11 +256,7 @@ pub(super) async fn complete_buffered_response(
     if completed {
         let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
-        runtime.bind_prompt_affinity(
-            prompt_affinity_key.as_deref(),
-            &route.candidate_id,
-            now_ms(),
-        );
+        runtime.bind_prompt_affinity_for_lease(prompt_affinity_key.as_deref(), lease, now_ms());
     } else {
         lease.settle_rotation_terminal(now_ms());
     }
@@ -440,6 +442,10 @@ async fn read_completed_body(
         .copied();
     let expected_model = (read.account_route && read.runtime.block_degraded_routes_enabled())
         .then_some(read.route.source_model.as_str());
+    let pending_usage = Some(crate::gateway::response::PendingUsageObservation::new(
+        read.runtime,
+        usage(false, read.status.as_u16(), None),
+    ));
     let collected =
         if read.route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints {
             super::super::super::response::collect_basis_points_response(
@@ -447,6 +453,7 @@ async fn read_completed_body(
                 expected_model,
                 read.started,
                 timing,
+                pending_usage,
             )
             .await
         } else {
@@ -461,6 +468,7 @@ async fn read_completed_body(
                 prewarm,
                 read.started,
                 timing,
+                pending_usage,
             )
             .await
         };
@@ -544,10 +552,16 @@ async fn read_completed_body(
                     }
                 }
             }
+            if failure_category_is_request_terminal(failure.category)
+                && let Some(routing) = event.routing.as_mut()
+            {
+                routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+            }
             apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(read.route, failure.status, &failure)
+                || (route_forbids_fallback(read.route, failure.status, &failure)
+                    && !read.lease.has_transient_retry())
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

@@ -267,10 +267,14 @@ impl GatewayRuntime {
             })
             .collect::<Vec<_>>();
         let order = crate::poison::mutex(&self.model_state.display_order);
-        let catalog = self.model_metadata_catalog.as_ref().map_or_else(
-            || Arc::new(crate::model_metadata::ModelMetadataCatalog::empty()),
-            |catalog| catalog.snapshot(),
-        );
+        let catalog = self
+            .provider_metadata
+            .reference_catalog
+            .as_ref()
+            .map_or_else(
+                || Arc::new(crate::model_metadata::ModelMetadataCatalog::empty()),
+                |catalog| catalog.snapshot(),
+            );
         models = catalog.merge_display_order(models.iter(), &order);
         models
             .into_iter()
@@ -289,7 +293,8 @@ impl GatewayRuntime {
         let scope = key.scope_snapshot();
         let routes = {
             let scheduler = self.lock_scheduler();
-            self.chatgpt_accounts
+            self.account_state
+                .executors
                 .values()
                 .filter_map(|account| {
                     let candidate = scheduler.candidate(&account.id)?;
@@ -329,7 +334,7 @@ impl GatewayRuntime {
         };
         let mut ranked = Vec::with_capacity(routes.len());
         for (account_id, url, visible_models) in routes {
-            let Some(account) = self.chatgpt_accounts.get(&account_id) else {
+            let Some(account) = self.account_state.executors.get(&account_id) else {
                 continue;
             };
             let auth_state = account.token_authority.auth_state(&account_id).await;
@@ -431,7 +436,7 @@ impl GatewayRuntime {
         self.service_tiers_for_routes(model, &routes)
     }
 
-    fn service_tiers_for_routes(
+    pub(crate) fn service_tiers_for_routes(
         &self,
         model: &str,
         routes: &[ExecutorRoute],

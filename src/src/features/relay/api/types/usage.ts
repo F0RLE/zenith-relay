@@ -100,7 +100,7 @@ export type RouteLatencyDiagnostics = {
 };
 
 export type RoutingDiagnostics = {
-  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  reason: "response_affinity" | "prompt_cache_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "provider_credits" | "subscription_expiry" | "subscription_plan" | "fair_rotation" | "fallback_attempt" | "manual_priority" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
@@ -109,23 +109,47 @@ export type RoutingDiagnostics = {
   /** Upstream declaration, not independently verified model identity. */
   upstreamResponseModel?: string | null;
   transport?: {
+    upstreamHttpStatus?: number | null;
+    downstreamHttpStatus?: number | null;
+    failureKind?: "connection" | "upstream" | "local" | null;
     upstream: "http" | "websocket";
     mode: "native" | "protocol_conversion" | "basis_points";
     fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "websocket_slow_handshake" | "existing_http_bridge" | null;
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
     connectionReused?: boolean | null;
+    connectionResetReason?: "new_session" | "missing_context" | "session_unavailable" | "session_expired" | "authorization_changed" | "connection_expired" | "connection_closed" | "pending_frame" | "heartbeat_failed" | "response_interrupted" | "response_failed" | "unproven_output" | null;
+    reauth?: boolean | null;
     responseHeadersMs?: number | null;
-    /** HTTP decoded body/parser offsets; not raw wire or CPU measurements. */
+    /** Stream parser/reasoning offsets; not raw wire or CPU measurements. */
     streamResponse?: {
       decodedBodyFirstMs?: number | null;
       sseJsonFirstMs?: number | null;
+      upstreamReasoningFirstMs?: number | null;
       upstreamOutputFirstMs?: number | null;
+      upstreamTextFirstMs?: number | null;
+      upstreamToolFirstMs?: number | null;
+      /** First complete native item, before client-call validation. */
+      upstreamToolFirstCompleteMs?: number | null;
     } | null;
     requestPreparationMs?: number | null;
     requestPayload?: {
       mode: "full" | "continuation";
-      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | null;
+      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | "socket_checkpoint_unavailable" | "socket_settings_changed" | "socket_history_changed" | "socket_output_changed" | "socket_no_new_input" | null;
+      /** Fixed field labels only; no item values, arbitrary keys or fingerprints. */
+      socketOutputMismatch?: {
+        outputIndex: number;
+        fields: ("type" | "id" | "status" | "role" | "content" | "summary" | "encrypted_content" | "phase" | "name" | "namespace" | "arguments" | "encrypted_arguments" | "encrypted_function_args" | "async" | "call_id" | "caller" | "input" | "output" | "metadata" | "execution" | "tools" | "action" | "author" | "recipient" | "result" | "revised_prompt" | "other")[];
+        itemKind?: "message" | "reasoning" | "function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call" | "tool_search_output" | "other" | null;
+        /** Bounded aggregate differences; no unknown keys, values or hashes. */
+        unknownFields?: {
+          added: number;
+          removed: number;
+          changed: number;
+          nullOnly: boolean;
+          truncated: boolean;
+        } | null;
+      } | null;
       jsonBytes: number;
       /** Encoded body bytes, excluding HTTP/WebSocket framing and TLS. */
       bodyBytes: number;
@@ -137,12 +161,25 @@ export type RoutingDiagnostics = {
       httpSendToHeadersMs?: number | null;
     } | null;
     requestPreparation?: {
+      /** Explicit SIWC compatibility mode omitted the client's output-token cap. */
+      siwcOutputLimitOmitted?: boolean | null;
       bodyMs?: number | null;
       /** Included in bodyMs. */
       schemaValidationMs?: number | null;
       catalogMs?: number | null;
       serializationMs?: number | null;
       attachmentsMs?: number | null;
+      /** Substages of attachmentsMs; concurrent waits are wall time, not summed uploads. */
+      attachments?: {
+        credentialMs?: number | null;
+        stagingMs: number;
+        resolveMs: number;
+        imageCount: number;
+        fileReferences: number;
+        uploadedImages: number;
+        uploadedBytes: number;
+        reusedImages: number;
+      } | null;
       /** Prepared-context accounting after attachments; not all diagnostic overhead. */
       contextAccountingMs?: number | null;
     } | null;
@@ -164,6 +201,12 @@ export type RoutingDiagnostics = {
   cacheAffinity?: CacheAffinityDiagnostics | null;
   /** Successful attempts for this candidate/route, captured before selection. */
   routeLatency?: RouteLatencyDiagnostics | null;
+  /** Normalized provider clock evidence, separate from local recovery delays. */
+  providerBackoff?: {
+    scope: string;
+    notBeforeMs: number;
+    observedAtMs?: number | null;
+  } | null;
   requestTiming?: {
     durationMs: number;
     ttftMs: number | null;

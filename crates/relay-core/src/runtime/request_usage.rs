@@ -108,6 +108,25 @@ impl GatewayRuntime {
         }
     }
 
+    /// Amend the current physical send without emitting usage or resetting its clock.
+    pub(crate) fn observe_pending_dispatch(
+        &self,
+        request_id: &str,
+        attempt: u16,
+        observe: impl FnOnce(&mut UsageEvent),
+    ) {
+        let mut registry = crate::poison::mutex(&self.control.request_usage);
+        let Some(pending) = registry
+            .0
+            .get_mut(request_id)
+            .and_then(|request| request.pending.as_mut())
+            .filter(|pending| pending.event.attempt == attempt)
+        else {
+            return;
+        };
+        observe(&mut pending.event);
+    }
+
     fn finish_request_usage(&self, request_id: &str, status: u16, cancelled: bool) {
         let request = crate::poison::mutex(&self.control.request_usage)
             .0
@@ -147,6 +166,7 @@ impl GatewayRuntime {
             // not on the logical client-disconnection result.
             event.upstream_error = None;
         }
+        event.normalize_client_cancellation();
         apply_timing(
             &mut event,
             request.started.elapsed().as_millis() as u64,
@@ -293,6 +313,7 @@ mod tests {
             rejected.input_tokens = Some(5);
             rejected.output_tokens = Some(0);
             rejected.error_category = Some(crate::error_codes::UPSTREAM_RATE_LIMITED.into());
+            rejected.http_status = 429;
             rejected.routing.as_mut().unwrap().attempt_outcome =
                 Some(AttemptOutcome::RetrySelection);
             let scope = runtime.track_request_usage(
@@ -312,11 +333,15 @@ mod tests {
             assert_eq!(events.len(), 2);
             assert!(!events[0].is_request_completion());
             assert_eq!(events[0].error_category, rejected.error_category);
+            assert_eq!(events[0].http_status, 429);
+            assert_eq!(events[0].error_origin(), Some(crate::ErrorOrigin::Provider));
             assert_eq!(events[0].input_tokens, Some(5));
             assert_eq!(events[1].is_request_completion(), !second_send);
             assert_eq!(events[1].attempt, if second_send { 2 } else { 1 });
             assert_eq!(events[1].input_tokens, (!second_send).then_some(5));
             assert_eq!(events[1].output_tokens, (!second_send).then_some(0));
+            assert_eq!(events[1].http_status, 499);
+            assert_eq!(events[1].error_origin(), Some(crate::ErrorOrigin::Relay));
             assert_eq!(
                 events[1].error_category.as_deref(),
                 Some("client_cancelled")

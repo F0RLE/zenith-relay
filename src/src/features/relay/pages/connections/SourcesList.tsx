@@ -24,11 +24,10 @@ import { sourceErrorDetails } from "./sourceError";
 const EMPTY_SOURCES: SourceSummary[] = [];
 const EMPTY_RUNTIME_ORDER: CandidateRuntimeSnapshot[] = [];
 
-export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit, onRefresh, onRefreshSelected, onRefreshAll }: {
+export function SourcesList({ query, onQuery, sourceStats, onEdit, onRefresh, onRefreshSelected, onRefreshAll }: {
   query: string;
   onQuery: (query: string) => void;
   sourceStats: Record<string, SourceStatsState>;
-  refreshReport: string | null;
   onEdit: (source: SourceSummary) => void;
   onRefresh: (sourceId: string) => void;
   onRefreshSelected: (sourceIds: readonly string[]) => void;
@@ -247,7 +246,6 @@ export function SourcesList({ query, onQuery, sourceStats, refreshReport, onEdit
           </div>}
         </div>
       </div>
-        {refreshReport ? <div className="connection-toolbar-result" role="status">{refreshReport}</div> : null}
         {!sources.length ? <NoResults /> : null}
         <div className="account-list source-cards" role="list">{sources.map((source) => {
           const sourceState = sourceStats[source.id];

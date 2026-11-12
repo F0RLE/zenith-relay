@@ -143,7 +143,7 @@ fn sanitize_breadcrumb(mut breadcrumb: Breadcrumb) -> Option<Breadcrumb> {
         return None;
     }
     breadcrumb.timestamp = safe_text(&breadcrumb.timestamp, 64);
-    breadcrumb.operation = safe_text(&breadcrumb.operation, 120);
+    breadcrumb.operation = safe_operation(&breadcrumb.operation);
     breadcrumb.stage = safe_text(&breadcrumb.stage, 120);
     if breadcrumb.operation.is_empty() || breadcrumb.stage.is_empty() {
         return None;

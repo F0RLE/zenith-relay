@@ -13,6 +13,7 @@ use crate::scheduler::rotation::{
     AttemptObservation, ExecutionObservation, HealthObservation, RotationOperation,
     SharedRequestBudget,
 };
+use crate::transport::{is_connection_header, single_header};
 use crate::{GatewayRuntime, WireApi, error_codes};
 use axum::body::Body;
 use axum::extract::State;
@@ -27,6 +28,9 @@ use std::time::Duration;
 
 const MAX_COUNT_RESPONSE_BYTES: usize = 256 * 1024;
 const COUNT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+mod tests;
 
 pub(super) async fn messages(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -324,7 +328,9 @@ async fn response(upstream: reqwest::Response, protocol: WireApi) -> Response<Bo
             "upstream token-counting endpoint rejected the request",
             error_codes::UPSTREAM_ERROR,
         );
-        if let Some(retry_after) = headers.get(RETRY_AFTER) {
+        if let Some(retry_after) = single_header(&headers, RETRY_AFTER.as_str())
+            .filter(|_| !is_connection_header(&headers, RETRY_AFTER.as_str()))
+        {
             response
                 .headers_mut()
                 .insert(RETRY_AFTER, retry_after.clone());

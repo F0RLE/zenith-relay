@@ -13,7 +13,7 @@ pub(super) enum UpgradeAction {
 }
 
 pub(super) async fn handle_upgrade_rejection(
-    upgrade: reqwest_websocket::UpgradeResponse,
+    upgrade: super::super::transport::UpgradeResponse,
     status: StatusCode,
     response_headers: &HeaderMap,
     prepared: &crate::runtime::PreparedAuthorization,
@@ -43,11 +43,21 @@ pub(super) async fn handle_upgrade_rejection(
     .await
     .ok()
     .and_then(Result::ok);
-    let failure =
-        GatewayFailure::upstream_status(status, error_body.as_deref(), source_error_origin)
-            .with_retry_headers(response_headers)
-            .apply_degraded_route_policy(runtime);
-    if failure.category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+    let failure = GatewayFailure::upstream_status_with_headers(
+        status,
+        error_body.as_deref(),
+        response_headers,
+        source_error_origin,
+    )
+    .apply_degraded_route_policy(runtime);
+    if matches!(
+        failure.category,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+            | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+            | error_codes::UPSTREAM_INVALID_WORKSPACE
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
+    ) {
         record_connect_returned_failure(&scope.trace(), &failure);
         return Ok(UpgradeAction::Fail(failure));
     }
@@ -159,9 +169,6 @@ pub(super) async fn handle_upgrade_rejection(
         failure.category,
         scope.request.has_previous_response_id(),
     ) {
-        if response_affinity_hit && !scope.request.requires_affinity_owner {
-            scope.request.response_affinity_key = None;
-        }
         record_connect_failure_with_hint(
             &scope.trace(),
             &failure,
@@ -171,6 +178,12 @@ pub(super) async fn handle_upgrade_rejection(
                 .map(rate_limit_body_hint)
                 .unwrap_or_default(),
         );
+        if response_affinity_hit
+            && !scope.request.requires_affinity_owner
+            && !lease.has_transient_retry()
+        {
+            scope.request.response_affinity_key = None;
+        }
         *last_failure = Some(failure);
         return Ok(UpgradeAction::ContinueCandidates);
     }

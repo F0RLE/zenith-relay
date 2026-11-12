@@ -3,8 +3,10 @@ use super::super::{
 };
 use super::{CodexSubscriptionMetadata, CodexSubscriptionRead};
 use crate::error_codes;
-use crate::quota::QuotaRefreshFailure;
-use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
+use crate::quota::{QuotaRefreshFailure, QuotaTransportFailure};
+use crate::scheduler::refresh::http::{
+    HttpAdmissionError, HttpClass, HttpSendError, ManagementHttpScope,
+};
 use crate::sources::{is_http_endpoint, is_loopback_url, url_has_userinfo};
 use chrono::Local;
 use reqwest::{
@@ -214,10 +216,7 @@ impl CodexSubscriptionClient {
                 HttpClass::Ordinary,
             )
             .await
-            .map_err(|_| {
-                super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true)
-                    .with_endpoint_stage("accounts_check")
-            })?;
+            .map_err(|error| send_failure(error, "accounts_check"))?;
         let subscription_check_payload = response_json(response, "accounts_check").await?;
         drop(permit);
         super::parse::parse_accounts_check(&subscription_check_payload, preferred_account_id)
@@ -243,10 +242,7 @@ impl CodexSubscriptionClient {
                 HttpClass::Ordinary,
             )
             .await
-            .map_err(|_| {
-                super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true)
-                    .with_endpoint_stage("subscriptions")
-            })?;
+            .map_err(|error| send_failure(error, "subscriptions"))?;
         let subscription_list_payload = response_json(response, "subscriptions").await?;
         drop(permit);
         super::parse::parse_subscriptions(&subscription_list_payload, account_id)
@@ -255,6 +251,48 @@ impl CodexSubscriptionClient {
 }
 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+pub(super) fn send_failure(
+    error: HttpSendError,
+    endpoint_stage: &'static str,
+) -> QuotaRefreshFailure {
+    let (code, retryable, reason) = match error {
+        HttpSendError::Stale => (
+            error_codes::SUBSCRIPTION_TRANSPORT,
+            false,
+            QuotaTransportFailure::StaleScope,
+        ),
+        HttpSendError::Admission(HttpAdmissionError::InvalidOrigin) => (
+            error_codes::SUBSCRIPTION_CONFIGURATION,
+            false,
+            QuotaTransportFailure::InvalidOrigin,
+        ),
+        HttpSendError::Admission(HttpAdmissionError::Full) => (
+            error_codes::SUBSCRIPTION_TRANSPORT,
+            true,
+            QuotaTransportFailure::AdmissionFull,
+        ),
+        HttpSendError::Admission(HttpAdmissionError::TimedOut) => (
+            error_codes::SUBSCRIPTION_TRANSPORT,
+            true,
+            QuotaTransportFailure::AdmissionTimeout,
+        ),
+        HttpSendError::Transport { timeout: true } => (
+            error_codes::SUBSCRIPTION_TRANSPORT,
+            true,
+            QuotaTransportFailure::Timeout,
+        ),
+        HttpSendError::Transport { timeout: false } => (
+            error_codes::SUBSCRIPTION_TRANSPORT,
+            true,
+            QuotaTransportFailure::Network,
+        ),
+    };
+    super::failure(code, retryable)
+        .with_endpoint_stage(endpoint_stage)
+        .with_transport_failure(reason)
+}
+
 // Observed ChatGPT Web compatibility headers do not establish Codex OAuth support.
 pub(super) const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
@@ -365,8 +403,11 @@ async fn response_json(
     let subscription_response_body = collect_response_body(response, MAX_RESPONSE_BYTES)
         .await
         .map_err(|error| match error {
-            ResponseBodyError::Timeout | ResponseBodyError::Transport => {
+            ResponseBodyError::Timeout => super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true)
+                .with_transport_failure(QuotaTransportFailure::BodyTimeout),
+            ResponseBodyError::Transport => {
                 super::failure(error_codes::SUBSCRIPTION_TRANSPORT, true)
+                    .with_transport_failure(QuotaTransportFailure::BodyTransport)
             }
             ResponseBodyError::TooLarge => {
                 super::failure(error_codes::SUBSCRIPTION_RESPONSE_TOO_LARGE, false)

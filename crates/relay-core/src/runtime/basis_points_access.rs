@@ -53,23 +53,26 @@ fn failure(code: ModelDiscoveryFailureCode, retryable: bool) -> ModelDiscoveryFa
 
 impl GatewayRuntime {
     pub(crate) fn is_chatgpt_account(&self, candidate_id: &str) -> bool {
-        self.chatgpt_accounts.contains_key(candidate_id)
+        self.account_state.executors.contains_key(candidate_id)
     }
 
     pub(crate) fn is_siwc_account(&self, candidate_id: &str) -> bool {
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .get(candidate_id)
             .is_some_and(|account| account.oauth_client_kind == OAuthClientKind::Siwc)
     }
     pub fn is_basis_points_account(&self, candidate_id: &str) -> bool {
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .get(candidate_id)
             .is_some_and(|account| account.oauth_client_kind == OAuthClientKind::ExcelBps)
     }
 
     pub(super) fn basis_points_model_snapshot(&self) -> BasisPointsModelSnapshot {
         let models_by_account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .values()
             .filter(|account| account.oauth_client_kind == OAuthClientKind::ExcelBps)
             .map(|account| {
@@ -93,7 +96,7 @@ impl GatewayRuntime {
     }
 
     fn cached_basis_points_access(&self, candidate_id: &str) -> Option<CachedBasisPointsAccess> {
-        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let account = self.account_state.executors.get(candidate_id)?;
         // Release the cache lock before acquiring the credential guard.
         // Publication holds the credential guard before editing this cache.
         let mut cached = crate::poison::read(&account.basis_points_access).clone()?;
@@ -191,7 +194,8 @@ impl GatewayRuntime {
         let scope = key.scope_snapshot();
         let candidate_ids = {
             let scheduler = self.lock_scheduler();
-            self.chatgpt_accounts
+            self.account_state
+                .executors
                 .values()
                 .filter(|account| {
                     account.oauth_client_kind == OAuthClientKind::ExcelBps
@@ -218,7 +222,8 @@ impl GatewayRuntime {
         prepared: &PreparedAuthorization,
     ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
         let account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get(candidate_id)
             .ok_or_else(|| failure(ModelDiscoveryFailureCode::InvalidAccountId, false))?;
         let revision = prepared
@@ -290,7 +295,7 @@ impl GatewayRuntime {
         account_id: &str,
         plan_type: Option<&str>,
     ) -> bool {
-        let Some(account) = self.chatgpt_accounts.get(account_id) else {
+        let Some(account) = self.account_state.executors.get(account_id) else {
             return false;
         };
         let mut current = crate::poison::write(&account.subscription_plan_type);
@@ -310,7 +315,8 @@ impl GatewayRuntime {
         prepared: &PreparedAuthorization,
     ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
         let account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get(candidate_id)
             .ok_or_else(|| failure(ModelDiscoveryFailureCode::InvalidAccountId, false))?;
         let url = basis_points_access_url(&account.basis_points_url)
@@ -347,6 +353,7 @@ impl GatewayRuntime {
             let code = match status.as_u16() {
                 401 => ModelDiscoveryFailureCode::Unauthorized,
                 403 => ModelDiscoveryFailureCode::Forbidden,
+                404 => ModelDiscoveryFailureCode::EndpointNotFound,
                 429 => ModelDiscoveryFailureCode::RateLimited,
                 _ if status.is_server_error() => ModelDiscoveryFailureCode::Upstream,
                 _ => ModelDiscoveryFailureCode::HttpStatus,

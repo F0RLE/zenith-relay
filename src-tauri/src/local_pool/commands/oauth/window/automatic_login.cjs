@@ -1,5 +1,6 @@
-function automaticLogin(input) {
+module.exports = function automaticLogin(locales, input, environment = globalThis) {
   try {
+    const { window, location, URL, getComputedStyle, HTMLInputElement, Event, document } = environment;
     const fresh = () => Number.isFinite(input.expiresAtMs) && Date.now() < input.expiresAtMs;
     if (!fresh()) return "manual";
     if (window.top !== window.self || location.origin !== "https://auth.openai.com" || location.href !== input.url) return "manual";
@@ -26,12 +27,19 @@ function automaticLogin(input) {
     const submitters = [...form.querySelectorAll('button:not([type]), button[type="submit"], input[type="submit"]')].filter((button) => visible(button) && !button.disabled);
     if (submitters.length !== 1) return "manual";
     const submitter = submitters[0];
+    const unsafeSubmit = new RegExp(locales.map((locale) => locale.unsafeSubmit).join("|"), "i");
+    const submitLabel = () => [
+      submitter.textContent,
+      submitter instanceof HTMLInputElement ? submitter.value : "",
+      submitter.getAttribute("aria-label"),
+      ...(submitter.getAttribute("aria-labelledby") ?? "").split(/\s+/).map((id) => document.getElementById(id)?.textContent),
+    ].join(" ");
     const safeForm = () => new URL(form.action, location.href).origin === location.origin
       && form.method.toLowerCase() === "post" && (!form.target || form.target === "_self")
       && !(submitter.hasAttribute("formaction") && new URL(submitter.formAction, location.href).origin !== location.origin)
       && !(submitter.hasAttribute("formmethod") && submitter.formMethod.toLowerCase() !== "post")
       && (!submitter.formTarget || submitter.formTarget === "_self")
-      && !/sign.?up|create|reset|forgot|google|apple|microsoft|consent|authorize|созда|сброс|разреш/i.test(submitter.textContent);
+      && !unsafeSubmit.test(submitLabel());
     if (!safeForm()) return "manual";
     if (!input.stage) return stage;
     if (input.stage !== stage || typeof input.value !== "string") return "manual";
@@ -56,4 +64,4 @@ function automaticLogin(input) {
   } catch {
     return "manual";
   }
-}
+};

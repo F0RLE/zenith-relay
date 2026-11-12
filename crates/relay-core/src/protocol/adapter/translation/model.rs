@@ -84,6 +84,12 @@ pub(super) enum Reasoning {
     DynamicBudget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReasoningDisplay {
+    Summarized,
+    Omitted,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Request {
     pub(super) origin: Option<WireApi>,
@@ -91,6 +97,10 @@ pub(super) struct Request {
     pub(super) instructions: Option<Message>,
     pub(super) messages: Vec<Message>,
     pub(super) tools: Vec<Function>,
+    /// Messages discovery uses an initial catalog item, even before a tool loads.
+    /// Loaded definitions map to discovering result IDs, which survive restored
+    /// or split portable history. Inline catalog changes use their existing owner.
+    pub(super) deferred_tools: Option<BTreeMap<String, Vec<String>>>,
     pub(super) web_search: Option<Value>,
     /// Responses tool kind, local name and namespace, keyed by upstream name.
     pub(super) client_tools: BTreeMap<String, ClientToolTarget>,
@@ -106,6 +116,7 @@ pub(super) struct Request {
     pub(super) stop: Vec<String>,
     pub(super) output_format: Option<OutputFormat>,
     pub(super) reasoning: Option<Reasoning>,
+    pub(super) reasoning_display: Option<ReasoningDisplay>,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, visibleAccounts } from "../src/features/relay/accountRoutes";
+import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountResetCreditsSource, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, linkedAccountQuotaIndicator, linkedAccountQuotaState, preferredAccountRouteConnection, visibleAccounts } from "../src/features/relay/accountRoutes";
 import type { AccountSummary } from "../src/features/relay/api/types";
 
 const accounts = [
@@ -16,6 +16,14 @@ describe("account route inventory", () => {
   test("explicit export and removal include the whole group exactly once", () => {
     expect(expandAccountRouteIds(["siwc", "codex", "separate"], accounts)).toEqual(["codex", "siwc", "separate"]);
     expect(expandAccountRouteIds(["removed"], accounts)).toEqual(["removed"]);
+  });
+  test("an older card resolves its saved methods from the current inventory", () => {
+    const outdated = { id: "siwc" } as AccountSummary;
+    expect(accountRouteConnections(outdated, accounts).map((a) => a.id)).toEqual(["codex", "siwc"]);
+  });
+  test("a detached connection cannot regain an old group through a stale card", () => {
+    const detached = { ...accounts[1]!, routeGroupId: null, routeInactive: false };
+    expect(accountRouteConnections(accounts[1]!, [accounts[0]!, detached])).toEqual([detached]);
   });
 });
 
@@ -34,7 +42,63 @@ function metadataAccount(id: string, kind: AccountSummary["oauthClientKind"], ov
   } as AccountSummary;
 }
 
+test("a saved method prefers a usable grant over an expired duplicate without hiding either record", () => {
+  const expired = metadataAccount("expired", "siwc", { authState: { state: "requires_reauth", reason: "token_rotation_recovery_required" } });
+  const active = metadataAccount("active", "siwc");
+  const excel = metadataAccount("excel", "excel_bps");
+  const connections = [expired, excel, active];
+  expect(preferredAccountRouteConnection(connections, "siwc")).toBe(active);
+  expect(preferredAccountRouteConnection(connections, "excel_bps")).toBe(excel);
+  expect(preferredAccountRouteConnection([expired], "siwc")).toBe(expired);
+  expect(connections.map(({ id }) => id)).toEqual(["expired", "excel", "active"]);
+});
+
 const primary = { kind: "primary", availableBasisPoints: 7500, explicitlyFull: false, resetAtMs: 5000, windowMinutes: 300, observedAtMs: 1000 } as const;
+
+describe("SIWC linked reset credits", () => {
+  const siwc = metadataAccount("siwc", "siwc");
+  const bps = metadataAccount("bps", "excel_bps", {
+    quota: { ...emptyQuota, resetCreditsAvailable: 2, updatedAtMs: 1000 },
+  });
+
+  test("selects a native credit source without quota windows or changing SIWC state", () => {
+    const inventory = [siwc, bps];
+    const before = structuredClone(inventory);
+    expect(accountResetCreditsSource(siwc, inventory)).toBe(bps);
+    expect(inventory).toEqual(before);
+    expect(siwc.quota.resetCreditsAvailable).toBeNull();
+    expect(siwc.routeInactive).toBe(false);
+  });
+
+  test("the newest known zero supersedes older positive availability", () => {
+    const codex = metadataAccount("codex", "codex", {
+      quota: { ...emptyQuota, resetCreditsAvailable: 0, updatedAtMs: 2000 },
+    });
+    expect(accountResetCreditsSource(siwc, [siwc, bps, codex])).toBe(codex);
+    expect(accountResetCreditsSource(codex, [siwc, bps, codex])).toBe(codex);
+  });
+
+  test("unknown native availability and SIWC's own copied counts do not grant reset support", () => {
+    const copied = { ...siwc, quota: { ...emptyQuota, resetCreditsAvailable: 3 } };
+    const unknown = { ...bps, id: "unknown", quota: { ...emptyQuota, updatedAtMs: 3000 } };
+    expect(accountResetCreditsSource(copied, [copied, unknown])).toBeNull();
+    expect(accountResetCreditsSource(siwc, [siwc, bps, unknown])).toBe(bps);
+  });
+
+  test("only a usable explicitly linked native connection can redeem a credit", () => {
+    const unavailable: Partial<AccountSummary>[] = [
+      { routeGroupId: "different" }, { oauthClientKind: "siwc" },
+      { secretAvailable: false }, { recoveryRequired: true }, { enabled: false },
+      { draining: true }, { health: "blocked" }, { health: "unhealthy" },
+      { authState: { state: "requires_reauth" } }, { authState: { state: "refreshing" } },
+      { authState: { state: "error" } },
+    ];
+    for (const override of unavailable) {
+      expect(accountResetCreditsSource(siwc, [siwc, { ...bps, ...override }])).toBeNull();
+    }
+    expect(accountResetCreditsSource(siwc, [bps, { ...siwc, routeGroupId: null }])).toBeNull();
+  });
+});
 
 describe("SIWC display metadata", () => {
   test("subscription date is a same-plan reference while token expiry stays with its route", () => {
@@ -235,5 +299,62 @@ describe("linked metadata observation freshness", () => {
     expect(accountMetadataIsStale({ ...source, quotaRefreshStatus: "failed" }, "quota", observed)).toBe(true);
     expect(accountMetadataIsStale({ ...source, refreshState: { models: "fresh", quota: "stale" } }, "quota", observed)).toBe(true);
     expect(accountMetadataIsStale({ ...source, refreshState: { models: "fresh", quota: "unknown" } }, "quota", observed)).toBe(true);
+  });
+});
+
+describe("linked quota presentation", () => {
+  const now = 1_000_000;
+  const source = metadataAccount("codex", "codex", {
+    quota: { ...emptyQuota, primary: { ...primary, resetAtMs: now + 60_000, observedAtMs: now },
+      secondary: { ...primary, kind: "secondary", windowMinutes: 10_080,
+        availableBasisPoints: 0, resetAtMs: now + 86_400_000, observedAtMs: now }, updatedAtMs: now },
+    refreshState: { quota: "fresh", models: "fresh" },
+  });
+
+  test("fresh weekly exhaustion describes the reader without mutating SIWC", () => {
+    const siwc = metadataAccount("siwc", "siwc", { enabled: true, operationalStatus: "rotation" });
+    const inventory = [siwc, source];
+    const before = structuredClone(inventory);
+    expect(accountMetadataSources(siwc, inventory, now).quota).toBe(source);
+    expect(linkedAccountQuotaState(source, now)).toBe("weekly_exhausted");
+    expect(inventory).toEqual(before);
+    expect(siwc.quota.limitReached).toBe(false);
+    expect(siwc.operationalStatus).toBe("rotation");
+    expect(linkedAccountQuotaIndicator(siwc, source, now, "ready")).toEqual({ tone: "warning", warning: true });
+  });
+
+  test("linked warnings preserve errors, disabled state and recovery priority", () => {
+    const siwc = metadataAccount("siwc", "siwc");
+    for (const tone of ["error", "disabled", "info"] as const) {
+      expect(linkedAccountQuotaIndicator(siwc, source, now, tone)).toEqual({ tone, warning: false });
+    }
+    expect(linkedAccountQuotaIndicator(source, source, now, "ready")).toEqual({ tone: "ready", warning: false });
+    expect(linkedAccountQuotaIndicator(siwc, source, now + 60_000, "ready")).toEqual({ tone: "warning", warning: true });
+    const available = { ...source, quota: { ...source.quota, secondary: null } };
+    expect(linkedAccountQuotaIndicator(siwc, available, now, "ready")).toEqual({ tone: "ready", warning: false });
+  });
+
+  test("stale, failed, future and expired zeroes are not current exhaustion", () => {
+    expect(linkedAccountQuotaState(source, now + 20 * 60_000)).toBe("stale");
+    expect(linkedAccountQuotaState(source, now + 60_000)).toBe("stale");
+    expect(linkedAccountQuotaState(source, now - 1)).toBe("stale");
+    expect(linkedAccountQuotaState({ ...source, quotaRefreshStatus: "failed" }, now)).toBe("stale");
+    expect(linkedAccountQuotaState({ ...source, refreshState: { quota: "stale", models: "fresh" } }, now)).toBe("stale");
+  });
+
+  test("an exhausted short window or reported limit keeps a generic label", () => {
+    const short = { ...source, quota: { ...source.quota, secondary: null,
+      primary: { ...source.quota.primary!, availableBasisPoints: 0 } } };
+    expect(linkedAccountQuotaState(short, now)).toBe("exhausted");
+    expect(linkedAccountQuotaState({ ...source, quota: { ...source.quota, secondary: null, limitReached: true } }, now)).toBe("exhausted");
+  });
+
+  test("unknown, supplemental and rounded-down values do not exhaust ordinary quota", () => {
+    for (const remaining of [null, 1, 49, 1000]) {
+      const quota = { ...source.quota, secondary: { ...source.quota.secondary!, availableBasisPoints: remaining } };
+      expect(linkedAccountQuotaState({ ...source, quota }, now)).toBe("available");
+    }
+    expect(linkedAccountQuotaState({ ...source, quota: { ...source.quota, secondary: null,
+      supplemental: [{ id: "review", label: "Code review", window: { ...source.quota.primary!, availableBasisPoints: 0 } }] } }, now)).toBe("available");
   });
 });

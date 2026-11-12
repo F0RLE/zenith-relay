@@ -30,11 +30,27 @@ export function openCheckedFile(path, { directories = false, writable = false } 
   }
 }
 
-export function readCheckedText(path, io = fs) {
+export function readDescriptorText(fd, { maxBytes = Infinity } = {}, io = fs) {
+  const size = io.fstatSync(fd).size;
+  if (size > maxBytes) throw new Error("File exceeds the read limit");
+  const buffer = Buffer.alloc(size + 1);
+  let length = 0;
+  while (length < buffer.length) {
+    const count = io.readSync(fd, buffer, length, buffer.length - length, length);
+    if (count === 0) break;
+    length += count;
+  }
+  if (length > maxBytes) throw new Error("File exceeds the read limit");
+  return buffer.toString("utf8", 0, length);
+}
+
+export function readCheckedText(path, io = fs, { maxBytes } = {}) {
   const opened = openCheckedFile(path, {}, io);
   if (!opened) return null;
   try {
-    const text = io.readFileSync(opened.fd, "utf8");
+    const text = maxBytes === undefined
+      ? io.readFileSync(opened.fd, "utf8")
+      : readDescriptorText(opened.fd, { maxBytes }, io);
     if (!sameFileState(opened.stat, io.fstatSync(opened.fd, { bigint: true }))) throw fileChanged(path);
     return text;
   } finally {

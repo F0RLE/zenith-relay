@@ -2,7 +2,10 @@ mod claude_desktop;
 mod opencode_desktop;
 pub(crate) mod settings;
 
-pub(crate) use claude_desktop::{is_claude_desktop_running, launch_claude_desktop};
+pub(crate) use claude_desktop::{
+    is_claude_desktop_running, launch_claude_desktop,
+    model_identity_support as claude_desktop_model_identity_support,
+};
 pub(crate) mod hosted_preview;
 mod process;
 

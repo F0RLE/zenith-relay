@@ -50,14 +50,18 @@ async fn http_sse_websocket_and_images_report_local_overload_without_upstream_ac
         ))
         .await
         .unwrap();
-    let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let Message::Text(response) = response else {
-        panic!("expected a local error frame")
-    };
+    let response = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Text(response) => return response,
+                Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                Message::Pong(_) => {}
+                _ => panic!("expected a local error frame"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     let value: Value = serde_json::from_str(&response).unwrap();
     assert_eq!(
         value["error"]["code"],

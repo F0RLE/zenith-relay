@@ -39,7 +39,7 @@ impl GatewayRuntime {
         if local_key_id.is_empty() || account_id.is_empty() {
             return None;
         }
-        self.chatgpt_accounts.get(account_id)?;
+        self.account_state.executors.get(account_id)?;
         Some(AuthenticatedKey {
             id: local_key_id.to_string(),
             scope: Arc::new(RwLock::new(CandidateScope {

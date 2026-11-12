@@ -286,6 +286,28 @@ fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
         "spillover"
     );
 }
+
+#[test]
+fn late_prompt_spillover_stays_warm_without_replacing_a_newer_lower_quota_owner() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, remaining) in [("new-owner", 4_000), ("late-owner", 9_000)] {
+        let mut member = oauth_candidate(id);
+        member.quota = CandidateQuota::Available(remaining);
+        member.quota_updated_at_ms = Some(100);
+        scheduler.upsert(member);
+    }
+    assert!(scheduler.bind_prompt_affinity("session:late", "new-owner", 100));
+    let before = scheduler.prompt_affinity_snapshot("session:late", 100);
+    scheduler.remember_prompt_affinity_spillover("session:late", "late-owner", 101);
+    assert_eq!(
+        scheduler.prompt_affinity_snapshot("session:late", 101),
+        before
+    );
+    assert_eq!(
+        scheduler.prompt_affinity.alternatives("session:late", 101),
+        vec!["late-owner"]
+    );
+}
 #[test]
 fn response_affinity_is_mandatory() {
     let mut scheduler = PoolScheduler::new();

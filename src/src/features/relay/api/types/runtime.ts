@@ -8,7 +8,7 @@ import type {
   WakeHistory,
   WakeTask,
 } from "./activity";
-import type { PoolRoutingSnapshot } from "./pool";
+import type { PoolRoutingPolicy } from "./pool";
 
 export type CodexMemoryStage = "extraction" | "consolidation";
 
@@ -22,7 +22,7 @@ export type RuntimeSnapshot = {
   weeklyCapacityRevision?: number;
   gateway: {
     toolPolicy?: ToolPolicy;
-    poolRouting?: PoolRoutingSnapshot;
+    poolRouting?: PoolRoutingPolicy;
     running: boolean;
     baseUrl: string;
     candidateCount: number;

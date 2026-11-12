@@ -1,12 +1,12 @@
 use super::super::compatibility::{
-    AdapterRejection, RouteCompatibility, incompatible_routes, record_adapter_rejection,
+    RejectedRequest, RouteCompatibility, incompatible_routes, record_adapter_rejection,
 };
 use super::RequestExecution;
 use super::drive::{AttemptCarry, DriveAttemptInput, DrivenAttempt, drive_selected_attempt};
 use super::prelude::*;
 use super::recovery::{adapter_error_response, request_has_previous_response_id};
 use super::selection::{SelectionMiss, SelectionMissInput, handle_selection_miss};
-use super::state::AttemptState;
+use crate::gateway::response::attach_request_id;
 
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
@@ -14,7 +14,9 @@ pub(in crate::gateway::execution) async fn execute_request(
     let scope = context
         .runtime
         .track_request_usage(&context.request_id, &context.budget);
-    let response = execute_request_inner(context).await;
+    let request_id = context.request_id.clone();
+    let mut response = execute_request_inner(context).await;
+    attach_request_id(&mut response, &request_id);
     let streaming = response.status().is_success()
         && response
             .headers()
@@ -40,23 +42,15 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         forwarded_headers,
         client_context_id,
         client_affinity_id,
-        response_affinity_key,
-        requires_affinity_owner,
+        mut state,
         client_wire_api,
         responses_lite,
         allow_previous_response_reset,
-        attempt_offset,
         budget,
         transport,
         transport_fallback,
         mut reserved_candidate,
     } = context;
-    let mut state = AttemptState::new(
-        attempt_offset,
-        response_affinity_key,
-        requires_affinity_owner,
-        &request,
-    );
     let mut prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -109,6 +103,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         // selection stops at its already-tried owner despite healthy routes.
         // Opaque response references and unpaired tool outputs stay pinned.
         if !state.continuation.requires_affinity_owner
+            && budget.retry_candidate_deadline().is_none()
             && state
                 .retry
                 .last_failure
@@ -180,20 +175,11 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 client_wire_api,
                 stream,
                 request_json: &mut request,
-                response_affinity_key: &mut state.continuation.response_affinity_key,
-                requires_affinity_owner: &mut state.continuation.requires_affinity_owner,
+                state: &mut state,
                 allow_previous_response_reset,
                 has_previous_response_id,
-                has_unpaired_tool_output: &mut state.continuation.has_unpaired_tool_output,
-                repairs: &mut state.continuation.repairs,
-                tried: &mut state.retry.tried,
                 retry_context: &retry_context,
-                last_failure: &state.retry.last_failure,
-                has_preparation_error: !state.retry.preparation_exclusions.is_empty(),
-                last_adapter_error: &mut state.retry.last_adapter_error,
                 retry_until_available,
-                attempt: state.retry.attempt,
-                retry_window_expired: state.retry.window_expired,
             })
             .await
             {
@@ -207,12 +193,12 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 SelectionMiss::AdapterError(error) => {
                     record_adapter_rejection(
                         &runtime,
-                        AdapterRejection {
+                        RejectedRequest {
                             request_id: &request_id,
                             attempt: state.retry.attempt,
                             local_key_id: &key.id,
                             requested_model: &requested_model,
-                            resolved_model: &resolved_model,
+                            resolved_model: Some(&resolved_model),
                             client_context_id: client_context_id.as_deref(),
                             wire_api: client_wire_api,
                             transport,
@@ -301,6 +287,9 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             &resolved_model,
             now_ms(),
         ) {
+            state.continuation.clear_materialized();
+            state.continuation.confirmed_response_missing = false;
+            state.retry.tried.clear();
             return Box::pin(execute_request(RequestExecution {
                 tool_policy,
                 runtime,
@@ -314,12 +303,10 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 forwarded_headers,
                 client_context_id,
                 client_affinity_id,
-                response_affinity_key: None,
-                requires_affinity_owner: false,
+                state,
                 client_wire_api,
                 responses_lite,
                 allow_previous_response_reset: false,
-                attempt_offset: state.retry.attempt,
                 budget,
                 transport,
                 transport_fallback,
@@ -339,12 +326,12 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
     {
         record_adapter_rejection(
             &runtime,
-            AdapterRejection {
+            RejectedRequest {
                 request_id: &request_id,
                 attempt: state.retry.attempt,
                 local_key_id: &key.id,
                 requested_model: &requested_model,
-                resolved_model: &resolved_model,
+                resolved_model: Some(&resolved_model),
                 client_context_id: client_context_id.as_deref(),
                 wire_api: client_wire_api,
                 transport,

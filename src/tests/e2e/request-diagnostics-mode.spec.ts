@@ -13,7 +13,10 @@ for (const locale of ["en", "ru"] as const) {
         routing: {
           reason: "only_eligible", eligibleCandidates: 1, quotaRemainingBasisPoints: 4000,
           inFlightBefore: 0, dispatchesBefore: 16, endpointKind: "excel_basis_points",
-          transport: { upstream: "http", mode: "basis_points", requestPreparationMs: 20, requestPreparation: { bodyMs: 10 } },
+          transport: { upstream: "http", mode: "basis_points", requestPreparationMs: 20, requestPreparation: {
+            bodyMs: 10, attachmentsMs: 10,
+            attachments: { credentialMs: 0, stagingMs: 2, resolveMs: 8, imageCount: 4, fileReferences: 1, uploadedImages: 1, uploadedBytes: 1024, reusedImages: 2 },
+          } },
         },
         toolUse: {
           ...completedUsage.toolUse,
@@ -28,8 +31,20 @@ for (const locale of ["en", "ru"] as const) {
       await expect(dialog.locator(".request-token-details")).toBeVisible();
       await dialog.locator(".request-technical-details > summary").click();
       await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeVisible();
-      for (const selector of [".request-route-section", ".request-context-section", ".request-tool-details"]) {
+      for (const selector of [".request-route-section", ".request-context-section", ".request-tool-details", ".request-attachment-details"]) {
         await expect(dialog.locator(selector)).toHaveCount(debug ? 1 : 0);
+      }
+      if (debug) {
+        await dialog.locator(".request-attachment-details > summary").click();
+        const details = dialog.locator(".request-attachment-details");
+        await expect(details.locator("dd").nth(0)).toHaveText(locale === "en" ? "0 ms" : "0 мс");
+        await expect(details.locator("dd").nth(3)).toHaveText("4");
+        await expect(details.locator("dd").nth(4)).toHaveText("1");
+        await expect(details.locator("dd").nth(5)).toHaveText("1");
+        await expect(details.locator("dd").nth(6)).toHaveText("2");
+        await page.setViewportSize({ width: 390, height: 900 });
+        expect(await details.locator("dt, dd").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1))).toBe(true);
+        await details.screenshot({ path: `output/playwright/attachment-details-${locale}.png` });
       }
       expect(await dialog.locator(".relay-dialog-body, .request-details-list dd").evaluateAll((items) =>
         items.every((item) => item.scrollWidth <= item.clientWidth + 1))).toBe(true);

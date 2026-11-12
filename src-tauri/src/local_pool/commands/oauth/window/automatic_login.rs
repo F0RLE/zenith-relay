@@ -14,7 +14,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use url::Url;
 
-const DRIVER: &str = include_str!("automatic_login.js");
+const DRIVER: &str = include_str!("automatic_login.cjs");
 const EVALUATION_TIMEOUT_MS: u64 = 2_000;
 const AUTOMATION_TIMEOUT_MS: u64 = 45_000;
 const FORM_LOAD_GRACE_MS: u64 = 5_000;
@@ -138,7 +138,10 @@ fn script(
         email,
     })
     .ok()?;
-    Some(format!("({DRIVER})({input})"))
+    Some(format!(
+        "(() => {{const module = {{exports: null}}; {DRIVER};return module.exports({},{input});}})()",
+        crate::local_pool::auth_page_patterns::JSON
+    ))
 }
 
 async fn evaluate(window: &WebviewWindow, script: String) -> Option<Stage> {
@@ -352,7 +355,7 @@ mod tests {
         let value = "synthetic-secret\"\\\n);throw new Error('not code')";
         let filled = script(&url, Some("password"), Some(value), None, 2_000, 5_000).unwrap();
         assert!(filled.ends_with(&format!(
-            "\"value\":{}}})",
+            "\"value\":{}}});}})()",
             serde_json::to_string(value).unwrap()
         )));
     }

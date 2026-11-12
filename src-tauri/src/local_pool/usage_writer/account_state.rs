@@ -8,6 +8,33 @@ use zenith_relay_core::{
     },
     error_codes,
 };
+
+pub(super) struct AccountUsageGuard<'a> {
+    _account: super::super::accounts::authority::ProcessAccountGuard,
+    _revision: Option<zenith_relay_core::accounts::TokenDispatchRevisionGuard<'a>>,
+}
+
+pub(super) fn current_account_usage<'a, B: SecretBackend>(
+    credentials: &CredentialStore<B>,
+    locks: &super::super::accounts::authority::ProcessAccountLocks,
+    event: &'a UsageEvent,
+) -> Option<AccountUsageGuard<'a>> {
+    let account_id = event.account_id.as_deref()?;
+    let account = locks.try_acquire(account_id).ok()??;
+    let revision = match (
+        event.account_token_generation,
+        event.account_token_revision.as_ref(),
+    ) {
+        (Some(_), Some(revision)) => Some(revision.guard()?),
+        (None, None) if credentials.load(account_id).ok()??.is_agent_identity() => None,
+        _ => return None,
+    };
+    Some(AccountUsageGuard {
+        _account: account,
+        _revision: revision,
+    })
+}
+
 pub(super) fn expire_account_access<B: SecretBackend>(
     credentials: &CredentialStore<B>,
     account_id: &str,

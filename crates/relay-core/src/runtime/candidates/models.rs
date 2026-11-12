@@ -10,7 +10,7 @@ impl GatewayRuntime {
     /// The scheduler lock also serializes this edit with final dispatch and
     /// model-list projection; old unstarted leases are rechecked there.
     pub fn update_account_models(&self, account_id: &str, models: &[String]) -> bool {
-        let Some(account) = self.chatgpt_accounts.get(account_id) else {
+        let Some(account) = self.account_state.executors.get(account_id) else {
             return false;
         };
         let configured_models = normalized_set(models.iter());
@@ -65,7 +65,7 @@ impl GatewayRuntime {
         if changed {
             // Transport cards describe the old inventory.
             // A removed and later reintroduced slug needs fresh evidence.
-            crate::poison::mutex(&self.model_metadata.codex_manifests).remove(account_id);
+            crate::poison::mutex(&self.provider_metadata.codex_manifests).remove(account_id);
         }
         drop(scheduler);
         self.candidate_availability.notify_waiters();

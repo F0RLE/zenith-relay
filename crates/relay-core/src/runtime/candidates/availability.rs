@@ -2,6 +2,16 @@ use super::super::GatewayRuntime;
 use crate::{CandidateHealth, CandidateQuota, CandidateQuotaState};
 
 impl GatewayRuntime {
+    pub fn set_account_spend_deadlines(
+        &self,
+        mut deadlines: std::collections::BTreeMap<String, crate::quota::QuotaSpendDeadline>,
+    ) {
+        deadlines.retain(|id, _| self.account_state.executors.contains_key(id));
+        if self.lock_scheduler().set_spend_deadlines(deadlines) {
+            self.candidate_availability.notify_waiters();
+        }
+    }
+
     pub fn invalidate_account_quota_reference_source(&self, account_id: &str) {
         if self
             .lock_scheduler()

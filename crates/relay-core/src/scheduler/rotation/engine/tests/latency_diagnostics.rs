@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn superseded_authorization_releases_capacity_without_health_latency_or_recovery_credit() {
+    for health in [
+        HealthObservation::Success,
+        HealthObservation::CountableTransient {
+            provider_not_before_ms: None,
+        },
+        HealthObservation::Cancelled,
+        HealthObservation::Unknown,
+    ] {
+        let mut engine = engine_with([candidate("a", 0, 1)]);
+        engine.recovery_credits = 0;
+        engine.successful_requests_since_recovery = engine
+            .recovery_policy
+            .successful_requests_per_credit
+            .saturating_sub(1);
+        let lease = engine.reserve(&request(1), 0).unwrap();
+        let budget = dispatch(&mut engine, &lease);
+        let settlement = engine
+            .settle_with_latency(
+                lease.lease_id,
+                AttemptObservation {
+                    execution: ExecutionObservation::committed(),
+                    health,
+                },
+                &budget,
+                10,
+                Some(100),
+                false,
+            )
+            .unwrap();
+        assert!(!settlement.observation_current);
+        assert_eq!(engine.candidates["a"].in_flight, 0);
+        assert_eq!(engine.circuit("a", "responses:gpt").failure_streak, 0);
+        assert_eq!(
+            engine
+                .latency_diagnostics("a", "responses:gpt", 10)
+                .sample_count,
+            0
+        );
+        assert_eq!(engine.recovery_credits, 0);
+    }
+}
+
+#[test]
 fn latency_diagnostics_isolate_candidates_and_routes() {
     let mut a = candidate("a", 0, 1);
     a.add_route("image:gpt", "gpt-image", RotationOperation::Image);
@@ -39,11 +83,11 @@ fn successful_unknown_ttft_is_counted_once_and_keeps_selection_ewma() {
         health: HealthObservation::Success,
     };
     engine
-        .settle_with_latency(lease.lease_id, success, &budget, 20, None)
+        .settle_with_latency(lease.lease_id, success, &budget, 20, None, true)
         .unwrap();
     assert!(
         engine
-            .settle_with_latency(lease.lease_id, success, &budget, 20, None)
+            .settle_with_latency(lease.lease_id, success, &budget, 20, None, true)
             .is_err()
     );
     let diagnostics = engine.latency_diagnostics("a", "responses:gpt", 20);
@@ -84,6 +128,7 @@ fn route_replacement_clears_samples_and_fences_the_previous_route() {
             &budget,
             20,
             Some(200),
+            true,
         )
         .unwrap();
     assert!(!settlement.observation_current);
@@ -124,6 +169,7 @@ fn unsuccessful_attempts_do_not_become_latency_samples() {
                 &budget,
                 10,
                 Some(5),
+                true,
             )
             .unwrap();
         let diagnostics = engine.latency_diagnostics("a", "responses:gpt", 10);

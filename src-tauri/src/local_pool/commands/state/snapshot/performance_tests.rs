@@ -10,7 +10,8 @@ pub(super) fn print_stages(stages: &[PerformanceSample<'_>]) {
     if std::env::var_os("RELAY_MEASURE_SNAPSHOT_STAGES").is_some() {
         for sample in stages {
             println!(
-                "snapshot_stage stage={} elapsed_ms={:.2}",
+                "{} context={} elapsed_ms={:.2}",
+                sample.name,
                 sample.context.unwrap_or_default(),
                 sample.duration_ms
             );
@@ -87,6 +88,52 @@ async fn measure_full_snapshot_projection() {
         );
     }
     state.gateway.stop().await;
+    remove_measurement_root(state, root).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "synthetic store-lock timing; no provider requests or real credentials"]
+async fn measure_snapshot_store_lock_wait() {
+    use std::{sync::mpsc, time::Duration};
+
+    let root = crate::files::test_temp_root("snapshot-store-lock-timing");
+    let state = DesktopState::open(root.clone()).unwrap();
+    let started = Instant::now();
+    let baseline = state.snapshot_inputs().await.unwrap();
+    let baseline_elapsed = started.elapsed();
+    assert!(baseline.store_lock_wait <= baseline_elapsed);
+    println!(
+        "snapshot_store_lock phase=uncontended elapsed_ms={:.3} lock_wait_ms={:.3}",
+        baseline_elapsed.as_secs_f64() * 1_000.0,
+        baseline.store_lock_wait.as_secs_f64() * 1_000.0,
+    );
+
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let writer_state = state.clone();
+    let writer = std::thread::spawn(move || {
+        let _store = writer_state.store().unwrap();
+        locked_tx.send(()).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    locked_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let started = Instant::now();
+    started_tx.send(()).unwrap();
+    let contended = state.snapshot_inputs().await.unwrap();
+    let elapsed = started.elapsed();
+    writer.join().unwrap();
+    println!(
+        "snapshot_store_lock phase=contended elapsed_ms={:.3} lock_wait_ms={:.3}",
+        elapsed.as_secs_f64() * 1_000.0,
+        contended.store_lock_wait.as_secs_f64() * 1_000.0,
+    );
+    assert!(contended.store_lock_wait >= Duration::from_millis(50));
+    assert!(contended.store_lock_wait <= elapsed);
+    remove_measurement_root(state, root).await;
+}
+
+async fn remove_measurement_root(state: DesktopState, root: std::path::PathBuf) {
     drop(state);
     // Optional metric jobs may briefly own SQLite after the state is dropped.
     for attempt in 0..20 {

@@ -35,8 +35,8 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
         Arc::new(|_| {}),
     )
     .unwrap();
-    assert_eq!(runtime.source_candidate_bindings.len(), 1);
-    let binding = &runtime.source_candidate_bindings["multi"];
+    assert_eq!(runtime.source_state.candidate_bindings.len(), 1);
+    let binding = &runtime.source_state.candidate_bindings["multi"];
     assert_eq!(binding.routes.len(), WireApi::ALL.len() * 2);
     let protocols = binding
         .routes
@@ -59,6 +59,7 @@ fn cooldowns_share_one_upstream_across_client_bindings() {
 
                 retry_at_ms: 1000,
                 reason,
+                provider_clock: None,
             }
         ));
         let mut scheduler = runtime.lock_scheduler();
@@ -81,7 +82,7 @@ async fn pool_rotation_capacity_waits_wake_without_rebuilding_the_runtime() {
             (crate::PoolMemberKind::Source, "source-b".into(), 0, 1),
         ],
     );
-    policy.mode = crate::PoolRoutingMode::InOrder;
+    policy.mode = crate::PoolRoutingMode::RoundRobin;
     for member in &mut policy.members {
         member.max_concurrency = 1;
     }
@@ -363,7 +364,8 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &exhausted_headers,
         1_000,
@@ -389,7 +391,8 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
 
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &recovered_headers,
         3_000,
@@ -408,6 +411,78 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
             .take_passive_quota_snapshot("account-1", 3_001)
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn image_http_responses_cannot_overwrite_the_text_quota_ledger() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let _revision = usage_revision(&runtime);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(|| async {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("100"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        (headers, "{}")
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let before = crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
+        .snapshot
+        .clone();
+    for path in ["/v1/images/generations", "/v1/images/edits"] {
+        let response = runtime
+            .send_authorized_request(
+                "account-1",
+                client.get(format!("http://{address}{path}")),
+                authorization::AuthorizationDispatch {
+                    client_version: None,
+                    identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                    turn_scope: None,
+                    budget: None,
+                    lease: None,
+                    usage_event: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(response.response.status().is_success());
+        assert_eq!(
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"].snapshot,
+            before
+        );
+    }
+    runtime
+        .send_authorized_request(
+            "account-1",
+            client.get(format!("http://{address}/v1/responses")),
+            authorization::AuthorizationDispatch {
+                client_version: None,
+                identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                turn_scope: None,
+                budget: None,
+                lease: None,
+                usage_event: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
+            .snapshot
+            .primary
+            .as_ref()
+            .unwrap()
+            .available_basis_points,
+        Some(0),
+    );
+    server.abort();
 }
 #[test]
 fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
@@ -438,7 +513,8 @@ fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -485,7 +561,8 @@ fn passive_windows_keep_admission_and_visible_headroom_in_sync() {
         }
         assert!(runtime.observe_codex_quota_headers(
             "account-1",
-            None,
+            Some(1),
+            Some(&usage_revision(&runtime)),
             reqwest::StatusCode::OK,
             &headers,
             observed,
@@ -532,7 +609,8 @@ fn fresh_window_headers_do_not_revive_an_expired_credit_ledger() {
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         now_ms,
@@ -554,7 +632,8 @@ fn complete_ledger_refresh_can_follow_newer_passive_windows_without_replacing_th
     );
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000
@@ -603,7 +682,8 @@ fn newer_secondary_refresh_preserves_and_persists_live_primary_exhaustion() {
     headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -648,7 +728,8 @@ fn same_clock_refresh_cannot_replace_dirty_passive_quota() {
     headers.insert("x-codex-primary-used-percent", "100".parse().unwrap());
     assert!(runtime.observe_codex_quota_headers(
         "account-1",
-        None,
+        Some(1),
+        Some(&usage_revision(&runtime)),
         reqwest::StatusCode::OK,
         &headers,
         3_000,
@@ -683,7 +764,8 @@ fn quota_429_does_not_turn_a_slot_into_permanent_exhaustion() {
             source_id: "openai-codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
-            account_token_generation: None,
+            account_token_generation: Some(1),
+            account_token_revision: Some(usage_revision(&runtime)),
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),
@@ -757,7 +839,8 @@ fn reported_quota_exhaustion_zeroes_an_open_primary_window_without_inventing_a_l
             source_id: "openai-codex".into(),
             candidate_id: Some("account-1".into()),
             account_id: Some("account-1".into()),
-            account_token_generation: None,
+            account_token_generation: Some(1),
+            account_token_revision: Some(usage_revision(&runtime)),
             client_context_id: None,
             routing: None,
             requested_model: Some("gpt-test".into()),

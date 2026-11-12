@@ -128,6 +128,23 @@ pub(in crate::local_pool::accounts) async fn refresh_manual_account_quota(
     refresh_account_quota_once(state, &target).await
 }
 
+/// Reset verification owns its provider read while holding the redemption
+/// coordinator; joining a quota job waiting for that coordinator would deadlock.
+pub(in crate::local_pool::accounts) async fn verify_reset_account_quota(
+    state: &DesktopState,
+    fence: &crate::local_pool::store::AccountRefreshFence,
+) -> LocalResult<AccountQuotaRefreshResponse> {
+    state.store()?.ensure_account_refresh_current(fence)?;
+    let target = quota_refresh_targets(state, std::slice::from_ref(&fence.account_id))?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| fence.account_id.clone());
+    let scope = AccountRefreshScope::capture(state, &target).await?;
+    let response = read_account_quota_once(state, &scope, true).await?;
+    state.store()?.ensure_account_refresh_current(fence)?;
+    Ok(response)
+}
+
 pub(crate) async fn prepare_account_credentials(
     state: &DesktopState,
     account_id: &str,

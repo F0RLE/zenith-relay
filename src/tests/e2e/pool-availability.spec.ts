@@ -84,6 +84,9 @@ for (const locale of ["ru", "en"] as const) {
     const phases = [
       { state: "monitoring", tone: "warning" },
       { state: "cooldown", tone: "warning" },
+      { state: "rateLimit", tone: "warning" },
+      { state: "busy", tone: "warning" },
+      { state: "draining", tone: "disabled" },
       { state: "recovering", tone: "info" },
       { state: "healthy", tone: "ready" },
       { state: "blocked", tone: "error" },
@@ -97,7 +100,11 @@ for (const locale of ["ru", "en"] as const) {
         const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
         const runtime = await invoke("get_local_runtime_state") as RuntimeSnapshot;
         const account = runtime.accounts[0]!;
-        account.operationalStatus = state === "cooldown" || state === "blocked" ? "unavailable" : "rotation";
+        const waiting = state === "cooldown" || state === "rateLimit" || state === "busy" || state === "draining";
+        account.operationalStatus = waiting || state === "blocked" ? "unavailable" : "rotation";
+        account.draining = state === "draining";
+        if (account.quota.primary) account.quota.primary.availableBasisPoints = 10_000;
+        if (account.quota.secondary) account.quota.secondary.availableBasisPoints = 10_000;
         account.proxyAvailable = state !== "blocked";
         account.routingBlockReason = state === "blocked" ? "proxy_unavailable" : null;
         account.lastErrorCode = state === "cooldown" || state === "blocked" ? "upstream_transport_connect" : null;
@@ -109,7 +116,9 @@ for (const locale of ["ru", "en"] as const) {
           available: account.operationalStatus === "rotation",
           halfOpen: state === "recovering",
           nextForNewRequest: account.operationalStatus === "rotation",
-          nextRetryAtMs: state === "cooldown" ? Date.now() + 60_000 : null,
+          nextRetryAtMs: state === "cooldown" || state === "rateLimit" ? Date.now() + 60_000 : null,
+          capacityWait: state === "busy",
+          quotaWait: false,
         }));
         scope.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
           if (command === "get_local_runtime_state") return structuredClone(runtime);
@@ -120,6 +129,14 @@ for (const locale of ["ru", "en"] as const) {
       await emitTauriEvent(page, "zenith-state-changed", null);
       const poolIcon = page.locator('.pool-member-card[data-member-label="Fixture 1"] .pool-member-kind-icon');
       await expect(poolIcon).toHaveAttribute("data-status", tone);
+      const statusLabel = state === "cooldown" || state === "rateLimit"
+        ? locale === "ru" ? "Ожидает повтора" : "Waiting to retry"
+        : state === "busy"
+          ? locale === "ru" ? "Занят" : "At capacity"
+          : state === "draining"
+            ? locale === "ru" ? "Завершает запросы" : "Finishing requests"
+            : state === "healthy" ? locale === "ru" ? "В ротации" : "In rotation" : null;
+      if (statusLabel) await expect(poolIcon).toHaveAttribute("aria-label", new RegExp(statusLabel));
       const monitoringLabel = locale === "ru" ? "Время ожидания обновления квоты истекло" : "Quota refresh timed out";
       if (state === "monitoring") {
         await expect(poolIcon).toHaveAttribute("aria-label", monitoringLabel);
@@ -128,6 +145,7 @@ for (const locale of ["ru", "en"] as const) {
       await page.getByRole("button", { name: connectionsName, exact: true }).click();
       const connectionIcon = page.locator(".account-card").filter({ hasText: "Fixture 1" }).locator(".account-kind-icon");
       await expect(connectionIcon).toHaveAttribute("data-status", tone);
+      if (statusLabel) await expect(connectionIcon).toHaveAttribute("aria-label", new RegExp(statusLabel));
       if (state === "monitoring") await expect(connectionIcon).toHaveAttribute("aria-label", monitoringLabel);
     }
   });

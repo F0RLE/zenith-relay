@@ -98,6 +98,18 @@ pub(in crate::gateway) fn incompatible_routes(
                 // permission and enforcement of an explicit single-call limit.
                 let supported =
                     capability.protocol_features_for_route(route.route_capability.as_ref());
+                if client == WireApi::Messages
+                    && route.adapter.is_passthrough()
+                    && capability.interleaved_system == Some(false)
+                    && request
+                        .get("messages")
+                        .and_then(Value::as_array)
+                        .is_some_and(|messages| {
+                            messages.iter().any(|message| message["role"] == "system")
+                        })
+                {
+                    return Err(AdapterError::parameter_unsupported_for("messages[].role"));
+                }
                 if let Some(feature) = features
                     .iter()
                     .find(|feature| supported.get(feature) == Some(&CapabilityStatus::Unsupported))
@@ -129,6 +141,9 @@ pub(in crate::gateway) fn incompatible_routes(
             // every candidate; execution still prepares it after reservation.
             // Messages must validate its configured cache TTL before admission.
             if route.adapter.is_passthrough() && client != WireApi::Messages {
+                if route.account_transport == AccountTransport::Siwc {
+                    crate::providers::chatgpt::validate_siwc_client_request(request)?;
+                }
                 return route
                     .adapter
                     .validate(client, route.reasoning_mode)
@@ -157,6 +172,9 @@ pub(in crate::gateway) fn incompatible_routes(
                 },
                 &capability,
             )?;
+            if route.account_transport == AccountTransport::Siwc {
+                crate::providers::chatgpt::validate_siwc_client_request(prepared.upstream_body())?;
+            }
             if route.account_transport == AccountTransport::ExcelBasisPoints
                 && let Some(error) =
                     super::basis_points::output_format_error(prepared.upstream_body())
@@ -179,12 +197,12 @@ pub(in crate::gateway) fn incompatible_routes(
     (excluded, admitted, last_error)
 }
 
-pub(in crate::gateway) struct AdapterRejection<'a> {
+pub(in crate::gateway) struct RejectedRequest<'a> {
     pub request_id: &'a str,
     pub attempt: u16,
     pub local_key_id: &'a str,
     pub requested_model: &'a str,
-    pub resolved_model: &'a str,
+    pub resolved_model: Option<&'a str>,
     pub client_context_id: Option<&'a str>,
     pub wire_api: WireApi,
     pub transport: crate::UsageTransport,
@@ -195,7 +213,7 @@ pub(in crate::gateway) struct AdapterRejection<'a> {
 /// without inventing a provider attempt, tokens, or a health/quota failure.
 pub(in crate::gateway) fn record_adapter_rejection(
     runtime: &GatewayRuntime,
-    request: AdapterRejection<'_>,
+    request: RejectedRequest<'_>,
     error: &AdapterError,
     latency_ms: u64,
 ) {
@@ -208,7 +226,49 @@ pub(in crate::gateway) fn record_adapter_rejection(
         .parameter()
         .map(|parameter| format!("{error} (parameter: {parameter})"))
         .unwrap_or_else(|| error.to_string());
-    let event = crate::UsageEvent {
+    let mut event = local_rejection_event(request, http_status, error.code(), latency_ms);
+    event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+        Some(http_status),
+        &serde_json::json!({"error": {
+            "code": error.code(), "type": "relay_adapter", "message": message,
+            "param": error.parameter()
+        }}),
+    ));
+    crate::gateway::response::emit_usage(runtime, event);
+}
+
+pub(in crate::gateway) fn record_continuation_rejection(
+    runtime: &GatewayRuntime,
+    request: RejectedRequest<'_>,
+    latency_ms: u64,
+) {
+    use crate::gateway::continuation::{
+        RESPONSE_CONTINUATION_UNAVAILABLE_CODE, RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
+    };
+    let mut event = local_rejection_event(
+        request,
+        409,
+        RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+        latency_ms,
+    );
+    event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+        Some(409),
+        &serde_json::json!({"error": {
+            "code": RESPONSE_CONTINUATION_UNAVAILABLE_CODE,
+            "type": "relay_continuation",
+            "message": RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE
+        }}),
+    ));
+    crate::gateway::response::emit_usage(runtime, event);
+}
+
+fn local_rejection_event(
+    request: RejectedRequest<'_>,
+    http_status: u16,
+    code: &str,
+    latency_ms: u64,
+) -> crate::UsageEvent {
+    crate::UsageEvent {
         request_id: request.request_id.to_owned(),
         attempt: request.attempt,
         local_key_id: request.local_key_id.to_owned(),
@@ -216,10 +276,11 @@ pub(in crate::gateway) fn record_adapter_rejection(
         candidate_id: None,
         account_id: None,
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: request.client_context_id.map(str::to_owned),
         routing: None,
         requested_model: Some(request.requested_model.to_owned()),
-        resolved_model: Some(request.resolved_model.to_owned()),
+        resolved_model: request.resolved_model.map(str::to_owned),
         requested_reasoning_effort: None,
         effective_reasoning_effort: None,
         wire_api: request.wire_api,
@@ -228,7 +289,7 @@ pub(in crate::gateway) fn record_adapter_rejection(
         applied_service_tier: None,
         success: false,
         http_status,
-        error_category: Some(error.code().to_owned()),
+        error_category: Some(code.to_owned()),
         tool_use: Default::default(),
         cooldown_scope: None,
         retry_at_ms: None,
@@ -243,19 +304,10 @@ pub(in crate::gateway) fn record_adapter_rejection(
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
-        // Reuse the bounded, redacted error envelope for local diagnostics.
-        // Source remains Relay; no request values or provider attempt are added.
-        upstream_error: Some(crate::usage::UpstreamErrorDetails::from_value(
-            Some(http_status),
-            &serde_json::json!({"error": {
-                "code": error.code(), "type": "relay_adapter", "message": message,
-                "param": error.parameter()
-            }}),
-        )),
+        upstream_error: None,
         quota_snapshot: None,
         image_usage: None,
-    };
-    crate::gateway::response::emit_usage(runtime, event);
+    }
 }
 
 pub(super) fn basis_points_route_error(

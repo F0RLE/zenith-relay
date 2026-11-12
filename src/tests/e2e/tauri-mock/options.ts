@@ -31,6 +31,8 @@ export type AccountMockOptions = {
   accountLabel?: string;
   accountRouteKinds?: Array<NonNullable<AccountSummary["oauthClientKind"]>>;
   accountRoutesGrouped?: boolean;
+  accountRouteGroups?: Array<{ members: number[]; selected: number }>;
+  accountRouteReauthIndexes?: number[];
   accountRouteSelectError?: boolean;
   oauthCompletedRouteKind?: NonNullable<AccountSummary["oauthClientKind"]>;
   accountOAuthClientKind?: AccountSummary["oauthClientKind"];
@@ -105,6 +107,7 @@ export type UsageMockOptions = {
   usageFailure?: boolean;
   usageTiming?: { latencyMs: number; ttftMs: number | null; generationMs: number | null };
   usageUpstreamError?: UpstreamErrorDetails;
+  usageTransportDiagnostics?: RoutingDiagnostics["transport"];
   usageUnpricedTokens?: number;
   usageCandidateKind?: "account" | "source";
   usageRequestedModel?: string;
@@ -170,7 +173,6 @@ export type PoolMockOptions = {
   nextCandidateId?: string | null;
   routingHeadroom?: Record<string, NonNullable<CandidateRuntimeSnapshot["resourceHeadroom"]>>;
   gatewayRunning?: boolean;
-  rotationVersion?: 1 | 2 | 3;
   chatgptRetryUntilAvailable?: boolean;
   blockDegradedRoutesEnabled?: boolean;
   poolMembers?: boolean;
@@ -195,7 +197,6 @@ export type PoolMockOptions = {
     inputLimit?: number;
     outputLimit?: number;
   }>;
-  manualReasoningFallbackModels?: string[];
 };
 
 export type ProxyMockOptions = {

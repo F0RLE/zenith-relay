@@ -1,5 +1,7 @@
 use super::*;
 
+mod chat_display;
+
 fn request() -> Value {
     json!({"messages":[{"role":"user","content":"Update the synthetic file."}],
         "max_tokens":4096,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"},
@@ -14,9 +16,21 @@ fn reply() -> Value {
 }
 
 fn assert_reasoning_tool_roundtrip(completed: &TranslatedResponse, native: &Value) {
+    assert_reasoning_tool_roundtrip_display(
+        completed,
+        native,
+        native["output"][0]["summary"] != json!([]),
+    );
+}
+
+fn assert_reasoning_tool_roundtrip_display(
+    completed: &TranslatedResponse,
+    native: &Value,
+    visible: bool,
+) {
     let body = &completed.response_body;
     let content = body["content"].as_array().unwrap();
-    if native["output"][0]["summary"] == json!([]) {
+    if !visible {
         assert_eq!(content.len(), 1);
     } else {
         assert_eq!(content.len(), 2);
@@ -324,10 +338,24 @@ fn response_events(response: &Value) -> Vec<Value> {
 }
 
 fn stream_response(response: &Value) -> (crate::AdapterStreamBridge, Vec<Value>) {
-    let mut stream = prepare(WireApi::Messages, WireApi::Responses, &request(), true)
+    stream_response_for(&request(), response)
+}
+
+fn stream_response_for(
+    request: &Value,
+    response: &Value,
+) -> (crate::AdapterStreamBridge, Vec<Value>) {
+    stream_events_for(request, response_events(response))
+}
+
+fn stream_events_for(
+    request: &Value,
+    events: Vec<Value>,
+) -> (crate::AdapterStreamBridge, Vec<Value>) {
+    let mut stream = prepare(WireApi::Messages, WireApi::Responses, request, true)
         .into_stream_bridge()
         .unwrap();
-    for event in response_events(response) {
+    for event in events {
         stream.push(format!("data: {event}\n\n").as_bytes());
     }
     stream.finish();
@@ -347,6 +375,223 @@ fn stream_response(response: &Value) -> (crate::AdapterStreamBridge, Vec<Value>)
         .map(|data| serde_json::from_str(data).unwrap())
         .collect();
     (stream, events)
+}
+
+#[test]
+fn messages_omitted_thinking_keeps_effort_usage_and_native_tool_replay_in_json_and_sse() {
+    let mut hidden = request();
+    hidden["model"] = json!("test");
+    hidden["thinking"]["display"] = json!("omitted");
+    let baseline = prepare(WireApi::Messages, WireApi::Responses, &request(), false);
+    let prepared = prepare(WireApi::Messages, WireApi::Responses, &hidden, false);
+    assert_eq!(prepared.upstream_body(), baseline.upstream_body());
+    let native = reply();
+    let json = prepared
+        .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_reasoning_tool_roundtrip_display(json.translated_response(), &native, false);
+    let (stream, events) = stream_response_for(&hidden, &native);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.to_string().contains("Plan the edit."))
+    );
+    let mut starts = 0;
+    let mut stops = 0;
+    for event in &events {
+        if let Some("content_block_start" | "content_block_delta" | "content_block_stop") =
+            event["type"].as_str()
+        {
+            assert_eq!(event["index"], 0);
+            starts += usize::from(event["type"] == "content_block_start");
+            stops += usize::from(event["type"] == "content_block_stop");
+        }
+    }
+    assert_eq!((starts, stops), (1, 1));
+    let completed = stream.completed().unwrap();
+    assert_reasoning_tool_roundtrip_display(completed, &native, false);
+    assert_eq!(
+        completed.response_body,
+        json.translated_response().response_body
+    );
+    let passthrough = prepare(WireApi::Messages, WireApi::Messages, &hidden, false);
+    assert_eq!(passthrough.upstream_body(), &hidden);
+}
+
+#[test]
+fn messages_summarized_or_default_thinking_keeps_visible_reasoning() {
+    for display in [json!("summarized"), Value::Null] {
+        let mut request = request();
+        request["thinking"]["display"] = display;
+        let native = reply();
+        let translated = prepare(WireApi::Messages, WireApi::Responses, &request, false)
+            .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_reasoning_tool_roundtrip(translated.translated_response(), &native);
+        let (stream, events) = stream_response_for(&request, &native);
+        assert!(
+            events
+                .iter()
+                .any(|event| event["delta"]["type"] == "thinking_delta")
+        );
+        assert_reasoning_tool_roundtrip(stream.completed().unwrap(), &native);
+    }
+}
+
+#[test]
+fn messages_summarized_thinking_requests_the_target_public_summary_without_changing_effort() {
+    let mut request = request();
+    request["thinking"]["display"] = json!("summarized");
+    let responses = prepare(WireApi::Messages, WireApi::Responses, &request, false);
+    assert_eq!(
+        responses.upstream_body()["reasoning"],
+        json!({"effort":"high","summary":"auto"})
+    );
+    let gemini = prepare(WireApi::Messages, WireApi::Gemini, &request, false);
+    assert_eq!(
+        gemini.upstream_body()["generationConfig"]["thinkingConfig"],
+        json!({"thinkingLevel":"high","includeThoughts":true})
+    );
+    let chat =
+        try_convert(WireApi::Messages, WireApi::ChatCompletions, &request, false).unwrap_err();
+    assert_eq!(chat.parameter(), Some("thinking.display"));
+}
+
+#[test]
+fn messages_omitted_thinking_keeps_contiguous_text_and_tool_stream_indices() {
+    let mut request = request();
+    request["thinking"]["display"] = json!("omitted");
+    let message = json!({"type":"message","id":"msg_prefix","role":"assistant","content":[{"type":"output_text","text":"Visible answer.","annotations":[]}]});
+    let second_reasoning = json!({"type":"reasoning","id":"rs_second","summary":[{"type":"summary_text","text":"Hidden second summary."}],"encrypted_content":"synthetic-second-state"});
+    let mut native = reply();
+    native["output"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, message.clone());
+    native["output"]
+        .as_array_mut()
+        .unwrap()
+        .insert(2, second_reasoning.clone());
+    let mut events = response_events(&reply());
+    let insert_at = events
+        .iter()
+        .position(|event| {
+            event["type"] == "response.output_item.added" && event["output_index"] == 1
+        })
+        .unwrap();
+    for event in &mut events {
+        if event["output_index"] == 1 {
+            event["output_index"] = json!(3);
+        }
+    }
+    events.splice(insert_at..insert_at, [
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_prefix","role":"assistant","content":[]}}),
+        json!({"type":"response.content_part.added","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"Visible "}),
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"answer."}),
+        json!({"type":"response.output_text.done","output_index":1,"content_index":0,"text":"Visible answer."}),
+        json!({"type":"response.content_part.done","output_index":1,"content_index":0,"part":message["content"][0]}),
+        json!({"type":"response.output_item.done","output_index":1,"item":message}),
+        json!({"type":"response.output_item.added","output_index":2,"item":{"type":"reasoning","id":"rs_second","summary":[]}}),
+        json!({"type":"response.reasoning_summary_part.added","output_index":2,"summary_index":0,"part":{"type":"summary_text","text":""}}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":2,"summary_index":0,"delta":"Hidden second summary."}),
+        json!({"type":"response.reasoning_summary_text.done","output_index":2,"summary_index":0,"text":"Hidden second summary."}),
+        json!({"type":"response.reasoning_summary_part.done","output_index":2,"summary_index":0,"part":second_reasoning["summary"][0]}),
+        json!({"type":"response.output_item.done","output_index":2,"item":second_reasoning}),
+    ]);
+    events.last_mut().unwrap()["response"] = native.clone();
+    let (stream, events) = stream_events_for(&request, events);
+    let completed = stream.completed().unwrap();
+    let json = prepare(WireApi::Messages, WireApi::Responses, &request, false)
+        .translate_response_bytes(&serde_json::to_vec(&native).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.response_body,
+        json.translated_response().response_body
+    );
+    for kind in ["content_block_start", "content_block_stop"] {
+        let indices = events
+            .iter()
+            .filter(|event| event["type"] == kind)
+            .map(|event| event["index"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(indices, vec![json!(0), json!(1)]);
+    }
+    for event in events
+        .iter()
+        .filter(|event| event["type"] == "content_block_delta")
+    {
+        assert_eq!(
+            event["index"],
+            if event["delta"]["type"] == "text_delta" {
+                0
+            } else {
+                1
+            }
+        );
+    }
+    assert!(!serde_json::to_string(&events).unwrap().contains("summary"));
+    assert_eq!(
+        completed.continuation.native_turns[&1],
+        native["output"].as_array().unwrap().clone()
+    );
+    assert_eq!(
+        completed.response_body["content"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn messages_thinking_display_rejects_unknown_malformed_and_disabled_controls() {
+    for display in [
+        json!("unknown"),
+        json!(true),
+        json!(42),
+        json!({}),
+        json!([]),
+    ] {
+        let mut request = request();
+        request["thinking"]["display"] = display;
+        let error =
+            try_convert(WireApi::Messages, WireApi::Responses, &request, false).unwrap_err();
+        assert_eq!(error.parameter(), Some("thinking.display"));
+    }
+    for display in [json!("omitted"), json!("summarized")] {
+        let mut request = request();
+        request["thinking"] = json!({"type":"disabled","display":display});
+        request["output_config"]["effort"] = json!("none");
+        assert!(try_convert(WireApi::Messages, WireApi::Responses, &request, false).is_err());
+    }
+}
+
+#[test]
+fn messages_omitted_thinking_preserves_an_explicit_budget() {
+    let mut request = request();
+    request.as_object_mut().unwrap().remove("output_config");
+    request["thinking"] = json!({"type":"enabled","budget_tokens":2048});
+    let mut hidden = request.clone();
+    hidden["thinking"]["display"] = json!("omitted");
+    let decoded = decode::request(WireApi::Messages, &hidden).unwrap();
+    assert!(matches!(decoded.reasoning, Some(Reasoning::Budget(2048))));
+    assert_eq!(decoded.reasoning_display, Some(ReasoningDisplay::Omitted));
+    for upstream in [
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Gemini,
+    ] {
+        let baseline = try_convert(WireApi::Messages, upstream, &request, false);
+        let hidden = try_convert(WireApi::Messages, upstream, &hidden, false);
+        match (baseline, hidden) {
+            (Ok(baseline), Ok(hidden)) => {
+                assert_eq!(hidden.upstream_body(), baseline.upstream_body())
+            }
+            (Err(baseline), Err(hidden)) => assert_eq!(hidden.code(), baseline.code()),
+            _ => panic!("display changed budget admission: {upstream:?}"),
+        }
+    }
 }
 
 #[test]

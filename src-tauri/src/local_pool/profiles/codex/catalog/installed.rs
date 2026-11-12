@@ -94,34 +94,37 @@ fn read_bundled_codex_catalog(executable: &OsString) -> Option<Value> {
 }
 
 pub(super) fn official_codex_ultra_rows(catalog: &Value) -> HashMap<String, Value> {
-    catalog
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|catalog_entry| {
-            let slug = catalog_entry.get("slug")?.as_str()?;
-            let has_ultra = catalog_entry
-                .get("supported_reasoning_levels")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"));
-            if !has_ultra || !zenith_relay_core::is_valid_model_id(slug) {
-                return None;
-            }
-            let mut ultra = json!({
-                "slug": slug,
-                "supported_reasoning_levels": [{"effort": "ultra"}]
+    let mut rows = HashMap::new();
+    let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+        return rows;
+    };
+    for catalog_entry in models {
+        let Some(slug) = catalog_entry.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let has_ultra = catalog_entry
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .is_some_and(|levels| {
+                levels
+                    .iter()
+                    .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
             });
-            for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
-                if let Some(value) = catalog_entry.get(field).and_then(Value::as_str) {
-                    ultra[field] = json!(value);
-                }
+        if !has_ultra || !zenith_relay_core::is_valid_model_id(slug) {
+            continue;
+        }
+        let mut ultra = json!({
+            "slug": slug,
+            "supported_reasoning_levels": [{"effort": "ultra"}]
+        });
+        for field in ["multi_agent_version", "multi_agent_reasoning_effort"] {
+            if let Some(value) = catalog_entry.get(field).and_then(Value::as_str) {
+                ultra[field] = json!(value);
             }
-            Some((zenith_relay_core::model_id_key(slug), ultra))
-        })
-        .collect()
+        }
+        rows.insert(zenith_relay_core::model_id_key(slug), ultra);
+    }
+    rows
 }
 
 pub(super) fn add_installed_codex_ultra(

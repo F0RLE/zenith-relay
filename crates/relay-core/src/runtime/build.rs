@@ -2,12 +2,11 @@ use super::{
     ChatGptAccountExecutor, GatewayRuntimeOptions, PassiveQuotaState, RuntimeHttpClients,
     RuntimeKey, RuntimeSource, SourceCandidateBinding, SourceCandidateRoute, all_native_wire_apis,
     client_wire_apis_to_native, model_rules, normalize_client_wire_api, normalize_prefix,
-    normalized_set, source_candidate_id,
+    normalized_set,
 };
 use super::{
-    CodexTurnStateStore, GatewayRuntime, LocalGatewayKey, NEXT_ACTIVITY_RUNTIME_ID, ProviderSource,
-    RuntimeControl, RuntimeLocalKey, SourceModelMetadataState, UsageCallback,
-    normalize_image_base_model, runtime_now_ms,
+    GatewayRuntime, LocalGatewayKey, NEXT_ACTIVITY_RUNTIME_ID, ProviderSource, RuntimeControl,
+    RuntimeLocalKey, RuntimeSessionState, UsageCallback, runtime_now_ms,
 };
 use crate::catalog::normalize_model_reasoning_allowed_levels;
 use crate::protocol::ClientWireApi;
@@ -39,7 +38,6 @@ pub(super) struct SourceRuntimeParts {
     pub(super) executors: BTreeMap<String, SourceConnector>,
     pub(super) candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
     pub(super) recovery_delays_ms: BTreeMap<String, u64>,
-    pub(super) legacy_candidate_ids: BTreeMap<String, Option<String>>,
 }
 
 pub(super) struct AccountRuntimeParts {
@@ -231,9 +229,6 @@ impl GatewayRuntime {
 
         let mut scheduler = configure_scheduler(&options)?;
         let mut registry = ModelRegistry::default();
-        // Validate legacy configuration on import; native image requests no
-        // longer select a text model or use text pricing for route selection.
-        normalize_image_base_model(options.image_base_model.clone())?;
         let reference_catalog = options
             .model_metadata_catalog
             .as_ref()
@@ -276,7 +271,6 @@ impl GatewayRuntime {
 
         let affinity_store = options.response_affinity_store.clone();
         let continuation_state = options.continuation_state.clone().unwrap_or_default();
-        let response_route_affinity = continuation_state.routes.clone();
         if let Some(store) = affinity_store.as_ref() {
             let now_ms = runtime_now_ms();
             if let Ok(bindings) = store.load(now_ms) {
@@ -288,7 +282,7 @@ impl GatewayRuntime {
                                 .bytes()
                                 .all(|byte| byte.is_ascii_hexdigit())
                         {
-                            let mut routes = crate::poison::mutex(&response_route_affinity);
+                            let mut routes = crate::poison::mutex(&continuation_state.routes);
                             if routes.get_with_expiry(&binding.key, now_ms).is_none() {
                                 routes.restore(
                                     binding.key,
@@ -302,19 +296,9 @@ impl GatewayRuntime {
                         }
                         continue;
                     }
-                    let soft =
-                        binding.key.starts_with("cache:") || binding.key.starts_with("session:");
                     let owner = if scheduler.candidate(&binding.candidate_id).is_some() {
                         Some(binding.candidate_id.clone())
-                    } else if soft {
-                        source_parts
-                            .legacy_candidate_ids
-                            .get(&binding.candidate_id)
-                            .cloned()
-                            .flatten()
                     } else {
-                        // Old suffixed opaque owners lack endpoint/credential
-                        // identity. Never guess that they belong to a new route.
                         None
                     };
                     let Some(owner) = owner else {
@@ -373,17 +357,21 @@ impl GatewayRuntime {
             clients,
             http3: super::http3::Http3Transport::new(),
             http_recovery: super::http_recovery::HttpRecovery::default(),
-            discovery_client,
-            sources: source_parts.executors,
-            source_http_clients,
-            source_websocket_clients,
-            source_candidate_bindings: source_parts.candidate_bindings,
-            legacy_source_candidate_ids: source_parts.legacy_candidate_ids,
-            response_route_affinity,
-            source_recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
-            chatgpt_accounts: account_parts.executors,
-            chatgpt_team_members: account_parts.team_members,
-            chatgpt_team_breaker_recent: Mutex::new(BTreeMap::new()),
+            source_state: super::provider_state::RuntimeSourceState {
+                discovery_client,
+                connectors: source_parts.executors,
+                http_clients: source_http_clients,
+                websocket_clients: source_websocket_clients,
+                candidate_bindings: source_parts.candidate_bindings,
+                recovery_delays_ms: Mutex::new(source_parts.recovery_delays_ms),
+            },
+            account_state: super::provider_state::RuntimeAccountState {
+                executors: account_parts.executors,
+                team_members: account_parts.team_members,
+                team_breaker_recent: Mutex::new(BTreeMap::new()),
+                team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
+                passive_quotas: Mutex::new(account_parts.passive_quotas),
+            },
             keys: key_parts.runtime_keys,
             model_state: super::models::RuntimeModelState::new(
                 registry,
@@ -395,17 +383,11 @@ impl GatewayRuntime {
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
             admission: Mutex::default(),
             admission_changed: tokio::sync::Notify::new(),
-            official_codex_ultra: Mutex::new(BTreeMap::new()),
-            websocket_transport_observations: Mutex::new(BTreeMap::new()),
-            model_metadata: SourceModelMetadataState::default(),
-            model_metadata_catalog: options.model_metadata_catalog.clone(),
-            passive_quotas: Mutex::new(account_parts.passive_quotas),
-            adapter_continuation_store: continuation_state.adapters.clone(),
-            agent_message_cipher: continuation_state.agent_messages.clone(),
-            native_responses_replay_store: continuation_state.native_responses.clone(),
-            cache_context_store: super::cache_context::CacheContextStore::default(),
-            codex_turn_state_store: CodexTurnStateStore::default(),
-            basis_points_catalog_store: super::tool_catalog::ToolCatalogStore::default(),
+            provider_metadata: super::provider_state::RuntimeProviderMetadata::new(
+                options.model_metadata_catalog.clone(),
+            ),
+            continuation_state,
+            session_state: RuntimeSessionState::default(),
             control: RuntimeControl::default(),
             max_retry_candidates: std::sync::atomic::AtomicUsize::new(options.max_retry_candidates),
             quota_stale_after_ms: options.quota_stale_after_ms,
@@ -414,9 +396,6 @@ impl GatewayRuntime {
             activity_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
             activity_runtime_id: NEXT_ACTIVITY_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
             activity_revision: Arc::new(AtomicU64::new(0)),
-            chatgpt_team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),
-            codex_catalog_hints: Mutex::new(BTreeMap::new()),
-            codex_catalog_hint_callback: Mutex::new(Arc::new(|_, _| false)),
             usage,
         })
     }

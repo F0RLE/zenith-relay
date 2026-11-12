@@ -3,12 +3,14 @@ pub(in crate::gateway) mod basis_points;
 mod client;
 pub(in crate::gateway) mod compatibility;
 mod request;
+mod state;
 
 pub(super) use account::{AccountExecution, execute_account_endpoint};
 pub(super) use client::execute_reserved_client_request;
 pub(super) use client::{RoutedCompactionRequest, RoutedRequestIdentity};
 pub(super) use client::{execute_client_request, execute_gemini_client_request};
 pub(super) use request::ReservedCandidate;
+pub(super) use state::ContinuationRecovery;
 
 use super::errors::{
     AttemptFailure, PreservedUpstreamError, api_error_with_origin_and_category, cooldown_error,
@@ -39,7 +41,7 @@ use std::collections::HashSet;
 ///
 /// Each flag records that its repair already ran for this request. The attempt
 /// loop owns the value; failure, selection, and stream steps borrow it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct AttemptRepairs {
     pub(super) native_replay: bool,
     pub(super) function_item_id: bool,
@@ -349,7 +351,7 @@ pub(super) fn finish_request_failure(
         return cooldown_error(
             retry_at,
             Some(&failure),
-            reason == crate::scheduler::CooldownReason::RateLimit,
+            reason.is_rate_limit(),
             failure_origin,
         );
     }
@@ -391,10 +393,11 @@ pub(super) fn attempt_error_response(
     };
     // A request-local limit can carry Retry-After without creating any pool cooldown.
     if failure.status == StatusCode::TOO_MANY_REQUESTS
-        && let Some(delay) = failure
+        && let Some(clock) = failure
             .cooldown_hint
-            .retry_after_for_account(failure_origin == ErrorOrigin::Account)
+            .retry_clock_for_account(failure_origin == ErrorOrigin::Account)
     {
+        let delay = clock.not_before_ms.saturating_sub(now_ms());
         let seconds = delay
             .saturating_add(999)
             .checked_div(1_000)

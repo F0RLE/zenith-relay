@@ -207,6 +207,13 @@ fn display_and_inference_settings_do_not_invalidate_monitoring() {
     gateway.max_retry_candidates = 5;
     gateway.hidden_models = vec!["gpt-test".into()];
     gateway.catalog_refresh_error = Some("test-warning".into());
+    gateway.client_catalog_refresh_failures.insert(
+        crate::local_pool::models::CatalogRefreshClient::OpenCode,
+        crate::local_pool::models::ClientCatalogRefreshFailure {
+            code: crate::local_pool::error::ErrorCode::Io,
+            recorded_at_ms: 1,
+        },
+    );
     store.replace_gateway(gateway).unwrap();
     store.ensure_account_refresh_current(&fence).unwrap();
     drop(store);

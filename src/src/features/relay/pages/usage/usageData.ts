@@ -87,7 +87,6 @@ export function codexRequestOriginFromErrorCategory(category: string | null): Co
 }
 
 export type LocalUsageRowLabels = {
-  backgroundConnection: string;
   removedAccount: string;
   unknownConnection: string;
   accountLabels: ReadonlyMap<string, string>;
@@ -98,11 +97,9 @@ export type LocalUsageRowLabels = {
 export function usageRowsFromLocal(events: readonly LocalUsage[], labels: LocalUsageRowLabels): UsageRow[] {
   return events.map((event): UsageRow => {
     const requestOrigin = codexRequestOriginFromErrorCategory(event.errorCategory);
-    const connection = requestOrigin
-      ? labels.backgroundConnection
-      : event.accountId
-        ? labels.accountLabels.get(event.accountId) ?? labels.removedAccount
-        : labels.sourceLabels.get(event.sourceId) ?? labels.unknownConnection;
+    const connection = event.accountId
+      ? labels.accountLabels.get(event.accountId) ?? labels.removedAccount
+      : labels.sourceLabels.get(event.sourceId) ?? labels.unknownConnection;
     return {
       id: event.id,
       attempt: event.attempt,

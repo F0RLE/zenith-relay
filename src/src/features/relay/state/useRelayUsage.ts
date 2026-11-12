@@ -19,27 +19,6 @@ type PendingUsageRead = {
   promise: Promise<LocalUsagePage>;
 };
 
-function legacyPreviewKey(query: UsageQuery) {
-  if (query.includeReport === undefined) return null;
-  // Reuse a same-scope preview saved before the lightweight IPC hint existed.
-  // It is display-only and still revalidated by the current native request.
-  const { includeReport: _includeReport, ...legacy } = query;
-  return JSON.stringify({ ...legacy, includeFilterOptions: true });
-}
-
-function previewFor(query: UsageQuery) {
-  const current = usagePreview.peek(JSON.stringify(query));
-  const legacyKey = legacyPreviewKey(query);
-  return current ?? (legacyKey ? usagePreview.peek(legacyKey) : null);
-}
-
-async function restorePreviewFor(query: UsageQuery) {
-  const key = JSON.stringify(query);
-  await usagePreview.restoreKey(key);
-  const legacyKey = legacyPreviewKey(query);
-  if (!usagePreview.peek(key) && legacyKey) await usagePreview.restoreKey(legacyKey);
-}
-
 /** Keeps the last complete local report without allowing stale filters to win. */
 export function useRelayUsage(commands: RelayUsageCommands) {
   const [report, setReport] = useState<{ key: string; data: LocalUsagePage } | null>(null);
@@ -54,7 +33,7 @@ export function useRelayUsage(commands: RelayUsageCommands) {
   // Keep only the last selected query; other pages load on navigation.
   const getCachedLocalUsage = useCallback((query: UsageQuery) => {
     const key = JSON.stringify(query);
-    return cache.current?.key === key ? cache.current.data : previewFor(query);
+    return cache.current?.key === key ? cache.current.data : usagePreview.peek(key);
   }, []);
 
   const loadLocalUsage = useCallback(async (query: UsageQuery, options: UsageLoadOptions = {}) => {
@@ -63,9 +42,9 @@ export function useRelayUsage(commands: RelayUsageCommands) {
     const key = JSON.stringify(query);
     const requestedRevision = resetRevision.current;
     if (cache.current?.key !== key) {
-      void restorePreviewFor(query).then(() => {
+      void usagePreview.restoreKey(key).then(() => {
         if (options.signal?.aborted || resetRevision.current !== requestedRevision || displayedQueryKey.current !== key || cache.current?.key === key) return;
-        const previous = previewFor(query);
+        const previous = usagePreview.peek(key);
         if (previous) {
           cache.current = { key, data: previous, updatedAt: 0, revision: undefined };
           setReport({ key, data: previous });

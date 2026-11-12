@@ -2,6 +2,99 @@ use super::*;
 use serde_json::json;
 
 #[tokio::test]
+async fn websocket_and_http_payloads_keep_each_turns_cache_policy_without_inheritance() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    let authorization = runtime
+        .prepare_route_authorization(&route, crate::unix_time_ms())
+        .await
+        .unwrap();
+    for options in [
+        Some(json!({"mode":"implicit","ttl":"30m"})),
+        Some(json!({"mode":"explicit","ttl":"12h"})),
+        None,
+    ] {
+        let mut body = json!({"type":"response.create","model":"relay/upstream-model","input":"Synthetic input"});
+        if let Some(options) = &options {
+            body["prompt_cache_options"] = options.clone();
+        }
+        let request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+        let prepared = request
+            .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+            .unwrap_or_else(|error| panic!("payload should prepare: {}", error.message));
+        let websocket: Value = serde_json::from_str(&prepared.payload).unwrap();
+        let http: Value = serde_json::from_slice(
+            &request
+                .http_payload()
+                .unwrap_or_else(|error| panic!("HTTP payload should prepare: {}", error.message)),
+        )
+        .unwrap();
+        for sent in [&websocket, &http] {
+            assert_eq!(sent.get("prompt_cache_options"), options.as_ref());
+            assert!(sent.get("prompt_cache_retention").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn websocket_reauth_compares_only_the_last_successful_scoped_authorization() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    let mut request = ClientRequest::parse(
+        &runtime,
+        &key,
+        &HeaderMap::new(),
+        br#"{"model":"relay/upstream-model","input":"synthetic"}"#,
+    )
+    .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+    let mut prepared = runtime
+        .prepare_route_authorization(&route, crate::unix_time_ms())
+        .await
+        .unwrap();
+    assert!(!request.websocket_reauth("source", &prepared));
+    request.observe_websocket_authorization("source", &prepared);
+    assert!(!request.websocket_reauth("source", &prepared));
+    // A replacement login can keep the same bearer. Its incarnation still changes.
+    prepared.agent_identity_revision = Some(1);
+    assert!(request.websocket_reauth("source", &prepared));
+    // An unsuccessful handshake does not advance the last successful authorization.
+    assert!(request.websocket_reauth("source", &prepared));
+    assert!(!request.websocket_reauth("other-source", &prepared));
+    request.observe_websocket_authorization("source", &prepared);
+    assert!(!request.websocket_reauth("source", &prepared));
+    prepared.authorization = HeaderValue::from_static("Bearer synthetic-replacement");
+    assert!(request.websocket_reauth("source", &prepared));
+}
+
+#[tokio::test]
 async fn final_websocket_continuation_rejection_is_recorded_without_dispatch() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured = events.clone();

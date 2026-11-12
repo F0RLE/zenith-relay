@@ -112,6 +112,8 @@ pub struct RotationCandidate {
     pub quota_remaining_basis_points: Option<u64>,
     pub quota_observed_at_ms: Option<u64>,
     pub quota_reference: Option<crate::CandidateQuotaReference>,
+    /// Soft expiry spending applies only to independent Automatic selections.
+    pub spend_deadline: Option<crate::quota::QuotaSpendDeadline>,
     /// Provider-reported balance in millionths of one credit. This is a
     /// separate fallback signal and never changes percentage-quota state.
     pub provider_credits_micro_units: Option<u64>,
@@ -151,6 +153,7 @@ impl RotationCandidate {
             quota_remaining_basis_points: None,
             quota_observed_at_ms: None,
             quota_reference: None,
+            spend_deadline: None,
             provider_credits_micro_units: None,
             provider_credits_unlimited: false,
             provider_credits_observed_at_ms: None,

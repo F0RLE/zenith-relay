@@ -100,7 +100,6 @@ fn basis_points_accepts_lite_items_without_inheriting_serial_transport_policy() 
     let mut schema_validation_ms = None;
     let basis_points = match rewrite_account_basis_points_body(
         &normalized,
-        "test-request",
         &mut last_adapter_error,
         &mut schema_validation_ms,
         true,

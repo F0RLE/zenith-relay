@@ -52,3 +52,21 @@ test("saved BPS model errors distinguish current proxy settings from unknown req
   expect(payload).not.toHaveProperty("proxy_mode");
   expect(payload).not.toHaveProperty("proxy_available");
 });
+
+test("a missing model endpoint warns without marking the whole account unavailable", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local", locale: "en", populated: true, accountCount: 1,
+    accountOAuthClientKind: "excel_bps", accountHealth: "degraded",
+    accountModelErrorCode: "models_endpoint_not_found",
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const account = page.locator('[data-member-label="Personal Plus"]');
+  const indicator = account.locator(".pool-member-kind-icon");
+  await expect(indicator).toHaveAttribute("data-status", "warning");
+  await expect(indicator).toHaveAttribute("aria-label", /Model catalog unavailable \(HTTP 404\)/);
+  await account.getByRole("button", { name: /HTTP 404/ }).click();
+  const details = page.getByRole("dialog", { name: "Technical error details" });
+  await expect(details).toContainText('"code": "models_endpoint_not_found"');
+  await expect(details).toContainText('"error_scope": "models"');
+});

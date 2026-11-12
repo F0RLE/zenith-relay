@@ -14,14 +14,15 @@ const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
 
 mod payloads;
 mod snapshot;
-use payloads::{attached_metadata, profile_is_current, restored_metadata, serialize};
+use payloads::{
+    attached_metadata, attached_profile, profile_is_current, restored_metadata, serialize,
+};
 pub(super) use snapshot::create as create_snapshot;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Recovery {
     library: PathBuf,
-    #[serde(default)]
     profile_id: String,
     previous_applied_id: Option<String>,
     profile_hashes: Vec<String>,
@@ -31,6 +32,8 @@ struct Recovery {
     created_at_ms: Option<u64>,
     #[serde(default)]
     pending: bool,
+    #[serde(default)]
+    preserve_profile_on_restore: bool,
 }
 
 #[derive(Debug)]
@@ -45,7 +48,21 @@ pub(super) struct LibraryStatus {
 fn invalid() -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::ProfileRestoreBlocked,
-        "Claude Desktop configuration changed outside Relay or is invalid; keep the recovery record and inspect the configuration before reconnecting",
+        "Claude Desktop recovery data or profile path cannot be used safely",
+    )
+}
+
+fn invalid_config() -> LocalPoolError {
+    LocalPoolError::new(
+        ErrorCode::InvalidState,
+        "Claude Desktop configuration is not a valid profile document",
+    )
+}
+
+fn changed() -> LocalPoolError {
+    LocalPoolError::new(
+        ErrorCode::Conflict,
+        "Claude Desktop configuration changed during the operation; retry with its current state",
     )
 }
 
@@ -79,7 +96,32 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 fn parse(bytes: &[u8]) -> Result<Value> {
-    serde_json::from_slice(bytes).map_err(|_| invalid())
+    serde_json::from_slice(bytes).map_err(|_| invalid_config())
+}
+
+pub(super) fn uses_model_identity(library: &Path) -> Result<bool> {
+    Ok(read(&library.join(format!("{PROFILE_ID}.json")))?
+        .as_deref()
+        .map(parse)
+        .transpose()?
+        .is_some_and(|profile| {
+            profile["inferenceModels"]
+                .as_array()
+                .is_some_and(|models| models.iter().any(|model| model.get("behavesAs").is_some()))
+        }))
+}
+
+pub(super) fn model_identity_support(library: &Path, observed: Option<bool>) -> Result<bool> {
+    if let Some(supported) = observed {
+        return Ok(supported);
+    }
+    if uses_model_identity(library)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "Claude Desktop version could not be verified; the existing model identity configuration was kept",
+        ));
+    }
+    Ok(false)
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -118,15 +160,18 @@ fn metadata(bytes: Option<&[u8]>) -> Result<Value> {
     let entries = value
         .get("entries")
         .and_then(Value::as_array)
-        .ok_or_else(invalid)?;
+        .ok_or_else(invalid_config)?;
     let mut ids = std::collections::HashSet::new();
     for entry in entries {
         let id = entry
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(invalid)?;
-        if !safe_id(id) || !ids.insert(id) || entry.get("name").and_then(Value::as_str).is_none() {
+            .ok_or_else(invalid_config)?;
+        if !safe_id(id) || !ids.insert(id) {
             return Err(invalid());
+        }
+        if entry.get("name").and_then(Value::as_str).is_none() {
+            return Err(invalid_config());
         }
     }
     if let Some(id) = value.get("appliedId")
@@ -150,10 +195,9 @@ fn recovery(path: &Path, library: &Path) -> Result<Option<Recovery>> {
     let value: Option<Recovery> = read(path)?
         .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
         .transpose()?;
-    // Ignore recovery records from older Relay versions that used a legacy ID.
-    let value = value.filter(|record| record.profile_id == PROFILE_ID);
     if value.as_ref().is_some_and(|record| {
-        record.library != library
+        record.profile_id != PROFILE_ID
+            || record.library != library
             || record
                 .previous_applied_id
                 .as_deref()
@@ -187,11 +231,35 @@ fn owns_entry(meta: &Value, profile_id: &str) -> bool {
     })
 }
 
+fn has_entry(meta: &Value, profile_id: &str) -> bool {
+    meta["entries"]
+        .as_array()
+        .is_some_and(|entries| entries.iter().any(|entry| entry["id"] == profile_id))
+}
+
 // A public ID/display name is not proof of ownership after losing recovery.
-// Reclaim only a static profile bound to this Relay's current endpoint and key,
-// with no foreign settings. The catalog may have changed since the last attach.
+// Reclaim only the current gateway binding with validated model identities.
+// Client preferences are preserved separately from that connection proof.
+fn matches_model_identity(model: &Value, config: &Value) -> bool {
+    let expected = config["inferenceModels"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|expected| expected["name"] == model["name"])
+        })
+        .and_then(|model| model.get("behavesAs"));
+    match (model.get("behavesAs"), expected) {
+        (None, None) => true,
+        (Some(Value::String(identity)), Some(Value::String(expected))) => {
+            !identity.is_empty() && identity == expected
+        }
+        _ => false,
+    }
+}
+
 fn matches_gateway(profile: &[u8], config: &Value) -> bool {
-    let Ok(mut profile) = parse(profile) else {
+    let Ok(profile) = parse(profile) else {
         return false;
     };
     if config["inferenceProvider"] != "gateway"
@@ -206,10 +274,12 @@ fn matches_gateway(profile: &[u8], config: &Value) -> bool {
         || !profile["inferenceModels"].as_array().is_some_and(|models| {
             models.iter().all(|model| {
                 model.as_object().is_some_and(|fields| {
-                    fields
-                        .keys()
-                        .all(|key| matches!(key.as_str(), "name" | "labelOverride" | "maxEffort"))
-                        && model["name"].as_str().is_some_and(|name| !name.is_empty())
+                    fields.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "name" | "labelOverride" | "maxEffort" | "behavesAs"
+                        )
+                    }) && model["name"].as_str().is_some_and(|name| !name.is_empty())
                         && fields.get("labelOverride").is_none_or(Value::is_string)
                         && fields.get("maxEffort").is_none_or(|effort| {
                             matches!(
@@ -217,25 +287,22 @@ fn matches_gateway(profile: &[u8], config: &Value) -> bool {
                                 Some("low" | "medium" | "high" | "xhigh" | "max")
                             )
                         })
+                        && matches_model_identity(model, config)
                 })
             })
         })
     {
         return false;
     }
-    profile["inferenceModels"] = config["inferenceModels"].clone();
-    // Older Relay profiles did not opt into tool search. A missing field is
-    // that old default, not permission to replace an explicit foreign setting.
-    if config["toolSearchEnabled"] == true && profile.get("toolSearchEnabled").is_none() {
-        profile["toolSearchEnabled"] = json!(true);
-    }
-    // Older owned profiles inherited Desktop's Auto-mode default without a
-    // configured classifier. Only migrate absence; explicit user settings
-    // still prevent reclaim when the ownership record is missing.
-    if config["autoModeEnabled"] == false && profile.get("autoModeEnabled").is_none() {
-        profile["autoModeEnabled"] = json!(false);
-    }
-    profile == *config
+    [
+        "inferenceProvider",
+        "inferenceCredentialKind",
+        "inferenceGatewayAuthScheme",
+        "inferenceGatewayBaseUrl",
+        "inferenceGatewayApiKey",
+    ]
+    .into_iter()
+    .all(|field| profile.get(field) == config.get(field))
 }
 
 fn validate_attach(
@@ -245,27 +312,14 @@ fn validate_attach(
     config: &Value,
     reconnect: bool,
 ) -> Result<()> {
-    if meta["entries"].as_array().is_some_and(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry["id"] == PROFILE_ID && entry["name"] != "Zenith Relay")
-    }) {
-        return Err(invalid());
-    }
     if let Some(record) = record {
-        // An explicit reconnect can re-establish the same gateway ownership
-        // as a lost recovery record. Keep the original recovery point; neither
-        // background refresh nor restore may adopt an externally changed file.
-        if !owns_profile(record, profile)
-            && !(reconnect
-                && !record.pending
-                && owns_entry(meta, PROFILE_ID)
-                && profile.is_some_and(|bytes| matches_gateway(bytes, config)))
-        {
+        // A valid recovery record identifies this integration. Users can edit
+        // its client settings; only an explicit reconnect may adopt those edits.
+        if !reconnect && !owns_profile(record, profile) {
             return Err(invalid());
         }
-    } else if (profile.is_some() || meta["appliedId"] == PROFILE_ID || owns_entry(meta, PROFILE_ID))
-        && (!owns_entry(meta, PROFILE_ID)
+    } else if (profile.is_some() || meta["appliedId"] == PROFILE_ID || has_entry(meta, PROFILE_ID))
+        && (!has_entry(meta, PROFILE_ID)
             || !profile.is_some_and(|bytes| matches_gateway(bytes, config)))
     {
         return Err(invalid());
@@ -278,15 +332,11 @@ pub(super) fn check_attach(library: &Path, recovery_path: &Path, config: &Value)
     let profile = read(&library.join(format!("{PROFILE_ID}.json")))?;
     let record = recovery(recovery_path, library)?;
     validate_attach(&meta, profile.as_deref(), record.as_ref(), config, true)?;
-    let bytes = serialize(config)?;
-    let has_legacy = owns_entry(&meta, "zenith-relay")
-        && read(&library.join("zenith-relay.json"))?
-            .as_deref()
-            .is_some_and(|bytes| matches_gateway(bytes, config));
-    if record.is_some() && !has_legacy && profile_is_current(&meta, profile.as_deref(), &bytes) {
+    let (bytes, _) = attached_profile(profile.as_deref(), record.as_ref(), config)?;
+    if record.is_some() && profile_is_current(&meta, profile.as_deref(), &bytes) {
         return Ok(());
     }
-    attached_metadata(meta, true, has_legacy).map(|_| ())
+    attached_metadata(meta, true).map(|_| ())
 }
 
 pub(super) fn inspect(library: &Path, recovery_path: &Path) -> Result<LibraryStatus> {
@@ -309,7 +359,7 @@ pub(super) fn inspect(library: &Path, recovery_path: &Path) -> Result<LibrarySta
     Ok(LibraryStatus {
         configured: owned
             && profile.is_some()
-            && owns_entry(&meta, PROFILE_ID)
+            && has_entry(&meta, PROFILE_ID)
             && meta["appliedId"] == PROFILE_ID,
         model_count,
         has_recovery: record.is_some(),
@@ -344,6 +394,15 @@ pub(super) fn apply(
     let meta = metadata(original_meta.as_deref())?;
     let existing = recovery(recovery_path, library)?;
     let created = existing.is_none();
+    if !select
+        && (meta["appliedId"] != PROFILE_ID
+            || !has_entry(&meta, PROFILE_ID)
+            || !existing
+                .as_ref()
+                .is_some_and(|record| owns_profile(record, original_profile.as_deref())))
+    {
+        return Ok(false);
+    }
     validate_attach(
         &meta,
         original_profile.as_deref(),
@@ -351,25 +410,14 @@ pub(super) fn apply(
         config,
         select,
     )?;
-    if !select && (meta["appliedId"] != PROFILE_ID || !owns_entry(&meta, PROFILE_ID)) {
-        return Ok(false);
-    }
-    // Cleanup is not legacy adoption: never delete a file based on its name alone.
-    let legacy_path = library.join("zenith-relay.json");
-    let legacy_profile = if owns_entry(&meta, "zenith-relay") {
-        read(&legacy_path)?
-    } else {
-        None
-    };
-    let has_legacy = legacy_profile
-        .as_deref()
-        .is_some_and(|bytes| matches_gateway(bytes, config));
-    let bytes = serialize(config)?;
-    if existing
-        .as_ref()
-        .is_some_and(|record| owns_profile(record, original_profile.as_deref()))
-        && !has_legacy
-        && profile_is_current(&meta, original_profile.as_deref(), &bytes)
+    let (bytes, preserve_profile) =
+        attached_profile(original_profile.as_deref(), existing.as_ref(), config)?;
+    let preserve_profile =
+        preserve_profile || (has_entry(&meta, PROFILE_ID) && !owns_entry(&meta, PROFILE_ID));
+    if existing.as_ref().is_some_and(|record| {
+        owns_profile(record, original_profile.as_deref())
+            && record.preserve_profile_on_restore == preserve_profile
+    }) && profile_is_current(&meta, original_profile.as_deref(), &bytes)
     {
         return Ok(false);
     }
@@ -378,39 +426,34 @@ pub(super) fn apply(
         profile_id: PROFILE_ID.to_owned(),
         previous_applied_id: meta["appliedId"]
             .as_str()
-            .filter(|id| *id != PROFILE_ID && !(has_legacy && *id == "zenith-relay"))
+            .filter(|id| *id != PROFILE_ID)
             .map(str::to_owned),
         profile_hashes: Vec::new(),
         snapshot_name: None,
         created_at_ms: Some(zenith_relay_core::unix_time_ms()),
         pending: false,
+        preserve_profile_on_restore: false,
     });
-    if select && meta["appliedId"] != PROFILE_ID {
-        record.previous_applied_id = meta["appliedId"]
-            .as_str()
-            .filter(|id| !(has_legacy && *id == "zenith-relay"))
-            .map(str::to_owned);
+    record.preserve_profile_on_restore = preserve_profile;
+    if select && meta["appliedId"] != PROFILE_ID && record.snapshot_name.is_none() {
+        record.previous_applied_id = meta["appliedId"].as_str().map(str::to_owned);
     }
     // Both fingerprints permit recovery after interruption between the two atomic writes.
     record.profile_hashes = original_profile.iter().map(|bytes| hash(bytes)).collect();
     record.profile_hashes.push(hash(&bytes));
     record.pending = false;
-    let metadata_bytes = attached_metadata(meta, select, has_legacy)?;
+    let metadata_bytes = attached_metadata(meta, select)?;
     write(recovery_path, &serialize(&record)?)?;
     if read(&meta_path)? != original_meta || read(&profile_path)? != original_profile {
-        return Err(invalid());
+        return Err(changed());
     }
     write(&profile_path, &bytes)?;
     if read(&meta_path)? != original_meta
         || read(&profile_path)?.as_deref() != Some(bytes.as_slice())
     {
-        return Err(invalid());
+        return Err(changed());
     }
     write(&meta_path, &metadata_bytes)?;
-    // Delete the orphaned legacy profile file after meta is safely updated.
-    if has_legacy && read(&legacy_path)? == legacy_profile {
-        crate::files::remove_regular_file(&legacy_path).map_err(|()| io_error("remove"))?;
-    }
     let status = inspect(library, recovery_path)?;
     if !status.configured {
         return Err(invalid());
@@ -418,29 +461,10 @@ pub(super) fn apply(
     Ok(created)
 }
 
-fn validate_restore(record: &Recovery, meta: &Value, profile: Option<&[u8]>) -> Result<()> {
-    if !owns_profile(record, profile)
-        || meta["entries"].as_array().is_some_and(|entries| {
-            entries
-                .iter()
-                .any(|entry| entry["id"] == PROFILE_ID && entry["name"] != "Zenith Relay")
-        })
-        || (record.pending
-            && (profile.is_some()
-                || owns_entry(meta, PROFILE_ID)
-                || meta["appliedId"] == PROFILE_ID))
-        || (meta["appliedId"] == PROFILE_ID
-            && record.previous_applied_id.as_ref().is_some_and(|previous| {
-                !meta["entries"].as_array().is_some_and(|entries| {
-                    entries
-                        .iter()
-                        .any(|entry| entry["id"].as_str() == Some(previous))
-                })
-            }))
-    {
-        return Err(invalid());
-    }
-    Ok(())
+fn preserve_restored_profile(record: &Recovery, meta: &Value, profile: Option<&[u8]>) -> bool {
+    record.preserve_profile_on_restore
+        || !owns_profile(record, profile)
+        || (has_entry(meta, PROFILE_ID) && !owns_entry(meta, PROFILE_ID))
 }
 
 // Validate before shutting down. Pending snapshots never changed the client,
@@ -449,37 +473,43 @@ pub(super) fn check_restore(library: &Path, recovery_path: &Path) -> Result<bool
     let Some(record) = recovery(recovery_path, library)? else {
         return Ok(false);
     };
+    if record.pending {
+        return Ok(false);
+    }
     let meta = metadata(read(&library.join("_meta.json"))?.as_deref())?;
     let profile = read(&library.join(format!("{PROFILE_ID}.json")))?;
-    validate_restore(&record, &meta, profile.as_deref())?;
-    if !record.pending {
-        restored_metadata(meta, &record)?;
-    }
-    Ok(!record.pending)
+    let preserve = preserve_restored_profile(&record, &meta, profile.as_deref());
+    restored_metadata(meta, &record, preserve)?;
+    Ok(true)
 }
 
 pub(super) fn restore(library: &Path, recovery_path: &Path) -> Result<bool> {
     let Some(record) = recovery(recovery_path, library)? else {
         return Ok(false);
     };
+    if record.pending {
+        // No client state was written by this snapshot, even if the user has
+        // since edited or selected a profile outside Relay.
+        crate::files::remove_regular_file(recovery_path).map_err(|()| io_error("remove"))?;
+        return Ok(true);
+    }
     let meta_path = library.join("_meta.json");
     let profile_path = library.join(format!("{PROFILE_ID}.json"));
     let original_meta = read(&meta_path)?;
     let profile = read(&profile_path)?;
     let meta = metadata(original_meta.as_deref())?;
-    validate_restore(&record, &meta, profile.as_deref())?;
-    if record.pending {
-        // An explicit snapshot before connection has not changed Claude at all.
-        // Consume only the recovery point; preserve the user's current selection.
-        crate::files::remove_regular_file(recovery_path).map_err(|()| io_error("remove"))?;
-        return Ok(true);
-    }
-    let metadata_bytes = restored_metadata(meta, &record)?;
+    let preserve = preserve_restored_profile(&record, &meta, profile.as_deref());
+    let metadata_bytes = restored_metadata(meta, &record, preserve)?;
     if read(&meta_path)? != original_meta || read(&profile_path)? != profile {
-        return Err(invalid());
+        return Err(changed());
     }
     write(&meta_path, &metadata_bytes)?;
-    crate::files::remove_regular_file(&profile_path).map_err(|()| io_error("remove"))?;
+    if !preserve {
+        if read(&profile_path)? != profile {
+            return Err(changed());
+        }
+        crate::files::remove_regular_file(&profile_path).map_err(|()| io_error("remove"))?;
+    }
     crate::files::remove_regular_file(recovery_path).map_err(|()| io_error("remove"))?;
     Ok(true)
 }

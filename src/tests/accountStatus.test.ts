@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
 import { accountErrorContext } from "../src/features/relay/pages/connections/accountErrorContext";
 import {
+  accountDisplayStatus,
   accountQuotaRefreshState,
   accountErrorTranslationKey,
   accountSurfaceTone,
@@ -153,12 +154,37 @@ describe("account status policy", () => {
     expect(accountSurfaceTone(account(), false, { ...candidate, available: true, nextRetryAtMs: null })).toBe("ready");
   });
 
+  test("full quota with a runtime rate limit waits to retry rather than for quota", () => {
+    const waiting = account({
+      operationalStatus: "unavailable",
+      quota: {
+        primary: { kind: "primary", availableBasisPoints: 10000, explicitlyFull: true, resetAtMs: 5000, windowMinutes: 300, observedAtMs: 100 },
+        secondary: { kind: "secondary", availableBasisPoints: 10000, explicitlyFull: true, resetAtMs: 10000, windowMinutes: 10080, observedAtMs: 100 },
+        limitReached: false,
+        updatedAtMs: 100,
+      },
+    });
+    const candidate = { available: false, quotaWait: false, nextRetryAtMs: 200 } as CandidateRuntimeSnapshot;
+    expect(accountDisplayStatus(waiting, candidate)).toBe("cooldown");
+    expect(accountSurfaceTone(waiting, false, candidate)).toBe("warning");
+    expect(currentAccountErrorCode(waiting)).toBeNull();
+    const recovered = { ...waiting, operationalStatus: "rotation" as const };
+    expect(accountDisplayStatus(recovered, { ...candidate, available: true, nextRetryAtMs: null })).toBe("rotation");
+  });
+
+  test("proven runtime quota exhaustion takes precedence over a retry deadline", () => {
+    const candidate = { available: false, quotaWait: true, nextRetryAtMs: 200 } as CandidateRuntimeSnapshot;
+    const waiting = account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" });
+    expect(accountDisplayStatus(waiting, candidate)).toBe("quotaWait");
+    expect(accountSurfaceTone(waiting, false, candidate)).toBe("warning");
+  });
+
   test("keeps account eligibility and error precedence explicit", () => {
     expect(isCodexOauthAccountEligible(account({ operationalStatus: "quotaWait" }))).toBeTrue();
     expect(isCodexOauthAccountEligible(account({ inPool: false }))).toBeTrue();
     expect(isCodexOauthAccountEligible(account({ oauthClientKind: "excel_bps" }))).toBeFalse();
     expect(isCodexOauthAccountEligible(account({ draining: true }))).toBeFalse();
-    expect(accountErrorTranslationKey("basis_points_free_account_unsupported")).toBe("accounts.errors.basisPointsFreeUnsupported");
+    expect(accountErrorTranslationKey("synthetic_retired_error")).toBe("accounts.errors.unknown");
     expect(currentAccountErrorCode(account({ operationalStatus: "quotaWait", routingBlockReason: "quota_exhausted" }))).toBeNull();
     expect(currentAccountErrorCode(account({ quotaRefreshStatus: "failed", quota: { error: { code: "quota_timeout" } } }))).toBe("quota_timeout");
     expect(currentAccountErrorCode(account({ authState: { state: "requires_reauth", reason: "expired" } }))).toBe("auth_expired");
@@ -224,7 +250,7 @@ describe("account status policy", () => {
       expect(accountSurfaceTone({ ...failed, enabled: false, operationalStatus: "disabled" })).toBe("disabled");
       expect(accountSurfaceTone({ ...failed, quotaRefreshStatus: "updated", quota: {} })).toBe("ready");
     }
-    for (const lastErrorCode of ["models_timeout", "models_transport"]) {
+    for (const lastErrorCode of ["models_timeout", "models_transport", "models_http_status", "models_endpoint_not_found"]) {
       expect(accountSurfaceTone(account({ lastErrorCode }))).toBe("warning");
       expect(accountSurfaceTone(account({ lastErrorCode, operationalStatus: "unavailable" }))).toBe("error");
     }
@@ -238,6 +264,8 @@ describe("account status policy", () => {
     expect(accountErrorTranslationKey("unknown_provider_problem")).toBe("accounts.errors.unknown");
     expect(accountErrorTranslationKey("upstream_forbidden")).toBe("usage.errorCategories.upstream_forbidden");
     expect(accountErrorTranslationKey("models_forbidden")).toBe("accounts.importFailureReasons.modelsForbidden");
+    expect(accountErrorTranslationKey("models_endpoint_not_found")).toBe("accounts.errors.modelsEndpointNotFound");
+    expect(accountErrorTranslationKey("models_http_status")).toBe("accounts.importFailureReasons.modelsHttpStatus");
     expect(accountErrorTranslationKey("models_prepare")).toBe("accounts.errors.models");
     expect(accountErrorTranslationKey("models_transport")).toBe("accounts.errors.modelsConnection");
     expect(accountErrorTranslationKey("quota_timeout")).toBe("accounts.errors.quotaTimeout");

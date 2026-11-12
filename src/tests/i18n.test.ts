@@ -10,6 +10,13 @@ import { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } fr
 import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
+  test("socket full-history reasons are available in both languages", () => {
+    for (const translations of [en, ru]) {
+      for (const reason of ["socket_checkpoint_unavailable", "socket_settings_changed", "socket_history_changed", "socket_output_changed", "socket_no_new_input"] as const) {
+        expect(translations.usage.fullRequestReasons[reason].length).toBeGreaterThan(0);
+      }
+    }
+  });
   test("shared profile recovery errors do not blame a specific application", () => {
     for (const locale of [en, ru]) {
       expect(locale.errors.profile_restore_blocked.length).toBeGreaterThan(0);

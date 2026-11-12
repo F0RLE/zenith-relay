@@ -1,3 +1,4 @@
+use super::super::state::{AttemptState, RetryState};
 use super::prelude::*;
 mod repair;
 mod settle;
@@ -32,22 +33,14 @@ pub(super) struct RejectionCarry<'a> {
     pub(super) request: &'a mut Value,
     pub(super) adapter_is_passthrough: bool,
     pub(super) has_previous_response_id: bool,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) has_unpaired_tool_output: &'a mut bool,
-    pub(super) requires_affinity_owner: &'a mut bool,
-    pub(super) last_failure: &'a mut Option<AttemptFailure>,
-    pub(super) last_failure_origin: &'a mut ErrorOrigin,
-    pub(super) last_preserved_upstream_error: &'a mut Option<PreservedUpstreamError>,
+    pub(super) state: &'a mut AttemptState,
     pub(super) tool_policy: &'a mut RequestToolPolicy,
     pub(super) stream: bool,
-    pub(super) response_affinity_key: &'a mut Option<String>,
     pub(super) resolved_model: &'a str,
     pub(super) allow_previous_response_reset: bool,
     pub(super) response_affinity_hit: bool,
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) prompt_affinity_key: &'a Option<String>,
-    pub(super) confirmed_response_missing: &'a mut bool,
     pub(super) account_route: bool,
     pub(super) forwarded_headers: &'a HeaderMap,
 }
@@ -96,26 +89,27 @@ pub(super) async fn handle_upstream_failure(
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
-                repairs,
-                tried,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-                last_failure,
-                last_failure_origin,
-                last_preserved_upstream_error,
+                state,
                 tool_policy,
                 stream,
-                response_affinity_key,
                 resolved_model,
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
                 prompt_affinity_key,
-                confirmed_response_missing,
                 account_route,
                 forwarded_headers,
             },
     } = upstream_failure_input;
+    let AttemptState {
+        retry:
+            RetryState {
+                last_failure,
+                last_failure_origin,
+                ..
+            },
+        ..
+    } = state;
     let mut event = usage_event(
         UsageAttempt {
             request_id,
@@ -147,30 +141,30 @@ pub(super) async fn handle_upstream_failure(
     .await
     {
         Ok(bytes) => bytes,
-        Err(error)
+        Err(error) => {
+            let failure =
+                AttemptFailure::status_with_headers(status, Some(&error.bytes), response_headers);
             if !basis_points
                 && retryable_route_status(route, status, has_previous_response_id)
                 && crate::gateway::response::has_complete_rejection_body(&error.bytes)
-                && AttemptFailure::status_with_body(status, Some(&error.bytes))
-                    .execution
-                    .certainty
-                    == ExecutionCertainty::NotSent =>
-        {
-            let failure = AttemptFailure::status_with_body(status, Some(&error.bytes));
-            populate_tokens(&mut event, &error.bytes);
-            event.error_category = Some(failure.category.to_string());
-            let failure_state =
-                settle_route_failure(runtime, lease, route, &failure, response_headers);
-            apply_failure_state(&mut event, failure_state);
-            if let Some(routing) = event.routing.as_mut() {
-                routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+                && !super::super::super::errors::failure_category_is_request_terminal(
+                    failure.category,
+                )
+                && failure.execution.certainty == ExecutionCertainty::NotSent
+            {
+                populate_tokens(&mut event, &error.bytes);
+                event.error_category = Some(failure.category.to_string());
+                let failure_state =
+                    settle_route_failure(runtime, lease, route, &failure, response_headers);
+                apply_failure_state(&mut event, failure_state);
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+                }
+                emit_usage(runtime, event);
+                *last_failure = Some(failure);
+                *last_failure_origin = selected_error_origin;
+                return FailureStep::Continue;
             }
-            emit_usage(runtime, event);
-            *last_failure = Some(failure);
-            *last_failure_origin = selected_error_origin;
-            return FailureStep::Continue;
-        }
-        Err(error) => {
             if let Some(routing) = event.routing.as_mut() {
                 routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
             }
@@ -207,22 +201,14 @@ pub(super) async fn handle_upstream_failure(
             request,
             adapter_is_passthrough,
             has_previous_response_id,
-            repairs,
-            tried,
-            has_unpaired_tool_output,
-            requires_affinity_owner,
-            last_failure,
-            last_failure_origin,
-            last_preserved_upstream_error,
+            state,
             tool_policy,
             stream,
-            response_affinity_key,
             resolved_model,
             allow_previous_response_reset,
             response_affinity_hit,
             selected_error_origin,
             prompt_affinity_key,
-            confirmed_response_missing,
             account_route,
             forwarded_headers,
         },

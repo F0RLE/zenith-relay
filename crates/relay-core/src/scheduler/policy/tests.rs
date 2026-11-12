@@ -14,7 +14,7 @@ fn policy() -> PoolRoutingPolicy {
 #[test]
 fn reconciles_inventory_without_losing_custom_order_or_limits() {
     let mut saved = policy();
-    saved.mode = PoolRoutingMode::InOrder;
+    saved.mode = PoolRoutingMode::RoundRobin;
     saved.members.swap(0, 1);
     saved.members[0].max_concurrency = 2;
     let resolved = resolve_pool_routing(
@@ -35,7 +35,7 @@ fn reconciles_inventory_without_losing_custom_order_or_limits() {
     );
     assert_eq!(resolved.members[0].max_concurrency, 2);
     assert_eq!(resolved.members[1].weight, 3);
-    assert_eq!(resolved.mode, PoolRoutingMode::InOrder);
+    assert_eq!(resolved.mode, PoolRoutingMode::RoundRobin);
 }
 
 #[test]
@@ -96,11 +96,7 @@ fn remaps_portable_ids_atomically_and_rejects_collisions() {
 
 #[test]
 fn old_policy_upgrade_is_idempotent_and_preserves_order_weights_and_limits() {
-    for mode in [
-        PoolRoutingMode::Smart,
-        PoolRoutingMode::InOrder,
-        PoolRoutingMode::RoundRobin,
-    ] {
+    for mode in [PoolRoutingMode::Smart, PoolRoutingMode::RoundRobin] {
         let legacy_policy = PoolRoutingPolicy {
             version: 1,
             mode,
@@ -125,6 +121,31 @@ fn old_policy_upgrade_is_idempotent_and_preserves_order_weights_and_limits() {
         );
         assert!(upgraded.validate_activation().is_ok());
         assert_eq!(resolve_pool_routing(Some(&upgraded), inventory), upgraded);
+    }
+}
+
+#[test]
+fn saved_in_order_is_read_as_round_robin_and_never_written_back() {
+    for version in 1..=3 {
+        let mut saved = serde_json::to_value(policy()).unwrap();
+        saved["version"] = serde_json::json!(version);
+        saved["mode"] = serde_json::json!("in_order");
+        let decoded: PoolRoutingPolicy = serde_json::from_value(saved).unwrap();
+        assert_eq!(decoded.mode, PoolRoutingMode::RoundRobin);
+        decoded.validate().unwrap();
+        let inventory = decoded
+            .members
+            .iter()
+            .map(|member| (member.kind, member.id.clone(), 0, 1))
+            .collect();
+        let current = resolve_pool_routing(Some(&decoded), inventory);
+        current.validate_activation().unwrap();
+        assert_eq!(current.members, decoded.members);
+        assert_eq!(current.version, 3);
+        assert_eq!(
+            serde_json::to_value(current).unwrap()["mode"],
+            "round_robin"
+        );
     }
 }
 
@@ -154,11 +175,7 @@ fn pre_policy_inventory_upgrades_and_invalid_values_still_fail_validation() {
 
 #[test]
 fn version_two_migration_keeps_effective_manual_behavior_and_saved_controls() {
-    for mode in [
-        PoolRoutingMode::Automatic,
-        PoolRoutingMode::InOrder,
-        PoolRoutingMode::RoundRobin,
-    ] {
+    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::RoundRobin] {
         let mut legacy = policy();
         legacy.version = 2;
         legacy.mode = mode;

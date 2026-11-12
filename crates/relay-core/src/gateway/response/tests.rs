@@ -1,3 +1,50 @@
+mod headers;
+mod output_snapshots;
+
+#[test]
+fn failure_evidence_keeps_http_envelopes_separate_from_terminal_status() {
+    use crate::usage::TransportFailureKind;
+    use std::sync::{Arc, Mutex};
+    let mut event = crate::gateway::test_support::test_usage_event();
+    event.success = false;
+    event.http_status = 429;
+    event.error_category = Some("upstream_rate_limited".into());
+    event.routing = Some(
+        serde_json::from_value(serde_json::json!({
+            "reason": "fair_rotation", "eligibleCandidates": 1,
+            "quotaRemainingBasisPoints": null, "inFlightBefore": 0, "dispatchesBefore": 0,
+            "transport": {"upstream":"http", "mode":"native", "responseFormat":"sse",
+                "upstreamHttpStatus":200, "downstreamHttpStatus":200}
+        }))
+        .unwrap(),
+    );
+    event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+        Some(429),
+        &serde_json::json!({"error":{"code":"rate_limit_exceeded"}}),
+    ));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let captured = recorded.clone();
+    let callback: crate::UsageCallback =
+        Arc::new(move |event| captured.lock().unwrap().push(event));
+    super::emit_callback(&callback, event.clone());
+    let result = recorded.lock().unwrap().pop().unwrap();
+    let transport = result.routing.unwrap().transport.unwrap();
+    assert_eq!(result.http_status, 429);
+    assert_eq!(transport.downstream_http_status, Some(200));
+    assert_eq!(transport.upstream_http_status, Some(200));
+    assert_eq!(transport.failure_kind, Some(TransportFailureKind::Upstream));
+    event.upstream_error = None;
+    let transport = event.routing.as_mut().unwrap().transport.as_mut().unwrap();
+    transport.upstream_http_status = None;
+    transport.downstream_http_status = None;
+    super::emit_callback(&callback, event);
+    let unknown = recorded.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        unknown.routing.unwrap().transport.unwrap().failure_kind,
+        None
+    );
+}
+
 use super::*;
 use crate::gateway::test_support::test_usage_event;
 use serde_json::Value;
@@ -347,8 +394,14 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
         let mut timing = BufferedResponseTiming::default();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             if basis_points {
-                collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing)
-                    .await
+                collect_basis_points_response(
+                    upstream,
+                    Some("gpt-6-astra"),
+                    started,
+                    &mut timing,
+                    None,
+                )
+                .await
             } else {
                 super::collect_upstream_response(
                     upstream,
@@ -357,6 +410,7 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
                     prewarm,
                     started,
                     &mut timing,
+                    None,
                 )
                 .await
             }
@@ -779,6 +833,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     Some("gpt-6-astra"),
                     std::time::Instant::now(),
                     &mut timing,
+                    None,
                 )
                 .await;
                 let mut event = test_usage_event();
@@ -794,6 +849,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     false,
                     std::time::Instant::now(),
                     &mut BufferedResponseTiming::default(),
+                    None,
                 )
                 .await
             }

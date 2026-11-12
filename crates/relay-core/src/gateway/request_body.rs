@@ -80,6 +80,21 @@ pub(super) async fn read_json_object(
     headers: &HeaderMap,
     request_body: Body,
 ) -> Result<Map<String, Value>, Box<Response<Body>>> {
+    read_json_object_inner(headers, request_body, false).await
+}
+
+pub(super) async fn read_responses_json_object(
+    headers: &HeaderMap,
+    request_body: Body,
+) -> Result<Map<String, Value>, Box<Response<Body>>> {
+    read_json_object_inner(headers, request_body, true).await
+}
+
+async fn read_json_object_inner(
+    headers: &HeaderMap,
+    request_body: Body,
+    codex_page_context: bool,
+) -> Result<Map<String, Value>, Box<Response<Body>>> {
     let encodings = headers.get_all(CONTENT_ENCODING).iter().collect::<Vec<_>>();
     let encoding = match encodings.as_slice() {
         [] => "identity".to_string(),
@@ -102,7 +117,7 @@ pub(super) async fn read_json_object(
         .map_err(|_| Box::new(unread_body()))?;
     let compressed = encoding != "identity";
     let parsed = if !compressed && encoded_request_body.len() <= MAX_INLINE_JSON_BYTES {
-        parse_json_object(&encoded_request_body)
+        parse_client_json_object(&encoded_request_body, codex_page_context)
     } else {
         let permit = JSON_READ_JOBS
             .acquire()
@@ -112,9 +127,9 @@ pub(super) async fn read_json_object(
             let _permit = permit;
             if compressed {
                 let decoded = decode(&encoded_request_body, &encoding)?;
-                parse_json_object(&decoded)
+                parse_client_json_object(&decoded, codex_page_context)
             } else {
-                parse_json_object(&encoded_request_body)
+                parse_client_json_object(&encoded_request_body, codex_page_context)
             }
         })
         .await
@@ -136,6 +151,17 @@ pub(super) async fn read_json_object(
             ),
         })
     })
+}
+
+fn parse_client_json_object(
+    request_bytes: &[u8],
+    codex_page_context: bool,
+) -> Result<Map<String, Value>, ReadError> {
+    let mut fields = parse_json_object(request_bytes)?;
+    if codex_page_context {
+        super::request::normalize_codex_page_context(&mut fields, request_bytes);
+    }
+    Ok(fields)
 }
 
 fn parse_json_object(request_bytes: &[u8]) -> Result<Map<String, Value>, ReadError> {
@@ -165,6 +191,47 @@ fn invalid_encoding() -> Response<Body> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn page_context_normalization_is_responses_only_for_every_body_encoding() {
+        let context = serde_json::json!({
+            "type":"function_call_output", "namespace":"agent",
+            "name":"codex_apps_open_page", "output":r#"{"page_id":null}"#
+        });
+        for large in [false, true] {
+            let raw = serde_json::json!({"model":"synthetic", "input":[context],
+                "extension":if large { "x".repeat(MAX_INLINE_JSON_BYTES) } else { String::new() }
+            })
+            .to_string();
+            for encoding in ["identity", "gzip", "zstd"] {
+                let bytes = match encoding {
+                    "gzip" => {
+                        let mut encoder =
+                            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                        encoder.write_all(raw.as_bytes()).unwrap();
+                        encoder.finish().unwrap()
+                    }
+                    "zstd" => zstd::stream::encode_all(raw.as_bytes(), 1).unwrap(),
+                    _ => raw.as_bytes().to_vec(),
+                };
+                let mut headers = HeaderMap::new();
+                headers.insert(CONTENT_ENCODING, encoding.parse().unwrap());
+                let ordinary = read_json_object(&headers, Body::from(bytes.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(ordinary["input"][0], context);
+                let responses = read_responses_json_object(&headers, Body::from(bytes))
+                    .await
+                    .unwrap();
+                assert_eq!(responses["input"][0]["role"], "user");
+                assert_eq!(
+                    responses["input"][0]["content"][0]["text"],
+                    context["output"]
+                );
+                assert_eq!(responses["extension"], ordinary["extension"]);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn native_json_roundtrip_preserves_order_and_exact_numbers() {

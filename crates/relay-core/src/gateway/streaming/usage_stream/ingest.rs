@@ -26,10 +26,8 @@ impl<S> UsageStream<S> {
                 },
             );
         }
-        if !event.success && event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED)
-        {
-            event.http_status = 499;
-        } else if !event.success
+        event.normalize_client_cancellation();
+        if !event.success
             && event.http_status < 400
             && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
         {
@@ -418,6 +416,19 @@ impl<S> UsageStream<S> {
             }
             if let Some(usage_event) = self.event.as_mut() {
                 usage_event.observe_response_metadata(terminal_event_payload);
+                if let Some(transport) = usage_event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+                {
+                    transport
+                        .stream_response
+                        .get_or_insert_default()
+                        .observe_reasoning(
+                            terminal_event_payload,
+                            self.started.elapsed().as_millis() as u64,
+                        );
+                }
                 usage_event
                     .tool_use
                     .observe_stream_payload(terminal_event_payload);

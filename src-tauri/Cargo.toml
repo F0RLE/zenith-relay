@@ -70,6 +70,12 @@ windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2.1.0"
 
+[patch.crates-io]
+# Upstream replaces basic-toml with the maintained TOML parser.
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n", rev = "2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4" }
+# Upstream PR #14 fixes the private proc_macro re-export; remove after release.
+proc-macro-error2 = { git = "https://github.com/GnomedDev/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
+
 [profile.release]
 strip = true
 lto = true

@@ -26,21 +26,13 @@ pub(in crate::gateway) fn tool_use_diagnostics(
 /// Internal request extension, never a wire header or persisted request body.
 #[derive(Clone)]
 pub(in crate::gateway) struct RequestToolPolicy {
-    policy: crate::ToolPolicy,
-    configured_mode: crate::ToolPolicyMode,
     pub(in crate::gateway) diagnostics: ToolUseDiagnostics,
     cache_context: Option<crate::runtime::cache_context::CacheContextObservation>,
 }
 
 impl RequestToolPolicy {
     pub(in crate::gateway) fn new(runtime: &GatewayRuntime, request: &Value) -> Self {
-        let mut policy = runtime.tool_policy();
-        // The settings switch is gone. A saved automatic mode must not keep
-        // adding defer_loading or tool_search to new requests.
-        policy.mode = crate::ToolPolicyMode::PassThrough;
         Self {
-            configured_mode: policy.mode,
-            policy,
             diagnostics: tool_use_diagnostics(request, runtime.diagnostics_enabled()),
             cache_context: None,
         }
@@ -72,49 +64,23 @@ impl RequestToolPolicy {
         }
     }
 
-    pub(in crate::gateway) fn apply(&mut self, request: &mut Value) -> Result<(), &'static str> {
-        self.apply_value(request)
-    }
-
-    pub(in crate::gateway) fn apply_value(&mut self, request: &Value) -> Result<(), &'static str> {
-        let policy_result = crate::tool_policy::apply_tool_policy(
+    pub(in crate::gateway) fn capture_forwarded_catalog(&mut self, request: &Value) {
+        let snapshot = crate::tool_policy::capture_tool_catalog(
             request,
-            &self.policy,
             self.diagnostics.client_context.is_some(),
-        )?;
-        self.record(policy_result);
-        Ok(())
-    }
-
-    pub(in crate::gateway) fn apply_adapter(
-        &mut self,
-        request: &mut crate::PreparedAdapterRequest,
-    ) -> Result<(), &'static str> {
-        let policy_result =
-            request.apply_tool_policy(&self.policy, self.diagnostics.client_context.is_some())?;
-        self.record(policy_result);
-        Ok(())
-    }
-
-    fn record(&mut self, policy_result: crate::tool_policy::ToolPolicyResult) {
-        // Keep the configured mode visible on every attempt.
-        self.diagnostics.policy_mode = Some(self.configured_mode);
-        // Capture the post-policy catalog before transport encoding (BPS may
+        );
+        self.diagnostics.policy_mode = Some(crate::ToolPolicyMode::PassThrough);
+        // Capture the forwarded catalog before transport encoding (BPS may
         // embed only loaded contracts as prompt text). Do not
         // deserialize the entire conversation again just to count its catalog.
         // Usage rows describe one attempt, not the maximum across other routes.
-        self.diagnostics.forwarded_tool_count = policy_result.after.count;
-        self.diagnostics.forwarded_schema_bytes = policy_result
-            .context
-            .as_ref()
-            .map(|_| policy_result.after.bytes);
-        self.diagnostics.deferred_tool_search = policy_result.after.deferred_search;
-        self.diagnostics.upstream_context = policy_result.context;
-        self.diagnostics.filtered_tool_count = policy_result
-            .before
-            .count
-            .saturating_sub(policy_result.after.count);
-        self.diagnostics.policy_outcome = Some(policy_result.outcome);
+        self.diagnostics.forwarded_tool_count = snapshot.stats.count;
+        self.diagnostics.forwarded_schema_bytes =
+            snapshot.context.as_ref().map(|_| snapshot.stats.bytes);
+        self.diagnostics.deferred_tool_search = snapshot.stats.deferred_search;
+        self.diagnostics.upstream_context = snapshot.context;
+        self.diagnostics.filtered_tool_count = 0;
+        self.diagnostics.policy_outcome = Some(crate::ToolPolicyOutcome::PassThrough);
     }
 }
 

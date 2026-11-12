@@ -30,6 +30,7 @@ pub(crate) fn catalog_capabilities(
             .or_else(|| model.get("supportedEndpointTypes"))
             .or_else(|| model.get("supported_endpoints"))
             .or_else(|| model.get("supportedGenerationMethods"))
+            .or_else(|| model.get("endpoints"))
             .and_then(Value::as_array);
         let mut protocols = Vec::new();
         for endpoint in endpoints

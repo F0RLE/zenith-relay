@@ -19,13 +19,33 @@ impl CandidateLease {
         self.rotation_budget.limit_rate_limit_recovery(window_ms);
     }
 
+    pub(crate) fn prefer_transient_retry(&self, allow_fallback: bool, window_ms: u64) {
+        let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+        self.rotation_budget.prefer_retry_candidate(
+            &self.candidate_id,
+            &self.model,
+            self.candidate_permission_revision,
+            revision,
+            allow_fallback,
+            window_ms,
+        );
+    }
+
+    pub(crate) fn retain_wire_authorization(&self, prepared: &PreparedAuthorization) {
+        *crate::poison::mutex(&self.dispatched_token_revision) = prepared.token_revision.clone();
+    }
+
+    pub(crate) fn has_transient_retry(&self) -> bool {
+        self.rotation_budget.retry_candidate_deadline().is_some()
+    }
+
     /// The final scope/config/availability gate and the generation debit are
     /// one scheduler transaction. A lost race never consumes a generation.
     #[cfg(test)]
     pub(crate) fn begin_rotation_dispatch(
         &self,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(false, || Some(()))
+        self.begin_rotation_dispatch_with_wire(false, None, || Some(()))
     }
 
     pub(crate) fn begin_rotation_dispatch_for(
@@ -33,7 +53,7 @@ impl CandidateLease {
         prepared: &PreparedAuthorization,
         runtime: &GatewayRuntime,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(false, || {
+        self.begin_rotation_dispatch_with_wire(false, prepared.token_revision.as_ref(), || {
             prepared.dispatch_guard(runtime, &self.candidate_id)
         })
     }
@@ -45,7 +65,7 @@ impl CandidateLease {
     pub(crate) fn begin_rotation_http_dispatch(
         &self,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(true, || Some(()))
+        self.begin_rotation_dispatch_with_wire(true, None, || Some(()))
     }
 
     pub(crate) fn begin_rotation_http_dispatch_for(
@@ -53,7 +73,7 @@ impl CandidateLease {
         prepared: &PreparedAuthorization,
         runtime: &GatewayRuntime,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
-        self.begin_rotation_dispatch_with_wire(true, || {
+        self.begin_rotation_dispatch_with_wire(true, prepared.token_revision.as_ref(), || {
             prepared.dispatch_guard(runtime, &self.candidate_id)
         })
     }
@@ -61,12 +81,20 @@ impl CandidateLease {
     fn begin_rotation_dispatch_with_wire<G>(
         &self,
         charge_wire: bool,
+        token_revision: Option<&TokenDispatchRevision>,
         guard_authorization: impl FnOnce() -> Option<G>,
     ) -> std::result::Result<RotationAttemptId, RotationDispatchStartError> {
         let budget = &self.rotation_budget;
         let dispatch_result = budget.with_budget(|request_budget| {
             if charge_wire && !request_budget.can_start_wire() {
                 return Err(RotationDispatchStartError::BudgetExhausted);
+            }
+            if self
+                .retry_token_revision
+                .as_ref()
+                .is_some_and(|expected| Some(expected) != token_revision)
+            {
+                return Err(RotationDispatchStartError::CandidateChanged);
             }
             let candidate_scope = crate::poison::read(&self.principal_scope);
             if self.principal_scope_revision.0.load(Ordering::Acquire)
@@ -123,6 +151,7 @@ impl CandidateLease {
                     .start_wire_attempt()
                     .expect("wire capacity was checked under the budget lock");
             }
+            *crate::poison::mutex(&self.dispatched_token_revision) = token_revision.cloned();
             Ok(rotation_attempt)
         });
         if dispatch_result.is_ok() {
@@ -168,6 +197,9 @@ impl CandidateLease {
                 return Ok(None);
             }
             request_budget.observe_execution(observation.execution);
+            let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+            let authorization = revision.as_ref().and_then(TokenDispatchRevision::guard);
+            let observation_owner_current = revision.is_none() || authorization.is_some();
             let mut scheduler = crate::poison::mutex(&self.scheduler);
             let settlement = scheduler.settle_rotation_with_latency(
                 self.reservation_id,
@@ -175,6 +207,7 @@ impl CandidateLease {
                 request_budget,
                 now_ms,
                 first_output_latency_ms,
+                observation_owner_current,
             )?;
             if settlement.observation_current {
                 apply(&mut scheduler);
@@ -283,6 +316,9 @@ impl CandidateLease {
             let budget = &self.rotation_budget;
             if !self.rotation_settled.swap(true, Ordering::AcqRel) {
                 budget.with_budget(|request_budget| {
+                    let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+                    let authorization = revision.as_ref().and_then(TokenDispatchRevision::guard);
+                    let observation_owner_current = revision.is_none() || authorization.is_some();
                     let mut scheduler = crate::poison::mutex(&self.scheduler);
                     if self.rotation_started.load(Ordering::Acquire) {
                         request_budget.observe_execution(RotationExecutionObservation::unknown());
@@ -290,6 +326,7 @@ impl CandidateLease {
                             self.reservation_id,
                             request_budget,
                             crate::unix_time_ms(),
+                            observation_owner_current,
                         );
                     } else {
                         let _ = scheduler.release_rotation_unstarted(self.reservation_id);

@@ -35,11 +35,9 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
   const members = new Map((runtime ? poolMembersFromRuntime(runtime) : []).map((member) => [`${member.kind}:${member.id}`, member]));
   const manualOrder = policy.mode !== "automatic";
-  const modern = policy.version === 3;
-  const modes = modern ? MODES : MODES.slice(0, 2);
-  const shares = policy.mode !== "smart" && usesRequestShares(policy.mode);
-  const selectedMode = policy.mode === "smart" ? "automatic" : rotationModeName(policy.mode);
-  const preset = policy.version === 1 ? "custom" : currentRotationPreset(policy);
+  const shares = usesRequestShares(policy.mode);
+  const selectedMode = rotationModeName(policy.mode);
+  const preset = currentRotationPreset(policy);
   const rows = policy.members.map((rule, index) => ({ rule, index, member: members.get(`${rule.kind}:${rule.id}`) }));
   if (!manualOrder) rows.sort((left, right) => compareOperationalStatus(left.member?.operationalStatus ?? "unavailable", right.member?.operationalStatus ?? "unavailable"));
   const listLabel = t(manualOrder ? "pool.memberOrder" : "pool.rotationMembers");
@@ -47,8 +45,8 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const offset = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key];
     if (offset === undefined && event.key !== "Home" && event.key !== "End") return;
     event.preventDefault();
-    const nextModeIndex = event.key === "Home" ? 0 : event.key === "End" ? modes.length - 1 : (index + (offset ?? 0) + modes.length) % modes.length;
-    const option = modes[nextModeIndex];
+    const nextModeIndex = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
+    const option = MODES[nextModeIndex];
     if (!option) return;
     edit({ type: "mode", mode: option.policyMode });
     event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextModeIndex]?.focus();
@@ -93,7 +91,6 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     onClose={() => { if (dragRef.current) clearDrag(); else void close(); }}>
     <div
       className="pool-routing-editor"
-      data-presets={modern}
       data-manual-order={manualOrder}
       data-request-shares={shares}
       aria-busy={saving}
@@ -104,7 +101,7 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
         }
       }}
     >
-      {modern ? <aside className="pool-routing-presets">
+      <aside className="pool-routing-presets">
         <div className="pool-routing-preset-heading"><span>{t("pool.rotationPreset")}</span>
           {preset === "custom" ? <span className="pool-routing-custom">{t("pool.rotationPresets.custom")}</span> : null}
         </div>
@@ -119,12 +116,12 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
             onClick={() => edit({ type: "preset", preset: id })}
           >{t(`pool.rotationPresets.${id}`)}</Button>)}
         </div>
-      </aside> : null}
+      </aside>
       <div className="pool-routing-content">
         <section className="pool-routing-strategy" aria-label={t("pool.routingStrategy")}>
           <h3>{t("pool.routingStrategy")}</h3>
-          <div className="pool-routing-modes" data-legacy={!modern} role="radiogroup" aria-label={t("pool.routingStrategy")}>
-            {modes.map(({ modeId, policyMode, icon: Icon }, index) => (
+          <div className="pool-routing-modes" role="radiogroup" aria-label={t("pool.routingStrategy")}>
+            {MODES.map(({ modeId, policyMode, icon: Icon }, index) => (
               <button
                 key={modeId}
                 type="button"
@@ -142,7 +139,7 @@ export function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
               </button>
             ))}
           </div>
-          {modern && selectedMode === "roundRobin" ? <div className="pool-routing-shares">
+          {selectedMode === "roundRobin" ? <div className="pool-routing-shares">
             <span>{t("pool.weightedRoundRobin")}</span>
             <ToggleSwitch
               label={t("pool.weightedRoundRobin")}

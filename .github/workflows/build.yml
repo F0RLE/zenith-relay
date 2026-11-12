@@ -399,6 +399,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: release-artifacts
@@ -420,21 +423,11 @@ jobs:
 
           License: [AGPL-3.0-only](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/LICENSE.txt) · [Corresponding source](${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.zip)
           "@
-          $version = [regex]::Escape(($env:GITHUB_REF_NAME -replace "^v", ""))
-          $changelog = Get-Content -Raw -LiteralPath "docs/releases/CHANGELOG.md"
-          $releaseSection = [regex]::Match($changelog, "(?ms)^## \[$version\].*?(?=^## \[|\z)")
-          if (-not $releaseSection.Success) {
-            throw "docs/releases/CHANGELOG.md must contain a user-facing section for release $version"
+          $notes = bun scripts/release/build-release-notes.mjs $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cannot assemble localized release notes for $env:GITHUB_REF_NAME"
           }
-          $notes = $releaseSection.Value.Trim()
-          if (-not $notes) {
-            throw "User-facing release notes are empty for $env:GITHUB_REF_NAME"
-          }
-          foreach ($locale in @("en", "ru")) {
-            if ($notes -notmatch "(?im)<!--\s*relay-notes:$locale\s*-->") {
-              throw "Release notes for $env:GITHUB_REF_NAME must include a relay-notes:$locale section"
-            }
-          }
+          $notes = $notes -join "`n"
           "$downloads`n`n$notes" | Set-Content -Path release-notes.md -Encoding utf8
       - name: Check all release assets before publishing
         shell: pwsh

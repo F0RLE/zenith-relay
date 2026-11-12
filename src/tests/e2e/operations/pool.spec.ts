@@ -714,12 +714,13 @@ test("source toolbar refresh discovers API data instead of only reloading the sn
   await page.getByRole("tab", { name: "Sources" }).click();
 
   await page.locator(".source-command-bar").getByRole("button", { name: "Refresh API data", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Updated: 2 · Errors: 0 · Skipped: 0");
+  await expect(page.locator(".source-command-bar").getByRole("button", { name: "Refresh API data", exact: true })).toBeEnabled();
+  await expect(page.locator(".connection-toolbar-result")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (
     window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { sourceId?: string } }> }
-  ).__TAURI_TEST_INVOKES__.filter((call) => call.command === "test_local_source"))).toEqual([
-    { command: "test_local_source", args: { sourceId: "source_synthetic" } },
-    { command: "test_local_source", args: { sourceId: "source_synthetic_2" } },
+  ).__TAURI_TEST_INVOKES__.filter((call) => call.command === "refresh_local_source_data"))).toEqual([
+    { command: "refresh_local_source_data", args: { sourceId: "source_synthetic", replaceManual: true } },
+    { command: "refresh_local_source_data", args: { sourceId: "source_synthetic_2", replaceManual: true } },
   ]);
 });
 

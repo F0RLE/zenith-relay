@@ -63,10 +63,21 @@ impl PoolScheduler {
         if !bound {
             // Keep the durable owner, but remember successful spillovers so a
             // busy owner does not send every continuation to another cold member.
-            self.prompt_affinity
-                .remember_alternative(&key, candidate_id, now_ms);
+            self.remember_prompt_affinity_spillover(&key, candidate_id, now_ms);
         }
         bound
+    }
+
+    pub(crate) fn remember_prompt_affinity_spillover(
+        &mut self,
+        key: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) {
+        if !self.is_retired() && self.candidates.contains_key(candidate_id) {
+            self.prompt_affinity
+                .remember_alternative(key, candidate_id, now_ms);
+        }
     }
 
     pub fn restore_response_affinity(
@@ -192,6 +203,16 @@ impl PoolScheduler {
         self.prompt_affinity
             .get_with_expiry(key, now_ms)
             .map(|(candidate_id, expires_at_ms)| (candidate_id.to_owned(), expires_at_ms))
+    }
+
+    pub(crate) fn prompt_affinity_binding(
+        &mut self,
+        key: &str,
+        now_ms: u64,
+    ) -> Option<(String, u64)> {
+        self.prompt_affinity
+            .get_with_revision(key, now_ms)
+            .map(|(candidate_id, revision)| (candidate_id.to_owned(), revision))
     }
 
     pub fn invalidate_response_affinity(&mut self, key: &str) -> bool {

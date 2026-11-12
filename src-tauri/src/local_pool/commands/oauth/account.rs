@@ -56,7 +56,10 @@ pub(super) fn preserve_existing_settings(
     account_to_update.account.draining = existing_account.account.draining;
     account_to_update.account.created_at_ms = existing_account.account.created_at_ms;
     account_to_update.account.last_used_at_ms = existing_account.account.last_used_at_ms;
-    account_to_update.account.quota = existing_account.account.quota.clone();
+    if existing_account.account.quota.updated_at_ms > account_to_update.account.quota.updated_at_ms
+    {
+        account_to_update.account.quota = existing_account.account.quota.clone();
+    }
     account_to_update.purchase_cost_micro_usd = existing_account.purchase_cost_micro_usd;
     account_to_update.recovery = existing_account.recovery.clone();
     let fresh_models = std::mem::take(&mut account_to_update.models);

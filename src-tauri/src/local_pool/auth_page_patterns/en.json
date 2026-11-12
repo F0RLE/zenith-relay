@@ -1,0 +1,5 @@
+{
+  "loginTitle": "sign in to chatgpt",
+  "loginPrimaryAction": "continue to sign in|sign in with chatgpt",
+  "unsafeSubmit": "sign.?up|create|reset|forgot|google|apple|microsoft|consent|authorize"
+}

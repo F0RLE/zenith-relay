@@ -1,7 +1,10 @@
 use crate::providers::chatgpt::OAuthClientKind;
 use crate::{PoolMemberKind, PoolRoutingPolicy};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+// Bound retained registration history and pairwise identity validation.
+const MAX_ROUTE_CONNECTIONS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,9 +24,8 @@ impl AccountRouteGroup {
     ) {
         policy.members.retain(|member| {
             member.kind != PoolMemberKind::Account
-                || (member.id != self.selected_account_id
-                    && (next_kind != OAuthClientKind::Codex
-                        || !self.account_ids.contains(&member.id)))
+                || !self.account_ids.contains(&member.id)
+                || (member.id == previous && next_kind != OAuthClientKind::Codex)
         });
         for member in &mut policy.members {
             if member.kind == PoolMemberKind::Account && member.id == previous {
@@ -44,9 +46,10 @@ pub struct AccountRouteIdentity {
 
 impl AccountRouteIdentity {
     pub fn same_owner(&self, other: &Self) -> bool {
-        if self.client_kind == other.client_kind {
-            return false;
-        }
+        self.client_kind != other.client_kind && self.same_principal(other)
+    }
+
+    fn same_principal(&self, other: &Self) -> bool {
         if self.client_kind != OAuthClientKind::Siwc && other.client_kind != OAuthClientKind::Siwc {
             return self.provider_account_id.is_some()
                 && self.provider_account_id == other.provider_account_id
@@ -82,7 +85,7 @@ pub fn validate_account_route_connection(
 pub fn validate_account_route_groups(groups: &[AccountRouteGroup]) -> Result<(), &'static str> {
     let mut route_accounts = BTreeSet::new();
     for group in groups {
-        if !(2..=3).contains(&group.account_ids.len())
+        if !(2..=MAX_ROUTE_CONNECTIONS).contains(&group.account_ids.len())
             || !group.account_ids.contains(&group.selected_account_id)
             || group
                 .notes_account_id
@@ -132,6 +135,69 @@ pub fn select_account_route_group(
         return Err("This route does not belong to the selected account");
     }
     group.selected_account_id = next.into();
+    Ok(group)
+}
+
+/// An explicit association can join saved grants only after every member's
+/// protected principal/workspace facts have been checked, including duplicate clients.
+pub fn associate_account_route_groups(
+    groups: &[AccountRouteGroup],
+    current: &str,
+    next: &str,
+    identities: &BTreeMap<String, AccountRouteIdentity>,
+) -> Result<AccountRouteGroup, &'static str> {
+    let containing = |id: &str| {
+        groups
+            .iter()
+            .find(|group| group.account_ids.iter().any(|member| member == id))
+    };
+    let source = containing(current);
+    let destination = containing(next);
+    if source.is_some_and(|group| group.selected_account_id != current) {
+        return Err("The selected account route changed; refresh and try again");
+    }
+    let members = |group: Option<&AccountRouteGroup>, fallback: &str| {
+        group.map_or_else(
+            || vec![fallback.to_owned()],
+            |group| group.account_ids.clone(),
+        )
+    };
+    // Retain an existing group's stable identity when joining a standalone duplicate.
+    let mut account_ids = members(source.or(destination), current);
+    for id in members(destination, next)
+        .into_iter()
+        .chain([current.to_owned()])
+    {
+        if !account_ids.contains(&id) {
+            account_ids.push(id);
+        }
+    }
+    let facts = account_ids
+        .iter()
+        .map(|id| {
+            identities
+                .get(id)
+                .ok_or("Account connection identity is unavailable")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, left) in facts.iter().enumerate() {
+        if facts[index + 1..]
+            .iter()
+            .any(|right| !left.same_principal(right))
+        {
+            return Err(
+                "Authorize a different route for the same account and workspace before associating it",
+            );
+        }
+    }
+    let group = AccountRouteGroup {
+        account_ids,
+        selected_account_id: next.to_owned(),
+        notes_account_id: source
+            .and_then(|group| group.notes_account_id.clone())
+            .or_else(|| destination.and_then(|group| group.notes_account_id.clone())),
+    };
+    validate_account_route_groups(std::slice::from_ref(&group))?;
     Ok(group)
 }
 

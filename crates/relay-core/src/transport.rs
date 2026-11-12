@@ -2,15 +2,68 @@ use crate::{Error, Result};
 use futures_util::StreamExt;
 use std::time::Duration;
 
+mod headers;
+
+pub(crate) use headers::{
+    is_connection_header, is_credential_header, retry_after_ms, single_header,
+};
+
+#[cfg(test)]
+mod header_tests;
+
 pub(crate) const MAX_MODEL_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Optional native HTTP deadline from connect through response headers.
-pub(crate) fn http_headers_timeout() -> Option<Duration> {
-    parse_http_headers_timeout(
+pub(crate) fn http_headers_timeout(image_generation: bool) -> Option<Duration> {
+    let general = parse_http_headers_timeout(
         std::env::var("ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS")
             .ok()
             .as_deref(),
+    );
+    if !image_generation || general.is_none() {
+        return general;
+    }
+    image_headers_timeout(
+        general,
+        std::env::var("ZENITH_RELAY_IMAGE_HEADERS_TIMEOUT_SECONDS")
+            .ok()
+            .as_deref(),
     )
+}
+
+fn image_headers_timeout(general: Option<Duration>, image: Option<&str>) -> Option<Duration> {
+    general.map(|general| {
+        parse_http_headers_timeout(image).map_or(general, |image| image.max(general))
+    })
+}
+
+/// Classify the prepared upstream tool contract, never model names or user text.
+pub(crate) fn permits_image_generation(request: &serde_json::Value) -> bool {
+    let image_tool = |tool: &serde_json::Value| {
+        tool.get("type").and_then(serde_json::Value::as_str) == Some("image_generation")
+    };
+    if !request
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tools| tools.iter().any(image_tool))
+    {
+        return false;
+    }
+    match request.get("tool_choice") {
+        Some(serde_json::Value::String(choice)) => choice == "auto" || choice == "required",
+        Some(serde_json::Value::Object(choice)) => {
+            match choice.get("type").and_then(serde_json::Value::as_str) {
+                Some("image_generation") => true,
+                Some("allowed_tools") => choice
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| tools.iter().any(image_tool)),
+                _ => false,
+            }
+        }
+        None => true,
+        _ => false,
+    }
 }
 
 fn parse_http_headers_timeout(value: Option<&str>) -> Option<Duration> {
@@ -175,27 +228,6 @@ pub(crate) async fn collect_with_progress_limit(
     }
 }
 
-/// A relative floor measured at receipt. Consumers must preserve the floor
-/// when converting it to a monotonic deadline; do not cap a long provider hint
-/// to a shorter polling interval.
-pub(crate) fn retry_after_ms(
-    headers: &reqwest::header::HeaderMap,
-    now: std::time::SystemTime,
-) -> Option<u64> {
-    let retry_after_header = headers.get("retry-after")?.to_str().ok()?.trim();
-    if let Ok(seconds) = retry_after_header.parse::<u64>() {
-        return Some(seconds.saturating_mul(1_000));
-    }
-    Some(
-        httpdate::parse_http_date(retry_after_header)
-            .ok()?
-            .duration_since(now)
-            .ok()?
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64,
-    )
-}
-
 pub(crate) async fn collect(response: reqwest::Response) -> Result<Vec<u8>> {
     let mut response_bytes = Vec::new();
     let mut stream = response.bytes_stream();
@@ -242,6 +274,52 @@ mod progress_tests {
             parse_http_headers_timeout(Some("1800")),
             Some(Duration::from_secs(1800))
         );
+    }
+
+    #[test]
+    fn image_header_wait_only_extends_an_enabled_general_guard() {
+        let general = Some(Duration::from_secs(30));
+        assert_eq!(image_headers_timeout(None, Some("180")), None);
+        assert_eq!(
+            image_headers_timeout(general, Some("180")),
+            Some(Duration::from_secs(180))
+        );
+        for value in [None, Some("0"), Some("invalid"), Some("1801"), Some("10")] {
+            assert_eq!(image_headers_timeout(general, value), general);
+        }
+    }
+
+    #[test]
+    fn image_header_policy_follows_current_tools_and_tool_choice() {
+        use serde_json::json;
+        let mut request = json!({"tools": [{"type": "image_generation"}]});
+        assert!(permits_image_generation(&request));
+        for choice in [
+            json!("auto"),
+            json!("required"),
+            json!({"type": "image_generation"}),
+            json!({"type": "allowed_tools", "tools": [{"type": "image_generation"}]}),
+        ] {
+            request["tool_choice"] = choice;
+            assert!(permits_image_generation(&request));
+        }
+        for choice in [
+            json!("none"),
+            json!({"type": "function", "name": "lookup"}),
+            json!({"type": "allowed_tools", "tools": [{"type": "function", "name": "lookup"}]}),
+        ] {
+            request["tool_choice"] = choice;
+            assert!(!permits_image_generation(&request));
+        }
+        assert!(!permits_image_generation(
+            &json!({"model": "image_generation", "input": "image_generation"})
+        ));
+        assert!(!permits_image_generation(
+            &json!({"tools": [{"type": "function", "name": "image_generation"}]})
+        ));
+        assert!(!permits_image_generation(
+            &json!({"input": [{"type": "additional_tools", "tools": [{"type": "image_generation"}]}]})
+        ));
     }
 
     async fn headers_request(

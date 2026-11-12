@@ -294,6 +294,32 @@ fn prompt_affinity_orders_lazy_restoration_before_a_successful_rebalance() {
 }
 
 #[test]
+fn prompt_affinity_restore_accepts_only_current_candidate_ids() {
+    for candidate_id in [
+        "source-a",
+        "source-a::responses_to_chat_completions",
+        "removed-source",
+    ] {
+        let store = Arc::new(RecordedResponseAffinityStore::default());
+        let runtime = prompt_runtime(store.clone());
+        let key = "cache:current-candidate";
+        *crate::poison::mutex(&store.restored_binding) = Some(ResponseAffinityBinding {
+            key: key.to_owned(),
+            candidate_id: candidate_id.to_owned(),
+            expires_at_ms: 100 + crate::PROMPT_AFFINITY_TTL_MS,
+        });
+        runtime.restore_prompt_affinity_from_store(key, 100);
+        let restored = runtime.lock_scheduler().prompt_affinity_snapshot(key, 100);
+        assert_eq!(
+            restored,
+            (candidate_id == "source-a")
+                .then(|| ("source-a".to_owned(), 100 + crate::PROMPT_AFFINITY_TTL_MS)),
+        );
+        assert!(crate::poison::mutex(&store.upserts).is_empty());
+    }
+}
+
+#[test]
 fn prompt_affinity_persists_the_monotonic_scheduler_expiry() {
     let store = Arc::new(RecordedResponseAffinityStore::default());
     let runtime = prompt_runtime(store.clone());

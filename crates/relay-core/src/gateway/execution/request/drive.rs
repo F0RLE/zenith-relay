@@ -1,6 +1,7 @@
 use super::super::super::request::ServiceTierPolicy;
 use super::super::basis_points::structured_output::requires_buffering;
-use super::super::compatibility::{AdapterRejection, record_adapter_rejection};
+use super::super::compatibility::{RejectedRequest, record_adapter_rejection};
+use super::super::state::AttemptState;
 use super::completion::{BufferedCompletionInput, CompletionStep, complete_buffered_response};
 use super::dispatch::{
     DispatchedRequestAttempt, RequestDispatch, RequestDispatchInput, dispatch_request_attempt,
@@ -11,7 +12,6 @@ use super::prepare::{
     PreparedRequestAttempt, RequestPrepare, RequestPrepareInput, prepare_request_attempt,
 };
 use super::recovery::{adapter_error_response, replay_native_tool_continuation};
-use super::state::{AttemptState, ContinuationState, RetryState};
 use super::stream::{OpenStreamInput, OpenedStream, open_response_stream};
 use std::sync::Arc;
 
@@ -98,27 +98,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         mut has_previous_response_id,
         allow_previous_response_reset,
     } = drive_input;
-    let AttemptState {
-        retry,
-        continuation,
-    } = state;
-    let RetryState {
-        attempt,
-        tried,
-        preparation_exclusions,
-        last_failure,
-        last_failure_origin,
-        last_adapter_error,
-        last_preserved_upstream_error,
-        window_expired: _,
-    } = retry;
-    let ContinuationState {
-        response_affinity_key,
-        requires_affinity_owner,
-        has_unpaired_tool_output,
-        confirmed_response_missing,
-        repairs,
-    } = continuation;
     if matches!(
         route.account_transport,
         AccountTransport::ExcelBasisPoints | AccountTransport::Siwc
@@ -136,7 +115,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             &mut request,
             &route,
             stream,
-            &mut repairs.native_replay,
+            &mut state.continuation.repairs.native_replay,
         )
         .and_then(|restored| {
             restored
@@ -146,12 +125,12 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         if let Err(error) = replay {
             record_adapter_rejection(
                 runtime,
-                AdapterRejection {
+                RejectedRequest {
                     request_id: &request_id,
-                    attempt: *attempt,
+                    attempt: state.retry.attempt,
                     local_key_id: &key.id,
                     requested_model: &requested_model,
-                    resolved_model,
+                    resolved_model: Some(resolved_model),
                     client_context_id: client_context_id.as_deref(),
                     wire_api: client_wire_api,
                     transport,
@@ -162,16 +141,13 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             );
             return DrivenAttempt::Respond(adapter_error_response(error, Some(&request_id)));
         }
-        clear_materialized_continuation(
-            response_affinity_key,
-            requires_affinity_owner,
-            has_unpaired_tool_output,
-        );
+        state.continuation.clear_materialized();
         has_previous_response_id = false;
     }
-    tried.insert(selected.candidate_id.clone());
+    state.retry.tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
-    let preparation_started = route.diagnostics_enabled.then(Instant::now);
+    let preparation_clock = Instant::now();
+    let preparation_started = route.diagnostics_enabled.then_some(preparation_clock);
     let prepared = match prepare_request_attempt(RequestPrepareInput {
         route,
         runtime,
@@ -189,16 +165,38 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         diagnostics: selected.diagnostics,
         client_context_id,
         client_transport: transport,
-        last_adapter_error,
+        retry: &mut state.retry,
     }) {
         RequestPrepare::Continue => {
-            preparation_exclusions.insert(selected.candidate_id.clone());
+            state
+                .retry
+                .preparation_exclusions
+                .insert(selected.candidate_id.clone());
             return DrivenAttempt::Continue(carry(
                 request,
                 request_id,
                 requested_model,
                 prompt_affinity_key,
             ));
+        }
+        RequestPrepare::Reject(error) => {
+            record_adapter_rejection(
+                runtime,
+                RejectedRequest {
+                    request_id: &request_id,
+                    attempt: state.retry.attempt,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: Some(resolved_model),
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                &error,
+                preparation_clock.elapsed().as_millis() as u64,
+            );
+            return DrivenAttempt::Respond(adapter_error_response(error, Some(&request_id)));
         }
         RequestPrepare::Respond(response) => return DrivenAttempt::Respond(response),
         RequestPrepare::Ready(prepared) => *prepared,
@@ -247,9 +245,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         requested_model: &requested_model,
         forwarded_headers,
         selected_error_origin,
-        attempt,
-        last_failure,
-        last_failure_origin,
+        retry: &mut state.retry,
     })
     .await
     {
@@ -257,7 +253,10 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             // Uploads and rejected dispatch fences can fail without spending a
             // generation. They must not reopen a ready member on every pass.
             if budget.dispatches() == dispatches_before {
-                preparation_exclusions.insert(selected.candidate_id.clone());
+                state
+                    .retry
+                    .preparation_exclusions
+                    .insert(selected.candidate_id.clone());
             }
             return DrivenAttempt::Continue(carry(
                 request,
@@ -295,7 +294,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             route: &route,
             source_model: &source_model,
             request_id: &request_id,
-            attempt: *attempt,
+            attempt: state.retry.attempt,
             key,
             reasoning_effort: &reasoning_effort,
             requested_model: &requested_model,
@@ -306,22 +305,14 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
                 request: &mut request,
                 adapter_is_passthrough,
                 has_previous_response_id,
-                repairs,
-                tried,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-                last_failure,
-                last_failure_origin,
-                last_preserved_upstream_error,
+                state,
                 tool_policy,
                 stream,
-                response_affinity_key,
                 resolved_model,
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
                 prompt_affinity_key: &prompt_affinity_key,
-                confirmed_response_missing,
                 account_route,
                 forwarded_headers,
             },
@@ -376,7 +367,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             route: &route,
             source_model: &source_model,
             request_id: &request_id,
-            attempt: *attempt,
+            attempt: state.retry.attempt,
             key,
             reasoning_effort: &reasoning_effort,
             requested_model: &requested_model,
@@ -388,17 +379,11 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
             client_wire_api,
             request: &mut request,
             adapter_is_passthrough,
-            repairs,
-            requires_affinity_owner,
-            has_unpaired_tool_output,
-            last_failure,
-            last_failure_origin,
-            last_preserved_upstream_error,
+            state,
             has_previous_response_id,
             basis_points_request: &basis_points_request,
             stream,
             adapter_request,
-            tried,
             selected_error_origin,
             response_affinity_hit,
             prompt_affinity_key: &prompt_affinity_key,
@@ -439,7 +424,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         client_wire_api,
         reasoning_effort,
         tool_use,
-        attempt: *attempt,
+        attempt: state.retry.attempt,
         started,
         forwarded_headers,
         adapter_is_passthrough,
@@ -448,14 +433,7 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
         stream,
         resolved_model,
         selected_error_origin,
-        repairs,
-        tried,
-        has_unpaired_tool_output,
-        requires_affinity_owner,
-        response_affinity_key,
-        last_failure,
-        last_failure_origin,
-        last_preserved_upstream_error,
+        state,
     })
     .await
     {

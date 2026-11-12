@@ -317,6 +317,7 @@ fn usage_retention_prunes_old_rows_on_open_and_periodically() {
             candidate_id: None,
             account_id: None,
             account_token_generation: None,
+            account_token_revision: None,
             client_context_id: None,
             routing: None,
             requested_model: None,

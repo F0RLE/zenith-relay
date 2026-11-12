@@ -1,3 +1,4 @@
+use super::super::super::state::{AttemptState, ContinuationState, RetryState};
 use super::super::prelude::*;
 use super::super::recovery::{adapter_error_response, replay_native_tool_continuation};
 use super::FailureStep;
@@ -17,19 +18,11 @@ pub(super) fn settle_collected_rejection(
                 request,
                 adapter_is_passthrough,
                 has_previous_response_id,
-                repairs,
-                tried,
-                has_unpaired_tool_output,
-                requires_affinity_owner,
-                last_failure,
-                last_failure_origin,
-                last_preserved_upstream_error,
+                state,
                 stream,
-                response_affinity_key,
                 response_affinity_hit,
                 selected_error_origin,
                 prompt_affinity_key,
-                confirmed_response_missing,
                 account_route,
                 forwarded_headers,
                 ..
@@ -40,9 +33,38 @@ pub(super) fn settle_collected_rejection(
     }: super::CollectedRejection<'_>,
     failure: AttemptFailure,
 ) -> FailureStep {
+    let AttemptState {
+        retry:
+            RetryState {
+                tried,
+                last_failure,
+                last_failure_origin,
+                last_preserved_upstream_error,
+                ..
+            },
+        continuation:
+            ContinuationState {
+                repairs,
+                has_unpaired_tool_output,
+                requires_affinity_owner,
+                response_affinity_key,
+                confirmed_response_missing,
+                ..
+            },
+    } = state;
     let native_replay_attempted = &mut repairs.native_replay;
     let cache_write_rejected = prompt_cache_write_rejected(&bytes);
     let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
+    if lease.has_transient_retry() {
+        apply_failure_state(event, rejection_state);
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+        }
+        emit_usage(runtime, event.clone());
+        *last_failure = Some(failure);
+        *last_failure_origin = selected_error_origin;
+        return FailureStep::Continue;
+    }
     let response_missing = previous_response_not_found(&bytes);
     let affinity_miss = recoverable_response_affinity_miss(
         status,

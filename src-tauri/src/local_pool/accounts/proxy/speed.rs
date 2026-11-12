@@ -24,10 +24,19 @@ pub async fn test(
     proxy: &ProxyConfig,
     on_started: impl FnOnce() -> bool,
 ) -> ProxySpeedTestResult {
-    test_at(proxy_id, proxy, DOWNLOAD_URL, BUDGET, on_started).await
+    test_at(
+        &SPEED_LIMIT,
+        proxy_id,
+        proxy,
+        DOWNLOAD_URL,
+        BUDGET,
+        on_started,
+    )
+    .await
 }
 
 async fn test_at(
+    limit: &tokio::sync::Semaphore,
     proxy_id: String,
     proxy: &ProxyConfig,
     url: &str,
@@ -38,7 +47,7 @@ async fn test_at(
         proxy_id,
         ..ProxySpeedTestResult::default()
     };
-    let Ok(_slot) = SPEED_LIMIT.acquire().await else {
+    let Ok(_slot) = limit.acquire().await else {
         result.error_code = Some(error_codes::PROXY_CHECK_UNAVAILABLE.into());
         return result;
     };

@@ -155,12 +155,9 @@ impl GatewayRuntime {
             return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
         if self.is_basis_points_account(candidate_id) {
-            let account =
-                self.chatgpt_accounts
-                    .get(candidate_id)
-                    .ok_or(AuthorizedRequestError::Prepare(
-                        ExecutorPrepareError::Authentication,
-                    ))?;
+            let account = self.account_state.executors.get(candidate_id).ok_or(
+                AuthorizedRequestError::Prepare(ExecutorPrepareError::Authentication),
+            )?;
             let revision =
                 prepared
                     .token_revision
@@ -216,13 +213,16 @@ impl GatewayRuntime {
         response: reqwest::Response,
         prepared: &PreparedAuthorization,
     ) -> AuthorizedResponse {
-        self.observe_codex_quota_headers(
-            candidate_id,
-            prepared.token_generation,
-            response.status(),
-            response.headers(),
-            runtime_now_ms(),
-        );
+        if endpoint_observes_codex_quota(response.url().path()) {
+            self.observe_codex_quota_headers(
+                candidate_id,
+                prepared.token_generation,
+                prepared.token_revision.as_ref(),
+                response.status(),
+                response.headers(),
+                runtime_now_ms(),
+            );
+        }
         AuthorizedResponse {
             response,
             account_token_generation: prepared.token_generation,
@@ -273,11 +273,14 @@ impl GatewayRuntime {
         candidate_id: &str,
         prepared: &PreparedAuthorization,
     ) -> Option<std::sync::Arc<super::super::routing_cookies::RoutingCookieJar>> {
-        self.chatgpt_accounts.get(candidate_id).map(|account| {
-            account
-                .routing_cookies
-                .for_credential(prepared.turn_state_credential())
-        })
+        self.account_state
+            .executors
+            .get(candidate_id)
+            .map(|account| {
+                account
+                    .routing_cookies
+                    .for_credential(prepared.turn_state_credential())
+            })
     }
 
     pub(crate) fn guard_turn_state(
@@ -394,7 +397,7 @@ impl GatewayRuntime {
                 }
             }
         }
-        let native_codex_account = self.chatgpt_accounts.contains_key(candidate_id)
+        let native_codex_account = self.account_state.executors.contains_key(candidate_id)
             && !self.is_siwc_account(candidate_id)
             && !self.is_basis_points_account(candidate_id)
             && identity_policy == AuthorizationIdentityPolicy::RelayCodex
@@ -421,11 +424,53 @@ impl GatewayRuntime {
         let headers_deadline = budget
             .filter(|_| !self.is_basis_points_account(candidate_id))
             .and_then(|budget| {
-                crate::transport::http_headers_timeout()
+                crate::transport::http_headers_timeout(budget.is_image_generation())
                     .map(|timeout| budget.http_headers_deadline(timeout))
             });
         if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
             return Err(AuthorizedRequestError::HeadersTimeout);
+        }
+        match self
+            .prepare_siwc_socket(
+                candidate_id,
+                &authorized_request,
+                prepared,
+                dispatch,
+                diagnostics_mode,
+            )
+            .await?
+        {
+            crate::runtime::siwc_socket::PreparedSocket::NotApplicable => (),
+            crate::runtime::siwc_socket::PreparedSocket::Rejected(response) => return Ok(response),
+            crate::runtime::siwc_socket::PreparedSocket::Ready(socket) => {
+                if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+                {
+                    return Err(AuthorizedRequestError::HeadersTimeout);
+                }
+                // The handshake spent a wire attempt, not a generation. Recheck
+                // principal, model, grant and response ownership before the frame.
+                dispatch
+                    .lease
+                    .expect("SIWC socket requires a lease")
+                    .begin_rotation_dispatch_for(prepared, self)
+                    .map_err(|error| {
+                        if error == crate::scheduler::rotation::DispatchStartError::BudgetExhausted
+                        {
+                            AuthorizedRequestError::DispatchBudgetExhausted
+                        } else {
+                            stale_authorization()
+                        }
+                    })?;
+                if let Some((template, started)) = dispatch.usage_event {
+                    let mut event = template.clone();
+                    event.attempt =
+                        budget.map_or(event.attempt, |budget| u16::from(budget.dispatches()));
+                    event.account_token_generation = prepared.token_generation;
+                    socket.observe_pending(&mut event);
+                    self.track_dispatch_usage(event, started);
+                }
+                return socket.send().await;
+            }
         }
         if let Some(budget) = budget {
             if let Some(lease) = lease {
@@ -555,8 +600,8 @@ impl GatewayRuntime {
                 .extensions_mut()
                 .insert(payload_diagnostics);
         }
+        self.observe_turn_state(upstream_response.headers(), scope, prepared);
         if upstream_response.status().is_success() {
-            self.observe_turn_state(upstream_response.headers(), scope, prepared);
             self.observe_codex_models_etag(
                 candidate_id,
                 &url,
@@ -570,3 +615,34 @@ impl GatewayRuntime {
 
 mod prepared;
 use prepared::apply_prepared_authorization;
+
+fn endpoint_observes_codex_quota(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    !["/images/generations", "/images/edits"]
+        .iter()
+        .any(|endpoint| path.ends_with(endpoint))
+}
+
+#[cfg(test)]
+mod quota_scope_tests {
+    use super::endpoint_observes_codex_quota;
+
+    #[test]
+    fn image_response_headers_do_not_update_the_codex_quota_ledger() {
+        for path in [
+            "/backend-api/codex/images/generations",
+            "/backend-api/codex/images/edits",
+            "/v1/images/generations",
+            "/v1/images/edits/",
+        ] {
+            assert!(!endpoint_observes_codex_quota(path), "{path}");
+        }
+        for path in [
+            "/backend-api/codex/responses",
+            "/v1/responses",
+            "/v1/chat/completions",
+        ] {
+            assert!(endpoint_observes_codex_quota(path), "{path}");
+        }
+    }
+}

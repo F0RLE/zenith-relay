@@ -4,6 +4,14 @@ import { installTauriMock } from "./tauri-mock";
 async function expectAlignedQuotas(page: Page, selector: string) {
   const cards = page.locator(selector);
   await expect(cards).toHaveCount(5);
+  const resetControls = cards.locator(".reset-credits-control");
+  expect(await resetControls.count()).toBeGreaterThan(0);
+  const resetLabelOffsets = await resetControls.evaluateAll((buttons) => buttons.map((button) => {
+    const control = button.getBoundingClientRect();
+    const label = button.querySelector(".reset-credits-action-label")!.getBoundingClientRect();
+    return Math.abs(label.left + label.width / 2 - control.left - control.width / 2);
+  }));
+  for (const offset of resetLabelOffsets) expect(offset).toBeLessThanOrEqual(1);
   const positions = await cards.evaluateAll((elements) => elements.map((card) => ({
     row: Math.round(card.getBoundingClientRect().top),
     quota: card.querySelector(".quota-stack, .account-quota-refresh-state")!.getBoundingClientRect().top,
@@ -24,7 +32,7 @@ for (const theme of ["light", "dark"] as const) {
   for (const mode of ["local"] as const) {
     test(`account quotas align across optional dates and pending states ${mode} ${theme}`, async ({ page }) => {
       await page.setViewportSize({ width: 1160, height: 900 });
-      await installTauriMock(page, { locale: "ru", theme, mode, populated: true, accountCount: 5, poolMembers: true });
+      await installTauriMock(page, { locale: "ru", theme, mode, populated: true, accountCount: 5, poolMembers: true, resetCreditsAvailable: 12 });
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
       await expectAlignedQuotas(page, ".account-card");

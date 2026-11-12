@@ -87,6 +87,52 @@ test("visible identifiers have no redundant hint but clipped identifiers retain 
   await expect(page.getByRole("tooltip")).toHaveCount(0);
 });
 
+test("keyboard hints survive focus scrolling and dismiss when scrolled out of view", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const viewport = document.createElement("div");
+    viewport.id = "keyboard-scroll-fixture";
+    viewport.style.cssText = "position:fixed;inset:120px auto auto 250px;width:260px;height:160px;overflow:auto;z-index:999";
+    const before = document.createElement("button");
+    before.id = "keyboard-before";
+    before.textContent = "Before";
+    const spacer = document.createElement("div");
+    spacer.style.height = "400px";
+    const anchor = document.createElement("button");
+    anchor.id = "keyboard-scroll-anchor";
+    anchor.textContent = "Details";
+    anchor.setAttribute("data-relay-tooltip", "Synthetic keyboard explanation");
+    viewport.append(before, spacer, anchor);
+    document.body.append(viewport);
+  });
+  const before = page.locator("#keyboard-before");
+  const anchor = page.locator("#keyboard-scroll-anchor");
+  const viewport = page.locator("#keyboard-scroll-fixture");
+  const hint = page.getByRole("tooltip", { name: "Synthetic keyboard explanation" });
+  for (let activation = 0; activation < 3; activation++) {
+    await before.focus();
+    await page.keyboard.press("Tab");
+    await expect(anchor).toBeFocused();
+    await expect.poll(() => viewport.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+    await expect(hint).toBeVisible();
+    // A stationary pointer can receive rollover events as the content scrolls.
+    await viewport.dispatchEvent("mouseover");
+    await viewport.evaluate((node) => node.scrollTop -= 10);
+    await expect.poll(() => viewport.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+    await expect(hint).toBeVisible();
+    await expect(anchor).toHaveAttribute("aria-describedby", await hint.getAttribute("id") as string);
+    await viewport.evaluate((node) => node.scrollTop = 0);
+    await expect(hint).toHaveCount(0);
+    await expect(anchor).not.toHaveAttribute("aria-describedby");
+  }
+  await anchor.blur();
+  await anchor.hover();
+  await expect(hint).toBeVisible();
+  await viewport.evaluate((node) => node.scrollTop -= 10);
+  await expect(hint).toHaveCount(0);
+});
+
 test("source editor does not expose obsolete route controls or tooltips", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true,
     sourceProtocolBindings: [{ wireApi: "responses", adapter: "native", modelIds: ["gpt-5.4"] }] });

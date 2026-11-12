@@ -1064,6 +1064,7 @@ fn direct_source_catalog_publishes_known_limits_without_client_context_policy() 
         &home,
         &["text-only".into(), "unknown".into()],
         &metadata,
+        &[],
     )
     .unwrap()
     .unwrap();
