@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageRow } from "./usageData";
 import {
@@ -13,9 +14,10 @@ export function RequestParameters({ row }: { row: UsageRow }) {
   const requestedModel = formatModelId(row.requestedModel, row.routedModel);
   const routedModel = formatModelId(row.routedModel);
   const modelChanged = requestedModel !== "—" && routedModel !== "—" && requestedModel !== routedModel;
+  const parameterCount = [row.wireApi, row.transport, row.serviceTier, requestedEffort || effectiveEffort, row.requestOrigin].filter(Boolean).length;
   if (!row.wireApi && !row.transport && !row.serviceTier && !requestedEffort && !effectiveEffort && !modelChanged && !row.requestOrigin) return null;
   return <section className="request-detail-section request-parameters-section" aria-label={t("usage.requestSections.parameters")}>
-    <dl className="request-details-parameters">
+    <dl className="request-details-parameters" style={{ "--request-parameter-columns": Math.max(1, parameterCount) } as CSSProperties}>
     {modelChanged ? <>
       <div className="request-parameter-wide"><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
       <div className="request-parameter-wide"><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
@@ -31,7 +33,7 @@ export function RequestParameters({ row }: { row: UsageRow }) {
           : formatReasoningEffort(effectiveEffort ?? requestedEffort, t)}
       </dd>
     </div> : null}
-    {row.requestOrigin ? <div className="request-parameter-wide"><dt>{t("usage.requestOrigin")}</dt><dd>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
+    {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
     </dl>
   </section>;
 }

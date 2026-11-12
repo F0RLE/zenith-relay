@@ -1,4 +1,6 @@
 import { expect, test } from "../bun-playwright";
+import { en } from "../../src/i18n/locales/en";
+import { ru } from "../../src/i18n/locales/ru";
 import { installTauriMock } from "./tauri-mock";
 
 const now = Date.UTC(2026, 9, 15, 12);
@@ -25,6 +27,7 @@ for (const mode of ["local"] as const) {
       await expect(expiry.locator("svg")).toHaveCount(1);
       await expect(expiry).toHaveAttribute("data-relay-tooltip", /2026/);
       await expect(card.locator(".account-value-strip")).toBeVisible();
+      await expect(card.locator(".reset-credits-control")).toBeVisible();
       expect(await expiry.evaluate((element) => ({
         bottom: element.nextElementSibling?.className,
         height: element.getBoundingClientRect().height,
@@ -38,6 +41,7 @@ for (const mode of ["local"] as const) {
       const member = page.locator('.pool-member-card[data-member-label="Personal Plus"]');
       await expect(member.locator(".account-token-expiry")).toHaveText(locale === "ru" ? "10 дн. 0 ч 0 мин" : "10 d 0 h 0 min");
       await expect(member.locator(".account-value-strip")).toBeVisible();
+      await expect(member.locator(".reset-credits-control")).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath("pool-token-expiry.png") });
       await member.locator(".pool-member-actions button").last().click();
       await expect(page.getByRole("dialog")).toBeVisible();
@@ -90,6 +94,39 @@ test("unknown token expiry stays unknown without a reauthentication banner", asy
   await expect(page.locator(".account-token-expiry")).toHaveAttribute("data-relay-tooltip", "Token expiry is unknown");
   await expect(page.getByText("Sign in to Excel / Basis Points again.", { exact: true })).toHaveCount(0);
 });
+
+for (const locale of ["en", "ru"] as const) {
+  test(`${locale} reauthentication keeps historical economics without quota or remaining forecasts`, async ({ page }, testInfo) => {
+    const labels = (locale === "ru" ? ru : en).accounts.accountValue;
+    await page.setViewportSize({ width: locale === "ru" ? 390 : 1160, height: 900 });
+    await page.clock.setFixedTime(now);
+    await installTauriMock(page, {
+      mode: "local", locale, theme: locale === "ru" ? "dark" : "light", populated: true, accountCount: 1,
+      accountOAuthClientKind: "excel_bps", accountAuthReason: "expired_refresh_token",
+      quotaRefreshStatus: "requires_reauth",
+      accountCredentialDiagnostics: {
+        status: "expired", expiresAtMs: now - 60_000, hasRefreshToken: true, recovery: "sign_in",
+      },
+    });
+    await page.goto("/");
+    for (const surface of ["connections", "pool"] as const) {
+      const navigation = surface === "connections"
+        ? (locale === "ru" ? ru : en).nav.connections
+        : (locale === "ru" ? ru : en).nav.pool;
+      await page.getByRole("button", { name: navigation, exact: true }).click();
+      const card = page.locator(surface === "connections" ? ".account-card" : '.pool-member-card[data-member-kind="account"]').first();
+      const strip = card.locator(".account-value-strip");
+      await expect(strip).toHaveAttribute("data-columns", "2");
+      await expect(strip.locator("dt")).toHaveText([labels.used, labels.payback]);
+      await expect(strip.locator("dd")).toHaveText([/14[.,]1/, /78\s*%/]);
+      await expect(card.locator(".quota-stack")).toHaveCount(0);
+      await expect(card.locator(".reset-credits-control")).toHaveCount(0);
+      await expect(card.locator(".account-quota-refresh-state.requires_reauth")).toBeVisible();
+      expect(await strip.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await card.screenshot({ path: testInfo.outputPath(`${surface}-reauth-economics.png`), animations: "disabled" });
+    }
+  });
+}
 
 for (const accountOAuthClientKind of ["codex", "excel_bps"] as const) {
   test(`${accountOAuthClientKind} accounts without diagnostics do not invent a token expiry`, async ({ page }) => {

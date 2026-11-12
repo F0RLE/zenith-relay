@@ -107,6 +107,7 @@ export type UsageMockOptions = {
   usageFailure?: boolean;
   usageTiming?: { latencyMs: number; ttftMs: number | null; generationMs: number | null };
   usageUpstreamError?: UpstreamErrorDetails;
+  usageTransportDiagnostics?: RoutingDiagnostics["transport"];
   usageUnpricedTokens?: number;
   usageCandidateKind?: "account" | "source";
   usageRequestedModel?: string;

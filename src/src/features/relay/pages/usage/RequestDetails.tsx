@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Ban, CircleAlert, CircleCheck, Clock3, Download, Link2 } from "lucide-react";
+import { CircleAlert, Clock3, Download, Link2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import { Button, CopyButton, Dialog } from "../../components/Ui";
@@ -13,8 +13,8 @@ import { usageSpeedSample } from "./usageData";
 import type { UsageRow } from "./usageData";
 import { usageBreakdown } from "./usageBreakdown";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatDurationMs, requestStatusKind, requestStatusLabel, formatErrorCategory, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
-import { RequestDetailMetric, RequestTokenValue, SpeedValue } from "./usageReportParts";
+import { formatDurationMs, requestStatusHint, requestStatusKind, requestStatusLabel, formatErrorCategory, cacheRemainingLabel, prefixErrorOrigin } from "./usageReportFormat";
+import { RequestDetailMetric, RequestTokenValue, RequestStatusGlyph, SpeedValue } from "./usageReportParts";
 import { RequestParameters } from "./RequestParameters";
 import { RequestTechnicalDetails } from "./RequestTechnicalDetails";
 
@@ -111,9 +111,9 @@ export function RequestDetails({ row, local, onClose }: {
             <h3>{row.model ?? t("common.unknown")}</h3>
             <span className="request-details-status" data-status={requestStatus}
               role={requestStatus === "success" ? "img" : undefined}
-              aria-label={requestStatus === "success" ? requestStatusLabel(row, t) : undefined}
-              data-relay-tooltip={requestStatus === "success" ? requestStatusLabel(row, t) : undefined}>
-              {requestStatus === "success" ? <CircleCheck aria-hidden /> : requestStatus === "pending" ? <Clock3 aria-hidden /> : requestStatus === "cancelled" ? <Ban aria-hidden /> : <CircleAlert aria-hidden />}
+              aria-label={requestStatus === "success" ? requestStatusHint(row, t) : undefined}
+              data-relay-tooltip={requestStatusHint(row, t)}>
+              <RequestStatusGlyph row={row} />
               {requestStatus !== "success" ? requestStatusLabel(row, t) : null}
             </span>
           </div>

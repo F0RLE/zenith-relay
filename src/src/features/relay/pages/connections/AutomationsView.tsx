@@ -20,6 +20,7 @@ import {
   eligibleAutomationAccounts,
   resolveAutomationModel,
   selectedAutomationAccounts,
+  weeklyResetThresholdBasisPoints,
 } from "./automationModel";
 
 function AutomationEnabledControl({ task }: { task: WakeTask }) {
@@ -92,7 +93,9 @@ export function AutomationsList({ onEdit }: { onEdit: (task: WakeTask) => void }
                   <div>
                     <dt>{t("automations.condition")}</dt>
                     <dd>
-                      {t(triggerType.conditionKey)}
+                      {task.trigger.kind === "weekly" && task.weeklyResetRemainingBasisPoints != null
+                        ? t("automations.weeklyThresholdCondition", { percent: task.weeklyResetRemainingBasisPoints / 100 })
+                        : t(triggerType.conditionKey)}
                       {triggerType.requiresModel ? <small>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</small> : null}
                       {modelUnavailable ? <small className="automation-validation">{t("automations.selectedModelUnavailable")}</small> : null}
                     </dd>
@@ -128,6 +131,9 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const [selectorKind, setSelectorKind] = useState<WakeTask["accountSelector"]["kind"]>(task?.accountSelector.kind ?? "all_eligible");
   const [accountIds, setAccountIds] = useState<string[]>(task?.accountSelector.kind === "account_ids" ? task.accountSelector.values : []);
   const [modelId, setModelId] = useState(task?.modelPolicy.kind === "explicit" ? task.modelPolicy.value : "");
+  const [weeklyThresholdEnabled, setWeeklyThresholdEnabled] = useState(task?.weeklyResetRemainingBasisPoints != null);
+  const [weeklyThresholdPercent, setWeeklyThresholdPercent] = useState(String((task?.weeklyResetRemainingBasisPoints ?? 0) / 100));
+  const weeklyThreshold = weeklyResetThresholdBasisPoints(weeklyThresholdPercent);
   const accounts = runtime?.accounts ?? [];
   const poolAccounts = eligibleAutomationAccounts(accounts);
   const selectedAccounts = selectedAutomationAccounts(poolAccounts, accountIds);
@@ -140,7 +146,8 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const accountSelectionValid = automationAccountSelectionValid(selectorKind, poolAccounts, accountIds, selectedAccounts);
   const selectedModel = resolveAutomationModel(availableModels, modelId);
   const modelUnavailable = Boolean(modelId.trim() && !selectedModel);
-  const valid = automationFormValid(automationName, accountSelectionValid, triggerType.requiresModel, selectedModel);
+  const valid = automationFormValid(automationName, accountSelectionValid, triggerType.requiresModel, selectedModel)
+    && (triggerKind !== "weekly" || !weeklyThresholdEnabled || weeklyThreshold != null);
   const selectorOptions = [
     { value: "all_eligible", label: t("automations.allEligible") },
     { value: "account_ids", label: t("automations.selectedAccounts") },
@@ -157,7 +164,10 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
   const save = async () => {
     if (!valid) return;
     const storedName = customName?.trim() || (triggerKind === "weekly" ? automationDefaultNames.en.weeklyDefaultName : automationDefaultNames.en.defaultName);
-    const submission = buildAutomationSubmission({ task, automationName: storedName, triggerKind, selectorKind, accountIds, selectedModel });
+    const submission = buildAutomationSubmission({
+      task, automationName: storedName, triggerKind, selectorKind, accountIds, selectedModel,
+      weeklyResetRemainingBasisPoints: weeklyThresholdEnabled ? weeklyThreshold : null,
+    });
     const ok = await perform(
       submission.operationId,
       () => task
@@ -198,9 +208,35 @@ export function AutomationDialog({ task, onClose }: { task: WakeTask | null; onC
           onChange={(triggerKindValue) => setTriggerKind(triggerKindValue as WakeTask["trigger"]["kind"])}
           options={typeOptions}
         />
-                <small className="automation-trigger-note">{t(triggerType.conditionKey)}</small>
+        <small className="automation-trigger-note">{triggerKind === "weekly" && weeklyThresholdEnabled
+          ? weeklyThreshold != null
+            ? t("automations.weeklyThresholdCondition", { percent: weeklyThreshold / 100 })
+            : t("automations.weeklyThreshold")
+          : t(triggerType.conditionKey)}</small>
       </div>
       <div className="automation-target-grid">
+        {triggerKind === "weekly" ? <>
+          <div className="relay-field">
+            <span>{t("automations.weeklyTiming")}</span>
+            <OptionMenu className="field-option-menu" label={t("automations.weeklyTiming")}
+              value={weeklyThresholdEnabled ? "threshold" : "reserve"}
+              onChange={(value) => setWeeklyThresholdEnabled(value === "threshold")}
+              options={[
+                { value: "reserve", label: t("automations.weeklyReserve") },
+                { value: "threshold", label: t("automations.weeklyThreshold") },
+              ]} />
+          </div>
+          {weeklyThresholdEnabled ? <label className="relay-field">
+            <span>{t("automations.weeklyRemainingPercent")}</span>
+            <input type="number" min={0} max={100} step={1} inputMode="numeric"
+              value={weeklyThresholdPercent}
+              onChange={(event) => setWeeklyThresholdPercent(event.target.value)}
+              aria-invalid={weeklyThreshold == null}
+              aria-describedby="weekly-reset-threshold-help" />
+            <small id="weekly-reset-threshold-help">{t("automations.weeklyThresholdHelp")}</small>
+            {weeklyThreshold == null ? <small role="alert">{t("automations.weeklyThresholdInvalid")}</small> : null}
+          </label> : null}
+        </> : null}
         <div className="relay-field">
           <span>{t("automations.accountSelection")}</span>
           <OptionMenu

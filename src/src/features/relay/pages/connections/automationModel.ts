@@ -104,6 +104,11 @@ export type AutomationSubmission = {
   base: Omit<WakeTask, "id" | "createdAtMs" | "updatedAtMs">;
 };
 
+export function weeklyResetThresholdBasisPoints(percent: string): number | null {
+  const normalized = percent.trim() || "0";
+  return /^(?:100|[1-9]?\d)$/.test(normalized) ? Number(normalized) * 100 : null;
+}
+
 export function buildAutomationSubmission(input: {
   task: WakeTask | null;
   automationName: string;
@@ -111,6 +116,7 @@ export function buildAutomationSubmission(input: {
   selectorKind: AutomationSelectorKind;
   accountIds: readonly string[];
   selectedModel: string;
+  weeklyResetRemainingBasisPoints?: number | null;
 }): AutomationSubmission {
   const {
     task,
@@ -134,6 +140,7 @@ export function buildAutomationSubmission(input: {
     windowKinds: weeklyReset ? ["secondary" as const] : ["primary" as const],
     modelPolicy,
     trigger: { kind: triggerKind },
+    weeklyResetRemainingBasisPoints: weeklyReset ? input.weeklyResetRemainingBasisPoints ?? null : null,
     executionPolicy: "automatic" as const,
     jitterSeconds: task?.jitterSeconds ?? 0,
     maxAttemptsPerCycle: task?.maxAttemptsPerCycle ?? 1,

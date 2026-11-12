@@ -86,7 +86,10 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
       {hasErrorMetadata || separateEndpoint || observedTier ? <RequestSection title={t(hasErrorMetadata ? "usage.requestSections.failure" : "usage.requestSections.response")} className="request-response-section">
         <dl className="request-details-list request-technical-fields">
           {requestFailed ? <>
-            {row.httpStatus != null ? field("usage.httpStatus", row.httpStatus) : null}
+            {row.httpStatus != null ? field("usage.resultStatus", row.httpStatus) : null}
+            {transport?.downstreamHttpStatus != null ? field("usage.downstreamHttpStatus", transport.downstreamHttpStatus) : null}
+            {transport?.upstreamHttpStatus != null ? field("usage.observedUpstreamHttpStatus", transport.upstreamHttpStatus) : null}
+            {field("usage.failureEvidence", transport?.failureKind ? t(`usage.failureKinds.${transport.failureKind}`) : t("common.unknown"))}
             {row.errorOrigin ? field("usage.errorOrigin", formatErrorOrigin(row.errorOrigin, t)) : null}
             {row.errorCategory ? field("usage.errorCategory", <code>{row.errorCategory}</code>) : null}
             {row.upstreamError?.httpStatus != null && row.upstreamError.httpStatus !== row.httpStatus
@@ -129,6 +132,7 @@ export function RequestTechnicalDetails({ row, debugEnabled }: { row: UsageRow; 
         <dl className="request-details-list request-technical-fields">
           {field("usage.requestPayloadMode", t(`usage.requestPayloadModes.${payload.mode}`))}
           {payload.fullRequestReason ? field("usage.fullRequestReason", t(`usage.fullRequestReasons.${payload.fullRequestReason}`)) : null}
+          {transport?.requestPreparation?.siwcOutputLimitOmitted ? field("usage.siwcOutputLimitOmitted", t("common.enabled")) : null}
           {field("usage.requestPayloadBytes", contextBytes(payload.jsonBytes, payload.bodyBytes))}
           {field("usage.requestEncoding", payload.contentEncoding === "zstd" ? "Zstd" : t("usage.requestUncompressed"))}
           {payload.compressionMs != null ? field("usage.requestCompressionTime", formatDurationMs(payload.compressionMs, i18n.language, t)) : null}

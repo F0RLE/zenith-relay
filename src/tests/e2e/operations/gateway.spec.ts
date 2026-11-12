@@ -96,6 +96,23 @@ test("API degraded-route switch is on for ChatGPT accounts and saves immediately
   expect(values).toEqual([false]);
 });
 
+test("SIWC output limits need no compatibility switch", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await openGatewayApi(page);
+  const toggle = page.getByRole("checkbox", { name: /SIWC/ });
+  await expect(toggle).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: "Wait for route recovery", exact: true })).toBeVisible();
+  await openGatewayApplication(page);
+  await openGatewayApi(page);
+  await expect(toggle).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.some((call) => call.command === "set_local_siwc_output_limit_compatibility")).toBe(false);
+  expect(calls.some((call) => ["stop_managed_codex_profile", "launch_managed_codex_profile", "stop_local_gateway"].includes(call.command))).toBe(false);
+});
+
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps",

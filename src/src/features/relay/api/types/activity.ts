@@ -73,6 +73,7 @@ export type WakeTask = {
   windowKinds: Array<"primary" | "secondary">;
   modelPolicy: { kind: "lightest_supported" } | { kind: "explicit"; value: string };
   trigger: { kind: "quota_full" } | { kind: "weekly" };
+  weeklyResetRemainingBasisPoints?: number | null;
   executionPolicy: "automatic" | "require_confirmation";
   jitterSeconds: number;
   maxAttemptsPerCycle: number;

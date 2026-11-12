@@ -109,12 +109,16 @@ export type RoutingDiagnostics = {
   /** Upstream declaration, not independently verified model identity. */
   upstreamResponseModel?: string | null;
   transport?: {
+    upstreamHttpStatus?: number | null;
+    downstreamHttpStatus?: number | null;
+    failureKind?: "connection" | "upstream" | "local" | null;
     upstream: "http" | "websocket";
     mode: "native" | "protocol_conversion" | "basis_points";
     fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "websocket_slow_handshake" | "existing_http_bridge" | null;
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
     connectionReused?: boolean | null;
+    connectionResetReason?: "new_session" | "missing_context" | "session_unavailable" | "session_expired" | "authorization_changed" | "connection_expired" | "connection_closed" | "pending_frame" | "heartbeat_failed" | "response_interrupted" | "response_failed" | "unproven_output" | null;
     reauth?: boolean | null;
     responseHeadersMs?: number | null;
     /** Stream parser/reasoning offsets; not raw wire or CPU measurements. */
@@ -131,7 +135,21 @@ export type RoutingDiagnostics = {
     requestPreparationMs?: number | null;
     requestPayload?: {
       mode: "full" | "continuation";
-      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | null;
+      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | "socket_checkpoint_unavailable" | "socket_settings_changed" | "socket_history_changed" | "socket_output_changed" | "socket_no_new_input" | null;
+      /** Fixed field labels only; no item values, arbitrary keys or fingerprints. */
+      socketOutputMismatch?: {
+        outputIndex: number;
+        fields: ("type" | "id" | "status" | "role" | "content" | "summary" | "encrypted_content" | "phase" | "name" | "namespace" | "arguments" | "encrypted_arguments" | "encrypted_function_args" | "async" | "call_id" | "caller" | "input" | "output" | "metadata" | "execution" | "tools" | "action" | "author" | "recipient" | "result" | "revised_prompt" | "other")[];
+        itemKind?: "message" | "reasoning" | "function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call" | "tool_search_output" | "other" | null;
+        /** Bounded aggregate differences; no unknown keys, values or hashes. */
+        unknownFields?: {
+          added: number;
+          removed: number;
+          changed: number;
+          nullOnly: boolean;
+          truncated: boolean;
+        } | null;
+      } | null;
       jsonBytes: number;
       /** Encoded body bytes, excluding HTTP/WebSocket framing and TLS. */
       bodyBytes: number;
@@ -143,6 +161,8 @@ export type RoutingDiagnostics = {
       httpSendToHeadersMs?: number | null;
     } | null;
     requestPreparation?: {
+      /** Explicit SIWC compatibility mode omitted the client's output-token cap. */
+      siwcOutputLimitOmitted?: boolean | null;
       bodyMs?: number | null;
       /** Included in bodyMs. */
       schemaValidationMs?: number | null;

@@ -1,6 +1,6 @@
 import type { AccountSummary, OAuthClientKind } from "./api/types";
 import type { TFunction } from "i18next";
-import { accountQuotaRefreshState } from "./accountStatus";
+import { accountQuotaRefreshState, type accountSurfaceTone } from "./accountStatus";
 import { accountPlanOption } from "./accountPlans";
 import { isFastSupplementalQuota } from "./quotaFormatting";
 
@@ -85,15 +85,34 @@ export function accountMetadataIsStale(account: AccountSummary, resource: "plan"
     || (account.refreshState != null && account.refreshState.quota !== "fresh");
 }
 
+/** Display evidence from a linked reader without changing the selected route's admission. */
+export function linkedAccountQuotaState(source: AccountSummary, nowMs: number): "available" | "exhausted" | "weekly_exhausted" | "stale" {
+  if (accountMetadataIsStale(source, "quota", nowMs)) return "stale";
+  const windows = [source.quota.primary, source.quota.secondary];
+  if (windows.some((window) => window?.availableBasisPoints === 0 && window.windowMinutes === 10_080)) {
+    return "weekly_exhausted";
+  }
+  return source.quota.limitReached || windows.some((window) => window?.availableBasisPoints === 0)
+    ? "exhausted" : "available";
+}
+
+export function linkedAccountQuotaIndicator(account: AccountSummary, source: AccountSummary, nowMs: number, tone: ReturnType<typeof accountSurfaceTone>) {
+  const warning = account.id !== source.id && (tone === "ready" || tone === "warning")
+    && linkedAccountQuotaState(source, nowMs) !== "available";
+  return { tone: warning ? "warning" as const : tone, warning };
+}
+
 export function accountMetadataHint(source: AccountSummary, resource: "plan" | "quota", nowMs: number, t: TFunction, locale: string) {
   const { observedAtMs } = accountMetadataObservation(source, resource);
   const time = observedAtMs != null && observedAtMs <= nowMs
     ? formatMetadataDate(observedAtMs, locale)
     : t("accounts.routeMetadataTimeUnknown");
+  const quotaState = resource === "quota" ? linkedAccountQuotaState(source, nowMs) : null;
   return [
     t("accounts.routeMetadataSource", { client: source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex", time }),
     accountMetadataIsStale(source, resource, nowMs) ? t("accounts.routeMetadataStale") : null,
-    resource === "quota" && source.quota.limitReached ? t("pool.memberStatus.quotaWait") : null,
+    quotaState === "exhausted" || quotaState === "weekly_exhausted"
+      ? t(`accounts.linkedQuotaStatus.${quotaState}`, { client: source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex" }) : null,
     t("accounts.routeMetadataFrom"),
   ].filter(Boolean).join(" · ");
 }
@@ -127,6 +146,15 @@ function accountMetadataConnections(account: AccountSummary, accounts: readonly 
     && connection.secretAvailable !== false && connection.enabled !== false && !connection.draining
     && connection.health !== "blocked" && connection.health !== "unhealthy"
     && accountQuotaRefreshState(connection) !== "requires_reauth" && connection.authState.state !== "error");
+}
+
+/** Reset credits stay with the native connection that can verify and redeem them. */
+export function accountResetCreditsSource(account: AccountSummary, accounts: readonly AccountSummary[]): AccountSummary | null {
+  if (account.oauthClientKind !== "siwc") return account;
+  return accountMetadataConnections(account, accounts)
+    .filter((connection) => connection.authState.state === "active" && connection.quota.resetCreditsAvailable != null)
+    .reduce<AccountSummary | null>((source, connection) => source == null
+      || (connection.quota.updatedAtMs ?? 0) > (source.quota.updatedAtMs ?? 0) ? connection : source, null);
 }
 
 /** A linked date is display-only and must describe the displayed plan, never the selected token. */

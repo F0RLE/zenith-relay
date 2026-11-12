@@ -151,7 +151,6 @@ export function UsagePage() {
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     const labels = {
-      backgroundConnection: t("codex.backgroundConnection"),
       removedAccount: t("usage.removedAccount"),
       unknownConnection: t("common.unknown"),
     };

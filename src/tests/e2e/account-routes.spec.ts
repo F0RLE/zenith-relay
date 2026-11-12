@@ -259,6 +259,54 @@ for (const donor of ["codex", "excel_bps"] as const) {
   });
 }
 
+for (const donor of ["codex", "excel_bps"] as const) {
+  for (const nav of ["Connections", "Pool"] as const) {
+    test(`SIWC linked reset credits use ${donor} from ${nav} without changing the selected route`, async ({ page }) => {
+      await installTauriMock(page, {
+        populated: true, locale: "en", usageActive: false, resetCreditsAvailable: 2,
+        accountRouteKinds: [donor, "siwc"], accountRoutesGrouped: true,
+      });
+      await openAccounts(page);
+      await page.locator(".account-route-selector > button").click();
+      await page.getByRole("option", { name: "SIWC", exact: true }).click();
+      if (nav === "Pool") await page.getByRole("button", { name: "Pool", exact: true }).click();
+      const card = page.locator(nav === "Pool" ? '.pool-member-card[data-member-kind="account"]' : ".account-card");
+      const client = donor === "codex" ? "Codex" : "Excel / BPS";
+      const control = card.locator(".reset-credits-control");
+      await expect(control.locator(".reset-credits-count")).toHaveText("2");
+      await expect(control).toHaveAttribute("data-relay-tooltip", `Reset weekly quota via ${client}`);
+      await control.click();
+      const confirmation = page.getByRole("dialog", { name: `Reset weekly quota via ${client}` });
+      await expect(confirmation).toContainText("SIWC app limits are managed separately");
+      await confirmation.getByRole("button", { name: "Yes, reset", exact: true }).click();
+      await expect(control.locator(".reset-credits-count")).toHaveText("1");
+      await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+      const recorded = await calls(page);
+      expect(recorded.filter((call) => call.command === "consume_local_reset_credit").map((call) => call.args))
+        .toEqual([{ accountId: "account_synthetic_1" }]);
+      expect(recorded.filter((call) => call.command === "select_local_account_route")).toHaveLength(1);
+      const active = await page.evaluate(async () => {
+        const native = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<{ accounts: Array<{ id: string; routeInactive?: boolean; quota: { resetCreditsAvailable: number | null } }> }> } }).__TAURI_INTERNALS__;
+        const state = await native.invoke("get_local_runtime_state");
+        return state.accounts.find((account) => account.id === "account_synthetic_2");
+      });
+      expect(active?.routeInactive).toBe(false);
+      expect(active?.quota.resetCreditsAvailable).toBeNull();
+    });
+  }
+}
+
+for (const nav of ["Connections", "Pool"] as const) {
+  test(`SIWC without a linked native reset reader keeps availability unknown in ${nav}`, async ({ page }) => {
+    await installTauriMock(page, { populated: true, locale: "en", usageActive: false, accountRouteKinds: ["siwc"] });
+    await openAccounts(page);
+    if (nav === "Pool") await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+    await expect(page.locator(".reset-credits-control")).toHaveCount(0);
+    expect((await calls(page)).some((call) => call.command === "consume_local_reset_credit")).toBe(false);
+  });
+}
+
 test("switching grouped routes keeps the same-plan subscription date and each route's own token", async ({ page }) => {
   const now = Date.UTC(2026, 9, 22, 12);
   await page.clock.install({ time: now });
@@ -366,8 +414,11 @@ for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit", 
         await expect(item.locator('.quota-stack[data-stale="true"]')).toHaveCount(0);
         await expect(item.locator(".account-quota-refresh-state")).toHaveCount(0);
         await expect(item.locator('[data-status="error"]')).toHaveCount(0);
-        await expect(item.locator('[data-status="warning"]')).toHaveCount(scenario === "route-model-error" ? 1 : 0);
+        await expect(item.locator('[data-status="warning"]')).toHaveCount(1);
         if (scenario === "quota-poll-error") {
+          const indicator = item.locator(".account-kind-icon, .pool-member-kind-icon");
+          await expect(indicator).toHaveAttribute("aria-label", /Codex quota exhausted/);
+          await expect(indicator).not.toHaveAttribute("aria-label", /quota_prepare|Update failed/);
           await page.mouse.move(0, 0);
           await item.screenshot({ path: `output/playwright/siwc-quota-owner-${surface.toLowerCase()}.png`, animations: "disabled" });
         }

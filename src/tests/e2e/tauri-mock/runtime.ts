@@ -470,6 +470,7 @@ export function initializeTauriMock(input: MockOptions) {
 
     const sourceUsage = input.usageCandidateKind === "source";
     const routing = { reason: sourceUsage ? "fair_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3, endpointKind: input.usageEndpointKind ?? null, cacheContext: input.usageCacheContext, cacheAffinity: input.usageCacheAffinity, upstreamResponseModel: input.usageUpstreamResponseModel,
+      transport: input.usageTransportDiagnostics,
       attemptOutcome: input.usageAttemptOutcome !== undefined ? input.usageAttemptOutcome : input.usageAttempts ? input.usageFailure ? "returned_failure" : "completed" : undefined };
     const localUnpricedTokens = Math.min(28, Math.max(0, input.usageUnpricedTokens ?? 0));
     const requestedUsageModel = input.usageRequestedModel ?? "gpt-5.4";

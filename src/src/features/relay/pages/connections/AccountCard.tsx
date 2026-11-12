@@ -21,7 +21,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
 import { accountDisplayStatus, accountQuotaRefreshState, accountSurfaceTone, canLaunchCodexAccount, currentAccountErrorCode, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
-import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
+import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource, linkedAccountQuotaIndicator } from "../../accountRoutes";
 import {
   AccountBadges,
   ActionMenu,
@@ -78,7 +78,7 @@ export function AccountCard({
   const confirm = useConfirm();
   const membershipPending = useRef(false);
   const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountValueVisible } = useRelayState();
-  const metadata = accountMetadataSources(account, runtime?.accounts ?? []);
+  const metadata = accountMetadataSources(account, runtime?.accounts ?? [], nowMs);
   const subscription = accountSubscriptionSource(account, runtime?.accounts ?? []);
   const { remove, openDeleteMenu, permanentDeleteMenu } = useConnectionAccountRemoval();
   const participation = usePendingFlag(accountParticipates(account));
@@ -113,14 +113,21 @@ export function AccountCard({
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
   const canLaunch = canLaunchCodexAccount(account) && !recoveryRequired;
   const surfaceTone = accountSurfaceTone(account, recoveryRequired, runtimeState);
-  const indicatorTone = surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone;
+  const quotaIndicator = linkedAccountQuotaIndicator(account, metadata.quota, nowMs,
+    surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone);
+  const indicatorTone = quotaIndicator.tone;
+  const linkedQuotaHint = quotaIndicator.warning ? accountMetadataHint(metadata.quota, "quota", nowMs, t, i18n.language) : null;
   const statusIndicatorLabel = quotaStatus === "updated" || quotaStatus === "not_available" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
-  const indicatorLabel = `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`;
+  const indicatorLabel = [
+    `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`,
+    linkedQuotaHint,
+  ].filter(Boolean).join(" · ");
   const errorLabel = displayedErrorCode ? accountErrorLabel(displayedErrorCode, t) : null;
   const errorIndicatorLabel = [
     operationalStatus === "rotation" || operationalStatus === "unavailable" ? null : operationalLabel,
     errorLabel,
     runtimeHint,
+    linkedQuotaHint,
   ].filter(Boolean).join(" · ");
 
   const updateParticipation = async (participate: boolean) => {
