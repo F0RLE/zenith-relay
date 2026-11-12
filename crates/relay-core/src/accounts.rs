@@ -51,5 +51,5 @@ pub use token_authority::{
     PrepareStatus, PreparedToken, TOKEN_REFRESH_SKEW_MS, TokenAuthority, TokenAuthorityError,
     TokenDispatchRevision, TokenDispatchRevisionGuard, TokenPersistenceAdapter,
     TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
-    TokenRefreshFailureKind, TokenSet, access_token_is_usable,
+    TokenRefreshFailureKind, TokenRefreshStage, TokenSet, access_token_is_usable,
 };

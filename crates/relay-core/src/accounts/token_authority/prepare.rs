@@ -67,6 +67,7 @@ impl TokenAuthority {
                     revision: None,
                 })?;
         let mut slot = slot_handle.lock().await;
+        let started = std::time::Instant::now();
         let result = async {
             self.ensure_current_slot(account_id, &slot_handle)?;
             if slot.persistence_pending {
@@ -106,13 +107,24 @@ impl TokenAuthority {
             if let AccountAuthState::RequiresReauth(reason) = slot.auth_state {
                 return Err(TokenAuthorityError::RequiresReauth(reason));
             }
-            if slot.tokens.is_access_usable(now_ms, refresh_skew_ms) {
+            // Renewal scheduling leaves the current access token's real expiry intact.
+            let deferred_until = slot.refresh_deferred_until_ms.filter(|at| *at > now_ms);
+            let access_only =
+                slot.auth_state == AccountAuthState::DegradedAccessOnly || deferred_until.is_some();
+            if slot
+                .tokens
+                .is_access_usable(now_ms, if access_only { 0 } else { refresh_skew_ms })
+            {
                 return Ok(PreparedToken {
                     status: PrepareStatus::Ready,
                     tokens: slot.tokens.clone(),
                     dispatch_revision: slot_handle.snapshot(),
                 });
             }
+            if let Some(retry_at_ms) = deferred_until {
+                return Err(TokenAuthorityError::RefreshDeferred { retry_at_ms });
+            }
+            slot.refresh_deferred_until_ms = None;
             let Some(refresh_token) = slot.tokens.refresh_token.clone() else {
                 slot_handle.bump();
                 slot.auth_state = AccountAuthState::DegradedAccessOnly;
@@ -131,6 +143,7 @@ impl TokenAuthority {
                 .await
             {
                 Ok(refreshed) => {
+                    slot.refresh_deferred_until_ms = None;
                     let tokens = TokenSet {
                         access_token: refreshed.access_token,
                         refresh_token: refreshed.refresh_token.or(Some(refresh_token)),
@@ -179,6 +192,62 @@ impl TokenAuthority {
                 }
                 Err(failure) => {
                     self.ensure_current_slot(account_id, &slot_handle)?;
+                    let observed_at_ms = now_ms
+                        .saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                    if failure.kind == TokenRefreshFailureKind::Deferred {
+                        slot.auth_state = previous_auth_state;
+                        if let Some(retry_at_ms) =
+                            failure.retry_at_ms.filter(|at| *at > observed_at_ms)
+                        {
+                            slot.refresh_deferred_until_ms = Some(retry_at_ms);
+                            if slot
+                                .tokens
+                                .expires_at_ms()
+                                .is_some_and(|expiry| expiry > observed_at_ms)
+                            {
+                                return Ok(PreparedToken {
+                                    status: PrepareStatus::Ready,
+                                    tokens: slot.tokens.clone(),
+                                    dispatch_revision: slot_handle.snapshot(),
+                                });
+                            }
+                            return Err(TokenAuthorityError::RefreshDeferred { retry_at_ms });
+                        }
+                        return Err(TokenAuthorityError::RefreshFailed(failure.code));
+                    }
+                    if failure.kind == TokenRefreshFailureKind::RotationOutcomeUnknown {
+                        // The durable rotation owner blocks grant replay; current access
+                        // remains usable only until its independently known expiry.
+                        let usable = slot
+                            .tokens
+                            .expires_at_ms()
+                            .is_some_and(|expiry| expiry > observed_at_ms);
+                        slot.auth_state = if usable {
+                            AccountAuthState::DegradedAccessOnly
+                        } else {
+                            AccountAuthState::RequiresReauth(
+                                ReauthReason::TokenRotationRecoveryRequired,
+                            )
+                        };
+                        persist_auth_state(
+                            account_id,
+                            &mut slot,
+                            persistence,
+                            &slot_handle.snapshot(),
+                        )
+                        .await?;
+                        self.ensure_current_slot(account_id, &slot_handle)?;
+                        if usable {
+                            return Ok(PreparedToken {
+                                status: PrepareStatus::Ready,
+                                tokens: slot.tokens.clone(),
+                                dispatch_revision: slot_handle.snapshot(),
+                            });
+                        }
+                        return Err(TokenAuthorityError::RequiresReauth(
+                            ReauthReason::TokenRotationRecoveryRequired,
+                        ));
+                    }
                     if let Some(reason) = failure.reauth_reason() {
                         slot.auth_state = AccountAuthState::RequiresReauth(reason);
                         persist_auth_state(

@@ -112,6 +112,7 @@ impl TokenAuthority {
             auth_state: replacement_auth_state,
             persistence_pending: false,
             auth_state_persistence_pending: false,
+            refresh_deferred_until_ms: None,
         };
         Ok(true)
     }

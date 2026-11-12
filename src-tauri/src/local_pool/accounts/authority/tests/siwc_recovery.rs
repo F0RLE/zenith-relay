@@ -51,7 +51,20 @@ struct Client {
     verified: AtomicUsize,
     fail: AtomicBool,
     pause: AtomicBool,
+    lose_response: AtomicBool,
     verifying: tokio::sync::Notify,
+}
+
+fn client(store: &CredentialStore<MemorySecrets>, lose_response: bool) -> Arc<Client> {
+    Arc::new(Client {
+        store: store.clone(),
+        received: AtomicUsize::new(0),
+        verified: AtomicUsize::new(0),
+        fail: AtomicBool::new(false),
+        pause: AtomicBool::new(false),
+        lose_response: AtomicBool::new(lose_response),
+        verifying: tokio::sync::Notify::new(),
+    })
 }
 
 impl CodexRefreshClient for Client {
@@ -70,6 +83,14 @@ impl CodexRefreshClient for Client {
                 0,
                 "consumed grant was resent"
             );
+            if self.lose_response.load(Ordering::SeqCst) {
+                return Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "transport",
+                )
+                .with_stage(zenith_relay_core::accounts::TokenRefreshStage::ResponseRead)
+                .with_request_id(Some("req_synthetic-lost-response")));
+            }
             Ok(pending(&self.store.require(account).unwrap(), now_ms))
         })
     }
@@ -183,14 +204,9 @@ async fn exercise_recovery(cancel: bool) {
     let store = CredentialStore::new(backend.clone());
     let before = initial();
     store.save(&before).unwrap();
-    let client = Arc::new(Client {
-        store: store.clone(),
-        received: AtomicUsize::new(0),
-        verified: AtomicUsize::new(0),
-        fail: AtomicBool::new(!cancel),
-        pause: AtomicBool::new(cancel),
-        verifying: tokio::sync::Notify::new(),
-    });
+    let client = client(&store, false);
+    client.fail.store(!cancel, Ordering::SeqCst);
+    client.pause.store(cancel, Ordering::SeqCst);
     let adapter = Arc::new(
         StoredRefreshAdapter::with_lock_config(
             root.clone(),
@@ -279,4 +295,121 @@ fn siwc_pending_checkpoint_is_not_authorization_and_new_login_wins() {
             .unwrap()
             .matches_snapshot(&newer)
     );
+}
+
+#[tokio::test]
+async fn siwc_renewal_window_does_not_claim_a_grant_or_increment_failure_backoff() {
+    let root = temp_root("siwc-window");
+    let store = CredentialStore::from_backend(MemorySecrets::default());
+    let mut registration = initial().siwc_registration().unwrap().clone();
+    registration.earliest_refresh_at_ms = Some(5_000);
+    let before = initial()
+        .with_siwc_registration(Some(registration))
+        .unwrap();
+    store.save(&before).unwrap();
+    let client = client(&store, false);
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client.clone(),
+        0,
+        fast_lock_config(),
+    )
+    .unwrap();
+    for now_ms in [1_000, 2_000, 4_999] {
+        let failure = adapter
+            .refresh("siwc_recovery", "old-refresh", now_ms)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, TokenRefreshFailureKind::Deferred);
+        assert_eq!(failure.retry_at_ms, Some(5_000));
+        assert!(store.recover_token_rotation(&before).unwrap().is_none());
+        let current = store.require("siwc_recovery").unwrap();
+        assert!(current.matches_snapshot(&before));
+        assert!(!current.refresh_is_paused(now_ms));
+    }
+    assert_eq!(client.received.load(Ordering::SeqCst), 0);
+    adapter
+        .refresh("siwc_recovery", "old-refresh", 5_000)
+        .await
+        .unwrap();
+    assert_eq!(client.received.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.require("siwc_recovery").unwrap().access_token(),
+        "rotated-access"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn siwc_lost_reply_preserves_live_access_after_restart_without_resending_the_grant() {
+    use zenith_relay_core::accounts::ReauthReason;
+    let root = temp_root("siwc-lost-reply");
+    let store = CredentialStore::from_backend(MemorySecrets::default());
+    let mut before = initial();
+    before.expire_access_at(10_000);
+    store.save(&before).unwrap();
+    let client = client(&store, true);
+    let adapter = StoredRefreshAdapter::with_lock_config(
+        root.clone(),
+        store.clone(),
+        client.clone(),
+        20_000,
+        fast_lock_config(),
+    )
+    .unwrap();
+    let metadata = Arc::new(CaptureMetadata::default());
+    let persistence = CredentialPersistence::new(store.clone(), metadata.clone(), root.clone());
+    let authority = TokenAuthority::new(1).unwrap();
+    authority
+        .register(
+            "siwc_recovery",
+            before.to_token_set().unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    let prepared = authority
+        .prepare_and_persist("siwc_recovery", 1_000, 20_000, &adapter, &persistence)
+        .await
+        .unwrap();
+    assert_eq!(prepared.tokens.access_token(), "old-access");
+    assert_eq!(
+        metadata.auth_states.lock().unwrap().last().unwrap().1,
+        AccountAuthState::DegradedAccessOnly
+    );
+    let restarted = TokenAuthority::new(1).unwrap();
+    restarted
+        .register(
+            "siwc_recovery",
+            before.to_token_set().unwrap(),
+            AccountAuthState::DegradedAccessOnly,
+        )
+        .await
+        .unwrap();
+    for now_ms in [2_000, 9_999] {
+        assert!(
+            restarted
+                .prepare_and_persist("siwc_recovery", now_ms, 20_000, &adapter, &persistence)
+                .await
+                .is_ok()
+        );
+    }
+    assert_eq!(
+        restarted
+            .prepare_and_persist("siwc_recovery", 10_000, 0, &adapter, &persistence)
+            .await
+            .unwrap_err(),
+        TokenAuthorityError::RequiresReauth(ReauthReason::TokenRotationRecoveryRequired)
+    );
+    assert_eq!(client.received.load(Ordering::SeqCst), 1);
+    assert_eq!(client.verified.load(Ordering::SeqCst), 0);
+    assert!(
+        store
+            .require("siwc_recovery")
+            .unwrap()
+            .matches_snapshot(&before)
+    );
+    assert!(store.recover_token_rotation(&before).is_err());
+    fs::remove_dir_all(root).unwrap();
 }

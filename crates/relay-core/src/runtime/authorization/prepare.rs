@@ -404,6 +404,7 @@ fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepare
             ExecutorPrepareError::Persistence
         }
         TokenAuthorityError::RefreshFailed(_)
+        | TokenAuthorityError::RefreshDeferred { .. }
         | TokenAuthorityError::InvalidCapacity
         | TokenAuthorityError::CapacityReached => ExecutorPrepareError::Transient,
     }

@@ -210,6 +210,16 @@ where
                 )
             });
         }
+        if pending_siwc.is_none()
+            && let Some(retry_at_ms) = stored_credentials
+                .siwc_registration()
+                .and_then(|registration| registration.earliest_refresh_at_ms)
+                .filter(|at| *at > now_ms)
+        {
+            let failure = TokenRefreshFailure::deferred("siwc_refresh_too_early", retry_at_ms);
+            siwc::record_renewal_failure(local_account_id, &failure);
+            return Err(failure);
+        }
         if stored_credentials.refresh_is_paused(now_ms) {
             return Err(TokenRefreshFailure::new(
                 TokenRefreshFailureKind::Transient,
@@ -289,6 +299,9 @@ where
         let refreshed = match refresh_result {
             Ok(refreshed) => refreshed,
             Err(error) => {
+                if stored_credentials.siwc_registration().is_some() {
+                    siwc::record_renewal_failure(local_account_id, &error);
+                }
                 if stored_credentials.siwc_registration().is_none() {
                     let _revision_guard = revision
                         .map(|revision| revision.guard().ok_or_else(superseded))
@@ -386,7 +399,11 @@ fn rotation_refresh_failure(error: CredentialError, kind: OAuthClientKind) -> To
     let siwc = kind == OAuthClientKind::Siwc;
     let (kind, code) = match error.code {
         CredentialErrorCode::RotationOutcomeUnknown => (
-            TokenRefreshFailureKind::RotationRecoveryRequired,
+            if siwc {
+                TokenRefreshFailureKind::RotationOutcomeUnknown
+            } else {
+                TokenRefreshFailureKind::RotationRecoveryRequired
+            },
             if siwc {
                 "siwc_rotation_outcome_unknown"
             } else {
@@ -411,6 +428,7 @@ fn rotation_refresh_failure(error: CredentialError, kind: OAuthClientKind) -> To
         ),
     };
     TokenRefreshFailure::new(kind, code)
+        .with_stage(zenith_relay_core::accounts::TokenRefreshStage::Recovery)
 }
 
 fn siwc_refresh_definitely_rejected(code: &str) -> bool {
@@ -462,7 +480,7 @@ fn siwc_rotation_recovery_errors_keep_storage_outages_retryable() {
         ),
         (
             CredentialErrorCode::RotationOutcomeUnknown,
-            TokenRefreshFailureKind::RotationRecoveryRequired,
+            TokenRefreshFailureKind::RotationOutcomeUnknown,
             "siwc_rotation_outcome_unknown",
         ),
         (

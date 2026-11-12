@@ -123,6 +123,65 @@ mod tests {
     }
 
     #[test]
+    fn siwc_refresh_requires_rotated_material_and_valid_timing_atomically() {
+        let valid = json!({"access_token":"synthetic-next-access","refresh_token":"synthetic-next-refresh",
+            "token_type":"Bearer","expires_in":3600});
+        for (field, value) in [
+            ("refresh_token", serde_json::Value::Null),
+            ("refresh_token", json!("")),
+            ("access_token", serde_json::Value::Null),
+            ("token_type", json!("Basic")),
+            ("expires_in", json!(0)),
+            ("expires_in", json!(-1)),
+            ("expires_in", json!(0.5)),
+            ("expires_in", json!("3600")),
+            ("expires_in", json!(u64::MAX)),
+            ("earliest_refresh_at", json!("invalid-private-deadline")),
+        ] {
+            let mut registration = super::super::tests::registration();
+            registration.earliest_refresh_at_ms = Some(42_000);
+            let before = registration.clone();
+            let mut body = valid.clone();
+            body[field] = value;
+            let error = parse(
+                &serde_json::to_vec(&body).unwrap(),
+                &mut registration,
+                true,
+                1_000,
+            )
+            .unwrap_err();
+            assert_eq!(
+                registration, before,
+                "invalid {field} must not commit partial state"
+            );
+            assert_eq!(error.code, OAuthErrorCode::InvalidResponse);
+            assert!(!format!("{error:?}").contains("invalid-private-deadline"));
+        }
+        let mut registration = super::super::tests::registration();
+        let before = registration.clone();
+        assert!(
+            parse(
+                &serde_json::to_vec(&valid).unwrap(),
+                &mut registration,
+                true,
+                u64::MAX - 100
+            )
+            .is_err()
+        );
+        assert_eq!(registration, before);
+        let tokens = parse(
+            &serde_json::to_vec(&valid).unwrap(),
+            &mut registration,
+            true,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(tokens.refresh_token(), Some("synthetic-next-refresh"));
+        assert_eq!(tokens.expires_at_ms(), Some(3_601_000));
+        assert!(tokens.id_token().is_none());
+    }
+
+    #[test]
     fn siwc_rejects_incomplete_grants_and_overflow_without_mutating_registration() {
         for (body, refreshing) in [
             (
