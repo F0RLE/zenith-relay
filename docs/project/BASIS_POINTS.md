@@ -20,6 +20,11 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
   cached briefly. A changed token or failed access read cannot reuse old access.
   Restricted models and account policy are enforced at execution.
+- Debug-mode account refresh and import diagnostics compare the received BPS
+  catalog with the parser's accepted models. Counts cover the complete catalog;
+  at most 64 rows retain a validated model ID, upstream row index and exclusion
+  reason. The local operation log reports omitted rows explicitly and never
+  records provider bodies, credentials or raw account identities.
 - Before rejecting an unknown WebSocket model, refresh scoped BPS access and
   resolve it again. This applies to initial frames and later turns, including
   HTTP fallback; known routes and malformed frames need no discovery I/O.

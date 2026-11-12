@@ -23,6 +23,47 @@ behavior only after evaluating the affected Relay contract.
 
 ## Additional inspected revisions
 
+The **2026-11-11 SIWC continuation review** inspected OpenAI Codex revision
+`340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac`,
+`codex-rs/protocol/src/models.rs::ResponseItem::Reasoning` (Apache-2.0).
+Its reasoning input preserves identity, summary and encrypted content but has no
+status field. Relay independently compares an omitted completed reasoning status
+without rewriting the wire or relaxing ciphertext/identity checks. A **2026-11-12**
+recheck of the same revision's `ResponseItem::Reasoning` and
+`should_serialize_reasoning_content` confirms that absent reasoning content
+roundtrips as `content: null`; Relay compares only those absent values equally,
+preserving non-null content and unknown fields. Synthetic
+WebSocket tests qualify idle control frames, lifecycle bounds and tool continuation;
+they do not establish live provider retention or cache-hit guarantees.
+
+The **2026-11-11 CLIProxyAPI comparison** inspected `v8.0.66` and main
+`fa11a573b252b30256bef4de952a95feee3c8c9d` (MIT). Relevant owners are
+`sdk/cliproxy/auth/selector_weighted.go`,
+`internal/runtime/executor/codex_executor_request.go`,
+`internal/runtime/executor/helps/{cache_helpers,derived_session}.go` and the
+initial Responses WebSocket heartbeat change
+`46d48eb5af062dda4e2d79ceeefedfde3f6917ba`.
+Relay independently bounds eligible-pool weighted debt to 32 rounds and starts
+native client heartbeats before the first request. Anthropic's documented
+fallback blocks and iteration models feed serving-model diagnostics and the
+existing strict identity guard; their execution evidence forbids replay.
+Fallback injection remains disabled. Stable scoped cache keys, route affinity,
+append-only catalogs and provider-reported usage remain separate from cache
+residency. Relay preserves explicit cache policy and does not derive a global
+provider key from an API credential or infer SIWC retention from Meta transport.
+No upstream code was copied; synthetic regressions do not measure live cache hits.
+
+The **2026-11-10 Sub2API comparison** checked `v2.20.3` at
+`d42bb4fc4b3eef9821994b4ad170d4eb881eca95` (LGPL-3.0), following `v2.20.0`.
+Relevant owners are `backend/internal/handler/openai_codex_page_context.go`,
+`backend/internal/service/{openai_sticky_compat,openai_ws_sse_incomplete}.go`,
+`backend/internal/service/basispoints/function_code_transport.go` and
+`docs/openai-agent-continuation.md`. Relay independently normalizes the narrow
+page-context envelope and fences prompt-affinity completion writes by admission
+revision. Synthetic regressions cover branched BPS arguments, control-only stream
+closure and encrypted native continuations waiting on their original owner.
+Relay retains its own spillover, retry, credential and account-control policies.
+
 The **2026-11-08 Sub2API comparison** checked `v2.20.0` at
 `6df0cd5bb0ce4d774d34004008f9dd661d236468` (LGPL-3.0), including
 `backend/internal/service/{oauth_refresh_api,token_refresh_service,gateway_forward_as_chat_completions}.go`
@@ -32,6 +73,19 @@ credentials, reports fenced source-catalog deltas, and supports an opt-in image
 header-wait extension. Existing strict terminal/replay and stream-timing owners
 remain authoritative. No Go implementation, automatic 2FA rotation, billing,
 zero-cache request blocking, or provider retry policy is imported.
+
+The **2026-11-10 Codex Proxy RS comparison** checked stable `v3.44.0`
+(`c622f08`, released 2026-11-09) and unreleased main
+`e079ba6e4bb1786f5d38dac4d095588d74f53c8c` (Apache-2.0), including
+`backend/crates/providers/openai/src/credential/catalog.rs`, provider
+`{execution,failure,live,observation}.rs`, and PRs #657, #667 and #669.
+Relay independently isolates image headers from text quota, records observed
+HTTP/failure evidence, fences account catalogs by credential/plan/inventory,
+preserves fresh reauthorization quota, and adds opt-in weekly-threshold resets.
+It retains targeted-principal validation, existing reserve semantics and bounded
+non-replayable redemption handling. The private consume endpoint owns credit
+selection. No raw provider-body logging or automatic generation switching is
+imported; main-branch observations are not released or public API contracts.
 
 The **2026-11-03 Codex transport comparison** checked codex-proxy-rs `v3.39.1`
 at `12c32fcdecb29da4e44a21bb33fbbf2aaf6a166d` (Apache-2.0), including
@@ -83,6 +137,19 @@ adapter and usage owners. A synthetic comparison of compression-context reuse
 (`16c6b4bd8c033b770ebd432d1b39fe53e61d1ee2`, `internal/api/response_compression.go`)
 did not justify changing Relay's bounded endpoint-specific request compression
 path. No Go implementation, retry policy or inferred charges are imported.
+
+The **2026-11-10 CLIProxyAPI follow-up** inspected `v8.0.64` (MIT) and
+`374056f28bfaa6b7582a82cba9f8ca84868f642e`, especially
+`internal/translator/codex/claude/codex_claude_request.go`, for ordered deferred
+tool loading without rewriting the initial catalog. Relay projects the initial
+catalog and validated Messages discoveries through its own portable IR into
+ordered developer `additional_tools`, including across SIWC preparation;
+native forwarding and inline catalog authority stay intact.
+The cooldown comparison at `098af7d54309c488d9e1a7c5a1c807302df8f131`
+(`sdk/cliproxy/auth/conductor_cooldown.go`) informed alias-boundary regression
+coverage; Relay already resolves its public aliases before admission and uses
+the canonical route model for cooldown. No parallel alias registry is imported.
+Local-summary option filtering does not change native compaction requests.
 
 The **2026-11-04 CLIProxyAPI follow-up** inspected `v8.0.53` at
 `01b24f1f95dc9b309765212c52b25b25e005ff01` (MIT), especially

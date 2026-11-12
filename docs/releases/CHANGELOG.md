@@ -10,6 +10,71 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- SIWC continuation diagnostics distinguish the completed item kind, known
+  execution/action fields and bounded unknown-field changes without recording
+  private names, content or hashes. JSON key order and truncated field proofs
+  do not invent additions or removals. Strict replay validation is unchanged.
+- SIWC automatically omits valid client output-token caps, including converted
+  Chat Completions, Messages and Gemini caps. The compatibility switch is removed;
+  actual omission remains visible in diagnostics. Null means no cap, malformed
+  limits are rejected, and other routes retain their existing limit handling.
+- Buffered account responses reconstruct sparse output in index order, without
+  duplicating completed tool calls. Conflicting, gapped or malformed snapshots
+  are rejected; replay checkpoints distinguish omitted terminal fields from
+  invalid shapes and conflicting response identities. Full terminal snapshots
+  cannot rewrite or drop completed output or hide conflicting duplicate items;
+  completed reasoning ciphertext keeps its precedence.
+- Repeated completed-output snapshots no longer consume replay capacity twice.
+  Sparse output with missing or ambiguous indices cannot establish SIWC
+  continuation; complete terminal snapshots remain authoritative.
+- SIWC continuation recognizes omitted/null optional call fields without resending
+  unchanged history; non-null execution and encrypted data stay strict. Idle
+  sockets remain available for up to 30 minutes, with oldest-idle eviction at the
+  32-lane bound and the existing connection-age limit. Diagnostics distinguish
+  execution/encrypted-argument changes without recording values.
+- SIWC sockets no longer retain continuation state from a response carrying a
+  provider error or rejected serving model, even if its terminal says completed.
+  Original failure handling and no-replay guarantees remain unchanged.
+- A completed SIWC warmup can start generation without new history, sending an
+  empty same-socket delta instead of resending the prefix. Explicit `prewarm: false`
+  and delivery-only obfuscation settings no longer force full-history payloads;
+  their wire controls and unknown or malformed settings remain unchanged.
+- SIWC continuation tolerates known client-only metadata and request-tracing
+  changes, plus omitted/null/empty reasoning content, while preserving strict
+  nonempty content, identity, tool-result and unknown-extension checks. Optional
+  diagnostics identify mismatched output fields without storing item values.
+- SIWC request controls are checked before route selection. Output-token limits
+  and sampling settings use a compatible pool route without being discarded;
+  continuation ownership and replay remain validated. SIWC-only incompatibilities
+  identify the unsupported parameter before dispatch.
+- Background requests show a status-colored robot in the status column and retain
+  the actual pool member. Their origin no longer overrides a failed execution result.
+- SIWC cards use the existing status indicator to warn about exhausted or stale
+  linked quota, with source details in its tooltip. SIWC's own availability and
+  quota failures remain authoritative.
+- SIWC text generation uses upstream WebSockets exclusively. Verified continuations
+  send only new items; independent turns use isolated full-history sockets.
+  Connection failures return errors instead of falling back to HTTP. Explicit
+  warmup, account/grant isolation and actual transport diagnostics are preserved.
+  Completed streamed items preserve continuation when the terminal output is sparse
+  or its reasoning snapshot differs. JSON key order does not invalidate matching
+  history or settings. Fresh sockets report a bounded reset reason.
+  Idle sockets service peer heartbeats and send bounded control-only pings.
+  Codex reasoning replay may omit a completed status without breaking continuation;
+  full-history sends distinguish the specific failed continuation check.
+  Absent and null reasoning content and documented nullable item defaults compare
+  equally, preserving the same socket across tool results and subsequent turns
+  without changing full-history payloads or relaxing content and identity checks.
+  Image-generation routes keep their existing transport, and text requests retain
+  image inputs.
+- SIWC account and pool cards show reset credits from a usable linked Codex/BPS
+  connection. Manual redemption uses that connection without switching the
+  selected SIWC route; confirmation keeps SIWC app limits distinct.
+- Terminal WebSocket connection failures finish a bounded close handshake,
+  preserving their error response when control frames are still pending.
+- Native WebSocket-to-HTTP fallback keeps the HTTP executor future off the
+  nested bridge stack, preventing a Windows stack overflow during recovery.
+- Updated the Desktop `rustix` dependency to its compatible memory-safety fix.
 - Build diagnostics and Codex qualification read through stable file handles;
   selected profile/catalog reads enforce byte limits on the opened files.
 - Request and send history share immutable diagnostic snapshots. Detailed

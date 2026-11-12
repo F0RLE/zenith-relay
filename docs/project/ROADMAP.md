@@ -5,7 +5,62 @@ Current contracts are in [PLANNING.md](PLANNING.md); development and release
 checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
 
+## Delivery focus
+
+Prioritize a qualified current runtime, a reusable product core, and Hosted
+implementation over adding unrelated providers or expanding Desktop features.
+These are delivery priorities, not claims that planned capabilities are shipped.
+
+**Active stage: current Desktop/runtime confirmation.** Hosted design, shared-core
+extraction for Hosted, and H00–H17 implementation are deferred until this stage
+is reviewed and the next stage is explicitly opened. Current core work is limited
+to qualifying existing behavior and correcting failures found by that qualification.
+
+| Priority | Target | Exit evidence |
+| --- | --- | --- |
+| 1 | Confirm the existing runtime on the intended client/model/route combinations | Versioned automated checks and permitted installed-client/provider acceptance cover text → tool call → result → next answer, supported streaming, partial usage, cancellation, renewal and restart. Unsupported combinations remain explicit. |
+| 2 | Establish the shared product foundation through Hosted H00/H01 | Reviewed ownership and reuse boundaries, documented existing entry points, and contract fixtures show that Desktop and Hosted can use the same execution core without duplicating codecs or crossing authorization/state boundaries. |
+| 3 | Start Hosted implementation through H02 and its dependent packages | Buildable server composition, validated configuration, PostgreSQL/migration and API fixtures, followed by the ordered internal end-to-end proof in the Hosted plan. Public release retains its full acceptance gates. |
+| 4 | Expand subscription authorizations and application integrations after the first Hosted release passes acceptance | Each new connector proves its account lifecycle and permitted execution; each new client proves supported launch/connection modes, tool roundtrips and profile recovery using the shared product core. |
+
+When Hosted work resumes, qualify its exact offered routes; unrelated Desktop
+picker issues or unoffered connectors do not become server prerequisites.
+Neither a passing fixture nor a working personal account establishes commercial
+permission or live Hosted acceptance.
+
+Keep source/test, installed-application and provider evidence separate. Record
+the tested revision and relevant client/model/transport scope without retaining
+credentials or real conversations. Measure cold/warm cache reuse, first-output
+and end-to-end latency on matched inputs before claiming an optimization.
+Resolve demonstrated correctness or recovery failures first; defer unrelated
+feature breadth until these delivery targets have evidence.
+
 ## Local runtime P0 — finish and accept the current runtime
+
+### Current confirmation scope
+
+- Identify the checked source revision, built artifact and running executable;
+  qualify them separately when their contents differ.
+- Run the existing script, frontend production-build, unit, Core/Desktop Rust,
+  formatting and strict lint gates; correct demonstrated regressions in scope.
+- Exercise synthetic conversation, retry/cancellation, renewal, ownership,
+  partial-usage and restart cases through their existing test owners.
+- Qualify an installed client with isolated temporary configuration and a
+  synthetic loopback provider before claiming client/protocol compatibility.
+- Review retained runtime/cache counters read-only. Match cold/warm tasks and
+  client/provider scopes for any new performance claim; historical observations
+  alone do not establish an improvement from uninstalled changes.
+- [x] Installed Codex 0.167.0-alpha.3.2 → Desktop Relay 1.1.5 →
+  `gpt-6.1-sol` / `medium`: Responses/SSE single and parallel tool calls →
+  results → next answer. Each live scenario confirms two physical dispatches on
+  one candidate, unchanged model/effort and matching durable usage. Parallel
+  qualification independently checks both tool executions and result identities.
+- [ ] Complete the remaining real-provider, installed-UI and account-lifecycle
+  cases for their exact client/model/route combinations. Keep source, fixture
+  and live acceptance separate.
+
+Use the existing acceptance sections below for the exact cases. Report routine
+run results in the task conversation; do not add execution diaries to this file.
 
 ### Model, provider, and harness compatibility
 
@@ -145,7 +200,10 @@ the safety of any history reduction before removing work.
 
 ## Maintenance
 
-- Upgrade Tauri/GTK as a tested platform change, not incidental cleanup.
+- Qualify dependency health separately from audit exit status. Apply compatible
+  fixes, verify affected paths and keep justified upstream constraints explicit.
+- Upgrade Tauri/GTK and Linux keyring dependencies as tested platform changes
+  that preserve credential-store compatibility.
 - Keep profile/history recovery, Windows paths, partial cleanup, transactional
   bulk mutations, and concurrent policy edits covered by their owning checks.
 - Keep current contracts, future work, user Help, and release history in their
@@ -153,6 +211,12 @@ the safety of any history reduction before removing work.
   implementation steps to this roadmap.
 
 ## Future connectors
+
+Expansion to other subscription authorizations follows acceptance of the first
+Hosted release. Maintain and qualify existing connections during the earlier
+stages; adding new subscription families belongs to priority 4. Each connector
+declares its independently qualified Desktop and Hosted scope rather than
+inheriting commercial or transfer permission from a personal login.
 
 - Qualify supported SIWC plan/quota telemetry before adding a quota reader;
   opaque token metadata and native Codex endpoints are not a compatible API.
@@ -171,3 +235,20 @@ authentication, renewal/revocation, protected storage, entitlements, quota units
 usage, models, execution, and recovery. A generic API codec is not a subscription
 connector. Kimi Code subscription and MiniMax M Plan readers remain unqualified
 until their exact cloud contracts are verified.
+
+## Future application integrations
+
+After the first Hosted release passes acceptance, expand application support
+alongside the subscription-connector track. Reuse the shared execution core and
+existing profile/recovery owners; qualify each application's supported versions
+and direct-launch or pooled-API modes separately.
+
+- Verify installation detection, connection/launch, authentication and the full
+  text → tool call → result → next answer cycle on the supported transport.
+- Verify attachment, external configuration edits, disconnect and requested
+  snapshot restore while preserving chats, newer logins and unrelated settings.
+- Establish supported models, reasoning controls, context limits, streaming,
+  cancellation and restart behavior from that client's actual contract.
+
+Publish only accepted modes. Keep new clients and subscription families
+independent so an unqualified integration does not delay another qualified one.

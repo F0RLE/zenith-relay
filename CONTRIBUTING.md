@@ -249,6 +249,12 @@ Add `--compact` for concise progress, warnings, errors and elapsed time. Complet
 build output is saved to `target/desktop-build.log`, replacing the previous log.
 The workspace desktop updater uses this mode and retains SHA-256 verification,
 safe replacement and startup checks.
+It reports `GatewayApiAvailable` separately from `GatewayOwnership`: unavailable
+listener metadata does not make a responding API unavailable. The credential-free
+API probe rejects redirects and foreign responses and has a total one-second
+read deadline. `-RequireGateway` still requires both a responding Relay API and
+a listener owned by the newly launched process; unknown or foreign ownership
+fails strict startup verification.
 
 Identical renderer filenames and bytes retain their previous timestamps, allowing
 Cargo to reuse its release output. Changed assets still trigger native work.
@@ -454,6 +460,19 @@ Script checks enforce immutable, credential-free Git sources, matching manifest
 and lockfile revisions, and the maintained parser. `age` and the Codex authorization
 encryption format stay unchanged. Replace each pin when a reviewed published
 release includes its fix; keep dependency audits and compiler checks enabled.
+
+The current Linux dependency families retain these upstream constraints:
+
+| Advisory | Dependency owner and required migration |
+| --- | --- |
+| [RUSTSEC-2024-0370](https://rustsec.org/advisories/RUSTSEC-2024-0370.html) | Tauri's GTK 0.18 family uses `proc-macro-error` 1 through `glib-macros` and `gtk3-macros`. The separate `proc-macro-error2` override does not replace it. |
+| [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) | GTK 0.18 retains `glib` 0.18. The published fix requires `glib` 0.20 or newer, so qualify a coordinated Tauri/GTK migration rather than mixing incompatible GTK types. |
+| [RUSTSEC-2026-0370](https://rustsec.org/advisories/RUSTSEC-2026-0370.html), [0371](https://rustsec.org/advisories/RUSTSEC-2026-0371.html), [0372](https://rustsec.org/advisories/RUSTSEC-2026-0372.html) | Linux keyring/Secret Service and Tauri plugins require zbus 5. Its standalone `zvariant`, `zbus_names` and derive crates moved into zbus 6; migrate their parent integrations together and verify credential-store compatibility. |
+
+These paths are absent from the Windows dependency graph but remain relevant to
+Linux delivery. They are unresolved upstream constraints, not false positives or
+audit suppressions. Recheck published parent constraints before a platform
+upgrade; qualify Linux credential access with an unlocked Secret Service.
 
 Private vulnerability reporting and CodeQL default setup are repository settings,
 not local workflow files. Changes to checked-in workflows and maintenance rules
@@ -745,11 +764,26 @@ bun scripts/build/cargo.mjs test --manifest-path crates/relay-core/Cargo.toml --
 
 ### Protocol optimization probes
 
-These opt-in probes use synthetic inputs and loopback, not provider quota. Compare
+The local probes use synthetic inputs and loopback, not provider quota. Compare
 the same machine, build profile and fixtures before/after; preserve unrelated
 dirty work. Report results in chat or review, not this guide. Local CPU, bytes and
 mock timings do not establish installed-app memory, provider TTFT, cache hits or
 billing savings. Keep ordinary correctness/continuation tests passing.
+
+#### SIWC live cache comparison
+
+`bun scripts/maintenance/siwc-cache-probe.mjs --help` describes a separate live
+probe. It requires explicit authorization and `--allow-requests MODEL EFFORT`;
+it consumes provider quota for at most six synthetic generations with no retries.
+Supply a current SIWC `accessToken` and optional account `proxyUrl` as JSON through
+stdin from an authorized in-memory credential source, never command arguments,
+checked-in fixtures or a plaintext file. Preserve the account's configured proxy.
+HTTP and a persistent WebSocket use isolated cache cohorts with the same model,
+reasoning and tool cycle. The probe uses HTTP only for this explicitly authorized
+comparison, independently of the runtime's WebSocket-only SIWC generation policy.
+Output contains bounded timing/byte/usage observations,
+not credentials, prompts or response IDs. Cache hits do not prove billing savings.
+Use `bun test ./scripts/maintenance/siwc-cache-probe.test.mjs` for offline checks.
 
 #### BPS discovery continuation probe
 

@@ -9,6 +9,11 @@ The [existing web preview](../../web/README.md) is UI work, not completion of th
 service packages below. Authentication, server operations and paid acceptance
 remain open independently of screen readiness.
 
+**Current stage:** Hosted design and implementation are deferred while the
+[current Desktop/runtime confirmation](../project/ROADMAP.md#current-confirmation-scope)
+is active. The package order below remains the future delivery plan; no Hosted
+package is opened by a successful Desktop check alone.
+
 ## Hosted multi-user Relay
 
 The first public Hosted release is a complete prepaid model-token service backed
@@ -35,6 +40,25 @@ its artifacts, failure cases and checks. Complete affected
 [specification gates](HOSTED_RELAY_ARCHITECTURE.md#specification-before-implementation)
 before code; package prerequisites define ordering.
 
+The immediate implementation target is H00/H01 qualification followed by H02
+server foundations. Resolve the affected HD decisions at their existing owners;
+an open payment, commercial or external-notice decision blocks its dependent
+behavior, not an independent local fixture or configuration specification.
+
+Treat H01 as the reusable product boundary: keep protocol conversion, execution
+certainty, continuation ownership and provider usage in the shared core; keep
+Desktop/Tauri I/O and Hosted tenant authority, durable jobs and accounting in
+their owning hosts. Document and test the existing entry points and the smallest
+required interfaces before extracting or adding an abstraction. A general plugin
+platform, second execution engine or public SDK is not a prerequisite.
+
+Each implementation increment must leave Desktop and the affected server package
+buildable and testable. H02 acceptance establishes process/configuration/database
+foundations, not a completed inference or billing service. Subsequent packages
+must prove the internal end-to-end path below with deterministic fixtures before
+separately authorized provider/payment acceptance. Reuse the package dependency
+map rather than starting all subsystems or the customer UI at once.
+
 Internal stages do not reduce the first-public-release scope. One qualified
 account family is enough initially; additional Claude/other account connectors
 are future work, not promised support inferred from an API adapter.
@@ -42,6 +66,20 @@ are future work, not promised support inferred from an API adapter.
 Excel/BPS deep acceptance and additional subscription connectors are not a
 prerequisite for a Hosted release that does not offer those credential classes.
 No shared paid route is inferred from a working personal account.
+
+### Post-release expansion
+
+After the first Hosted release passes H17 acceptance, the next product focus is
+additional subscription authorizations and supported application integrations,
+as ordered in the [Desktop delivery focus](../project/ROADMAP.md#delivery-focus).
+Use the existing shared core rather than a separate execution implementation.
+The [connector track](../project/ROADMAP.md#future-connectors) qualifies each
+credential family's lifecycle, execution and permitted deployment scope; the
+[application track](../project/ROADMAP.md#future-application-integrations)
+qualifies client launch, connection and recovery behavior. Hosted admission of a
+new subscription route still requires its own commercial and technical evidence.
+Maintenance and qualification of already offered integrations continue before
+this expansion stage; these additions do not enlarge first-release scope.
 
 ### Customer website implementation slices
 

@@ -332,6 +332,15 @@ quota on other compatible pool accounts. Unknown capacity defers redemption.
 An available reset nearing expiration may restore an exhausted week before the
 next quota check; an imminent natural weekly recovery takes precedence. Relay
 verifies recovery before another automatic reset. Manual reset remains available.
+A fresh subscription ending before natural weekly recovery can also release
+the reserve while its matching automatic reset rule is enabled.
+For an explicit quota threshold, choose **Reset timing → At a quota threshold**
+and enter the remaining weekly percentage. This option is off by default.
+0 or blank means exhausted only; a full quota never triggers a reset, even at
+100%. Primary and model-specific limits do not trigger it. Relay requires a fresh
+weekly observation and a known future reset date. An uncertain redemption waits
+for confirmed recovery; a confirmed threshold reset is not repeated before the
+original weekly deadline.
 Save the rule and enable its switch; its card shows the result.
 After saving or enabling it, Relay checks current quota. An already-full window
 is considered without waiting for another transition to 100% or repeating a wake
@@ -388,6 +397,8 @@ without closing your settings.
   Quota-based switching needs a lead of at least 5 percentage points, or 10
   for the primary prompt-cache connection while its quota is fresh and positive.
   Availability and concurrency limits still apply.
+  Expiring subscriptions receive a bounded larger share of new independent
+  work. Existing cache-affinity rules stay intact; stale dates provide no boost.
 - **Round robin:** independent requests cycle through available members in
   saved order. **Use custom request shares** enables weighted distribution.
 - **Primary & reserve:** the first compatible available member handles requests;
@@ -419,6 +430,12 @@ active requests, clear cooldowns, or move an opaque continuation to another acco
 <!-- relay:topic-end:pool-rotation -->
 
 ### Failures and retries
+
+With **Wait for route recovery** enabled, temporary throttling or model-capacity
+refusals first wait for the same member, using provider cooldowns and increasing
+retry delays. This preference lasts up to 30 seconds within the request's remaining
+send and wait limits. After that, normal route and continuation rules apply;
+SIWC temporary failures do not authorize switching to another account.
 
 The pool may select another member after a refusal before generation.
 A started or uncertain request is not automatically replayed on another account.
@@ -517,6 +534,10 @@ address needs updating.
 **Wait for route recovery** can hold eligible text requests until a member
 becomes available again. The client can cancel the wait.
 This does not fix a wrong key, an invalid format, or a response already started.
+
+SIWC automatically omits client output-token caps, which its preview API does not
+support. The provider sets the response bound, so answers may exceed the requested
+cap and use more quota. Other routes retain their existing limit handling.
 
 **Paths for manual setup**
 
@@ -827,6 +848,9 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_account_disabled`, `account_deactivated` · 403 | An account, workspace, or project is disabled. | Check its provider dashboard and restore access through that provider. Use another permitted member while it is unavailable. |
 | `upstream_account_verification_required`, `account_verification_required` | The provider requires account verification. | Complete it on the provider website, then refresh sign-in and account data. See [BPS sign-in requirements](#account-sign-in). |
 | `upstream_forbidden`, `permission_denied` · 403 | The account or key lacks permission for the operation. | Check project, key, and model permissions. Reading a model list does not prove inference access. |
+| `upstream_invalid_workspace`, `invalid_workspace_selected` · 403 | The selected upstream workspace is invalid. | Select a valid workspace or sign in again. Relay ends this request without rotating accounts or applying a cooldown. |
+| `upstream_access_program_invalid`, `invalid_access_program`, `unsupported_access_program` · 400 | The selected access program cannot be used with this model. | Choose a supported model/program combination. Relay does not downgrade the requested mode or rotate accounts. |
+| `upstream_access_program_not_enabled`, `access_program_not_enabled` · 403 | The selected access program is not enabled. | Check program availability for the selected account and model. This request refusal does not invalidate the account or apply a cooldown. |
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | Edge security, including Cloudflare 1010, blocked API access. | Check the API address, proxy and provider access. Signing in again does not resolve this block. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
@@ -879,6 +903,7 @@ such as 429, explains why. More retries do not replenish quota.
 
 | Code or message | Cause | Action |
 | --- | --- | --- |
+| `siwc_websocket_required` | SIWC text generation requires an upstream WebSocket route. | Update Relay and check that the SIWC endpoint and assigned proxy support WebSockets. HTTP clients can still connect to Relay; the upstream text route requires WebSocket. Image endpoints keep their existing transport. |
 | `upstream_transport_connect`, `upstream_transport_request`, `upstream_transport` | The provider connection could not be established or executed. | Check the API address, DNS, internet, certificate, and assigned proxy, then test the connection. Do not disable TLS verification to bypass an error. |
 | `upstream_transport_timeout`, `upstream_request_timeout`, `request_timeout`, `upstream_gateway_timeout`, `gateway_timeout` · 408 / 504 | A timeout expired; local WebSocket also waits for initial `response.create`. | Check latency, proxy, and service health. Reconnect a stuck client and retry after a pause. |
 | `upstream_transport_body`, `upstream_body`, `upstream_error` | Request/response body transfer failed. | Check network/proxy stability. After output starts, retry is the client's decision; Relay does not combine answers from different members. |
