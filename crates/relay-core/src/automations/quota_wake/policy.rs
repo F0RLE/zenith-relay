@@ -82,6 +82,9 @@ pub struct WakeTask {
     pub window_kinds: BTreeSet<QuotaWindowKind>,
     pub model_policy: WakeModelPolicy,
     pub trigger: WakeTrigger,
+    /// Opt-in weekly redemption threshold. None preserves reserve behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_reset_remaining_basis_points: Option<u16>,
     pub fallback_schedule: Option<WakeTrigger>,
     pub execution_policy: WakeExecutionPolicy,
     pub jitter_seconds: u32,
@@ -112,6 +115,12 @@ impl WakeTask {
         if self.trigger == WakeTrigger::Weekly
             && (self.window_kinds != BTreeSet::from([QuotaWindowKind::Secondary])
                 || self.execution_policy != WakeExecutionPolicy::Automatic)
+        {
+            return Err(WakeTaskValidationError::UnsupportedSchedule);
+        }
+        if self
+            .weekly_reset_remaining_basis_points
+            .is_some_and(|threshold| threshold > 10_000 || self.trigger != WakeTrigger::Weekly)
         {
             return Err(WakeTaskValidationError::UnsupportedSchedule);
         }

@@ -177,10 +177,17 @@ pub(super) fn prepare_account_attempt(
     }
     // Only a text-summary bridge omits tools; ordinary account requests keep them.
     tool_policy.capture_forwarded_catalog(&upstream_body);
+    let mut preparation = RequestPreparationDiagnostics::default();
     if siwc_route {
-        if let Err(error) = crate::providers::chatgpt::prepare_siwc_request(upstream_body.to_mut())
-        {
-            return AccountPrepare::Reject(error);
+        match crate::providers::chatgpt::prepare_siwc_request(upstream_body.to_mut()) {
+            Ok(omitted) => preparation.siwc_output_limit_omitted = omitted.then_some(true),
+            Err(error) => {
+                if error.parameter() == Some("previous_response_id") {
+                    return AccountPrepare::Reject(error);
+                }
+                *last_adapter_error = Some(error);
+                return AccountPrepare::Continue;
+            }
         }
         crate::gateway::request::apply_account_prompt_cache_key(
             upstream_body
@@ -192,7 +199,6 @@ pub(super) fn prepare_account_attempt(
             client_context_id.as_deref(),
         );
     }
-    let mut preparation = RequestPreparationDiagnostics::default();
     let mut bps_catalog = super::super::basis_points::RequestCatalog::default();
     if basis_points_route {
         match rewrite_account_basis_points_body(

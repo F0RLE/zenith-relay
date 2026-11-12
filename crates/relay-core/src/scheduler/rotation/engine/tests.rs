@@ -1,8 +1,10 @@
 use super::*;
 
 mod cache_diagnostics;
+mod expiry_spending;
 mod latency_diagnostics;
 mod quota_affinity;
+mod weighted_credit;
 
 fn candidate(id: &str, priority: i32, weight: u32) -> RotationCandidate {
     let mut candidate = RotationCandidate::new(id, "responses:gpt", "gpt-6");

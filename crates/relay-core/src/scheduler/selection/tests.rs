@@ -12,6 +12,49 @@ mod rate_limits;
 mod recovery;
 mod rotation;
 mod warm_fallback;
+
+#[test]
+fn spending_evidence_is_account_scoped_and_cannot_survive_removal() {
+    let mut scheduler = PoolScheduler::new();
+    scheduler.upsert(oauth_candidate("account"));
+    scheduler.upsert(candidate("source"));
+    let deadline = crate::quota::QuotaSpendDeadline {
+        expires_at_ms: 5_000,
+        observed_at_ms: 100,
+        valid_until_ms: 1_000,
+    };
+    assert!(scheduler.set_spend_deadlines(BTreeMap::from([
+        ("account".into(), deadline),
+        ("source".into(), deadline),
+        ("missing".into(), deadline),
+    ])));
+    assert_eq!(scheduler.spend_deadlines.len(), 1);
+    assert_eq!(
+        scheduler
+            .rotation_candidate(&oauth_candidate("account"))
+            .unwrap()
+            .spend_deadline,
+        Some(deadline)
+    );
+    scheduler.upsert(candidate("account"));
+    assert!(
+        scheduler.spend_deadlines.is_empty(),
+        "a replaced identity must not inherit an entitlement deadline"
+    );
+    scheduler.upsert(oauth_candidate("account"));
+    assert!(scheduler.spend_deadlines.is_empty());
+    scheduler.set_spend_deadlines(BTreeMap::from([("account".into(), deadline)]));
+    scheduler.remove("account");
+    scheduler.upsert(oauth_candidate("account"));
+    assert!(scheduler.spend_deadlines.is_empty());
+    assert_eq!(
+        scheduler
+            .rotation_candidate(&oauth_candidate("account"))
+            .unwrap()
+            .spend_deadline,
+        None
+    );
+}
 use crate::ModelRules;
 use crate::scheduler::{CandidateKind, CandidateQuota};
 use std::collections::{BTreeSet, HashSet};

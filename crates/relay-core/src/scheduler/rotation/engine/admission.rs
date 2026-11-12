@@ -4,6 +4,14 @@ use super::*;
 
 mod cache_affinity;
 
+const ROTATION_CREDIT_HORIZON_ROUNDS: i64 = 32;
+
+fn rotation_total_weight(candidates: &[ReadyCandidate]) -> i64 {
+    candidates.iter().fold(0_i64, |total, candidate| {
+        total.saturating_add(i64::from(candidate.weight))
+    })
+}
+
 impl RotationEngine {
     pub fn candidate_availability(
         &self,
@@ -97,6 +105,11 @@ impl RotationEngine {
         let least_loaded = self.cache_aware_load_group(ready_candidates, request);
         if least_loaded.len() < ready_candidates.len() {
             return RotationSelectionReason::LeastLoaded;
+        }
+        if Self::independent_request(ready_candidates, request)
+            && self.expiry_weight(&selected.id, now_ms) > 1
+        {
+            return RotationSelectionReason::WeightedRotation;
         }
         let best_quota = least_loaded
             .iter()
@@ -397,11 +410,28 @@ impl RotationEngine {
                 // Independent work uses the least-loaded physical members.
                 // A warm owner may stay within the bounded load margin;
                 // resource and health checks apply equally to that owner.
+                let independent = Self::independent_request(ready, request);
                 let candidates = self.cache_aware_load_group(ready, request);
-                let candidates = self.resource_group(candidates, request, now_ms);
-                self.soft_health_group(candidates)
+                let candidates = self.resource_group(candidates, request, now_ms, independent);
+                let mut candidates = self.soft_health_group(candidates);
+                if independent {
+                    for candidate in &mut candidates {
+                        candidate.weight = candidate
+                            .weight
+                            .saturating_mul(self.expiry_weight(&candidate.id, now_ms));
+                    }
+                }
+                candidates
             }
         }
+    }
+
+    fn independent_request(ready: &[ReadyCandidate], request: &RotationRequest) -> bool {
+        request.owner.is_none()
+            && !ready.iter().any(|candidate| {
+                request.preferred.as_deref() == Some(candidate.id.as_str())
+                    || request.warm_fallbacks.contains(&candidate.id)
+            })
     }
 
     fn resource_group(
@@ -409,6 +439,7 @@ impl RotationEngine {
         mut candidates: Vec<ReadyCandidate>,
         request: &RotationRequest,
         now_ms: u64,
+        expiry_bias: bool,
     ) -> Vec<ReadyCandidate> {
         let best_quota = candidates
             .iter()
@@ -417,6 +448,7 @@ impl RotationEngine {
         if let Some(best_quota) = best_quota {
             candidates.retain(|candidate| {
                 self.within_quota_band(request, &candidate.id, best_quota, now_ms)
+                    || (expiry_bias && self.expiry_weight(&candidate.id, now_ms) > 1)
             });
         } else if let Some(best_credits) = candidates
             .iter()
@@ -434,6 +466,16 @@ impl RotationEngine {
             });
         }
         candidates
+    }
+
+    fn expiry_weight(&self, candidate_id: &str, now_ms: u64) -> u32 {
+        self.candidates
+            .get(candidate_id)
+            .and_then(|runtime| runtime.candidate.spend_deadline)
+            .zip(self.fresh_quota_remaining(candidate_id, now_ms))
+            .map_or(1, |(deadline, remaining)| {
+                deadline.weight(remaining, now_ms)
+            })
     }
 
     fn soft_health_group(&self, mut candidates: Vec<ReadyCandidate>) -> Vec<ReadyCandidate> {
@@ -656,6 +698,8 @@ impl RotationEngine {
                 })
                 .cloned();
         }
+        let credit_limit =
+            rotation_total_weight(candidates).saturating_mul(ROTATION_CREDIT_HORIZON_ROUNDS);
         candidates
             .iter()
             .max_by(|left, right| {
@@ -664,12 +708,14 @@ impl RotationEngine {
                     .get(&(route_key.to_owned(), left.capacity_key.clone()))
                     .copied()
                     .unwrap_or_default()
+                    .clamp(-credit_limit, credit_limit)
                     .saturating_add(i64::from(left.weight));
                 let right_rotation_credit = self
                     .rotation_credit
                     .get(&(route_key.to_owned(), right.capacity_key.clone()))
                     .copied()
                     .unwrap_or_default()
+                    .clamp(-credit_limit, credit_limit)
                     .saturating_add(i64::from(right.weight));
                 left_rotation_credit
                     .cmp(&right_rotation_credit)
@@ -718,27 +764,20 @@ impl RotationEngine {
         self.rotation_credit.retain(|(route, capacity), _| {
             route != route_key || eligible_capacity_keys.contains(capacity)
         });
-        let total_weight = candidates
-            .iter()
-            .map(|candidate| i64::from(candidate.weight))
-            .sum::<i64>();
+        let total_weight = rotation_total_weight(candidates);
+        let credit_limit = total_weight.saturating_mul(ROTATION_CREDIT_HORIZON_ROUNDS);
         for candidate in candidates {
             let credit_key = (route_key.to_owned(), candidate.capacity_key.clone());
             let candidate_credit = self.rotation_credit.entry(credit_key).or_default();
-            *candidate_credit = candidate_credit.saturating_add(i64::from(candidate.weight));
-        }
-        let Some(selected_candidate) = candidates
-            .iter()
-            .find(|candidate| candidate.id == selected_candidate_id)
-        else {
-            return;
-        };
-        let credit_key = (
-            route_key.to_owned(),
-            selected_candidate.capacity_key.clone(),
-        );
-        if let Some(candidate_credit) = self.rotation_credit.get_mut(&credit_key) {
-            *candidate_credit = candidate_credit.saturating_sub(total_weight);
+            let accrued = (*candidate_credit)
+                .clamp(-credit_limit, credit_limit)
+                .saturating_add(i64::from(candidate.weight));
+            *candidate_credit = if candidate.id == selected_candidate_id {
+                accrued.saturating_sub(total_weight)
+            } else {
+                accrued
+            }
+            .clamp(-credit_limit, credit_limit);
         }
     }
 }

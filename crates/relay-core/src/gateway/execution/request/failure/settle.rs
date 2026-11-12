@@ -55,6 +55,16 @@ pub(super) fn settle_collected_rejection(
     let native_replay_attempted = &mut repairs.native_replay;
     let cache_write_rejected = prompt_cache_write_rejected(&bytes);
     let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
+    if lease.has_transient_retry() {
+        apply_failure_state(event, rejection_state);
+        if let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+        }
+        emit_usage(runtime, event.clone());
+        *last_failure = Some(failure);
+        *last_failure_origin = selected_error_origin;
+        return FailureStep::Continue;
+    }
     let response_missing = previous_response_not_found(&bytes);
     let affinity_miss = recoverable_response_affinity_miss(
         status,

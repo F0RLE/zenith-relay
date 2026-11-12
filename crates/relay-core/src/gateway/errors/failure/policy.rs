@@ -104,6 +104,7 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
         error_codes::UPSTREAM_TOOL_CALL_MISMATCH
             | error_codes::HTTP_HEADERS_TIMEOUT
             | error_codes::HTTP_SEND_START_TIMEOUT
+            | error_codes::SIWC_WEBSOCKET_REQUIRED
             | error_codes::STREAM_EVENT_TOO_LARGE
             | error_codes::UPSTREAM_TURN_RATE_LIMITED
             | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
@@ -117,5 +118,8 @@ pub(crate) fn failure_category_is_request_terminal(category: &str) -> bool {
             | error_codes::UPSTREAM_WEBSOCKET_UNSUPPORTED
             | error_codes::UPSTREAM_WEBSOCKET_HANDSHAKE_REJECTED
             | error_codes::UPSTREAM_INVALID_REQUEST
+            | error_codes::UPSTREAM_INVALID_WORKSPACE
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
     )
 }

@@ -305,6 +305,7 @@ fn siwc_cannot_bridge_codex_and_bps_from_different_workspaces_or_users() {
 
 fn automation(selector: AccountSelector) -> WakeTask {
     WakeTask {
+        weekly_reset_remaining_basis_points: None,
         id: "wake_synthetic".into(),
         name: "Synthetic wake".into(),
         enabled: true,

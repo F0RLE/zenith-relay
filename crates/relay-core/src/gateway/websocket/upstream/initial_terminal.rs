@@ -324,7 +324,10 @@ fn retry_initial_terminal(
             terminal.body_hint,
             Some(crate::AttemptOutcome::RetrySelection),
         );
-        if scope.response_affinity_hit && !scope.request.requires_affinity_owner {
+        if scope.response_affinity_hit
+            && !scope.request.requires_affinity_owner
+            && !scope.lease.has_transient_retry()
+        {
             scope.request.response_affinity_key = None;
         }
     }

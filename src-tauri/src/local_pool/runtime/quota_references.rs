@@ -125,6 +125,7 @@ pub(in crate::local_pool) fn sync_account_quota_references(
     runtime: &GatewayRuntime,
     store: &LocalPoolStore,
 ) -> Result<()> {
+    super::spending::sync_spend_deadlines(runtime, store);
     if store.gateway().account_routes.is_empty() {
         runtime.set_account_quota_references(BTreeMap::new());
         return Ok(());

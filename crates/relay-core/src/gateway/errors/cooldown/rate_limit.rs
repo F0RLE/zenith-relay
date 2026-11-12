@@ -12,6 +12,8 @@ pub(crate) struct RateLimitBodyHint {
     pub(crate) chatgpt_subscription: bool,
     /// Exact SIWC quota discriminator, never inferred from diagnostic prose.
     pub(crate) siwc_usage_limit: bool,
+    /// A recognized transient discriminator, distinct from an unknown 429.
+    pub(crate) explicit_transient_rejection: bool,
     pub(crate) global: bool,
     pub(crate) shared_bucket: Option<[u8; 32]>,
 }
@@ -143,6 +145,17 @@ pub(crate) fn rate_limit_body_hint_value(
             )
     });
     let observed_at_ms = crate::unix_time_ms_at(now);
+    let error = ["/error", "/response/error", "/body/error"]
+        .into_iter()
+        .find_map(|path| rate_limit_payload.pointer(path))
+        .unwrap_or(rate_limit_payload);
+    let explicit_transient_rejection = matches!(
+        error
+            .get("code")
+            .or_else(|| error.get("type"))
+            .and_then(Value::as_str),
+        Some("rate_limit_exceeded" | "slow_down" | "server_is_overloaded")
+    );
     let clock =
         |delay| ProviderClock::new(observed_at_ms.saturating_add(delay), Some(observed_at_ms));
     RateLimitBodyHint {
@@ -151,6 +164,7 @@ pub(crate) fn rate_limit_body_hint_value(
         headers_normalized: false,
         chatgpt_subscription,
         siwc_usage_limit,
+        explicit_transient_rejection,
         global,
         shared_bucket: organization_rate_limit_bucket(rate_limit_payload),
     }

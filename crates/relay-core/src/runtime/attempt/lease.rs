@@ -19,6 +19,26 @@ impl CandidateLease {
         self.rotation_budget.limit_rate_limit_recovery(window_ms);
     }
 
+    pub(crate) fn prefer_transient_retry(&self, allow_fallback: bool, window_ms: u64) {
+        let revision = crate::poison::mutex(&self.dispatched_token_revision).clone();
+        self.rotation_budget.prefer_retry_candidate(
+            &self.candidate_id,
+            &self.model,
+            self.candidate_permission_revision,
+            revision,
+            allow_fallback,
+            window_ms,
+        );
+    }
+
+    pub(crate) fn retain_wire_authorization(&self, prepared: &PreparedAuthorization) {
+        *crate::poison::mutex(&self.dispatched_token_revision) = prepared.token_revision.clone();
+    }
+
+    pub(crate) fn has_transient_retry(&self) -> bool {
+        self.rotation_budget.retry_candidate_deadline().is_some()
+    }
+
     /// The final scope/config/availability gate and the generation debit are
     /// one scheduler transaction. A lost race never consumes a generation.
     #[cfg(test)]
@@ -68,6 +88,13 @@ impl CandidateLease {
         let dispatch_result = budget.with_budget(|request_budget| {
             if charge_wire && !request_budget.can_start_wire() {
                 return Err(RotationDispatchStartError::BudgetExhausted);
+            }
+            if self
+                .retry_token_revision
+                .as_ref()
+                .is_some_and(|expected| Some(expected) != token_revision)
+            {
+                return Err(RotationDispatchStartError::CandidateChanged);
             }
             let candidate_scope = crate::poison::read(&self.principal_scope);
             if self.principal_scope_revision.0.load(Ordering::Acquire)

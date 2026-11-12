@@ -27,6 +27,8 @@ pub struct WakeAutomationInput {
     #[serde(default = "quota_full_trigger")]
     trigger: WakeTrigger,
     #[serde(default)]
+    weekly_reset_remaining_basis_points: Option<u16>,
+    #[serde(default)]
     jitter_seconds: u32,
     #[serde(default = "default_attempt_limit")]
     max_attempts_per_cycle: u8,
@@ -179,6 +181,7 @@ fn build_task(
             trim_model_policy(input.model_policy)
         },
         trigger: input.trigger,
+        weekly_reset_remaining_basis_points: input.weekly_reset_remaining_basis_points,
         fallback_schedule: None,
         execution_policy: WakeExecutionPolicy::Automatic,
         jitter_seconds: input.jitter_seconds,
@@ -255,7 +258,7 @@ fn selected_automation_accounts(
 }
 
 fn schedule_countdown_refresh(task: &WakeTask, state: &DesktopState) -> Result<(), CommandError> {
-    if !task.enabled || task.trigger != WakeTrigger::QuotaFull {
+    if !task.enabled || !matches!(task.trigger, WakeTrigger::QuotaFull | WakeTrigger::Weekly) {
         return Ok(());
     }
     // Verify current provider evidence through the existing single-flight

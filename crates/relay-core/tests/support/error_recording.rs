@@ -88,11 +88,7 @@ async fn websocket_adapter_preparation_rejection_is_recorded_once() {
         .send(ClientWsMessage::Text(request.to_string()))
         .await
         .unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let frame = receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
     let ClientWsMessage::Text(frame) = frame else {
         panic!("expected a local protocol error");
     };

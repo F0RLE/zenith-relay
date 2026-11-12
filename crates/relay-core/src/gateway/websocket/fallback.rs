@@ -222,12 +222,14 @@ async fn serve_http_fallback_request(
         });
     let upstream_response = await_while_client_connected(
         downstream,
-        execute_reserved_client_request(
+        // A native-socket handoff runs inside the live bridge. Keep the HTTP
+        // executor's state machine off that already nested request stack.
+        Box::pin(execute_reserved_client_request(
             Arc::clone(&runtime),
             http_request,
             WireApi::Responses,
             reserved_candidate,
-        ),
+        )),
         client_request.stream_id.as_deref(),
     )
     .await?;

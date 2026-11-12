@@ -1,5 +1,65 @@
 use super::*;
 
+#[tokio::test]
+async fn cached_catalog_is_fenced_by_credential_plan_and_inventory_revisions() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let revision = usage_revision(&runtime);
+    let context = runtime.codex_model_manifest_context("account-1").unwrap();
+    let manifest = serde_json::json!({"models":[{"slug":"gpt-test", "context_window":128_000}]});
+    assert!(runtime.remember_authorized_codex_model_manifest(
+        "account-1",
+        manifest.clone(),
+        AuthorizationIncarnation::OAuth(revision.clone()),
+        context.clone(),
+    ));
+    assert_eq!(runtime.stale_codex_model_manifests(["account-1"]).len(), 1);
+    runtime.account_state.executors["account-1"]
+        .token_authority
+        .register(
+            "account-1",
+            TokenSet::new("replacement-access", None, None, None, 1, 1).unwrap(),
+            AccountAuthState::Active,
+        )
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .stale_codex_model_manifests(["account-1"])
+            .is_empty()
+    );
+    assert!(!runtime.remember_authorized_codex_model_manifest(
+        "account-1",
+        manifest.clone(),
+        AuthorizationIncarnation::OAuth(revision),
+        context.clone(),
+    ));
+    assert_eq!(
+        runtime.model_context_windows("gpt-test", ["account-1"]),
+        Default::default()
+    );
+    runtime.remember_codex_model_manifest("account-1", manifest.clone(), 1);
+    runtime.update_account_subscription_plan("account-1", Some("different-plan"));
+    assert!(
+        runtime
+            .stale_codex_model_manifests(["account-1"])
+            .is_empty()
+    );
+    assert!(!runtime.remember_authorized_codex_model_manifest(
+        "account-1",
+        manifest.clone(),
+        AuthorizationIncarnation::Source,
+        context,
+    ));
+    let context = runtime.codex_model_manifest_context("account-1").unwrap();
+    runtime.update_account_models("account-1", &["gpt-new".into()]);
+    assert!(!runtime.remember_authorized_codex_model_manifest(
+        "account-1",
+        manifest,
+        AuthorizationIncarnation::Source,
+        context,
+    ));
+}
+
 #[test]
 fn provider_image_metadata_does_not_change_unknown_model_capabilities() {
     let runtime = quota_runtime(QuotaSnapshot::default());

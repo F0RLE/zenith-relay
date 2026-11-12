@@ -49,7 +49,7 @@ pub(in crate::gateway) use fast_delta::{FastResponseDelta, fast_response_delta_j
 
 use bridge::bridge_adapter_stream;
 
-pub(super) use replay::NativeReplayCapture;
+pub(crate) use replay::NativeReplayCapture;
 
 pub(super) use events::{
     TerminalEvent, TerminalOutcome, has_generation_evidence, has_output_delta, has_semantic_output,
@@ -132,7 +132,7 @@ impl StreamExecution {
         let expected_model = (route.account_id.is_some()
             && runtime.block_degraded_routes_enabled())
         .then_some(source_model.clone());
-        let initial_event = usage_event(
+        let mut initial_event = usage_event(
             UsageAttempt {
                 request_id: &request_id,
                 attempt,
@@ -147,6 +147,14 @@ impl StreamExecution {
             None,
             0,
         );
+        if initial_event.transport == crate::UsageTransport::Http
+            && let Some(transport) = initial_event
+                .routing
+                .as_mut()
+                .and_then(|routing| routing.transport.as_mut())
+        {
+            transport.downstream_http_status = Some(status.as_u16());
+        }
         let mut first = first;
         let upstream_usage = (!adapter_is_passthrough
             || basis_points_request.is_some()

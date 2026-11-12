@@ -141,30 +141,30 @@ pub(super) async fn handle_upstream_failure(
     .await
     {
         Ok(bytes) => bytes,
-        Err(error)
+        Err(error) => {
+            let failure =
+                AttemptFailure::status_with_headers(status, Some(&error.bytes), response_headers);
             if !basis_points
                 && retryable_route_status(route, status, has_previous_response_id)
                 && crate::gateway::response::has_complete_rejection_body(&error.bytes)
-                && AttemptFailure::status_with_body(status, Some(&error.bytes))
-                    .execution
-                    .certainty
-                    == ExecutionCertainty::NotSent =>
-        {
-            let failure = AttemptFailure::status_with_body(status, Some(&error.bytes));
-            populate_tokens(&mut event, &error.bytes);
-            event.error_category = Some(failure.category.to_string());
-            let failure_state =
-                settle_route_failure(runtime, lease, route, &failure, response_headers);
-            apply_failure_state(&mut event, failure_state);
-            if let Some(routing) = event.routing.as_mut() {
-                routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+                && !super::super::super::errors::failure_category_is_request_terminal(
+                    failure.category,
+                )
+                && failure.execution.certainty == ExecutionCertainty::NotSent
+            {
+                populate_tokens(&mut event, &error.bytes);
+                event.error_category = Some(failure.category.to_string());
+                let failure_state =
+                    settle_route_failure(runtime, lease, route, &failure, response_headers);
+                apply_failure_state(&mut event, failure_state);
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(crate::AttemptOutcome::RetrySelection);
+                }
+                emit_usage(runtime, event);
+                *last_failure = Some(failure);
+                *last_failure_origin = selected_error_origin;
+                return FailureStep::Continue;
             }
-            emit_usage(runtime, event);
-            *last_failure = Some(failure);
-            *last_failure_origin = selected_error_origin;
-            return FailureStep::Continue;
-        }
-        Err(error) => {
             if let Some(routing) = event.routing.as_mut() {
                 routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
             }

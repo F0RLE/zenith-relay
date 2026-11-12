@@ -73,7 +73,11 @@ pub(super) fn handle_account_status_failure(
     let mut classified = classify_account_failure(&mut input);
     if matches!(
         classified.failure.category,
-        error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+        error_codes::UPSTREAM_TURN_RATE_LIMITED
+            | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+            | error_codes::UPSTREAM_INVALID_WORKSPACE
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+            | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
     ) {
         let state = settle_route_failure(
             input.runtime,
@@ -159,8 +163,11 @@ fn repair_account_body(
 }
 
 fn classify_account_failure(input: &mut AccountStatusFailureInput<'_>) -> ClassifiedAccountFailure {
-    let mut failure = AttemptFailure::status_with_body(input.status, Some(&input.bytes))
-        .with_retry_headers(input.response_headers);
+    let mut failure = AttemptFailure::status_with_headers(
+        input.status,
+        Some(&input.bytes),
+        input.response_headers,
+    );
     super::super::super::errors::apply_degraded_route_policy(input.runtime, &mut failure);
     if input.status == StatusCode::PAYMENT_REQUIRED
         && input.route.account_id.is_some()
@@ -368,10 +375,12 @@ fn settle_account_failure(
         runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
     }
     if not_sent
-        && ((classified.cache_write_rejected && !route_forbids_fallback(route, status, &failure))
+        && (lease.has_transient_retry()
+            || (classified.cache_write_rejected
+                && !route_forbids_fallback(route, status, &failure))
             || retryable_route_failure(route, status, &failure, has_previous_response_id))
     {
-        if response_affinity_hit && !*requires_affinity_owner {
+        if response_affinity_hit && !*requires_affinity_owner && !lease.has_transient_retry() {
             *response_affinity_key = None;
         }
         let rejection_state = rejection_state.clone();

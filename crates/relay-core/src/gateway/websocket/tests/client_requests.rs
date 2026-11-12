@@ -2,6 +2,58 @@ use super::*;
 use serde_json::json;
 
 #[tokio::test]
+async fn websocket_and_http_payloads_keep_each_turns_cache_policy_without_inheritance() {
+    let runtime = runtime();
+    let key = runtime
+        .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+        .unwrap();
+    let mut route = runtime
+        .executor_route(
+            "source",
+            "upstream-model",
+            &key.scope_snapshot(),
+            WEBSOCKET_PROTOCOLS,
+            false,
+        )
+        .unwrap();
+    let authorization = runtime
+        .prepare_route_authorization(&route, crate::unix_time_ms())
+        .await
+        .unwrap();
+    for options in [
+        Some(json!({"mode":"implicit","ttl":"30m"})),
+        Some(json!({"mode":"explicit","ttl":"12h"})),
+        None,
+    ] {
+        let mut body = json!({"type":"response.create","model":"relay/upstream-model","input":"Synthetic input"});
+        if let Some(options) = &options {
+            body["prompt_cache_options"] = options.clone();
+        }
+        let request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            &serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap_or_else(|error| panic!("request should parse: {}", error.message));
+        let prepared = request
+            .observed_payload_for(&runtime, &mut route, &HeaderMap::new(), &authorization)
+            .unwrap_or_else(|error| panic!("payload should prepare: {}", error.message));
+        let websocket: Value = serde_json::from_str(&prepared.payload).unwrap();
+        let http: Value = serde_json::from_slice(
+            &request
+                .http_payload()
+                .unwrap_or_else(|error| panic!("HTTP payload should prepare: {}", error.message)),
+        )
+        .unwrap();
+        for sent in [&websocket, &http] {
+            assert_eq!(sent.get("prompt_cache_options"), options.as_ref());
+            assert!(sent.get("prompt_cache_retention").is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn websocket_reauth_compares_only_the_last_successful_scoped_authorization() {
     let runtime = runtime();
     let key = runtime

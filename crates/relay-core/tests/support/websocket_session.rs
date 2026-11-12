@@ -258,11 +258,8 @@ async fn guarded_websocket_reuses_decoding_without_changing_text_or_binary_frame
             .await
             .unwrap();
         for expected in frames.iter() {
-            let actual = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let actual =
+                receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
             match (expected, actual) {
                 (AxumWsMessage::Text(expected), ClientWsMessage::Text(actual)) => {
                     assert_eq!(actual.as_bytes(), expected.as_bytes());

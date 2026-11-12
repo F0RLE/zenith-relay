@@ -175,6 +175,27 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
     let mut event = event;
     event.normalize_client_cancellation();
+    let local_failure = event.error_origin() == Some(crate::ErrorOrigin::Relay);
+    if !event.success
+        && event.error_category.as_deref() != Some(crate::error_codes::CLIENT_CANCELLED)
+        && let Some(transport) = event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        && transport.failure_kind.is_none()
+    {
+        transport.failure_kind = if local_failure {
+            Some(crate::usage::TransportFailureKind::Local)
+        } else if event.upstream_error.is_some()
+            || transport
+                .upstream_http_status
+                .is_some_and(|status| status >= 400)
+        {
+            Some(crate::usage::TransportFailureKind::Upstream)
+        } else {
+            None
+        };
+    }
     if let Some(routing) = event.routing.as_mut()
         && event.success
     {

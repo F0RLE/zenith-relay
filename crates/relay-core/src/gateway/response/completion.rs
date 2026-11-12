@@ -21,7 +21,7 @@ pub(in crate::gateway) fn has_generation_evidence_bytes(bytes: &[u8]) -> bool {
             || event
                 .event_payload
                 .as_ref()
-                .is_some_and(super::has_generated_tokens)
+                .is_some_and(|payload| has_generation_evidence(payload, None))
         {
             return true;
         }
@@ -339,6 +339,7 @@ pub(in crate::gateway) fn completed_upstream_response(
     }
     let mut offset = 0;
     let mut output_items = Vec::new();
+    let mut malformed_output_index = false;
     let mut saw_generation = false;
     while let Some(end) = sse_event_end(&bytes[offset..]) {
         let terminal = parse_sse_event(&bytes[offset..offset + end]);
@@ -346,7 +347,7 @@ pub(in crate::gateway) fn completed_upstream_response(
             || terminal
                 .event_payload
                 .as_ref()
-                .is_some_and(super::has_generated_tokens);
+                .is_some_and(|payload| has_generation_evidence(payload, None));
         if expected_model.is_some_and(|expected| {
             terminal
                 .event_payload
@@ -368,11 +369,12 @@ pub(in crate::gateway) fn completed_upstream_response(
             }));
         }
         if let Some(output_item) = terminal.output_item {
-            let index = terminal
+            let raw_index = terminal
                 .event_payload
                 .as_ref()
-                .and_then(|payload| payload.get("output_index"))
-                .and_then(Value::as_u64);
+                .and_then(|payload| payload.get("output_index"));
+            let index = raw_index.and_then(Value::as_u64);
+            malformed_output_index |= raw_index.is_some() && index.is_none();
             output_items.push((index, output_item));
         }
         match terminal.outcome {
@@ -405,12 +407,19 @@ pub(in crate::gateway) fn completed_upstream_response(
                         .and_then(Value::as_array)
                         .is_some_and(Vec::is_empty)
                     {
-                        response["output"] =
-                            Value::Array(output_items.into_iter().map(|(_, item)| item).collect());
+                        if malformed_output_index {
+                            return Err(invalid_buffered_response());
+                        }
+                        response["output"] = Value::Array(
+                            crate::protocol::response_snapshots::ordered_completed_output(
+                                output_items,
+                            )
+                            .map_err(|_| invalid_buffered_response())?,
+                        );
                     } else if let Some(output) =
                         response.get_mut("output").and_then(Value::as_array_mut)
                     {
-                        crate::protocol::response_snapshots::retain_completed_reasoning_items(
+                        crate::protocol::response_snapshots::reconcile_completed_output(
                             &output_items,
                             output,
                         )

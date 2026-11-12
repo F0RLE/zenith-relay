@@ -11,6 +11,7 @@ mod system;
 mod tool_search;
 
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
+    let original = request_body;
     system::validate_positions(
         request_body
             .get("messages")
@@ -153,5 +154,6 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             _ => return Err(AdapterError::reasoning_unsupported()),
         }
     }
+    decoded_request.deferred_tools = tool_search::discoveries(original, &decoded_request.tools);
     Ok(decoded_request)
 }

@@ -140,19 +140,28 @@ pub(in crate::local_pool::accounts) async fn discover_account_models(
         .with_http_scope(http_scope.clone());
     let client_version = zenith_relay_core::providers::chatgpt::configured_codex_client_version();
     let result = client
-        .discover_authorized(
+        .discover_authorized_with_diagnostics(
             prepared.authorization.clone(),
             &prepared.provider_account_id,
             &client_version,
         )
         .await;
-    if let Err(error) = &result {
-        crate::local_pool::accounts::model_probe::record_failure(
+    match &result {
+        Ok(discovery) => {
+            if let Some(catalog) = &discovery.basis_points_diagnostics {
+                crate::local_pool::accounts::model_probe::record_catalog(
+                    account_id,
+                    prepared.proxy.is_some(),
+                    catalog,
+                );
+            }
+        }
+        Err(error) => crate::local_pool::accounts::model_probe::record_failure(
             account_id,
             prepared.oauth_client_kind,
             prepared.proxy.is_some(),
             error,
-        );
+        ),
     }
-    result
+    result.map(|discovery| discovery.models)
 }

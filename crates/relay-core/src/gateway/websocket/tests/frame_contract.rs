@@ -514,3 +514,47 @@ fn relayed_subscription_reset_does_not_become_a_websocket_retry_deadline() {
     );
     assert!(account.retry_at_ms.is_some());
 }
+#[test]
+fn websocket_terminal_request_refusals_keep_status_and_category() {
+    use crate::error_codes;
+    use crate::gateway::websocket::resolved_terminal_failure;
+
+    for (code, status, category) in [
+        (
+            "context_length_exceeded",
+            StatusCode::BAD_REQUEST,
+            error_codes::UPSTREAM_CONTEXT_TOO_LARGE,
+        ),
+        (
+            "context_length_exceeded",
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_UNAVAILABLE,
+        ),
+        (
+            "invalid_access_program",
+            StatusCode::BAD_REQUEST,
+            error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID,
+        ),
+        (
+            "access_program_not_enabled",
+            StatusCode::FORBIDDEN,
+            error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED,
+        ),
+    ] {
+        let payload = json!({"type":"error","status":status.as_u16(),"error":{"code":code}});
+        let terminal = event_terminal(&payload);
+        assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Failure));
+        assert_eq!(resolved_terminal_failure(&terminal), (status, category));
+        let mut without_status = payload;
+        without_status.as_object_mut().unwrap().remove("status");
+        let terminal = event_terminal(&without_status);
+        assert_eq!(
+            terminal.error_category,
+            Some(if code == "context_length_exceeded" {
+                error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+            } else {
+                category
+            })
+        );
+    }
+}

@@ -43,6 +43,9 @@ static LOCAL_SOCKET_LOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 #[path = "support/usage_observations.rs"]
 mod usage_observations;
+#[path = "support/websocket_frames.rs"]
+mod websocket_frames;
+use websocket_frames::receive_websocket_data_with_timeout;
 
 fn reference_metadata_options() -> GatewayRuntimeOptions {
     use zenith_relay_core::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
@@ -111,6 +114,8 @@ mod route_capacity;
 mod route_fallback;
 #[path = "support/transport_matrix.rs"]
 mod transport_matrix;
+#[path = "support/websocket_continuation_guards.rs"]
+mod websocket_continuation_guards;
 #[path = "support/websocket_fallback.rs"]
 mod websocket_fallback;
 #[path = "support/websocket_queue.rs"]
@@ -1070,16 +1075,11 @@ async fn receive_websocket_json_with_timeout(
     socket: &mut reqwest_websocket::WebSocket,
     timeout_duration: Duration,
 ) -> Value {
-    loop {
-        let message = tokio::time::timeout(timeout_duration, socket.next())
-            .await
-            .expect("websocket JSON message timed out")
-            .expect("websocket closed before a JSON message")
-            .expect("websocket message failed");
-        if let ClientWsMessage::Text(text) = message {
-            return serde_json::from_str(&text).unwrap();
-        }
-    }
+    let message = receive_websocket_data_with_timeout(socket, timeout_duration).await;
+    let ClientWsMessage::Text(text) = message else {
+        panic!("expected a text WebSocket JSON message, received {message:?}");
+    };
+    serde_json::from_str(&text).unwrap()
 }
 
 async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {

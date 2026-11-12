@@ -123,14 +123,7 @@ pub(in crate::gateway) enum TerminalOutcome {
 /// Native APIs name the served model on the resource, not in generated content.
 /// Only those fields count: a `degradeN` token anywhere else can be user text.
 pub(in crate::gateway) fn served_model_is_degraded(event_payload: &Value) -> bool {
-    [
-        event_payload.get("model"),
-        event_payload.pointer("/response/model"),
-        event_payload.pointer("/interaction/model"),
-    ]
-    .into_iter()
-    .filter_map(|model| model.and_then(Value::as_str))
-    .any(crate::is_degraded_route_model)
+    crate::protocol::response_models::declared(event_payload).any(crate::is_degraded_route_model)
 }
 
 /// Compare upstream identity, never the public alias or text inside the output.
@@ -151,15 +144,9 @@ pub(in crate::gateway) fn served_model_is_rejected(event_payload: &Value, expect
     }
     let expected = model_identity(expected);
     !expected.is_empty()
-        && [
-            event_payload.get("model"),
-            event_payload.pointer("/response/model"),
-            event_payload.pointer("/interaction/model"),
-        ]
-        .into_iter()
-        .filter_map(|model| model.and_then(Value::as_str))
-        .map(model_identity)
-        .any(|served| !served.is_empty() && served != expected)
+        && crate::protocol::response_models::declared(event_payload)
+            .map(model_identity)
+            .any(|served| !served.is_empty() && served != expected)
 }
 
 fn model_identity(model_id: &str) -> String {
@@ -375,7 +362,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         canonical_upstream_status(status, category)
     });
     let mut cooldown_hint = rate_limit_body_hint_value(&event_json, SystemTime::now());
-    if cooldown_hint.siwc_usage_limit
+    if (cooldown_hint.siwc_usage_limit || cooldown_hint.explicit_transient_rejection)
         && std::str::from_utf8(&sse_payload)
             .ok()
             .and_then(|body| crate::strict_json::validate(body).ok())
@@ -384,6 +371,7 @@ pub(in crate::gateway) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         // Value already collapsed duplicate keys. Keep the failure diagnostics,
         // but only an unambiguous original envelope may authorize SIWC replay.
         cooldown_hint.siwc_usage_limit = false;
+        cooldown_hint.explicit_transient_rejection = false;
     }
     let preserved_error = preserved_stream_error(&event_json);
     let has_output_delta = has_output_delta(&event_json, event_type);

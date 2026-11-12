@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 /// policy-only updates keep this owner, while graph replacement creates a new one.
 #[derive(Default)]
 pub(super) struct RuntimeSessionState {
+    pub(super) siwc_sockets: siwc_socket::SocketStore,
     pub(super) cache_context: cache_context::CacheContextStore,
     codex_turns: CodexTurnStateStore,
     tool_catalog: tool_catalog::ToolCatalogStore,

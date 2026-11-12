@@ -1,5 +1,8 @@
 mod refresh;
+mod spending;
 mod windows;
+
+pub use spending::QuotaSpendDeadline;
 
 pub(crate) use refresh::QuotaTransportFailure;
 

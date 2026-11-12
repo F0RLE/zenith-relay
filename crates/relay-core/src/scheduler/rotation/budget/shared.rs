@@ -13,6 +13,7 @@ pub(crate) struct SharedRequestBudget {
     /// instead visits a physical member, across every driver of this request.
     /// At most one entry per dispatch can be added, so this is budget-bounded.
     attempted_members: Arc<Mutex<BTreeSet<String>>>,
+    pub(super) retry_candidate: Arc<Mutex<Option<super::RetryCandidate>>>,
 }
 
 impl SharedRequestBudget {
@@ -23,6 +24,7 @@ impl SharedRequestBudget {
             ))),
             attempted_members: Arc::default(),
             waiting: Arc::default(),
+            retry_candidate: Arc::default(),
         }
     }
 

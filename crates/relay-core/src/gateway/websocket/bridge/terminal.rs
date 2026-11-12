@@ -85,6 +85,11 @@ pub(super) fn finish_terminal(
             let recovered =
                 lease.settle_rotation_success_with_latency(now_ms(), in_flight.event.ttft_ms);
             in_flight.event.consecutive_failures = recovered.then_some(0);
+            runtime.bind_prompt_affinity_for_lease(
+                in_flight.prompt_affinity_key.as_deref(),
+                &lease,
+                now_ms(),
+            );
         } else if outcome != EventTerminalOutcome::Failure {
             lease.settle_rotation_terminal(now_ms());
         } else {
@@ -129,11 +134,6 @@ pub(super) fn finish_terminal(
         runtime.bind_response_route_affinity(
             in_flight.response_id.as_deref(),
             &in_flight.route,
-            now_ms(),
-        );
-        runtime.bind_prompt_affinity(
-            in_flight.prompt_affinity_key.as_deref(),
-            &in_flight.route.candidate_id,
             now_ms(),
         );
     } else if matches!(outcome, EventTerminalOutcome::Failure) {

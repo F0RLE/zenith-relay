@@ -76,6 +76,7 @@ pub struct Selection {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
+    spend_deadlines: BTreeMap<String, crate::quota::QuotaSpendDeadline>,
     cooldown_metadata: BTreeMap<(String, String), CooldownMetadata>,
     shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
     response_affinity: AffinityCache,
@@ -113,6 +114,7 @@ impl PoolScheduler {
         Self {
             candidates: BTreeMap::new(),
             quota_references: BTreeMap::new(),
+            spend_deadlines: BTreeMap::new(),
             cooldown_metadata: BTreeMap::new(),
             shared_rate_limits: BTreeMap::new(),
             response_affinity: AffinityCache::new(

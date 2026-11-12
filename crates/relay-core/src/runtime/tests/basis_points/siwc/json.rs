@@ -1,6 +1,6 @@
 use super::*;
 
-fn completed_response() -> Value {
+pub(super) fn completed_response() -> Value {
     json!({"id":"resp_synthetic_json","object":"response","status":"completed",
         "model":"gpt-test","output":[{
             "id":"msg_synthetic_json","type":"message","role":"assistant",
@@ -10,11 +10,12 @@ fn completed_response() -> Value {
 }
 
 #[tokio::test]
-async fn siwc_json_preserves_native_and_converted_client_streams() {
+async fn siwc_websocket_preserves_native_and_converted_client_modes() {
     for (chat, debug) in [(false, false), (true, false), (false, true), (true, true)] {
         for stream in [false, true] {
             let siwc = AccessServer::start(json!([]), false).await;
             let native = AccessServer::start(json!([]), false).await;
+            siwc.state.stream_generations.store(true, Ordering::SeqCst);
             *crate::poison::mutex(&siwc.state.generation_body) = completed_response();
             let usage = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
             let captured = usage.clone();
@@ -83,16 +84,36 @@ async fn siwc_json_preserves_native_and_converted_client_streams() {
             assert!(usage[0].success);
             assert_eq!(usage[0].input_tokens, Some(41));
             assert_eq!(usage[0].output_tokens, Some(7));
-            assert_eq!(usage[0].ttft_ms, None);
-            assert_eq!(usage[0].generation_ms, None);
+            let first_output = usage[0]
+                .ttft_ms
+                .expect("incremental WebSocket output arrival");
+            assert!(first_output <= usage[0].latency_ms);
+            assert_eq!(
+                usage[0].generation_ms,
+                Some(usage[0].latency_ms - first_output)
+            );
             let transport = usage[0].routing.as_ref().unwrap().transport.as_ref();
             assert_eq!(transport.is_some(), debug);
             if debug {
                 let transport = transport.unwrap();
-                assert_eq!(transport.upstream_response_ms, Some(usage[0].latency_ms));
-                assert!(transport.client_response_ready_ms.unwrap() >= usage[0].latency_ms);
+                assert_eq!(transport.upstream, crate::UsageTransport::Websocket);
+                assert_eq!(transport.response_headers_ms, None);
+                assert_eq!(
+                    transport.response_format,
+                    Some(crate::usage::TransportResponseFormat::WebsocketFrames)
+                );
+                assert_eq!(transport.connection_reused, Some(false));
+                assert!(transport.handshake_ms.is_some());
+                if !chat && !stream {
+                    assert_eq!(transport.upstream_response_ms, Some(usage[0].latency_ms));
+                    assert!(transport.client_response_ready_ms.unwrap() >= usage[0].latency_ms);
+                }
             }
             assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                siwc.state.http_generation_requests.load(Ordering::SeqCst),
+                0
+            );
             assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
             task.abort();
         }

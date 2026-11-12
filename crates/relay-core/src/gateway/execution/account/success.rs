@@ -164,11 +164,7 @@ pub(super) fn complete_account_response(
     if completed {
         let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
-        runtime.bind_prompt_affinity(
-            prompt_affinity_key.as_deref(),
-            &route.candidate_id,
-            now_ms(),
-        );
+        runtime.bind_prompt_affinity_for_lease(prompt_affinity_key.as_deref(), lease, now_ms());
         bind_responses_turn(
             runtime,
             &key.id,

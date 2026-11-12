@@ -155,9 +155,9 @@ impl StreamCompletionSettlement {
                 &self.route,
                 now_ms(),
             );
-            self.runtime.bind_prompt_affinity(
+            self.runtime.bind_prompt_affinity_for_lease(
                 self.prompt_affinity.as_deref(),
-                &self.candidate_id,
+                &self.lease,
                 now_ms(),
             );
             if self.uses_response_affinity {

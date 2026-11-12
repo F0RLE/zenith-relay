@@ -173,6 +173,7 @@ pub(super) async fn drive_selected_candidate(
     // the credential that actually performed the upgrade.
     route.account_token_generation = prepared.token_generation;
     route.account_token_revision = prepared.token_revision.clone();
+    lease.retain_wire_authorization(&prepared);
     let status = upgrade.status();
     let response_headers = upgrade.headers().clone();
     runtime.observe_codex_quota_headers(

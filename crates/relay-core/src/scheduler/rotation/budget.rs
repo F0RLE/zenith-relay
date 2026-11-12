@@ -3,10 +3,12 @@
 use super::*;
 
 mod evidence;
+mod recovery;
 mod shared;
 mod waiting;
 
 pub use evidence::{ExecutionEvidence, IdempotencyContract, RetryEvidence};
+pub(crate) use recovery::RetryCandidate;
 pub(crate) use shared::SharedRequestBudget;
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ pub(super) async fn send_gateway_error(
     {
         return;
     }
-    let _ = send_message(
+    super::io::close_downstream(
         downstream,
         Message::Close(Some(CloseFrame {
             code: if failure.status.is_client_error() {
@@ -333,6 +333,29 @@ impl GatewayFailure {
                     .map(rate_limit_body_hint)
                     .unwrap_or_default(),
             );
+        }
+        failure
+    }
+
+    pub(super) fn upstream_status_with_headers(
+        status: StatusCode,
+        upstream_error_body: Option<&[u8]>,
+        headers: &HeaderMap,
+        origin: ErrorOrigin,
+    ) -> Self {
+        let classification = super::super::errors::classify_upstream_error_with_headers(
+            status,
+            upstream_error_body,
+            headers,
+        );
+        let mut failure =
+            Self::upstream_status(status, upstream_error_body, origin).with_retry_headers(headers);
+        failure.status =
+            super::super::errors::canonical_upstream_status(status, classification.category);
+        failure.category = classification.category;
+        failure.message = classification.message;
+        if classification.category == error_codes::UPSTREAM_INVALID_WORKSPACE {
+            failure.retry_at_ms = None;
         }
         failure
     }

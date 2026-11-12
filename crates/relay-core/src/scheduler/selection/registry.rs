@@ -3,6 +3,23 @@
 use super::*;
 
 impl PoolScheduler {
+    pub fn set_spend_deadlines(
+        &mut self,
+        mut deadlines: BTreeMap<String, crate::quota::QuotaSpendDeadline>,
+    ) -> bool {
+        deadlines.retain(|id, _| {
+            self.candidates.get(id).is_some_and(|candidate| {
+                candidate.kind == CandidateKind::OAuthAccount
+                    && !self.retired_candidates.contains(id)
+            })
+        });
+        if self.spend_deadlines == deadlines {
+            return false;
+        }
+        self.spend_deadlines = deadlines;
+        true
+    }
+
     pub fn invalidate_quota_reference_source(&mut self, account_id: &str) -> bool {
         let previous = self.quota_references.len();
         self.quota_references
@@ -34,6 +51,13 @@ impl PoolScheduler {
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         let candidate_id = candidate.id.clone();
+        if self.candidates.get(&candidate_id).is_some_and(|previous| {
+            previous.kind != candidate.kind
+                || previous.source_id != candidate.source_id
+                || previous.account_id != candidate.account_id
+        }) {
+            self.spend_deadlines.remove(&candidate_id);
+        }
         if self
             .candidates
             .get(&candidate_id)
@@ -77,6 +101,7 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
+        self.spend_deadlines.remove(candidate_id);
         self.forget_shared_rate_limits(candidate_id);
         self.quota_references.retain(|id, reference| {
             id != candidate_id && reference.source_account_id != candidate_id

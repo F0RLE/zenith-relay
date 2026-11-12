@@ -22,6 +22,7 @@ use zenith_relay_core::{
 #[cfg(test)]
 mod reserve_tests;
 mod reset_policy;
+mod weekly_threshold;
 
 pub(super) fn evaluate_updated_transitions(
     state: &DesktopState,
@@ -102,6 +103,10 @@ pub(super) async fn evaluate_weekly_exhaustions(
     response: &AccountQuotaRefreshResponse,
     fence: &AccountRefreshFence,
 ) -> Result<Option<AccountQuotaRefreshResponse>> {
+    weekly_threshold::confirm_redemption(state, response, fence)?;
+    if weekly_threshold::has_matching_rule(state, response)? {
+        return weekly_threshold::evaluate(state, response, fence).await;
+    }
     if response.account.recovery.is_some()
         || response
             .account
@@ -126,6 +131,7 @@ pub(super) async fn evaluate_weekly_exhaustions(
     let has_weekly_task = tasks.iter().any(|task| {
         task.enabled
             && task.trigger == WakeTrigger::Weekly
+            && task.weekly_reset_remaining_basis_points.is_none()
             && task.account_selector.matches(&response.account.account)
     });
     if !has_weekly_task {
@@ -161,6 +167,16 @@ pub(super) async fn evaluate_weekly_exhaustions(
                     return Ok(false);
                 }
                 let now_ms = current_time_ms();
+                let subscription_deadline =
+                    state
+                        .store()?
+                        .account(&fence.account_id)
+                        .and_then(|record| {
+                            zenith_relay_core::quota::QuotaSpendDeadline::from_subscription(
+                        &record.account.subscription, now_ms,
+                        zenith_relay_core::providers::chatgpt::SUBSCRIPTION_REFRESH_INTERVAL_MS,
+                    )
+                        });
                 let ordinary_capacity = state.gateway.runtime().await.and_then(|runtime| {
                     runtime.ordinary_quota_alternative_available(&fence.account_id, now_ms)
                 });
@@ -191,6 +207,7 @@ pub(super) async fn evaluate_weekly_exhaustions(
                     ordinary_capacity,
                     natural_reset,
                     expiry,
+                    subscription_deadline,
                     next_check_at_ms,
                     now_ms,
                 ))
@@ -220,42 +237,33 @@ fn weekly_reset_still_current(
     response: &AccountQuotaRefreshResponse,
     fence: &AccountRefreshFence,
 ) -> Result<bool> {
+    let now_ms = current_time_ms();
     let store = state.store()?;
     store.ensure_account_refresh_current(fence)?;
     let Some(account) = store.account(&fence.account_id) else {
         return Ok(false);
     };
-    let awaiting_confirmation = store.accounts().iter().any(|pending| {
-        pending.recovery.is_none()
-            && pending.account.is_wake_eligible()
-            && [
-                pending.account.quota.primary.as_ref(),
-                pending.account.quota.secondary.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|window| {
-                window.available_basis_points == Some(0)
-                    && window
-                        .exhaustion_transition_fingerprint
-                        .as_ref()
-                        .is_some_and(|fingerprint| {
-                            store
-                                .automations()
-                                .weekly_reset_fingerprints
-                                .get(&pending.account.id)
-                                == Some(fingerprint)
-                        })
-            })
-    });
+    let awaiting_confirmation =
+        weekly_threshold::has_pending_confirmation(store.automations(), store.accounts());
     Ok(!awaiting_confirmation
         && account.recovery.is_none()
         && account.account.is_wake_eligible()
-        && fresh_weekly_exhaustion(response, current_time_ms())
+        && !matches!(
+            account.account.subscription.status,
+            zenith_relay_core::quota::SubscriptionStatus::Expired
+                | zenith_relay_core::quota::SubscriptionStatus::Forbidden
+        )
+        && account
+            .account
+            .subscription
+            .active_until_ms
+            .is_none_or(|expiry| expiry > now_ms)
+        && fresh_weekly_exhaustion(response, now_ms)
         && account.account.quota == response.account.account.quota
         && store.automations().tasks.iter().any(|task| {
             task.enabled
                 && task.trigger == WakeTrigger::Weekly
+                && task.weekly_reset_remaining_basis_points.is_none()
                 && task.account_selector.matches(&account.account)
         }))
 }
@@ -382,6 +390,7 @@ mod tests {
             window_kinds: [QuotaWindowKind::Primary].into(),
             model_policy: WakeModelPolicy::Explicit("gpt-test".into()),
             trigger: WakeTrigger::QuotaFull,
+            weekly_reset_remaining_basis_points: None,
             fallback_schedule: None,
             execution_policy: WakeExecutionPolicy::Automatic,
             jitter_seconds: 0,

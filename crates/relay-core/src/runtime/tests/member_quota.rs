@@ -412,6 +412,78 @@ fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_d
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn image_http_responses_cannot_overwrite_the_text_quota_ledger() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let _revision = usage_revision(&runtime);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(|| async {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("100"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("600"),
+        );
+        (headers, "{}")
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let before = crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
+        .snapshot
+        .clone();
+    for path in ["/v1/images/generations", "/v1/images/edits"] {
+        let response = runtime
+            .send_authorized_request(
+                "account-1",
+                client.get(format!("http://{address}{path}")),
+                authorization::AuthorizationDispatch {
+                    client_version: None,
+                    identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                    turn_scope: None,
+                    budget: None,
+                    lease: None,
+                    usage_event: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(response.response.status().is_success());
+        assert_eq!(
+            crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"].snapshot,
+            before
+        );
+    }
+    runtime
+        .send_authorized_request(
+            "account-1",
+            client.get(format!("http://{address}/v1/responses")),
+            authorization::AuthorizationDispatch {
+                client_version: None,
+                identity_policy: AuthorizationIdentityPolicy::RelayCodex,
+                turn_scope: None,
+                budget: None,
+                lease: None,
+                usage_event: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::poison::mutex(&runtime.account_state.passive_quotas)["account-1"]
+            .snapshot
+            .primary
+            .as_ref()
+            .unwrap()
+            .available_basis_points,
+        Some(0),
+    );
+    server.abort();
+}
 #[test]
 fn refreshed_quota_snapshot_replaces_passive_state_before_header_merges() {
     let initial = QuotaSnapshot {

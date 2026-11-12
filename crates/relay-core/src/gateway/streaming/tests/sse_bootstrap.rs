@@ -39,6 +39,21 @@ fn streaming_terminal_errors_keep_the_canonical_category() {
 }
 
 #[tokio::test]
+async fn codex_control_metadata_without_a_terminal_never_commits_a_successful_stream() {
+    for frames in [
+        "data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{}}\n\n".to_owned(),
+        "data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{}}\n\ndata: {\"type\":\"codex.response.metadata\",\"response_id\":\"resp_synthetic\"}\n\n".to_owned(),
+    ] {
+        let (upstream, server) = response_from_sse_event(frames.clone()).await;
+        let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+        server.await.unwrap();
+        assert_eq!(failure.failure.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(failure.failure.category, error_codes::STREAM_INCOMPLETE);
+        assert_eq!(failure.partial_body, frames.as_bytes());
+    }
+}
+
+#[tokio::test]
 async fn bootstrap_preserves_a_json_refusal_instead_of_hiding_it_as_incomplete() {
     let (upstream, server) = response_from_sse_event(
         json!({"error": {
@@ -613,4 +628,36 @@ async fn bootstrap_does_not_replay_a_late_model_mismatch_after_generated_output(
         failure.execution.certainty,
         crate::scheduler::rotation::ExecutionCertainty::Accepted
     );
+}
+
+#[tokio::test]
+async fn messages_server_fallback_is_executed_not_a_retryable_empty_model_rejection() {
+    for payload in [
+        serde_json::json!({"type":"content_block_start","index":0,"content_block":{
+            "type":"fallback","from":{"model":"claude-requested"},"to":{"model":"claude-serving"}}}),
+        serde_json::json!({"type":"message_delta","usage":{"iterations":[
+            {"type":"fallback_message","model":"claude-serving"}]}}),
+    ] {
+        let frame = format!("data: {payload}\n\n");
+        let (upstream, server) = response_from_sse_event(frame.clone()).await;
+        let failure = bootstrap_stream(upstream, Some("claude-requested"))
+            .await
+            .err()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            failure.failure.category,
+            error_codes::UPSTREAM_ROUTE_DEGRADED
+        );
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Accepted
+        );
+        assert!(crate::gateway::response::has_generation_evidence_bytes(
+            frame.as_bytes()
+        ));
+        assert!(crate::gateway::response::has_generation_evidence_bytes(
+            &serde_json::to_vec(&payload).unwrap()
+        ));
+    }
 }

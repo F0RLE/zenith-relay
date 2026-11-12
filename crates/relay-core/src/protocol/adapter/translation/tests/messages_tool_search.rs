@@ -63,6 +63,182 @@ pub(super) fn try_prepare_discovery(
 }
 
 #[test]
+fn messages_tool_search_keeps_responses_prefix_stable_after_discovery() {
+    for stream in [false, true] {
+        let initial = prepare_discovery(WireApi::Responses, &catalog(), stream);
+        let request = discovered();
+        let original = request.clone();
+        let loaded = prepare_discovery(WireApi::Responses, &request, stream);
+        let initial = initial.upstream_body();
+        let loaded = loaded.upstream_body();
+        assert_eq!(request, original);
+        assert_eq!(loaded["tools"], initial["tools"]);
+        let prefix = initial["input"].as_array().unwrap();
+        let input = loaded["input"].as_array().unwrap();
+        assert_eq!(&input[..prefix.len()], prefix);
+        assert_eq!(input[prefix.len()]["call_id"], "search_1");
+        assert_eq!(input[prefix.len() + 1]["call_id"], "search_1");
+        assert_eq!(
+            input[prefix.len() + 2],
+            json!({"type":"additional_tools","role":"developer","tools":[{
+                "type":"function","name":"lookup","description":"Lookup a synthetic record","strict":false,
+                "parameters":request["tools"][1]["input_schema"]
+            }]})
+        );
+    }
+}
+
+#[test]
+fn messages_tool_search_siwc_keeps_unused_initial_tools_in_the_cache_prefix() {
+    let mut bodies = Vec::new();
+    for mut request in [catalog(), discovered()] {
+        // This fixture isolates tool loading; SIWC rejects explicit output caps.
+        request.as_object_mut().unwrap().remove("max_tokens");
+        request["tools"].as_array_mut().unwrap().push(json!({
+            "name":"always_available", "input_schema":{"type":"object","properties":{}}
+        }));
+        let prepared = prepare_discovery(WireApi::Responses, &request, true);
+        let mut body = prepared.upstream_body().clone();
+        let input = body["input"].clone();
+        crate::providers::chatgpt::prepare_siwc_request(&mut body).unwrap();
+        assert_eq!(
+            body["input"], input,
+            "SIWC must not relocate initial declarations"
+        );
+        let initial = body["input"][0]["tools"].as_array().unwrap();
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial[0]["name"], "ToolSearch");
+        assert_eq!(initial[1]["name"], "always_available");
+        bodies.push(body);
+    }
+    assert_eq!(bodies[0]["tools"], bodies[1]["tools"]);
+    let prefix = bodies[0]["input"].as_array().unwrap();
+    assert_eq!(
+        &bodies[1]["input"].as_array().unwrap()[..prefix.len()],
+        prefix
+    );
+    assert_eq!(
+        bodies[1]["input"][prefix.len() + 2]["tools"][0]["name"],
+        "lookup"
+    );
+}
+
+#[test]
+fn messages_tool_search_emits_each_schema_once_without_rewriting_earlier_turns() {
+    let first = prepare_discovery(WireApi::Responses, &discovered(), false);
+    let mut request = discovered();
+    request["messages"].as_array_mut().unwrap().extend([
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"search_2","name":"ToolSearch","input":{"query":"more"}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"search_2","content":[
+            {"type":"tool_reference","tool_name":"lookup"},
+            {"type":"tool_reference","tool_name":"unused"},
+            {"type":"tool_reference","tool_name":"unused"}
+        ]}]}),
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"lookup_1","name":"lookup","input":{"id":7}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"lookup_1","content":"synthetic result"}]}),
+    ]);
+    let next = prepare_discovery(WireApi::Responses, &request, false);
+    let first = first.upstream_body();
+    let next = next.upstream_body();
+    assert_eq!(next["tools"], first["tools"]);
+    let first_input = first["input"].as_array().unwrap();
+    assert_eq!(
+        &next["input"].as_array().unwrap()[..first_input.len()],
+        first_input
+    );
+    let additions: Vec<_> = next["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "additional_tools")
+        .collect();
+    assert_eq!(additions.len(), 3);
+    assert_eq!(additions[0]["tools"][0]["name"], "ToolSearch");
+    assert_eq!(additions[1]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(additions[1]["tools"][0]["name"], "lookup");
+    assert_eq!(additions[2]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(additions[2]["tools"][0]["name"], "unused");
+    assert_eq!(next["input"][first_input.len() + 1]["call_id"], "search_2");
+    assert_eq!(next["input"][first_input.len() + 2], *additions[2]);
+}
+
+#[test]
+fn messages_tool_search_compacted_and_forced_tools_keep_their_original_schema() {
+    let mut request = catalog();
+    request["system"] = json!("Synthetic instructions");
+    request["tool_choice"] = json!({"type":"tool","name":"lookup"});
+    let forced = prepare_discovery(WireApi::Responses, &request, false);
+    let body = forced.upstream_body();
+    assert!(body["tools"].as_array().unwrap().is_empty());
+    assert_eq!(body["input"][0]["tools"][0]["name"], "ToolSearch");
+    assert_eq!(body["input"][1]["role"], "system");
+    assert_eq!(body["input"][3]["type"], "additional_tools");
+    assert_eq!(
+        body["input"][3]["tools"][0]["parameters"],
+        request["tools"][1]["input_schema"]
+    );
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type":"function","name":"lookup"})
+    );
+    request["messages"].as_array_mut().unwrap().extend([
+        json!({"role":"assistant","content":[{"type":"tool_use","id":"lookup_1","name":"lookup","input":{"id":7}}]}),
+        json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"lookup_1","content":"synthetic result"}]}),
+    ]);
+    let compacted = prepare_discovery(WireApi::Responses, &request, false);
+    let body = compacted.upstream_body();
+    assert_eq!(body["input"][3]["type"], "additional_tools");
+    assert_eq!(body["input"][4]["call_id"], "lookup_1");
+    assert_eq!(
+        body["input"][3]["tools"][0]["parameters"],
+        request["tools"][1]["input_schema"]
+    );
+}
+
+#[test]
+fn messages_tool_search_respects_later_inline_revocation_and_schema_replacement() {
+    for replacement in [
+        None,
+        Some(json!({"name":"lookup", "input_schema":{
+            "type":"object","properties":{"value":{"type":"boolean"}},"required":["value"]
+        }})),
+    ] {
+        let mut request = discovered();
+        let update = replacement.as_ref().map_or_else(
+            || json!({"type":"tool_removal","tool":{"type":"tool_reference","name":"lookup"}}),
+            |definition| json!({"type":"tool_addition","tool":{"type":"tool_definition","definition":definition}}),
+        );
+        request["messages"].as_array_mut().unwrap().extend([
+            json!({"role":"system","content":[update]}),
+            json!({"role":"assistant","content":"Synthetic acknowledgement"}),
+            json!({"role":"user","content":"Continue"}),
+        ]);
+        let prepared = prepare_discovery(WireApi::Responses, &request, false);
+        let body = prepared.upstream_body();
+        assert!(
+            !body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["type"] == "additional_tools")
+        );
+        let lookup = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "lookup");
+        if let Some(definition) = replacement {
+            assert_eq!(lookup.unwrap()["parameters"], definition["input_schema"]);
+        } else {
+            assert!(
+                lookup.is_none(),
+                "discovery history must not restore a withdrawn tool"
+            );
+        }
+    }
+}
+
+#[test]
 fn messages_tool_search_loads_only_explicit_client_discoveries() {
     let request = discovered();
     let original = request.clone();
@@ -437,10 +613,23 @@ fn messages_tool_search_preserves_opaque_reasoning_ownership_across_discovery() 
         if id == "lookup_1" {
             assert_eq!(
                 prepared.upstream_body()["tools"].as_array().unwrap().len(),
-                2
+                0
+            );
+            let additions: Vec<_> = prepared.upstream_body()["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["type"] == "additional_tools")
+                .collect();
+            assert_eq!(additions.len(), 2);
+            assert_eq!(additions[0]["tools"][0]["name"], "ToolSearch");
+            assert_eq!(additions[1]["tools"][0]["name"], "lookup");
+            assert_eq!(
+                additions[1]["tools"][0]["parameters"],
+                request["tools"][1]["input_schema"]
             );
             assert_eq!(
-                prepared.upstream_body()["input"][1]["encrypted_content"],
+                prepared.upstream_body()["input"][2]["encrypted_content"],
                 "synthetic-private-search_1"
             );
         }

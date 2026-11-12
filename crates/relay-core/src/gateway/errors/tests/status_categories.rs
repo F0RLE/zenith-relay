@@ -582,3 +582,12 @@ fn preserved_upstream_error_keeps_only_safe_structured_messages() {
     assert_eq!(unknown.code, "provider_error");
     assert_eq!(unknown.message, "upstream diagnostic");
 }
+
+#[test]
+fn absent_verified_model_is_distinct_from_an_account_authentication_failure() {
+    let failure = AttemptFailure::authorized_request(AuthorizedRequestError::ModelUnavailable);
+    assert_eq!(failure.status, StatusCode::NOT_ACCEPTABLE);
+    assert_eq!(failure.category, error_codes::UPSTREAM_MODEL_UNSUPPORTED);
+    assert!(failure.message.contains("verified Basis Points catalog"));
+    assert!(!failure_category_affects_account_state(failure.category));
+}

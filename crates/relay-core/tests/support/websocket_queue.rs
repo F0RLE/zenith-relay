@@ -486,11 +486,8 @@ async fn websocket_initial_foreign_lane_frames_do_not_settle_or_escape_to_the_cl
         let mut socket = connect(&gateway).await;
         socket.send(create(0, stream_id)).await.unwrap();
         assert_eq!(receive_websocket_json(&mut socket).await, created);
-        let binary_delta = tokio::time::timeout(Duration::from_secs(2), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let binary_delta =
+            receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(2)).await;
         let ClientWsMessage::Binary(binary_delta) = binary_delta else {
             panic!("the current delta must retain its binary frame");
         };

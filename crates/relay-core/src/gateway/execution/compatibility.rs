@@ -141,6 +141,9 @@ pub(in crate::gateway) fn incompatible_routes(
             // every candidate; execution still prepares it after reservation.
             // Messages must validate its configured cache TTL before admission.
             if route.adapter.is_passthrough() && client != WireApi::Messages {
+                if route.account_transport == AccountTransport::Siwc {
+                    crate::providers::chatgpt::validate_siwc_client_request(request)?;
+                }
                 return route
                     .adapter
                     .validate(client, route.reasoning_mode)
@@ -169,6 +172,9 @@ pub(in crate::gateway) fn incompatible_routes(
                 },
                 &capability,
             )?;
+            if route.account_transport == AccountTransport::Siwc {
+                crate::providers::chatgpt::validate_siwc_client_request(prepared.upstream_body())?;
+            }
             if route.account_transport == AccountTransport::ExcelBasisPoints
                 && let Some(error) =
                     super::basis_points::output_format_error(prepared.upstream_body())

@@ -64,6 +64,7 @@ mod routing_cookies;
 mod selection;
 mod session_state;
 mod settings;
+pub(crate) mod siwc_socket;
 mod source_metadata;
 mod support;
 mod tool_catalog;
@@ -159,6 +160,8 @@ struct PassiveQuotaState {
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
     manifest_payload: Value,
+    authorization: AuthorizationIncarnation,
+    account_context: (Option<String>, u64),
 }
 
 #[derive(Clone)]
@@ -314,6 +317,11 @@ pub(crate) enum AuthorizedRequestError {
     ProgressTimeout,
     HeadersTimeout,
     SendStartTimeout,
+    WebsocketSend,
+    WebsocketRequired {
+        status: reqwest::StatusCode,
+        message: &'static str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

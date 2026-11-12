@@ -220,6 +220,9 @@ async fn prepare_oauth_completion(
         );
     }
     if let Some(existing) = existing {
+        // Retain the last observation until the new grant is probed. The
+        // commit-time settings merge must not overwrite the probe result.
+        account_record.account.quota = existing.account.quota.clone();
         preserve_existing_settings(
             &mut account_record,
             existing,

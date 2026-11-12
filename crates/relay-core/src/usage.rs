@@ -42,10 +42,11 @@ pub use tools::{
     ToolChoiceMode, ToolUseDiagnostics,
 };
 pub use transport::{
-    AttachmentPreparationDiagnostics, CodexServerTiming, FullRequestReason, RequestContentEncoding,
-    RequestPayloadDiagnostics, RequestPayloadMode, RequestPreparationDiagnostics,
-    StreamResponseDiagnostics, TransportDiagnostics, TransportFallbackReason, TransportMode,
-    TransportResponseFormat,
+    AttachmentPreparationDiagnostics, CodexServerTiming, ConnectionResetReason, FullRequestReason,
+    RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
+    RequestPreparationDiagnostics, SocketOutputMismatch, SocketReplayField, SocketReplayItemKind,
+    SocketUnknownFieldChanges, StreamResponseDiagnostics, TransportDiagnostics,
+    TransportFailureKind, TransportFallbackReason, TransportMode, TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

@@ -103,6 +103,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         // selection stops at its already-tried owner despite healthy routes.
         // Opaque response references and unpaired tool outputs stay pinned.
         if !state.continuation.requires_affinity_owner
+            && budget.retry_candidate_deadline().is_none()
             && state
                 .retry
                 .last_failure

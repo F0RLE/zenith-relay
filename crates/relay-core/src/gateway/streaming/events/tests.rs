@@ -285,6 +285,38 @@ fn provider_policy_rejection_is_not_reclassified_as_model_mismatch() {
 }
 
 #[test]
+fn messages_fallback_metadata_cannot_silently_substitute_the_requested_model() {
+    for payload in [
+        json!({"type":"message_start","message":{"model":"claude-other"}}),
+        json!({"type":"content_block_start","index":0,"content_block":{
+            "type":"fallback","from":{"model":"claude-requested"},"to":{"model":"claude-other"}}}),
+        json!({"type":"message_delta","usage":{"iterations":[
+            {"type":"message","model":"claude-requested"},
+            {"type":"fallback_message","model":"claude-other"}]}}),
+        json!({"type":"message","model":"claude-requested","content":[
+            {"type":"fallback","from":{"model":"claude-requested"},"to":{"model":"claude-other"}}]}),
+    ] {
+        assert!(
+            served_model_is_rejected(&payload, "claude-requested"),
+            "{payload}"
+        );
+    }
+    for payload in [
+        json!({"type":"message_start","message":{"model":"claude-requested"}}),
+        json!({"type":"content_block_start","content_block":{
+            "type":"text","text":"claude-other","to":{"model":"claude-other"}}}),
+        json!({"type":"message_delta","delta":{"to":{"model":"claude-other"}}}),
+        json!({"type":"response.completed","response":{"model":"claude-requested","output":[
+            {"type":"message","content":[{"type":"fallback","to":{"model":"claude-other"}}]}]}}),
+    ] {
+        assert!(
+            !served_model_is_rejected(&payload, "claude-requested"),
+            "{payload}"
+        );
+    }
+}
+
+#[test]
 fn translated_errors_keep_the_original_code_in_each_client_protocol() {
     for code in [
         crate::error_codes::UPSTREAM_ROUTE_DEGRADED,

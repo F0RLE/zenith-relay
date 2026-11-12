@@ -6,7 +6,7 @@ use zenith_relay_core::{
     quota::QuotaWindow,
 };
 
-fn exhausted_response(state: &DesktopState) -> AccountQuotaRefreshResponse {
+pub(super) fn exhausted_response(state: &DesktopState) -> AccountQuotaRefreshResponse {
     let now_ms = current_time_ms();
     let mut account = account();
     account.account.in_pool = true;
@@ -37,6 +37,7 @@ fn exhausted_response(state: &DesktopState) -> AccountQuotaRefreshResponse {
         window_kinds: [QuotaWindowKind::Secondary].into(),
         model_policy: WakeModelPolicy::LightestSupported,
         trigger: WakeTrigger::Weekly,
+        weekly_reset_remaining_basis_points: None,
         fallback_schedule: None,
         execution_policy: WakeExecutionPolicy::Automatic,
         jitter_seconds: 0,
@@ -53,6 +54,43 @@ fn exhausted_response(state: &DesktopState) -> AccountQuotaRefreshResponse {
         },
         exhaustion_transitions: vec![],
     }
+}
+
+#[tokio::test]
+async fn weekly_reserve_rechecks_entitlement_expiry_before_redemption() {
+    use zenith_relay_core::quota::{Subscription, SubscriptionStatus};
+    let state = state();
+    let mut response = exhausted_response(&state);
+    let now_ms = current_time_ms();
+    for (deadline, status, eligible) in [
+        (Some(now_ms + 60_000), SubscriptionStatus::Active, true),
+        (None, SubscriptionStatus::Unknown, true),
+        (Some(now_ms - 1), SubscriptionStatus::Active, false),
+        (Some(now_ms + 60_000), SubscriptionStatus::Expired, false),
+        (Some(now_ms + 60_000), SubscriptionStatus::Forbidden, false),
+    ] {
+        response.account.account.subscription = Subscription {
+            plan_type: Some("plus".into()),
+            active_until_ms: deadline,
+            status,
+            updated_at_ms: Some(now_ms),
+        };
+        state
+            .store()
+            .unwrap()
+            .upsert_account(response.account.clone())
+            .unwrap();
+        let (_, fence) = state
+            .store()
+            .unwrap()
+            .account_refresh_scope(&response.account.account.id)
+            .unwrap();
+        assert_eq!(
+            weekly_reset_still_current(&state, &response, &fence).unwrap(),
+            eligible
+        );
+    }
+    cleanup(state).await;
 }
 
 #[tokio::test]

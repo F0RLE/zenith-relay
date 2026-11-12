@@ -6,8 +6,10 @@ use serde_json::Value;
 
 mod scoped;
 mod siwc;
+mod terminal;
 mod text;
 pub(super) use siwc::error_code as siwc_error_code;
+pub(super) use terminal::provider_request_terminal_category;
 use text::classify_upstream_error_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,12 +26,36 @@ pub(in crate::gateway) fn classify_upstream_error(
         return classify_upstream_error_text(status, "");
     };
     match serde_json::from_slice::<Value>(response_body) {
-        Ok(error_payload) => classify_upstream_error_value(status, &error_payload),
+        Ok(error_payload) => {
+            let classification = classify_upstream_error_value(status, &error_payload);
+            if matches!(
+                classification.category,
+                error_codes::UPSTREAM_INVALID_WORKSPACE
+                    | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+                    | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
+            ) && std::str::from_utf8(response_body)
+                .ok()
+                .and_then(|body| crate::strict_json::parse(body).ok())
+                .is_none()
+            {
+                return classify_upstream_error_text(status, "");
+            }
+            classification
+        }
         Err(_) => {
             if status == StatusCode::FORBIDDEN
                 && let Some(error_payload) = scoped::error_before_sse(response_body)
             {
-                return classify_upstream_error_value(status, &error_payload);
+                let classification = classify_upstream_error_value(status, &error_payload);
+                if !matches!(
+                    classification.category,
+                    error_codes::UPSTREAM_INVALID_WORKSPACE
+                        | error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID
+                        | error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED
+                ) {
+                    return classification;
+                }
+                return classify_upstream_error_text(status, "");
             }
             classify_upstream_error_text(status, &normalized_error_text(response_body))
         }
@@ -40,6 +66,20 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     status: StatusCode,
     error_payload: &Value,
 ) -> UpstreamErrorClassification {
+    if let Some(category) = provider_request_terminal_category(Some(status), error_payload) {
+        return UpstreamErrorClassification {
+            category,
+            message: upstream_failure_message(category),
+        };
+    }
+    if status == StatusCode::FORBIDDEN
+        && selected_workspace_error_code(error_payload) == Some("invalid_workspace_selected")
+    {
+        return UpstreamErrorClassification {
+            category: error_codes::UPSTREAM_INVALID_WORKSPACE,
+            message: upstream_failure_message(error_codes::UPSTREAM_INVALID_WORKSPACE),
+        };
+    }
     if status == StatusCode::BAD_REQUEST && session_budget_exceeded(error_payload) {
         return UpstreamErrorClassification {
             category: error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED,
@@ -149,6 +189,61 @@ pub(in crate::gateway) fn classify_upstream_error_value(
         };
     }
     classification
+}
+
+pub(in crate::gateway) fn classify_upstream_error_with_headers(
+    status: StatusCode,
+    response_body: Option<&[u8]>,
+    headers: &axum::http::HeaderMap,
+) -> UpstreamErrorClassification {
+    use base64::Engine;
+    let classification = classify_upstream_error(status, response_body);
+    if status != StatusCode::FORBIDDEN || headers.get_all("x-error-json").iter().count() != 1 {
+        return classification;
+    }
+    if let Some(body) = response_body.filter(|body| !body.is_empty()) {
+        let Some(value) = std::str::from_utf8(body)
+            .ok()
+            .and_then(|body| crate::strict_json::parse(body).ok())
+        else {
+            return classification;
+        };
+        // An explicit body discriminator owns the refusal, including unknown codes.
+        if selected_workspace_error_code(&value).is_some() {
+            return classification;
+        }
+    }
+    let invalid_workspace = headers
+        .get("x-error-json")
+        .filter(|value| value.as_bytes().len() <= 8_192)
+        .and_then(|value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value.as_bytes())
+                .ok()
+        })
+        .and_then(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|body| crate::strict_json::parse(body).ok())
+        })
+        .is_some_and(|value| {
+            value.pointer("/error/code").and_then(Value::as_str)
+                == Some("invalid_workspace_selected")
+        });
+    if invalid_workspace {
+        UpstreamErrorClassification {
+            category: error_codes::UPSTREAM_INVALID_WORKSPACE,
+            message: upstream_failure_message(error_codes::UPSTREAM_INVALID_WORKSPACE),
+        }
+    } else {
+        classification
+    }
+}
+
+pub(super) fn selected_workspace_error_code(error_payload: &Value) -> Option<&str> {
+    ["/detail/code", "/error/code"]
+        .into_iter()
+        .find_map(|path| error_payload.pointer(path).and_then(Value::as_str))
 }
 
 pub(super) fn session_budget_exceeded(error_payload: &Value) -> bool {

@@ -6,7 +6,7 @@ async fn siwc_streams_native_and_converted_output_before_upstream_completion() {
 }
 
 #[tokio::test]
-async fn siwc_streams_with_missing_or_mislabeled_sse_content_type() {
+async fn siwc_websocket_frames_are_independent_of_http_content_type() {
     for content_type in [None, Some("application/json"), Some("text/plain")] {
         incremental_stream(content_type).await;
     }

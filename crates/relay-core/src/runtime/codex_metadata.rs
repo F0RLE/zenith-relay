@@ -1,6 +1,7 @@
-use super::{CachedModelManifest, GatewayRuntime};
+use super::{AuthorizationIncarnation, CachedModelManifest, GatewayRuntime};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 
 impl GatewayRuntime {
     pub(crate) fn model_context_windows<'a>(
@@ -22,13 +23,8 @@ impl GatewayRuntime {
         }
         let model_id = crate::model_id_key(model);
         let mut windows = ModelContextWindows::default();
-        let manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
-        for candidate_id in candidate_ids {
-            let Some(manifest) = manifests.get(candidate_id) else {
-                continue;
-            };
+        for (_, manifest) in self.stale_codex_model_manifests(candidate_ids) {
             for entry in manifest
-                .manifest_payload
                 .get("models")
                 .and_then(Value::as_array)
                 .into_iter()
@@ -69,33 +65,101 @@ impl GatewayRuntime {
             .cloned()
     }
 
+    pub(crate) fn codex_model_manifest_context(
+        &self,
+        candidate_id: &str,
+    ) -> Option<(Option<String>, u64)> {
+        let account = self.account_state.executors.get(candidate_id)?;
+        Some((
+            crate::poison::read(&account.subscription_plan_type).clone(),
+            account.image_bridge_revision.load(Ordering::Acquire),
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn remember_codex_model_manifest(
         &self,
         candidate_id: &str,
         manifest_payload: Value,
         _observed_at_ms: u64,
     ) {
+        if let Some(context) = self.codex_model_manifest_context(candidate_id) {
+            self.remember_authorized_codex_model_manifest(
+                candidate_id,
+                manifest_payload,
+                AuthorizationIncarnation::Source,
+                context,
+            );
+        }
+    }
+
+    pub(crate) fn remember_authorized_codex_model_manifest(
+        &self,
+        candidate_id: &str,
+        manifest_payload: Value,
+        authorization: AuthorizationIncarnation,
+        account_context: (Option<String>, u64),
+    ) -> bool {
+        let Some(account) = self.account_state.executors.get(candidate_id) else {
+            return false;
+        };
+        let plan = crate::poison::read(&account.subscription_plan_type);
         let scheduler = self.lock_scheduler();
-        if scheduler.candidate(candidate_id).is_none() {
-            return;
+        let revision = authorization.token_revision();
+        let _credential = revision.and_then(|revision| revision.guard());
+        if scheduler.candidate(candidate_id).is_none()
+            || !account.active.load(Ordering::Acquire)
+            || *plan != account_context.0
+            || account.image_bridge_revision.load(Ordering::Acquire) != account_context.1
+            || (revision.is_some() && _credential.is_none())
+            || matches!(authorization, AuthorizationIncarnation::Agent(expected)
+                if account.agent_identity_revision.load(Ordering::Acquire) != expected)
+        {
+            return false;
         }
         crate::poison::mutex(&self.provider_metadata.codex_manifests).insert(
             candidate_id.to_string(),
-            CachedModelManifest { manifest_payload },
+            CachedModelManifest {
+                manifest_payload,
+                authorization: authorization.clone(),
+                account_context,
+            },
         );
+        true
     }
 
     pub(crate) fn stale_codex_model_manifests<'a>(
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
     ) -> Vec<(String, Value)> {
-        let manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
         candidate_ids
             .into_iter()
             .filter_map(|candidate_id| {
-                manifests
-                    .get(candidate_id)
-                    .map(|manifest| (candidate_id.to_string(), manifest.manifest_payload.clone()))
+                let account = self.account_state.executors.get(candidate_id)?;
+                let plan = crate::poison::read(&account.subscription_plan_type);
+                let scheduler = self.lock_scheduler();
+                if !account.active.load(Ordering::Acquire)
+                    || scheduler.candidate(candidate_id).is_none()
+                {
+                    return None;
+                }
+                let mut manifests = crate::poison::mutex(&self.provider_metadata.codex_manifests);
+                let manifest = manifests.get(candidate_id)?;
+                let revision = manifest.authorization.token_revision();
+                let credential = revision.and_then(|revision| revision.guard());
+                let current = *plan == manifest.account_context.0
+                    && account.image_bridge_revision.load(Ordering::Acquire)
+                        == manifest.account_context.1
+                    && (revision.is_none() || credential.is_some())
+                    && !matches!(manifest.authorization, AuthorizationIncarnation::Agent(expected)
+                        if account.agent_identity_revision.load(Ordering::Acquire) != expected);
+                let result =
+                    current.then(|| (candidate_id.to_string(), manifest.manifest_payload.clone()));
+                drop(credential);
+                if !current {
+                    manifests.remove(candidate_id);
+                }
+                result
             })
             .collect()
     }

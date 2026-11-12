@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::{Map, json};
 
+mod tool_discovery;
+
 pub(super) fn request(
     request: &Request,
     protocol: WireApi,
@@ -21,7 +23,13 @@ pub(super) fn request(
         request_fields.insert("model".into(), model.into());
         request_fields.insert("stream".into(), stream.into());
     }
-    let (history, system) = conversation(request, protocol, native_turns, capabilities)?;
+    let additions = if protocol == WireApi::Responses {
+        tool_discovery::additions(request)?
+    } else {
+        BTreeMap::new()
+    };
+    let (history, system) =
+        conversation(request, protocol, native_turns, capabilities, &additions)?;
     request_fields.insert(
         match protocol {
             WireApi::Responses => "input",
@@ -80,6 +88,7 @@ fn conversation(
     protocol: WireApi,
     native_turns: &BTreeMap<usize, Vec<Value>>,
     capabilities: Option<&crate::model_metadata::ModelCapabilities>,
+    additions: &BTreeMap<usize, Value>,
 ) -> AdapterResult<(Vec<Value>, Vec<Value>)> {
     let mut history: Vec<Value> = Vec::new();
     let mut system = Vec::new();
@@ -114,6 +123,12 @@ fn conversation(
         .chain(&request.messages)
         .enumerate()
     {
+        if let Some(addition) = position
+            .checked_sub(usize::from(request.instructions.is_some()))
+            .and_then(|index| additions.get(&index))
+        {
+            history.push(addition.clone());
+        }
         if matches!(message.role, Role::System | Role::Developer)
             && matches!(protocol, WireApi::Messages | WireApi::Gemini)
         {
@@ -245,6 +260,9 @@ fn conversation(
             history.push(item);
         }
     }
+    if let Some(addition) = additions.get(&request.messages.len()) {
+        history.push(addition.clone());
+    }
     Ok((history, system))
 }
 
@@ -375,6 +393,7 @@ fn write_tools(
     let mut declarations = request
         .tools
         .iter()
+        .filter(|_| protocol != WireApi::Responses || request.deferred_tools.is_none())
         .map(|tool| parts::function(tool, protocol))
         .collect::<AdapterResult<Vec<_>>>()?;
     if let Some(search) = &request.web_search {

@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn siwc_websocket_requirement_is_not_sent_without_account_penalty_or_replay() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let error = AuthorizedRequestError::WebsocketRequired {
+            status,
+            message: "Synthetic WebSocket requirement",
+        };
+        assert_eq!(
+            error.execution_certainty(),
+            crate::scheduler::rotation::ExecutionCertainty::NotSent
+        );
+        let failure = AttemptFailure::authorized_request(error);
+        assert_eq!(failure.status, status);
+        assert_eq!(failure.category, error_codes::SIWC_WEBSOCKET_REQUIRED);
+        assert!(!failure_category_requires_cooldown(failure.category));
+        assert!(!failure_category_affects_account_state(failure.category));
+        assert!(!retryable_failure(failure.status, failure.category, false));
+        assert_eq!(
+            crate::ErrorOrigin::Account.for_category(failure.category),
+            crate::ErrorOrigin::Relay
+        );
+    }
+}
+
+#[test]
 fn http3_send_start_timeout_is_terminal_without_account_penalty_or_replay() {
     let error = AuthorizedRequestError::SendStartTimeout;
     assert_eq!(

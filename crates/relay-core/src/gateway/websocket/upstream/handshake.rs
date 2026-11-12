@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use reqwest_websocket::UpgradeResponse;
+use super::super::transport::{UpgradeResponse, upgrade};
 
 use super::super::*;
 use super::ConnectTrace;
@@ -77,11 +77,10 @@ pub(super) async fn upgrade_with_authorization_refresh(
         if let Some(cookies) = &cookies {
             cookies.apply(&route.upstream_url, &mut headers);
         }
-        let upgrade = runtime
+        let upgrade_request = runtime
             .websocket_client(&route.candidate_id)
             .get(route.upstream_url.clone())
-            .headers(headers)
-            .upgrade();
+            .headers(headers);
         let handshake_started = Instant::now();
         let reauth = request.websocket_reauth(&route.candidate_id, prepared);
         route.observe_websocket_dispatch(None);
@@ -90,7 +89,7 @@ pub(super) async fn upgrade_with_authorization_refresh(
         } else {
             UPSTREAM_CONNECT_TIMEOUT
         };
-        let upgrade = timeout(connect_budget, upgrade.send()).await;
+        let upgrade = timeout(connect_budget, upgrade(upgrade_request)).await;
         let elapsed_ms = handshake_started.elapsed().as_millis() as u64;
         if fast_path && upgrade.is_err() {
             // Only GET/Upgrade was attempted, never response.create. Dropping

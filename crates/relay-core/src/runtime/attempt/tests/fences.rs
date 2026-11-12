@@ -1,6 +1,82 @@
 use super::*;
 
 #[tokio::test]
+async fn late_prompt_completion_keeps_new_binding_without_rejecting_dispatch() {
+    let runtime = runtime();
+    let now = crate::unix_time_ms();
+    let affinity = "session:synthetic-late-completion";
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, lease) = runtime
+        .select_and_reserve_with_budget(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(affinity)),
+            now,
+            &budget,
+        )
+        .await
+        .unwrap();
+    let newer_owner = if lease.candidate_id() == "source-a" {
+        "source-b"
+    } else {
+        "source-a"
+    };
+    runtime.bind_prompt_affinity(Some(affinity), newer_owner, now + 1);
+    let before = runtime
+        .lock_scheduler()
+        .prompt_affinity_binding(affinity, now + 1);
+
+    assert!(lease.begin_rotation_http_dispatch().is_ok());
+    runtime.bind_prompt_affinity_for_lease(Some(affinity), &lease, now + 2);
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .prompt_affinity_binding(affinity, now + 2),
+        before
+    );
+    assert_eq!(budget.dispatches(), 1);
+    assert_eq!(lease.prompt_owner.as_ref().unwrap().1, None);
+}
+
+#[tokio::test]
+async fn prompt_completion_refreshes_its_current_owner_without_warming_another_chat() {
+    let runtime = runtime();
+    let now = crate::unix_time_ms();
+    let affinity = "session:synthetic-current-completion";
+    let (_, lease) = runtime
+        .select_and_reserve(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(affinity)),
+            now,
+        )
+        .await
+        .unwrap();
+    runtime.bind_prompt_affinity(Some(affinity), lease.candidate_id(), now + 1);
+    let before = runtime
+        .lock_scheduler()
+        .prompt_affinity_snapshot(affinity, now + 1)
+        .unwrap();
+    runtime.bind_prompt_affinity_for_lease(Some(affinity), &lease, now + 100);
+    let after = runtime
+        .lock_scheduler()
+        .prompt_affinity_snapshot(affinity, now + 100)
+        .unwrap();
+    assert_eq!(after.0, before.0);
+    assert!(after.1 > before.1);
+    runtime.bind_prompt_affinity_for_lease(Some("session:another-chat"), &lease, now + 101);
+    assert!(
+        !runtime
+            .lock_scheduler()
+            .has_prompt_affinity("session:another-chat", now + 101)
+    );
+}
+
+#[tokio::test]
 async fn changed_response_owner_revokes_pending_dispatch_without_spending_a_generation() {
     let runtime = runtime();
     let now = crate::unix_time_ms();

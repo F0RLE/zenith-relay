@@ -153,6 +153,7 @@ fn account_record(id: &str) -> LocalAccountRecord {
 
 fn wake_task(id: &str, execution_policy: WakeExecutionPolicy) -> WakeTask {
     WakeTask {
+        weekly_reset_remaining_basis_points: None,
         id: id.into(),
         name: id.into(),
         enabled: true,

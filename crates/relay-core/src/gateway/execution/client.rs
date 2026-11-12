@@ -115,11 +115,15 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
-    let mut request_json =
-        match super::super::request_body::read_json_object(&headers, request_body).await {
-            Ok(request_object) => Value::Object(request_object),
-            Err(error_response) => return *error_response,
-        };
+    let request_fields = if client_wire_api == WireApi::Responses {
+        super::super::request_body::read_responses_json_object(&headers, request_body).await
+    } else {
+        super::super::request_body::read_json_object(&headers, request_body).await
+    };
+    let mut request_json = match request_fields {
+        Ok(request_object) => Value::Object(request_object),
+        Err(error_response) => return *error_response,
+    };
     if client_wire_api == WireApi::GeminiInteractions
         && let Err(message) = crate::protocol::interactions::validate_request(&request_json)
     {

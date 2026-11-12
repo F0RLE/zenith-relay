@@ -17,6 +17,7 @@ use std::sync::Arc;
 mod agent_messages;
 mod client_requests;
 mod frame_contract;
+mod initial_request;
 
 fn runtime() -> GatewayRuntime {
     runtime_with_events(Arc::new(|_| {}))

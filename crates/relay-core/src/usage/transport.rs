@@ -8,6 +8,7 @@ mod server_timing;
 mod stream;
 pub use payload::{
     FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
+    SocketOutputMismatch, SocketReplayField, SocketReplayItemKind, SocketUnknownFieldChanges,
 };
 pub use server_timing::CodexServerTiming;
 pub use stream::StreamResponseDiagnostics;
@@ -15,6 +16,9 @@ pub use stream::StreamResponseDiagnostics;
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPreparationDiagnostics {
+    /// SIWC request preparation omitted an unsupported client output-token cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siwc_output_limit_omitted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ms: Option<u64>,
     /// Initial schema validation is a subset of body_ms, not an extra stage.
@@ -55,6 +59,13 @@ pub struct AttachmentPreparationDiagnostics {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_http_status: Option<u16>,
+    /// Response constructed for HTTP ingress, not proof of client receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downstream_http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<TransportFailureKind>,
     /// Dispatch boundary, not proof that the provider accepted a generation.
     pub upstream: UsageTransport,
     pub mode: TransportMode,
@@ -70,6 +81,9 @@ pub struct TransportDiagnostics {
     /// Native WS: false is selected-route setup before generation, true is reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_reused: Option<bool>,
+    /// Why SIWC opened a fresh socket; bounded local state, not provider text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reset_reason: Option<ConnectionResetReason>,
     /// New native WS attempt after authorization changed on the same candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reauth: Option<bool>,
@@ -102,6 +116,31 @@ pub struct TransportDiagnostics {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TransportFailureKind {
+    Connection,
+    Upstream,
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionResetReason {
+    NewSession,
+    MissingContext,
+    SessionUnavailable,
+    SessionExpired,
+    AuthorizationChanged,
+    ConnectionExpired,
+    ConnectionClosed,
+    PendingFrame,
+    HeartbeatFailed,
+    ResponseInterrupted,
+    ResponseFailed,
+    UnprovenOutput,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TransportMode {
     Native,
     ProtocolConversion,
@@ -128,6 +167,37 @@ pub enum TransportResponseFormat {
 }
 
 impl ExecutorRoute {
+    pub(crate) fn observe_authorized_dispatch_failure(
+        &mut self,
+        error: &crate::runtime::AuthorizedRequestError,
+    ) {
+        use crate::runtime::AuthorizedRequestError;
+        if let Some(transport) = self
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            if matches!(error, AuthorizedRequestError::WebsocketSend) {
+                transport.upstream = UsageTransport::Websocket;
+                transport.fallback_reason = None;
+                transport.http_version = None;
+                transport.upstream_http_status = None;
+                transport.response_headers_ms = None;
+                transport.response_format = Some(TransportResponseFormat::WebsocketFrames);
+            }
+            transport.failure_kind = match error {
+                AuthorizedRequestError::Transport(error) if error.is_connect() => {
+                    Some(TransportFailureKind::Connection)
+                }
+                AuthorizedRequestError::NotReplayable
+                | AuthorizedRequestError::DispatchBudgetExhausted
+                | AuthorizedRequestError::ModelUnavailable
+                | AuthorizedRequestError::ReasoningUnavailable => Some(TransportFailureKind::Local),
+                _ => None,
+            };
+        }
+    }
+
     pub(crate) fn observe_http_dispatch(&mut self, fallback: Option<TransportFallbackReason>) {
         if !self.diagnostics_enabled {
             return;
@@ -149,6 +219,9 @@ impl ExecutorRoute {
             });
         if let Some(routing) = self.routing.as_mut() {
             routing.transport = Some(TransportDiagnostics {
+                upstream_http_status: None,
+                downstream_http_status: None,
+                failure_kind: None,
                 upstream: UsageTransport::Http,
                 mode,
                 fallback_reason,
@@ -156,6 +229,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms: None,
                 connection_reused: None,
+                connection_reset_reason: None,
                 reauth: None,
                 response_headers_ms: None,
                 stream_response: None,
@@ -193,6 +267,11 @@ impl ExecutorRoute {
         else {
             return;
         };
+        // SIWC wraps WebSocket events as SSE internally. Those synthetic
+        // headers are not an observed HTTP response from the provider.
+        if transport.upstream == UsageTransport::Websocket {
+            return;
+        }
         transport.response_headers_ms.get_or_insert(elapsed_ms);
         transport.response_format = headers
             .get(CONTENT_TYPE)
@@ -206,6 +285,9 @@ impl ExecutorRoute {
         }
         if let Some(routing) = self.routing.as_mut() {
             routing.transport = Some(TransportDiagnostics {
+                upstream_http_status: None,
+                downstream_http_status: None,
+                failure_kind: None,
                 upstream: UsageTransport::Websocket,
                 mode: TransportMode::Native,
                 fallback_reason: None,
@@ -213,6 +295,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms,
                 connection_reused: Some(false),
+                connection_reset_reason: None,
                 reauth: None,
                 response_headers_ms: None,
                 stream_response: None,
@@ -498,6 +581,7 @@ mod tests {
         let mut route = route();
         route.observe_http_dispatch(None);
         let preparation = RequestPreparationDiagnostics {
+            siwc_output_limit_omitted: None,
             body_ms: Some(0),
             schema_validation_ms: Some(0),
             catalog_ms: Some(0),
@@ -546,6 +630,48 @@ mod tests {
     }
 
     #[test]
+    fn siwc_socket_diagnostics_do_not_report_synthetic_http_headers() {
+        let mut route = route();
+        route.observe_http_dispatch(None);
+        route.observe_request_preparation(9, RequestPreparationDiagnostics::default());
+        let mut response: reqwest::Response = axum::http::Response::builder()
+            .status(200)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body("")
+            .unwrap()
+            .into();
+        response
+            .extensions_mut()
+            .insert(crate::runtime::siwc_socket::SocketDiagnostics {
+                reused: true,
+                handshake_ms: None,
+                reset_reason: None,
+            });
+        route.observe_http_payload(&response);
+        route.observe_http_response(response.headers(), 15);
+        let transport = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(transport.upstream, UsageTransport::Websocket);
+        assert_eq!(
+            transport.response_format,
+            Some(TransportResponseFormat::WebsocketFrames)
+        );
+        assert_eq!(transport.connection_reused, Some(true));
+        assert_eq!(transport.http_version, None);
+        assert_eq!(transport.upstream_http_status, None);
+        assert_eq!(transport.response_headers_ms, None);
+        assert_eq!(transport.request_preparation_ms, Some(9));
+        response
+            .extensions_mut()
+            .remove::<crate::runtime::siwc_socket::SocketDiagnostics>();
+        route.observe_http_payload(&response);
+        route.observe_http_response(response.headers(), 20);
+        let transport = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(transport.upstream, UsageTransport::Http);
+        assert_eq!(transport.connection_reused, None);
+        assert_eq!(transport.response_headers_ms, Some(20));
+    }
+
+    #[test]
     fn upstream_http_version_is_observed_and_never_carried_between_attempts() {
         fn version(route: &ExecutorRoute) -> Option<&str> {
             let transport = route.routing.as_ref()?.transport.as_ref()?;
@@ -559,16 +685,97 @@ mod tests {
             route.observe_http_dispatch(None);
             let response = reqwest::Response::from(
                 axum::http::Response::builder()
+                    .status(429)
                     .version(http_version)
                     .body(String::new())
                     .unwrap(),
             );
             route.observe_http_payload(&response);
             assert_eq!(version(&route), Some(label));
+            assert_eq!(
+                route
+                    .routing
+                    .as_ref()
+                    .unwrap()
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .upstream_http_status,
+                Some(429)
+            );
             route.observe_websocket_dispatch(None);
             assert_eq!(version(&route), None);
+            assert_eq!(
+                route
+                    .routing
+                    .as_ref()
+                    .unwrap()
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .upstream_http_status,
+                None
+            );
         }
         route.observe_http_dispatch(None);
         assert_eq!(version(&route), None);
+    }
+
+    #[tokio::test]
+    async fn connection_and_local_failures_do_not_invent_an_http_response() {
+        let mut route = route();
+        route.observe_http_dispatch(None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect());
+        route.observe_authorized_dispatch_failure(
+            &crate::runtime::AuthorizedRequestError::Transport(error),
+        );
+        let transport = route.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(
+            transport.failure_kind,
+            Some(TransportFailureKind::Connection)
+        );
+        assert_eq!(transport.upstream_http_status, None);
+        assert_eq!(transport.downstream_http_status, None);
+        route.observe_http_dispatch(None);
+        route.observe_authorized_dispatch_failure(
+            &crate::runtime::AuthorizedRequestError::NotReplayable,
+        );
+        assert_eq!(
+            route
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .failure_kind,
+            Some(TransportFailureKind::Local)
+        );
+        route.observe_http_dispatch(None);
+        route.observe_authorized_dispatch_failure(
+            &crate::runtime::AuthorizedRequestError::HeadersTimeout,
+        );
+        assert_eq!(
+            route
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .failure_kind,
+            None
+        );
     }
 }

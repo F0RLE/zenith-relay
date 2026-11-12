@@ -482,6 +482,24 @@ fn cache_comparison_response_id_is_excluded_but_actual_controls_are_compared() {
             .changes_from(&first),
         vec![CacheContextSection::CachePolicy]
     );
+    let thirty_minutes = RequestFingerprint::capture(&next, &salt).unwrap();
+    next["prompt_cache_options"]["ttl"] = json!("12h");
+    let twelve_hours = RequestFingerprint::capture(&next, &salt).unwrap();
+    assert_eq!(
+        twelve_hours.changes_from(&thirty_minutes),
+        vec![CacheContextSection::CachePolicy]
+    );
+    assert_eq!(
+        first.changes_from(&twelve_hours),
+        vec![CacheContextSection::CachePolicy]
+    );
+    next["prompt_cache_options"]["mode"] = json!("explicit");
+    assert_eq!(
+        RequestFingerprint::capture(&next, &salt)
+            .unwrap()
+            .changes_from(&twelve_hours),
+        vec![CacheContextSection::CachePolicy]
+    );
 }
 
 #[test]

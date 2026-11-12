@@ -332,7 +332,8 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 settle_route_failure(runtime, &lease, &route, &failure, response_headers);
             apply_failure_state(&mut event, failure_state);
             let terminal = failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(&route, failure.status, &failure)
+                || (route_forbids_fallback(&route, failure.status, &failure)
+                    && !lease.has_transient_retry())
                 || failure.execution.certainty != ExecutionCertainty::NotSent;
             if let Some(routing) = event.routing.as_mut() {
                 routing.attempt_outcome = Some(if terminal {

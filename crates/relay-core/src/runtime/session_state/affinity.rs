@@ -4,7 +4,7 @@ mod route;
 use super::super::{GatewayRuntime, ResponseAffinityBinding};
 use sha2::{Digest, Sha256};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // Order each key's in-memory decision and durable write, including across
 // replacement runtimes. Stripes bound lock storage without serializing every
@@ -37,8 +37,9 @@ impl GatewayRuntime {
         // session on the successful candidate so provider-side prefix caches
         // survive normal key rotation; explicit cache keys remain stronger.
         let (material_kind, material) = prompt_cache_key
-            .map(str::trim)
-            .filter(|cache_key| !cache_key.is_empty())
+            // Provider cache keys are opaque: check blanks without merging
+            // distinct supplied values into the same local affinity binding.
+            .filter(|cache_key| !cache_key.trim().is_empty())
             .map(|cache_key| ("cache", cache_key))
             .or_else(|| {
                 client_context_id
@@ -70,11 +71,53 @@ impl GatewayRuntime {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn bind_prompt_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
+        self.update_prompt_affinity(key, candidate_id, None, now_ms);
+    }
+
+    pub(crate) fn bind_prompt_affinity_for_lease(
+        &self,
+        key: Option<&str>,
+        lease: &super::super::CandidateLease,
+        now_ms: u64,
+    ) {
+        if !Arc::ptr_eq(&self.scheduler, &lease.scheduler) {
+            return;
+        }
+        self.update_prompt_affinity(key, &lease.candidate_id, Some(lease), now_ms);
+    }
+
+    fn update_prompt_affinity(
+        &self,
+        key: Option<&str>,
+        candidate_id: &str,
+        lease: Option<&super::super::CandidateLease>,
+        now_ms: u64,
+    ) {
         if let Some(key) = key {
             let _persistence = self.lock_prompt_affinity(key);
             let binding = {
                 let mut scheduler = self.lock_scheduler();
+                if let Some(lease) = lease {
+                    let Some((observed_key, observed_revision)) = lease.prompt_owner.as_ref()
+                    else {
+                        return;
+                    };
+                    if observed_key != key {
+                        return;
+                    }
+                    let current = scheduler.prompt_affinity_binding(key, now_ms);
+                    let same_owner = current
+                        .as_ref()
+                        .is_some_and(|(owner, _)| owner == candidate_id);
+                    if !same_owner
+                        && current.as_ref().map(|(_, revision)| *revision) != *observed_revision
+                    {
+                        scheduler.remember_prompt_affinity_spillover(key, candidate_id, now_ms);
+                        return;
+                    }
+                }
                 if !scheduler.bind_prompt_affinity_sticky(key, candidate_id, now_ms) {
                     return;
                 }

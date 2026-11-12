@@ -211,7 +211,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                         || event
                             .event_payload
                             .as_ref()
-                            .is_some_and(crate::gateway::response::has_generated_tokens);
+                            .is_some_and(|payload| super::has_generation_evidence(payload, None));
                     if expected_model.is_some_and(|expected| {
                         event.event_payload.as_ref().is_some_and(|served_model| {
                             super::served_model_is_rejected(served_model, expected)

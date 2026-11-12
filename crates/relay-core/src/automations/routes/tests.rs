@@ -4,6 +4,7 @@ use crate::quota::QuotaWindowKind;
 
 fn task(selector: AccountSelector) -> WakeTask {
     WakeTask {
+        weekly_reset_remaining_basis_points: None,
         id: "synthetic-task".into(),
         name: "Synthetic wake".into(),
         enabled: true,

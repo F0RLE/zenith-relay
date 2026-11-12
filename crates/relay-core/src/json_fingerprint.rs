@@ -1,5 +1,7 @@
 //! Stable JSON fingerprints without allocating a complete serialized copy.
 use serde::Serialize;
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::{self, BufWriter, Write};
 
@@ -11,6 +13,37 @@ pub(crate) fn sha256(value: &impl Serialize) -> Result<[u8; 32], serde_json::Err
         writer.flush().map_err(serde_json::Error::io)?;
     }
     Ok(digest.finalize().into())
+}
+
+/// Compare JSON structure without changing the outgoing object's key order.
+pub(crate) fn canonical_sha256(value: &Value) -> Result<[u8; 32], serde_json::Error> {
+    sha256(&Canonical(value))
+}
+
+struct Canonical<'a>(&'a Value);
+
+impl Serialize for Canonical<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Object(object) => {
+                let mut entries: Vec<_> = object.iter().collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, &Canonical(value))?;
+                }
+                map.end()
+            }
+            Value::Array(items) => {
+                let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    sequence.serialize_element(&Canonical(item))?;
+                }
+                sequence.end()
+            }
+            value => value.serialize(serializer),
+        }
+    }
 }
 
 struct DigestWriter<'a>(&'a mut Sha256);
@@ -59,5 +92,36 @@ mod tests {
             }
         }
         assert!(sha256(&Invalid).is_err());
+    }
+
+    #[test]
+    fn canonical_fingerprints_ignore_only_object_key_order() {
+        let original: Value =
+            serde_json::from_str(r#"{"z":[{"b":2,"a":1},"opaque {\"b\":2,\"a\":1}"],"a":true}"#)
+                .unwrap();
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        let mut sorted = original.clone();
+        sorted.sort_all_objects();
+        assert_eq!(
+            canonical_sha256(&original).unwrap(),
+            sha256(&sorted).unwrap()
+        );
+        assert_eq!(
+            canonical_sha256(&original).unwrap(),
+            canonical_sha256(&sorted).unwrap()
+        );
+        assert_eq!(serde_json::to_vec(&original).unwrap(), original_bytes);
+        let mut changed = original.clone();
+        changed["z"].as_array_mut().unwrap().reverse();
+        assert_ne!(
+            canonical_sha256(&original).unwrap(),
+            canonical_sha256(&changed).unwrap()
+        );
+        changed = original.clone();
+        changed["z"][1] = json!("opaque {\"a\":1,\"b\":2}");
+        assert_ne!(
+            canonical_sha256(&original).unwrap(),
+            canonical_sha256(&changed).unwrap()
+        );
     }
 }

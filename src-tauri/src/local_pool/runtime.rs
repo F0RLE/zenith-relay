@@ -29,6 +29,7 @@ pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms
 
 mod assemble;
 mod quota_references;
+mod spending;
 mod sync;
 
 #[cfg(test)]

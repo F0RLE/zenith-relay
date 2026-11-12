@@ -382,11 +382,7 @@ async fn native_websocket_preserves_raw_text_binary_numbers_and_repeated_beta_he
         (DELTA, true),
         (COMPLETED, false),
     ] {
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let frame = receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
         match frame {
             ClientWsMessage::Text(text) => {
                 assert!(!binary);

@@ -252,11 +252,7 @@ async fn websocket_http_fallback_preserves_json_compaction_events() {
         receive_websocket_json(&mut socket).await["type"],
         "response.created"
     );
-    let compaction = tokio::time::timeout(Duration::from_secs(2), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let compaction = receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(2)).await;
     match compaction {
         ClientWsMessage::Text(text) => assert_eq!(
             text,
@@ -320,11 +316,7 @@ async fn websocket_http_fallback_accepts_compaction_events_over_one_mebibyte() {
         .await
         .unwrap();
 
-    let compact = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let compact = receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
     match compact {
         ClientWsMessage::Text(text) => {
             assert!(text.len() > 1024 * 1024);

@@ -152,6 +152,11 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
             }
             let events = crate::poison::mutex(&events);
             assert_eq!(events.len(), 3);
+            assert_eq!(
+                siwc.state.websocket_requests.load(Ordering::SeqCst),
+                1,
+                "one upstream connection must serve the identified conversation: stream={stream}, debug={debug}"
+            );
             for event in events.iter() {
                 assert!(event.success);
                 assert_eq!(event.input_tokens, Some(12_000));
@@ -171,10 +176,10 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
                         crate::usage::RequestContentEncoding::Identity
                     );
                     assert_eq!(payload.compression_us, None);
-                    let send_ms = payload
-                        .http_send_to_headers_ms
-                        .expect("HTTP execute was observed");
-                    assert!(transport.response_headers_ms.unwrap() >= send_ms);
+                    assert_eq!(transport.upstream, crate::UsageTransport::Websocket);
+                    assert_eq!(payload.http_send_to_headers_ms, None);
+                    assert_eq!(transport.response_headers_ms, None);
+                    assert_eq!(transport.upstream_http_status, None);
                 }
                 let diagnostics = |index: usize| {
                     events[index]
@@ -213,6 +218,133 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
             }
             assert_eq!(siwc.state.generation_requests.load(Ordering::SeqCst), 3);
             assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn siwc_completed_item_snapshots_reuse_pool_socket_with_delta_history() {
+    for stream in [false, true] {
+        for sparse in [false, true] {
+            let siwc = AccessServer::start(json!([]), false).await;
+            let native = AccessServer::start(json!([]), false).await;
+            siwc.state.stream_generations.store(true, Ordering::SeqCst);
+            let mut runtime = runtime(&siwc, &native).await;
+            let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+            let captured = events.clone();
+            let mutable = Arc::get_mut(&mut runtime).unwrap();
+            mutable.diagnostics_enabled = || true;
+            mutable.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+            let reasoning = json!({"type":"reasoning","id":"rs_test","summary":[],"content":[],
+                "encrypted_content":"synthetic-completed-cipher","status":"completed",
+                "internal_chat_message_metadata_passthrough":{"turn_id":"synthetic-provider-turn"}});
+            let call = json!({"type":"function_call","id":"fc_test","call_id":"call_test",
+                "name":"lookup","arguments":"{}","status":"completed","caller":null});
+            let mut terminal_reasoning = reasoning.clone();
+            terminal_reasoning["encrypted_content"] = json!("synthetic-terminal-cipher");
+            let output = if sparse {
+                json!([])
+            } else {
+                json!([terminal_reasoning, call])
+            };
+            let frames = [
+                json!({"type":"response.created","response":{"id":"synthetic-first","status":"in_progress","model":"gpt-test"}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+                json!({"type":"response.output_item.done","output_index":1,"item":call}),
+                json!({"type":"response.completed","response":{"id":"synthetic-first","status":"completed","model":"gpt-test","output":output}}),
+            ];
+            let wire = frames
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            crate::poison::mutex(&siwc.state.stream_bodies).push_back(wire.into_bytes());
+            let answer = json!({"type":"message","id":"msg_test","status":"completed",
+                "role":"assistant","phase":null,"content":[{"type":"output_text",
+                "text":"Synthetic final reply","annotations":[],"logprobs":[]}]});
+            *crate::poison::mutex(&siwc.state.generation_body) = json!({
+                "id":"synthetic-second","status":"completed","model":"gpt-test",
+                "output":[answer]
+            });
+            let (base, task) = recovery::gateway(runtime).await;
+            let client = retry_admission::bounded_client();
+            let tools = json!([{"type":"function","name":"lookup","parameters":{"type":"object"}}]);
+            let mut input = json!([{"role":"user","content":"Synthetic first turn"}]);
+            let result = json!({"type":"function_call_output","call_id":"call_test","output":"Synthetic result"});
+            let followup = json!({"role":"user","content":"Synthetic next turn"});
+            for turn in 0..3 {
+                for item in input.as_array_mut().unwrap() {
+                    if matches!(
+                        item.get("type").and_then(Value::as_str),
+                        Some("reasoning" | "message" | "function_call")
+                    ) {
+                        item["internal_chat_message_metadata_passthrough"] = json!({
+                            "turn_id":format!("synthetic-client-turn-{turn}"),
+                            "create_time":turn,"content_token_count":10,
+                        });
+                    }
+                }
+                if turn == 2 {
+                    crate::poison::mutex(&siwc.state.generation_body)["id"] =
+                        json!("synthetic-third");
+                }
+                let response = client.post(format!("{base}/v1/responses"))
+                    .bearer_auth("local-secret")
+                    .header("x-codex-session-id", "synthetic-snapshot-session")
+                    .json(&json!({"model":"gpt-test","stream":stream,"store":false,"input":input,"tools":tools,
+                        "client_metadata":{"turn":format!("synthetic-turn-{turn}")}}))
+                    .send().await.unwrap();
+                let status = response.status();
+                let text = response.text().await.unwrap();
+                assert_eq!(status, StatusCode::OK, "{text}");
+                if turn == 0 {
+                    input = crate::poison::mutex(&siwc.state.generation_bodies)[0]["input"].clone();
+                    let mut replayed_reasoning = reasoning.clone();
+                    replayed_reasoning.as_object_mut().unwrap().remove("status");
+                    replayed_reasoning["content"] = Value::Null;
+                    let mut replayed_call = call.clone();
+                    replayed_call.as_object_mut().unwrap().remove("caller");
+                    input.as_array_mut().unwrap().extend([
+                        replayed_reasoning,
+                        replayed_call,
+                        result.clone(),
+                    ]);
+                } else if turn == 1 {
+                    let mut replayed_answer = answer.clone();
+                    replayed_answer.as_object_mut().unwrap().remove("phase");
+                    input
+                        .as_array_mut()
+                        .unwrap()
+                        .extend([replayed_answer, followup.clone()]);
+                }
+            }
+            assert_eq!(siwc.state.websocket_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                siwc.state.http_generation_requests.load(Ordering::SeqCst),
+                0
+            );
+            assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+            let sent = crate::poison::mutex(&siwc.state.websocket_bodies);
+            assert_eq!(sent.len(), 3);
+            assert_eq!(
+                sent[1]["previous_response_id"], "synthetic-first",
+                "stream={stream}, sparse={sparse}; synthetic requests={sent:#?}"
+            );
+            assert_eq!(sent[1]["input"], json!([result]));
+            assert_eq!(sent[2]["previous_response_id"], "synthetic-second");
+            assert_eq!(sent[2]["input"], json!([followup]));
+            let events = crate::poison::mutex(&events);
+            assert_eq!(events.len(), 3);
+            assert!(events.iter().all(|event| event.success));
+            for event in &events[1..] {
+                let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+                assert_eq!(transport.connection_reused, Some(true));
+                assert_eq!(transport.connection_reset_reason, None);
+                assert_eq!(
+                    transport.request_payload.as_ref().unwrap().mode,
+                    crate::usage::RequestPayloadMode::Continuation
+                );
+            }
             task.abort();
         }
     }
@@ -329,7 +461,7 @@ async fn siwc_websocket_http_bridge_keeps_cache_context_across_tool_history() {
         assert!(routing.cache_context.is_some());
         assert_eq!(
             routing.transport.as_ref().unwrap().upstream,
-            crate::UsageTransport::Http
+            crate::UsageTransport::Websocket
         );
     }
     let next = events[1]

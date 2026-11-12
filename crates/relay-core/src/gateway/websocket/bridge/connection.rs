@@ -45,7 +45,7 @@ pub(super) async fn finish_connection_failure(
             return;
         }
     }
-    let _ = super::super::io::send_close_message(
+    super::super::io::close_downstream(
         downstream,
         Message::Close(Some(CloseFrame {
             code: close_code::ERROR,
@@ -118,7 +118,8 @@ pub(in crate::gateway::websocket) async fn send_request(
     request_payload: String,
     origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
-    send_message(upstream, UpstreamMessage::Text(request_payload))
+    upstream
+        .send_request(request_payload)
         .await
         .map_err(|_| GatewayFailure::transport(origin))
 }

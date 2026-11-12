@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource, WireApi,
 };
+use reqwest::header::HeaderMap;
 use std::sync::Arc;
 
 fn runtime(recovery_delay_seconds: u64) -> GatewayRuntime {
@@ -43,6 +44,154 @@ async fn reserve(runtime: &GatewayRuntime) -> crate::runtime::CandidateLease {
         .await
         .unwrap()
         .1
+}
+
+#[tokio::test]
+async fn public_model_aliases_share_the_canonical_route_cooldown() {
+    for prefix in [None, Some("team")] {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "synthetic-source-key".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["vendor/model".into(), "vendor/model-mini".into()],
+                proxy_url: None,
+            })],
+            vec![RuntimeLocalKey {
+                model_prefix: prefix.map(str::to_owned),
+                ..RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                    id: "key".into(),
+                    secret: "synthetic-local-key".into(),
+                })
+            }],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static(
+                "Bearer synthetic-local-key",
+            )))
+            .unwrap();
+        let public = prefix.map_or_else(
+            || "vendor/model".to_owned(),
+            |prefix| format!("{prefix}/vendor/model"),
+        );
+        let model = runtime
+            .resolve_visible_model(&key, &public, &[WireApi::Responses], now_ms())
+            .unwrap();
+        let (_, lease) = runtime
+            .select_and_reserve(
+                &key,
+                &model,
+                &[WireApi::Responses],
+                &Default::default(),
+                (None, None),
+                now_ms(),
+            )
+            .await
+            .unwrap();
+        let route = runtime
+            .executor_route(
+                lease.candidate_id(),
+                &model,
+                &key.scope_snapshot(),
+                &[WireApi::Responses],
+                false,
+            )
+            .unwrap();
+        assert_eq!(route.source_model, "vendor/model");
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+        let failure = AttemptFailure::classified_with_hint(
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::UPSTREAM_RATE_LIMITED,
+            Default::default(),
+        );
+        let state = settle_route_failure(&runtime, &lease, &route, &failure, &headers);
+        assert_eq!(state.cooldown_scope.as_deref(), Some("vendor/model"));
+        for alias in [
+            public.clone(),
+            public.to_uppercase(),
+            crate::codex_model_alias(&public),
+            crate::claude_desktop_model_alias(&public),
+            crate::claude_desktop_reasoning_model_alias(&public),
+            crate::claude_desktop_catalog_model_alias(&public),
+        ] {
+            let model = runtime
+                .resolve_configured_model(&key, &alias, &[WireApi::Responses])
+                .unwrap();
+            assert_eq!(crate::model_id_key(&model), "vendor/model");
+            assert!(
+                runtime
+                    .select_and_reserve(
+                        &key,
+                        &model,
+                        &[WireApi::Responses],
+                        &Default::default(),
+                        (None, None),
+                        now_ms()
+                    )
+                    .await
+                    .is_none(),
+                "cooldown bypass through {alias}"
+            );
+        }
+        assert!(
+            runtime
+                .select_and_reserve(
+                    &key,
+                    "vendor/model-mini",
+                    &[WireApi::Responses],
+                    &Default::default(),
+                    (None, None),
+                    now_ms()
+                )
+                .await
+                .is_some(),
+            "similar names are not equivalent quota identities"
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_candidate_wait_requires_a_temporary_proven_rejection_and_opt_in() {
+    use crate::scheduler::rotation::ExecutionObservation;
+    for enabled in [false, true] {
+        for (status, category, temporary) in [
+            (429, error_codes::UPSTREAM_RATE_LIMITED, true),
+            (503, error_codes::UPSTREAM_OVERLOADED, true),
+            (503, error_codes::UPSTREAM_MODEL_CAPACITY, true),
+            (429, error_codes::UPSTREAM_QUOTA_EXHAUSTED, false),
+            (401, error_codes::UPSTREAM_UNAUTHORIZED, false),
+            (400, error_codes::UPSTREAM_INVALID_REQUEST, false),
+        ] {
+            for (execution, rejected) in [
+                (ExecutionObservation::not_sent(), true),
+                (ExecutionObservation::unknown(), false),
+                (ExecutionObservation::committed(), false),
+            ] {
+                let runtime = runtime(0);
+                runtime.set_route_recovery_enabled(enabled);
+                let lease = reserve(&runtime).await;
+                lease.begin_rotation_http_dispatch().unwrap();
+                let mut failure = AttemptFailure::classified_with_hint(
+                    StatusCode::from_u16(status).unwrap(),
+                    category,
+                    Default::default(),
+                );
+                failure.execution = execution;
+                settle_attempt_failure(&runtime, &lease, "model-a", &failure, &HeaderMap::new());
+                assert_eq!(
+                    lease.has_transient_retry(),
+                    enabled && temporary && rejected,
+                    "{category}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

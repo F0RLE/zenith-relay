@@ -1,4 +1,36 @@
 use super::*;
+
+#[test]
+fn spending_projection_uses_current_subscription_evidence_and_drops_missing_dates() {
+    use zenith_relay_core::quota::{Subscription, SubscriptionStatus};
+    let (mut record, _) = connection("expiry-projection", OAuthClientKind::Codex);
+    record.account.subscription = Subscription {
+        plan_type: Some("plus".into()),
+        active_until_ms: Some(86_400_100),
+        status: SubscriptionStatus::Active,
+        updated_at_ms: Some(100),
+    };
+    let project = |record: &LocalAccountRecord, now| {
+        super::super::spending::account_spend_deadlines(std::slice::from_ref(record), now)
+    };
+    let deadlines = project(&record, 100);
+    assert_eq!(deadlines[&record.account.id].weight(10_000, 100), 7);
+    assert!(
+        project(
+            &record,
+            101 + zenith_relay_core::providers::chatgpt::SUBSCRIPTION_REFRESH_INTERVAL_MS
+        )
+        .is_empty()
+    );
+    record.account.subscription.active_until_ms = Some(30 * 86_400_000);
+    assert_eq!(
+        project(&record, 100)[&record.account.id].weight(10_000, 100),
+        1
+    );
+    record.account.subscription.active_until_ms = None;
+    assert!(project(&record, 100).is_empty());
+    assert!(super::super::spending::account_spend_deadlines(&[], 100).is_empty());
+}
 use crate::local_pool::{
     accounts::{credentials::StoredCodexCredentials, records::new_account_record},
     models::AccountRouteGroup,

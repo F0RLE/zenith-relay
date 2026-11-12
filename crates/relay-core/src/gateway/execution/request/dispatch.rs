@@ -364,6 +364,7 @@ pub(super) async fn dispatch_request_attempt(
         }
         Err(error) => {
             let uncertain = error.execution_certainty() == ExecutionCertainty::Unknown;
+            route.observe_authorized_dispatch_failure(&error);
             let attachment_changed = attachment_owner.is_some()
                 && matches!(error, AuthorizedRequestError::NotReplayable);
             let exhausted = matches!(error, AuthorizedRequestError::DispatchBudgetExhausted);

@@ -350,6 +350,7 @@ pub(super) async fn dispatch_account_attempt(
             }
         }
         Err(error) => {
+            route.observe_authorized_dispatch_failure(&error);
             return reject_authorized_dispatch(
                 error,
                 attachment_owner.is_some(),

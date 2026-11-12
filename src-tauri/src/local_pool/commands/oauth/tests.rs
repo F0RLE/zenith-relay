@@ -555,6 +555,25 @@ fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
 }
 
 #[test]
+fn reauthentication_settings_merge_preserves_the_new_quota_observation() {
+    let mut current = account("account_quota", "provider-account", "old-refresh");
+    current.account.quota.reset_credits_available = Some(0);
+    current.account.quota.updated_at_ms = Some(1_000);
+    let mut updated = account("account_quota", "provider-account", "new-refresh");
+    updated.account.quota.reset_credits_available = Some(2);
+    updated.account.quota.updated_at_ms = Some(2_000);
+    let fresh_quota = updated.account.quota.clone();
+
+    preserve_existing_settings(&mut updated, &current, OAuthClientKind::Codex);
+
+    assert_eq!(updated.account.quota, fresh_quota);
+    assert_ne!(updated.account.quota, current.account.quota);
+    current.account.quota.updated_at_ms = Some(3_000);
+    preserve_existing_settings(&mut updated, &current, OAuthClientKind::Codex);
+    assert_eq!(updated.account.quota, current.account.quota);
+}
+
+#[test]
 fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
     let mut current = account("account_expired", "provider-account", "old-refresh");
     current.account.subscription = zenith_relay_core::quota::Subscription::normalize(

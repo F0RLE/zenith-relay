@@ -228,16 +228,9 @@ impl UsageEvent {
                 }
             }
         }
-        let model = [
-            "/response/model",
-            "/message/model",
-            "/model",
-            "/modelVersion",
-        ]
-        .into_iter()
-        .find_map(|path| payload.pointer(path).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .filter(|model| crate::catalog::is_valid_model_token(model));
+        let model = crate::protocol::response_models::serving(payload)
+            .map(str::trim)
+            .filter(|model| crate::catalog::is_valid_model_token(model));
         if let (Some(routing), Some(model)) = (self.routing.as_mut(), model) {
             if routing.upstream_response_model.as_deref() == Some(model) {
                 return;
@@ -309,6 +302,7 @@ fn relay_error_category(category: &str) -> bool {
         error_codes::INVALID_REQUEST
             | error_codes::HTTP_HEADERS_TIMEOUT
             | error_codes::HTTP_SEND_START_TIMEOUT
+            | error_codes::SIWC_WEBSOCKET_REQUIRED
             | error_codes::MODEL_NOT_FOUND
             | error_codes::NO_ELIGIBLE_SOURCE
             | error_codes::ALL_SOURCES_TEMPORARILY_UNAVAILABLE

@@ -97,6 +97,10 @@ pub(super) struct Request {
     pub(super) instructions: Option<Message>,
     pub(super) messages: Vec<Message>,
     pub(super) tools: Vec<Function>,
+    /// Messages discovery uses an initial catalog item, even before a tool loads.
+    /// Loaded definitions map to discovering result IDs, which survive restored
+    /// or split portable history. Inline catalog changes use their existing owner.
+    pub(super) deferred_tools: Option<BTreeMap<String, Vec<String>>>,
     pub(super) web_search: Option<Value>,
     /// Responses tool kind, local name and namespace, keyed by upstream name.
     pub(super) client_tools: BTreeMap<String, ClientToolTarget>,

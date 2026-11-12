@@ -256,11 +256,7 @@ pub(super) async fn complete_buffered_response(
     if completed {
         let recovered = lease.settle_rotation_success_with_latency(now_ms(), event.ttft_ms);
         event.consecutive_failures = recovered.then_some(0);
-        runtime.bind_prompt_affinity(
-            prompt_affinity_key.as_deref(),
-            &route.candidate_id,
-            now_ms(),
-        );
+        runtime.bind_prompt_affinity_for_lease(prompt_affinity_key.as_deref(), lease, now_ms());
     } else {
         lease.settle_rotation_terminal(now_ms());
     }
@@ -564,7 +560,8 @@ async fn read_completed_body(
             apply_failure_state(&mut event, failure_state);
             emit_usage(read.runtime, event);
             if failure_category_is_request_terminal(failure.category)
-                || route_forbids_fallback(read.route, failure.status, &failure)
+                || (route_forbids_fallback(read.route, failure.status, &failure)
+                    && !read.lease.has_transient_retry())
                 || failure.execution.certainty != ExecutionCertainty::NotSent
             {
                 return Err(CompletionStep::Respond(attempt_error_response(

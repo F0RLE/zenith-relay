@@ -86,7 +86,12 @@ impl RotationEngine {
         if !load_group.iter().any(|candidate| candidate.id == preferred) {
             return CacheAffinityReason::ParallelLoad;
         }
-        let resources = self.resource_group(load_group, request, now_ms);
+        let resources = self.resource_group(
+            load_group,
+            request,
+            now_ms,
+            Self::independent_request(&ready, request),
+        );
         if !resources.iter().any(|candidate| candidate.id == preferred) {
             return if diagnostics.best_quota_remaining_basis_points.is_some() {
                 CacheAffinityReason::QuotaHeadroom

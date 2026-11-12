@@ -1,6 +1,85 @@
 use super::*;
 
 #[tokio::test]
+async fn persistent_websocket_rate_limit_wait_reuses_the_original_account() {
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(VecDeque::from([
+            vec![json!({"type":"error","status":429,"body":{"error":{
+                "code":"rate_limit_exceeded","message":"Synthetic temporary limit",
+                "retry_after":0.01
+            }}})],
+            vec![json!({"type":"response.completed","response":{
+                "id":"synthetic-recovered","status":"completed","model":MODEL,
+                "output":[{"type":"message","role":"assistant","content":[{
+                    "type":"output_text","text":"Synthetic recovered answer"
+                }]}]
+            }})],
+        ]))),
+    ))
+    .await;
+    let (backup, backup_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(2).unwrap());
+    register_ready(&authority, "retry-owner", "synthetic-owner-access").await;
+    register_ready(&authority, "retry-backup", "synthetic-backup-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("retry-owner", "provider-owner", &upstream, 200),
+            account("retry-backup", "provider-backup", &backup, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .set_route_recovery_enabled(true);
+    rotation_policy::set_order(&gateway, &["retry-owner", "retry-backup"]);
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","model":MODEL,"input":"Synthetic input"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.completed"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    assert_eq!(backup_state.requests.lock().unwrap().len(), 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if usage_observations::physical_attempts(&events.lock().unwrap()).len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let events = events.lock().unwrap();
+    let attempts = usage_observations::physical_attempts(&events);
+    assert_eq!(attempts[0].http_status, 429);
+    assert!(attempts[1].success);
+    assert_eq!(attempts[0].candidate_id, attempts[1].candidate_id);
+    assert_eq!(attempts[0].request_id, attempts[1].request_id);
+}
+
+#[tokio::test]
 async fn failed_live_websocket_response_with_generated_usage_is_not_repaired() {
     assert_live_websocket_terminal_repair(
         json!({"usage":{"input_tokens":5,"output_tokens":7}}),
@@ -534,6 +613,13 @@ async fn persistent_websocket_retry_stops_when_retry_policy_is_disabled() {
     let failure = receive_websocket_json_with_timeout(&mut socket, Duration::from_secs(3)).await;
     assert_eq!(failure["type"], "error");
     assert_eq!(failure["error"]["code"], "upstream_websocket_closed");
+    assert_eq!(runtime.candidate_runtime_order()[0].in_flight, 0);
+    let close = tokio::time::timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("gateway did not send the close frame")
+        .expect("gateway dropped the connection before the close frame")
+        .expect("gateway reset the connection before the close frame");
+    assert!(matches!(close, ClientWsMessage::Close { .. }));
 }
 
 #[tokio::test]

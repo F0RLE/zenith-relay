@@ -91,6 +91,12 @@ async fn send_reset_request(
     endpoint: &str,
     request_body: Option<&Value>,
 ) -> LocalResult<ResetHttpResponse> {
+    if prepared.oauth_client_kind == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "Reset credits require a linked Codex or Excel/BPS connection",
+        ));
+    }
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(20))
@@ -208,4 +214,30 @@ pub(super) fn reset_http_error(status: StatusCode) -> LocalPoolError {
         retryable: Some(retryable),
         ..ErrorDiagnostics::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn siwc_reset_requests_stop_before_building_an_http_request() {
+        let prepared = PreparedAccountAuthorization {
+            oauth_client_kind: zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc,
+            authorization: HeaderValue::from_static("Bearer synthetic-siwc-access"),
+            subscription_authorization: None,
+            tokens: None,
+            token_revision: None,
+            agent_task_id: None,
+            provider_account_id: "synthetic-provider".into(),
+            proxy: None,
+        };
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let result = send_reset_request(&prepared, method, "invalid-endpoint", None).await;
+            assert!(
+                matches!(result, Err(error) if error.code == ErrorCode::Conflict
+                && error.message.contains("linked Codex or Excel/BPS"))
+            );
+        }
+    }
 }

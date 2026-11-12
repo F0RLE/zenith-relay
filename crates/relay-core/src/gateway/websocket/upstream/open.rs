@@ -19,7 +19,7 @@ pub(super) async fn open_upgraded_socket(
     mut request: ClientRequest,
     route: ExecutorRoute,
     lease: CandidateLease,
-    upgrade: reqwest_websocket::UpgradeResponse,
+    upgrade: super::super::transport::UpgradeResponse,
     prepared_request: PreparedPayload,
     prepared: PreparedAuthorization,
     attempt: &mut u16,

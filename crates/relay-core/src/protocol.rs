@@ -4,6 +4,7 @@ pub(crate) mod agent_messages;
 pub(crate) mod completion;
 pub(crate) mod interactions;
 mod management;
+pub(crate) mod response_models;
 pub(crate) mod response_snapshots;
 pub(crate) mod sse;
 

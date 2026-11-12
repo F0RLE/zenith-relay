@@ -183,11 +183,16 @@ pub(super) fn prepare_request_attempt(
             adapter_request.upstream_body(),
         ))
     .then(|| adapter_request.upstream_body().clone());
+    let mut preparation = RequestPreparationDiagnostics::default();
     if siwc_route {
-        if let Err(error) =
-            crate::providers::chatgpt::prepare_siwc_request(adapter_request.upstream_body_mut())
-        {
-            return RequestPrepare::Reject(error);
+        match crate::providers::chatgpt::prepare_siwc_request(adapter_request.upstream_body_mut()) {
+            Ok(omitted) => preparation.siwc_output_limit_omitted = omitted.then_some(true),
+            Err(error) => {
+                if error.parameter() == Some("previous_response_id") {
+                    return RequestPrepare::Reject(error);
+                }
+                return stop_for_adapter_error(error, last_adapter_error);
+            }
         }
         // SIWC skips Codex normalization, not the shared account cache-key policy.
         crate::gateway::request::apply_account_prompt_cache_key(
@@ -200,7 +205,6 @@ pub(super) fn prepare_request_attempt(
             client_context_id.as_deref(),
         );
     }
-    let mut preparation = RequestPreparationDiagnostics::default();
     let basis_points_request = if basis_points_route {
         match rewrite_basis_points_body(
             &mut adapter_request,

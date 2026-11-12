@@ -32,6 +32,24 @@ mod tests {
     use zenith_relay_core::protocol::MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;
 
     #[test]
+    fn retired_siwc_output_limit_setting_preserves_other_gateway_settings() {
+        let expected = GatewaySettings {
+            enabled: true,
+            port: 15432,
+            ..GatewaySettings::default()
+        };
+        let canonical = serde_json::to_value(&expected).unwrap();
+        assert!(canonical.get("siwcOutputLimitCompatibility").is_none());
+        for enabled in [false, true] {
+            let mut stored = canonical.clone();
+            stored["siwcOutputLimitCompatibility"] = serde_json::json!(enabled);
+            let restored: GatewaySettings = serde_json::from_value(stored).unwrap();
+            assert_eq!(restored, expected);
+            assert_eq!(serde_json::to_value(restored).unwrap(), canonical);
+        }
+    }
+
+    #[test]
     fn existing_gateway_warning_fields_load_without_client_failures() {
         let mut stored = serde_json::to_value(GatewaySettings::default()).unwrap();
         assert!(stored.get("clientCatalogRefreshFailures").is_none());

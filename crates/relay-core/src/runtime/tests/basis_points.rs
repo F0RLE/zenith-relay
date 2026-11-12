@@ -35,6 +35,11 @@ struct AccessState {
     generation_replies: Mutex<std::collections::VecDeque<(StatusCode, Value)>>,
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
+    http_generation_requests: AtomicUsize,
+    websocket_generations: AtomicBool,
+    websocket_requests: AtomicUsize,
+    websocket_upgrade_reply: Mutex<Option<AccessReply>>,
+    websocket_bodies: Mutex<Vec<Value>>,
     attachment_requests: AtomicUsize,
     attachment_file_id: Mutex<Option<String>>,
     attachment_failure: Mutex<Option<(StatusCode, HeaderMap)>>,
@@ -80,6 +85,11 @@ impl AccessServer {
             generation_replies: Mutex::new(Default::default()),
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
+            http_generation_requests: AtomicUsize::new(0),
+            websocket_generations: AtomicBool::new(false),
+            websocket_requests: AtomicUsize::new(0),
+            websocket_upgrade_reply: Mutex::new(None),
+            websocket_bodies: Mutex::new(Vec::new()),
             attachment_requests: AtomicUsize::new(0),
             attachment_file_id: Mutex::new(None),
             attachment_failure: Mutex::new(None),
@@ -102,15 +112,18 @@ impl AccessServer {
             .route("/responses/access", get(access))
             .route(
                 "/responses",
-                post(generation)
-                    .get(|State(state): State<Arc<AccessState>>| async move {
-                        // Count rejected upgrades so tests catch stray native WebSocket requests.
-                        state.generation_requests.fetch_add(1, Ordering::SeqCst);
-                        StatusCode::METHOD_NOT_ALLOWED
-                    })
-                    // Large-history regressions must exercise Relay's replay
-                    // budget, not Axum's unrelated 2 MiB JSON extractor limit.
-                    .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+                post(
+                    |state: State<Arc<AccessState>>, body: Json<Value>| async move {
+                        state
+                            .http_generation_requests
+                            .fetch_add(1, Ordering::SeqCst);
+                        generation(state, body).await
+                    },
+                )
+                .get(siwc::upstream::upgrade)
+                // Large-history regressions must exercise Relay's replay
+                // budget, not Axum's unrelated 2 MiB JSON extractor limit.
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
             )
             .route("/attachments", post(attachment))
             .with_state(state.clone());

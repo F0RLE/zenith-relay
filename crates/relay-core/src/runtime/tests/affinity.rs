@@ -196,6 +196,21 @@ fn prompt_affinity_uses_explicit_cache_key_before_session_context() {
     assert!(explicit.is_some());
     assert!(session.is_some());
     assert_ne!(explicit, session);
+    for distinct in [" cache-key", "cache-key ", "cache-key\t"] {
+        assert_ne!(
+            explicit,
+            runtime.prompt_affinity_key(
+                "key-1",
+                "gpt-test",
+                Some(distinct),
+                Some("client-session")
+            )
+        );
+    }
+    assert_eq!(
+        session,
+        runtime.prompt_affinity_key("key-1", "gpt-test", Some(" \t"), Some("client-session"))
+    );
     assert_ne!(session, other_session);
     assert_ne!(
         session,

@@ -223,7 +223,8 @@ pub(super) async fn execute(
         .await
         .map_err(|_| Box::new((*invalid_stream(), headers.clone())))?;
     if !status.is_success() {
-        let mut failure = AttemptFailure::status_with_body(status, Some(&response_bytes));
+        let mut failure =
+            AttemptFailure::status_with_headers(status, Some(&response_bytes), &headers);
         super::errors::apply_degraded_route_policy(runtime, &mut failure);
         return Err(Box::new((failure, headers)));
     }
@@ -276,6 +277,37 @@ mod tests {
         assert_eq!(response_json["usage"]["input_tokens"], 12);
         assert_eq!(response_json["output"][0]["type"], "compaction");
         assert!(compaction_document(&json!({"status": "incomplete", "output": []})).is_err());
+    }
+
+    #[test]
+    fn native_compaction_preserves_format_and_ordered_configuration_items() {
+        let request = json!({"model":"synthetic-model", "input":[
+            {"type":"configuration_update","configuration":{"synthetic_extension":true}},
+            {"role":"user","content":"Synthetic retained context"}
+        ], "text":{"format":{"type":"json_schema","name":"synthetic_output","strict":true,
+            "schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}},
+            "tools":[{"type":"function","name":"synthetic_lookup","parameters":{"type":"object","properties":{}}}],
+            "tool_choice":"none", "reasoning":{"effort":"high"}});
+        let encoded: Value = serde_json::from_slice(&request_body(&request).ok().unwrap()).unwrap();
+        assert_eq!(
+            &encoded["input"].as_array().unwrap()[..2],
+            request["input"].as_array().unwrap()
+        );
+        for field in ["text", "tools", "tool_choice", "reasoning"] {
+            assert_eq!(
+                encoded[field], request[field],
+                "native {field} is not a local-summary option"
+            );
+        }
+        let mut routed = request.as_object().unwrap().clone();
+        assert!(prepare_routed_compaction_request(&mut routed));
+        for field in ["text", "tools", "tool_choice", "reasoning"] {
+            assert_eq!(routed[field], request[field]);
+        }
+        assert_eq!(
+            &routed["input"].as_array().unwrap()[..2],
+            request["input"].as_array().unwrap()
+        );
     }
 
     #[test]

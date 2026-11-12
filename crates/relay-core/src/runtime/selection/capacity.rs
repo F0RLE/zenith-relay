@@ -31,6 +31,23 @@ impl GatewayRuntime {
         if let Some(key) = prompt_affinity_key {
             self.restore_prompt_affinity_from_store(key, now_ms);
         }
+        match self
+            .retry_preferred_candidate(AdmissionRequest {
+                key: key.clone(),
+                model: model.into(),
+                protocols: allowed_protocols.into(),
+                tried: tried.clone(),
+                response_affinity: response_affinity_key.map(str::to_owned),
+                prompt_affinity: prompt_affinity_key.map(str::to_owned),
+                operation,
+                budget: budget.clone(),
+            })
+            .await
+        {
+            Ok(Some(selected)) => return Some(selected),
+            Err(()) => return None,
+            Ok(None) => {}
+        }
         let attempted_members = budget.attempted_members();
         let mut exclusions = self.lock_scheduler().routes_for_members(&attempted_members);
         exclusions.extend(tried.iter().cloned());
@@ -77,13 +94,41 @@ impl GatewayRuntime {
         if !budget.can_dispatch() {
             return (None, false);
         }
-        // Live principal scope stays locked through selection and reservation.
+        let preferred = budget.retry_candidate();
+        // Keep the dispatch lock order: principal scope, authorization, scheduler.
         let scope = key.scope_read();
+        let retry_authorization = preferred
+            .as_ref()
+            .and_then(|candidate| candidate.token_revision.as_ref())
+            .map(crate::accounts::TokenDispatchRevision::guard);
+        if retry_authorization.as_ref().is_some_and(Option::is_none) {
+            return (None, false);
+        }
+        // Live principal scope stays locked through selection and reservation.
         let mut scheduler = self.lock_scheduler();
         let hidden = crate::poison::read(&self.model_state.hidden_models);
         if hidden.contains(&crate::model_id_key(model)) {
             return (None, false);
         }
+        let retry_exclusions = if let Some(preferred) = &preferred {
+            if scheduler.candidate_permission_revision(&preferred.candidate_id)
+                != preferred.permission_revision
+            {
+                return (None, false);
+            }
+            let mut exclusions = tried.clone();
+            exclusions.extend(
+                scheduler
+                    .candidates()
+                    .filter(|candidate| candidate.id != preferred.candidate_id)
+                    .map(|candidate| candidate.id.clone()),
+            );
+            exclusions.remove(&preferred.candidate_id);
+            Some(exclusions)
+        } else {
+            None
+        };
+        let tried = retry_exclusions.as_ref().unwrap_or(tried);
         let selection_request = || SelectionRequest {
             model,
             allowed_protocols,
@@ -146,9 +191,18 @@ impl GatewayRuntime {
                             debug_assert_eq!(owner, selection.candidate_id);
                             (key.to_owned(), revision)
                         }),
+                    prompt_owner: prompt_affinity_key.map(|key| {
+                        let revision = scheduler
+                            .prompt_affinity_binding(key, now_ms)
+                            .map(|(_, revision)| revision);
+                        (key.to_owned(), revision)
+                    }),
                     image_bridge_revision,
                     rotation_budget: budget.clone(),
                     dispatched_token_revision: Mutex::new(None),
+                    retry_token_revision: preferred
+                        .as_ref()
+                        .and_then(|candidate| candidate.token_revision.clone()),
                     rotation_started: AtomicBool::new(false),
                     rotation_settled: AtomicBool::new(false),
                     activity_callback: self.activity_callback.clone(),
