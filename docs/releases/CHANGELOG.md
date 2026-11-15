@@ -203,8 +203,8 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
   selected SIWC route; confirmation keeps SIWC app limits distinct.
 - Terminal WebSocket connection failures finish a bounded close handshake,
   preserving their error response when control frames are still pending.
-- Native WebSocket-to-HTTP fallback keeps the HTTP executor future off the
-  nested bridge stack, preventing a Windows stack overflow during recovery.
+- Native WebSocket sessions and HTTP fallback no longer overflow worker stacks
+  during generation, conversation continuation, or recovery.
 - Updated the Desktop `rustix` dependency to its compatible memory-safety fix.
 - Build diagnostics and Codex qualification read through stable file handles;
   selected profile/catalog reads enforce byte limits on the opened files.

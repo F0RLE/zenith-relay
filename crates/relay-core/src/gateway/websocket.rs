@@ -216,7 +216,9 @@ async fn handle_connection(
         }
     };
 
-    bridge(downstream, runtime, key, headers, connected).await;
+    // A live bridge owns the continuation/recovery state for the whole session.
+    // Keep that future off the upgrade handler's stack, including debug builds.
+    Box::pin(bridge(downstream, runtime, key, headers, connected)).await;
 }
 
 async fn read_initial_request(
