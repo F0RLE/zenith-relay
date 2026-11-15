@@ -240,7 +240,7 @@ fn diagnostic_schema_upgrades_v45_without_rewriting_history() {
         connection
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        LOCAL_DATABASE_SCHEMA_VERSION
+        46
     );
     assert_eq!(
         connection
@@ -256,4 +256,61 @@ fn diagnostic_schema_upgrades_v45_without_rewriting_history() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn image_diagnostics_reopen_export_and_expire_without_losing_usage() {
+    let root = crate::files::test_temp_root("relay-image-diagnostics");
+    let path = root.join("usage.sqlite");
+    let mut observation = event("synthetic-image");
+    observation.routing.as_mut().unwrap().endpoint_kind = Some("images".into());
+    observation.routing.as_mut().unwrap().images = Some(serde_json::from_value(json!({
+        "requested":{"model":"gpt-image-2.6-sunburst","size":"3840x2160","quality":"max"},
+        "sent":{"model":"gpt-image-2.6-sunburst","size":"3840x2160","quality":"max"},
+        "reported":[{"size":"auto","quality":"synthetic-private"}],
+        "outputs":[{"index":0,"reported":{},"headerStatus":"observed","detectedFormat":"png","dimensions":{"width":1672,"height":941},"sentSizeMatches":false}]
+    })).unwrap());
+    let database = TelemetryDb::open(&path).unwrap();
+    database.record(&observation).unwrap();
+    drop(database);
+    let database = TelemetryDb::open(&path).unwrap();
+    let rows = database.list(10).unwrap();
+    assert_eq!(
+        rows[0].routing.as_ref().unwrap().images,
+        observation.routing.as_ref().unwrap().images
+    );
+    let report = super::super::support::document(rows.first(), &rows, false);
+    assert_eq!(
+        report["finalRequest"]["routing"]["images"]["outputs"][0]["dimensions"]["width"],
+        1672
+    );
+    assert_eq!(
+        report["finalRequest"]["routing"]["images"]["sent"]["size"],
+        "3840x2160"
+    );
+    assert!(!report.to_string().contains("synthetic-private"));
+    let totals =
+        serde_json::to_value(database.usage_page(&UsageQuery::default()).unwrap().totals).unwrap();
+    database
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "UPDATE request_logs SET created_at = datetime('now', '-8 days');
+         UPDATE request_attempts SET created_at = datetime('now', '-8 days');",
+        )
+        .unwrap();
+    database.maintain_usage().unwrap();
+    let rows = database.list(10).unwrap();
+    assert!(rows[0].routing.as_ref().unwrap().images.is_none());
+    assert_eq!(
+        rows[0].routing.as_ref().unwrap().endpoint_kind.as_deref(),
+        Some("images")
+    );
+    assert_eq!(
+        serde_json::to_value(database.usage_page(&UsageQuery::default()).unwrap().totals).unwrap(),
+        totals
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
 }

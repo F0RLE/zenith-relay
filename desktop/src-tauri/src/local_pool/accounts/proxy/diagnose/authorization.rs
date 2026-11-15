@@ -16,6 +16,8 @@ use zenith_relay_core::{
 #[cfg(test)]
 mod tests;
 
+pub(super) mod image_probe;
+
 struct Selection {
     record: LocalAccountRecord,
     credentials: StoredCodexCredentials,

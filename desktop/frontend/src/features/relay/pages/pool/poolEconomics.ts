@@ -63,7 +63,7 @@ export function poolEconomics(members: readonly PoolMember[], nowMs = Date.now()
     purchaseCount, purchaseMicroUsd, recoveredMicroUsd,
     // Use matched account usage and purchase costs, never average percentages
     // or inflate payback with API sources that have no account purchase cost.
-    payback: purchaseMicroUsd > 0 && (recoveredPricedTokens > 0 || recoveredUnpricedTokens === 0)
+    payback: purchaseMicroUsd > 0 && (recoveredMicroUsd > 0 || recoveredPricedTokens > 0 || recoveredUnpricedTokens === 0)
       ? recoveredMicroUsd / purchaseMicroUsd : null,
     paybackApproximate: paybackApproximate || purchaseCount < accountCount,
   };

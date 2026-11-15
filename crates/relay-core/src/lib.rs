@@ -105,7 +105,7 @@ pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{ProxyConfig, normalize_proxy_url, proxy_reference_id};
 pub use request_timezone::{is_valid_timezone, normalize_timezone};
 pub use runtime::{
-    DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions,
+    CODEX_IMAGE_MODELS, DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions,
     Http2DispatchObservation, Http2RetryDiagnostic, IMAGE_API_MODEL, PoolAccess, PoolParticipant,
     RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
     RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,

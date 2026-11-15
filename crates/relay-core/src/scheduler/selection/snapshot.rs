@@ -101,6 +101,8 @@ pub struct RoutingDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_response_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<crate::usage::ImageDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<crate::usage::TransportDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
@@ -436,6 +438,7 @@ impl PoolScheduler {
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
             upstream_response_model: None,
+            images: None,
             transport: None,
             cache_context: None,
             cache_affinity: None,

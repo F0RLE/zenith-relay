@@ -50,6 +50,7 @@ fn event(
             dispatches_before: 0,
             endpoint_kind: Some("responses".into()),
             upstream_response_model: None,
+            images: None,
             transport: None,
             cache_context: Some(diagnostics),
             cache_affinity: None,

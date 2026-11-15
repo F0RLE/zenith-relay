@@ -13,6 +13,12 @@ mod authorization;
 
 pub(crate) fn run_if_requested() -> Option<i32> {
     let args: Vec<_> = std::env::args_os().collect();
+    if authorization::image_probe::requested(&args) {
+        return Some(write_result(
+            authorization::image_probe::run(&args),
+            &mut std::io::stdout().lock(),
+        ));
+    }
     let result = match diagnostic_root(&args) {
         Ok(None) => return None,
         Err(code) => Err(code),

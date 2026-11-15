@@ -1,4 +1,4 @@
-use super::super::{AccountModelInventory, GatewayRuntime, IMAGE_API_MODEL, normalized_set};
+use super::super::{AccountModelInventory, CODEX_IMAGE_MODELS, GatewayRuntime, normalized_set};
 use crate::CandidateKind;
 use crate::error_codes;
 use std::sync::atomic::Ordering;
@@ -14,9 +14,6 @@ impl GatewayRuntime {
             return false;
         };
         let configured_models = normalized_set(models.iter());
-        let image_main_model = (account.oauth_client_kind
-            == crate::providers::chatgpt::OAuthClientKind::Codex)
-            .then(|| IMAGE_API_MODEL.to_owned());
         let mut candidate_models = if account.images_only {
             Default::default()
         } else {
@@ -27,9 +24,9 @@ impl GatewayRuntime {
         } else {
             models.to_vec()
         };
-        if image_main_model.is_some() {
-            candidate_models.insert(IMAGE_API_MODEL.to_string());
-            published_models.push(IMAGE_API_MODEL.to_string());
+        if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex {
+            candidate_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
+            published_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
         }
         let mut scheduler = self.lock_scheduler();
         if scheduler.is_retired() {
@@ -48,13 +45,9 @@ impl GatewayRuntime {
         // scheduler lock until all three views name the same inventory.
         let mut inventory = crate::poison::write(&account.model_inventory);
         let changed = inventory.configured_models != configured_models;
-        let image_bridge_changed = changed || inventory.image_main_model != image_main_model;
-        *inventory = AccountModelInventory {
-            configured_models,
-            image_main_model,
-        };
+        *inventory = AccountModelInventory { configured_models };
         drop(inventory);
-        if image_bridge_changed {
+        if changed {
             // Inventory changes revoke pending leases, including image sends.
             // The native image model itself never changes with a text model.
             account.image_bridge_revision.fetch_add(1, Ordering::AcqRel);

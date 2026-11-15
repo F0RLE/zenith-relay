@@ -216,12 +216,23 @@ const fn or_rate(preferred_rate: Option<u64>, fallback_rate: Option<u64>) -> Opt
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageModelPrice {
     pub input_micro_usd_per_image: Option<u64>,
     pub output_micro_usd_per_image: Option<u64>,
+    /// Token rates, including image-token rates, are microUSD per million.
     pub input_micro_usd_per_image_token: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_micro_usd_per_image_token: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_image_micro_usd_per_million: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_text_micro_usd_per_million: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_text_micro_usd_per_million: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_text_micro_usd_per_million: Option<u64>,
 }
 
 /// A request-level image quote. Image operations are intentionally kept out

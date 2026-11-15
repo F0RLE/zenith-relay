@@ -1,6 +1,43 @@
 use super::{CatalogEntry, PriceSource, PricingCatalog, ResolvedPrice, TokenPrice};
 
 impl PricingCatalog {
+    pub(crate) fn is_image_generation(&self, model: &str) -> bool {
+        self.exact_entry(model, None)
+            .or_else(|| {
+                Self::official_model_family(model)
+                    .and_then(|family| self.canonical_entry(model, family))
+            })
+            .is_some_and(|entry| entry.image_generation)
+    }
+
+    pub fn resolve_image(
+        &self,
+        model: &str,
+        account: bool,
+        pricing_provider: Option<&str>,
+        provider_family: Option<&str>,
+    ) -> (Option<super::ImageModelPrice>, PriceSource) {
+        if !account
+            && let Some(image) = self
+                .exact_entry(model, pricing_provider)
+                .and_then(|entry| entry.image)
+        {
+            return (Some(image), PriceSource::LiteLlmExact);
+        }
+        let family = if account {
+            provider_family
+        } else {
+            Self::official_model_family(model).or(provider_family)
+        };
+        match family
+            .and_then(|family| self.canonical_entry(model, family))
+            .and_then(|entry| entry.image)
+        {
+            Some(image) => (Some(image), PriceSource::LiteLlmCanonical),
+            None => (None, PriceSource::Unpriced),
+        }
+    }
+
     /// Resolves a source price using provider evidence, then LiteLLM exact,
     /// the official catalog family for a known model id, an explicitly
     /// declared family for any other model, and finally a manual override.

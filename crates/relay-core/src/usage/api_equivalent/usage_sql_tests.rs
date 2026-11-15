@@ -5,7 +5,12 @@ fn usage_total_columns_keep_the_local_speed_guard() {
     let desktop_at = desktop.find(marker).unwrap() + marker.len();
     assert_eq!(
         &desktop[desktop_at..],
-        ", COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN latency_ms ELSE 0 END), 0)"
+        concat!(
+            ", COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), ",
+            "COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND COALESCE(output_tokens, 0) <= latency_ms THEN latency_ms ELSE 0 END), 0), ",
+            "COALESCE(SUM(CASE WHEN input_tokens > 0 AND cached_input_tokens BETWEEN 0 AND input_tokens THEN input_tokens ELSE 0 END), 0), ",
+            "COALESCE(SUM(CASE WHEN input_tokens > 0 AND cached_input_tokens BETWEEN 0 AND input_tokens THEN cached_input_tokens ELSE 0 END), 0)"
+        )
     );
 }
 

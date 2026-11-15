@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Modality subsets of ordinary token totals, never additional consumption.
+/// Rendering subsets and separate SVG authoring, included once in ordinary totals.
 /// No image bytes, prompts, URLs, or inferred account credit costs are retained.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,15 +11,63 @@ pub struct ImageUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_image_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_text_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_image_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_image_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_text_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub svg_usage: Option<SvgUsage>,
     #[serde(default)]
     pub generated_images: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_details_consistent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_details_consistent: Option<bool>,
+}
+
+/// SVG authoring is separate from rendering; reasoning is a subset of its output.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvgUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+}
+
+impl SvgUsage {
+    pub(crate) fn observe(&mut self, usage: &Value) {
+        if let Some(model) = usage.get("model").and_then(Value::as_str)
+            && crate::is_valid_model_id(model)
+        {
+            self.model = Some(model.to_owned());
+        }
+        for (target, key) in [
+            (&mut self.input_tokens, "input_tokens"),
+            (&mut self.output_tokens, "output_tokens"),
+            (&mut self.reasoning_tokens, "reasoning_tokens"),
+        ] {
+            if let Some(value) = usage.get(key).and_then(Value::as_u64) {
+                *target = Some(value);
+            }
+        }
+        if let Some(total) = usage.get("total_tokens").and_then(Value::as_u64) {
+            self.total_tokens = Some(total);
+        } else if let Some((input, output)) = self.input_tokens.zip(self.output_tokens) {
+            self.total_tokens = input.checked_add(output);
+        }
+    }
 }
 
 impl ImageUsage {
@@ -43,11 +91,25 @@ impl ImageUsage {
                 &mut self.cached_image_tokens,
                 "/input_tokens_details/cached_tokens_details/image_tokens",
             ),
-            (&mut self.output_image_tokens, "/output_tokens"),
+            (
+                &mut self.output_image_tokens,
+                "/output_tokens_details/image_tokens",
+            ),
+            (
+                &mut self.output_text_tokens,
+                "/output_tokens_details/text_tokens",
+            ),
         ] {
             if let Some(value) = usage.pointer(path).and_then(Value::as_u64) {
                 *target = Some(value);
             }
+        }
+        if let (Some(total), Some(text), Some(image)) = (
+            usage.get("output_tokens").and_then(Value::as_u64),
+            self.output_text_tokens,
+            self.output_image_tokens,
+        ) {
+            self.output_details_consistent = Some(text.checked_add(image) == Some(total));
         }
         if let (Some(total), Some(text), Some(image)) = (
             usage.get("input_tokens").and_then(Value::as_u64),
@@ -80,7 +142,16 @@ mod tests {
         usage.observe(&json!({}));
         assert_eq!(usage.input_text_tokens, Some(3));
         assert_eq!(usage.input_image_tokens, Some(7));
-        assert_eq!(usage.output_image_tokens, Some(6));
+        assert_eq!(usage.output_image_tokens, None);
+        assert_eq!(usage.output_text_tokens, None);
+        usage.observe(
+            &json!({"output_tokens":6,"output_tokens_details":{"image_tokens":4,"text_tokens":2}}),
+        );
+        assert_eq!(usage.output_image_tokens, Some(4));
+        assert_eq!(usage.output_text_tokens, Some(2));
+        assert_eq!(usage.output_details_consistent, Some(true));
+        usage.observe(&json!({"output_tokens":7}));
+        assert_eq!(usage.output_details_consistent, Some(false));
         assert_eq!(usage.input_details_consistent, Some(true));
         usage.observe(&json!({"input_tokens": 11}));
         assert_eq!(usage.input_details_consistent, Some(false));

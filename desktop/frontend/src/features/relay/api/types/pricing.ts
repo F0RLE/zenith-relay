@@ -54,6 +54,14 @@ export type ApiEquivalentBreakdown = {
   cacheRead: ApiEquivalentSummary | null;
   cacheWrite: ApiEquivalentSummary | null;
   output: ApiEquivalentSummary | null;
+  image?: {
+    inputText: ApiEquivalentSummary | null;
+    inputImage: ApiEquivalentSummary | null;
+    outputText: ApiEquivalentSummary | null;
+    outputImage: ApiEquivalentSummary | null;
+    svgInput: ApiEquivalentSummary | null;
+    svgOutput: ApiEquivalentSummary | null;
+  } | null;
 };
 
 export type PricingSourceSummary =

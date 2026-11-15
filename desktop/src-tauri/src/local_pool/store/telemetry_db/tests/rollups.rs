@@ -32,6 +32,7 @@ fn usage_survives_database_reopen() {
             dispatches_before: 3,
             endpoint_kind: None,
             upstream_response_model: Some("synthetic-upstream-snapshot".into()),
+            images: None,
             transport: Some(
                 serde_json::from_value(serde_json::json!({
                     "upstream":"http","mode":"native","responseFormat":"json",

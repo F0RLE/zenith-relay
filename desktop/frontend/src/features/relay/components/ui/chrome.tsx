@@ -19,15 +19,13 @@ export function AccountPlanBadge({ planType, unknown, hint, stale }: { planType:
   </span>;
 }
 
-export function AccountBadges({ planType, oauthClientKind, unknown, routeControl, planHint, planStale, poolScope = false, codexTextModelsEnabled = false }: {
+export function AccountBadges({ planType, oauthClientKind, unknown, routeControl, planHint, planStale }: {
   planType: string | null;
   oauthClientKind?: OAuthClientKind | undefined;
   unknown: string;
   routeControl?: ReactNode;
   planHint?: string | undefined;
   planStale?: boolean | undefined;
-  poolScope?: boolean | undefined;
-  codexTextModelsEnabled?: boolean | undefined;
 }) {
   const { t } = useTranslation();
   const client = oauthClientKind === "excel_bps" ? "BPS" : oauthClientKind === "siwc" ? "SIWC" : oauthClientKind === "codex" ? "Codex" : unknown;
@@ -35,7 +33,6 @@ export function AccountBadges({ planType, oauthClientKind, unknown, routeControl
   return <div className="account-badges">
     <AccountPlanBadge planType={planType} unknown={oauthClientKind === "siwc" ? t("accounts.siwcPlanUnavailable") : unknown} hint={planHint} stale={planStale} />
     {routeControl ?? <span className="account-client-badge" data-relay-tooltip={label} aria-label={label}>{client}</span>}
-    {poolScope && oauthClientKind === "codex" && !codexTextModelsEnabled ? <span className="account-client-badge">{t("accounts.imagesOnly")}</span> : null}
   </div>;
 }
 

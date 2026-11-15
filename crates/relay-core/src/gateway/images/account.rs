@@ -46,9 +46,26 @@ impl ImageAttempt<'_> {
 }
 
 pub(super) fn image_capability_unavailable(bytes: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    text.contains("image generation is not enabled")
-        || text.contains(error_codes::IMAGE_GENERATION_NOT_ENABLED)
+    let Ok(payload) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    let Some(error) = payload.get("error") else {
+        return false;
+    };
+    ["code", "type"].into_iter().any(|key| {
+        error.get(key).and_then(Value::as_str).is_some_and(|code| {
+            code.eq_ignore_ascii_case(error_codes::IMAGE_GENERATION_NOT_ENABLED)
+        })
+    }) || error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .is_some_and(|message| {
+            message
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("image generation is not enabled")
+        })
 }
 
 pub(super) fn direct_request_body(request: &PreparedImageRequest, source_model: &str) -> Vec<u8> {

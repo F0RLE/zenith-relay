@@ -63,6 +63,8 @@ for (const legacy of [false, true]) {
         for (const totals of [value.totals, ...value.buckets.map((bucket) => bucket.totals)]) {
           delete totals["cacheWriteInputTokens"];
           delete totals["cacheWriteInputSamples"];
+          delete totals["cacheRateInputTokens"];
+          delete totals["cacheRateCachedInputTokens"];
         }
       }
       localStorage.setItem(key, JSON.stringify(entries));

@@ -144,6 +144,10 @@ describe("usage data", () => {
     expect(totals.inputTokens).toBe(10);
     expect(totals.outputTokens).toBe(5);
     expect(totals.totalTokens).toBe(15);
+    expect(totals.ttftSamples).toBe(0);
+    expect(totals.generationSamples).toBe(0);
+    expect(totals.speedOutputTokens).toBe(0);
+    expect(totals.speedDurationMs).toBe(0);
   });
   test("catalog discovery is pending, not a failed or successful logical request", async () => {
     const pending = row({ success: false, routing: {
@@ -259,8 +263,8 @@ describe("usage data", () => {
   });
 
   test("send rows preserve all usage and deduplicate only the same physical send", () => {
-    const lookup = row({ id: 1, success: false, tokens: 15, inputTokens: 10, outputTokens: 5 });
-    const final = row({ id: 2, attempt: 2, duration: 8000 });
+    const lookup = row({ id: 1, success: false, tokens: 15, inputTokens: 10, outputTokens: 5, cachedInputTokens: 5 });
+    const final = row({ id: 2, attempt: 2, duration: 8000, inputTokens: 30, cachedInputTokens: 20 });
     const corrected = { ...lookup, tokens: 25, inputTokens: 20, time: "2026-08-23T00:00:09Z" };
     const rows = physicalRequestRows([lookup, final, corrected, final]);
     expect(rows).toHaveLength(2);
@@ -269,6 +273,9 @@ describe("usage data", () => {
     expect(totals.requests).toBe(1);
     expect(totals.successfulRequests).toBe(1);
     expect(totals.totalTokens).toBe(70);
+    expect(totals.cachedInputSamples).toBe(2);
+    expect(totals.cacheRateInputTokens).toBe(50);
+    expect(totals.cacheRateCachedInputTokens).toBe(25);
     expect(totals.latencyMs).toBe(8000);
     expect(totals.apiEquivalent.microUsd).toBe(3_000_000);
   });

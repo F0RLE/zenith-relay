@@ -14,6 +14,7 @@ pub(crate) struct AuthorizationDispatch<'a> {
 }
 
 mod dispatch;
+mod image_rejection;
 mod payload;
 mod prepare;
 

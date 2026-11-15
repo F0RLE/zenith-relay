@@ -430,29 +430,30 @@ fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidenc
             .stale_codex_model_manifests(["account-1"])
             .is_empty()
     );
-    assert_eq!(
-        runtime
-            .image_executor_route(
-                "account-1",
-                IMAGE_API_MODEL,
-                &scope,
-                &[WireApi::ChatCompletions],
-            )
-            .unwrap()
-            .source_model,
-        IMAGE_API_MODEL
-    );
+    for model in CODEX_IMAGE_MODELS {
+        assert_eq!(
+            runtime
+                .image_executor_route("account-1", model, &scope, &[WireApi::ChatCompletions])
+                .unwrap()
+                .source_model,
+            *model
+        );
+    }
     assert!(runtime.update_account_models("account-1", &["gpt-test".into()]));
-    assert!(
-        runtime
-            .image_executor_route(
-                "account-1",
-                IMAGE_API_MODEL,
-                &scope,
-                &[WireApi::ChatCompletions],
-            )
-            .is_some()
-    );
+    for model in CODEX_IMAGE_MODELS {
+        assert!(
+            runtime
+                .image_executor_route("account-1", model, &scope, &[WireApi::ChatCompletions])
+                .is_some()
+        );
+    }
+    for model in ["gpt-test", "gpt-image-unknown"] {
+        assert!(
+            runtime
+                .image_executor_route("account-1", model, &scope, &[WireApi::ChatCompletions])
+                .is_none()
+        );
+    }
 }
 #[tokio::test]
 async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {

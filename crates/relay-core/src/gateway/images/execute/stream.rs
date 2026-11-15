@@ -1,4 +1,7 @@
-use super::super::{ImageEndpoint, MAX_IMAGE_EVENT_BYTES, native::ImageEnvelope};
+use super::super::{
+    ImageEndpoint, MAX_IMAGE_EVENT_BYTES,
+    native::{ImageEnvelope, ImageUsageState},
+};
 use crate::gateway::{
     now_ms,
     response::{emit_usage, proxy_sse_response},
@@ -21,6 +24,7 @@ struct ImageCompletion {
     started: Instant,
 }
 
+mod normalize;
 #[cfg(test)]
 mod tests;
 
@@ -64,10 +68,14 @@ impl Drop for ImageCompletion {
 struct ImageStream {
     upstream: Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>,
     pending: Vec<u8>,
+    incoming: Bytes,
+    event_limit: usize,
     completion: ImageCompletion,
     terminal_kind: String,
     expected_images: u64,
     completed_images: u64,
+    normalize_codex_edits: bool,
+    usage: ImageUsageState,
     finished: bool,
 }
 
@@ -88,6 +96,7 @@ impl ImageStream {
             if let Some(end) = crate::protocol::sse::event_end(&self.pending) {
                 let frame: Vec<u8> = self.pending.drain(..end).collect();
                 let data = crate::protocol::sse::event_data(&frame);
+                let mut normalized_frame = None;
                 if !data.is_empty() {
                     if data.as_ref() == b"[DONE]" {
                         return Some(self.fail(error_codes::STREAM_INCOMPLETE));
@@ -95,15 +104,40 @@ impl ImageStream {
                     let Ok(envelope) = serde_json::from_slice::<ImageEnvelope<'_>>(&data) else {
                         return Some(self.fail(error_codes::STREAM_INVALID));
                     };
+                    let normalized_kind = if self.normalize_codex_edits {
+                        envelope
+                            .kind
+                            .as_deref()
+                            .and_then(|kind| kind.strip_prefix("image_generation."))
+                            .map(|suffix| format!("image_edit.{suffix}"))
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = &normalized_kind {
+                        let Some(rewritten) =
+                            normalize::codex_edit_frame(&frame, &data, kind, self.event_limit)
+                        else {
+                            return Some(self.fail(error_codes::STREAM_INVALID));
+                        };
+                        normalized_frame = Some(rewritten);
+                    }
+                    let kind = normalized_kind.as_deref().or(envelope.kind.as_deref());
                     if let Some(event) = self.completion.event.as_mut() {
-                        envelope.observe_usage(event);
-                        if envelope.kind.as_deref().is_some_and(|kind| {
+                        if kind == Some(self.terminal_kind.as_str()) {
+                            super::super::diagnostics::observe_response(
+                                &self.completion.runtime,
+                                event,
+                                &data,
+                            );
+                        }
+                        self.usage.observe(event, &envelope);
+                        if kind.is_some_and(|kind| {
                             kind.ends_with(".partial_image") || kind == self.terminal_kind
                         }) {
                             event.ttft_ms.get_or_insert(self.completion.started.elapsed().as_millis() as u64);
                         }
                     }
-                    if envelope.error.is_some() || envelope.kind.as_deref() == Some("error") {
+                    if envelope.error.is_some() || kind == Some("error") {
                         self.finished = true;
                         if let Some(event) = self.completion.event.as_mut() {
                             event.upstream_error =
@@ -113,11 +147,11 @@ impl ImageStream {
                                 ));
                         }
                         self.completion.finish(Some(error_codes::STREAM_ERROR));
-                    } else if envelope.kind.as_deref() == Some(self.terminal_kind.as_str()) {
+                    } else if kind == Some(self.terminal_kind.as_str()) {
                         if !envelope
                             .b64_json
                             .as_deref()
-                            .is_some_and(|data| !data.is_empty())
+                            .is_some_and(|data| !data.trim().is_empty())
                         {
                             return Some(self.fail(error_codes::IMAGE_OUTPUT_MISSING));
                         }
@@ -134,14 +168,20 @@ impl ImageStream {
                         }
                     }
                 }
-                return Some(Bytes::from(frame));
+                return Some(Bytes::from(normalized_frame.unwrap_or(frame)));
+            }
+            if !self.incoming.is_empty() {
+                let available = self.event_limit.saturating_sub(self.pending.len());
+                if available == 0 {
+                    return Some(self.fail(error_codes::STREAM_EVENT_TOO_LARGE));
+                }
+                let part = self.incoming.split_to(available.min(self.incoming.len()));
+                self.pending.extend_from_slice(&part);
+                continue;
             }
             match self.upstream.next().await {
                 Some(Ok(chunk)) => {
-                    if self.pending.len().saturating_add(chunk.len()) > MAX_IMAGE_EVENT_BYTES {
-                        return Some(self.fail(error_codes::STREAM_EVENT_TOO_LARGE));
-                    }
-                    self.pending.extend_from_slice(&chunk);
+                    self.incoming = chunk;
                 }
                 Some(Err(_)) | None => return Some(self.fail(error_codes::STREAM_INCOMPLETE)),
             }
@@ -160,9 +200,12 @@ pub(super) fn image_stream_response(
 ) -> Response<Body> {
     let status = upstream.status();
     let headers = upstream.headers().clone();
+    let normalize_codex_edits = event.account_id.is_some() && endpoint == ImageEndpoint::Edits;
     let state = ImageStream {
         upstream: Box::pin(upstream.bytes_stream()),
         pending: Vec::new(),
+        incoming: Bytes::new(),
+        event_limit: MAX_IMAGE_EVENT_BYTES,
         completion: ImageCompletion {
             runtime,
             lease,
@@ -172,6 +215,8 @@ pub(super) fn image_stream_response(
         terminal_kind: format!("{}.completed", endpoint.stream_prefix()),
         expected_images: expected_images.max(1),
         completed_images: 0,
+        normalize_codex_edits,
+        usage: ImageUsageState::default(),
         finished: false,
     };
     let stream = futures_util::stream::unfold(state, |mut state| async move {

@@ -38,7 +38,7 @@ impl UsageRecordKind {
             COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
             input_tokens, cached_input_tokens, cache_write_input_tokens, cache_write_ttl,
             output_tokens, total_tokens, applied_service_tier, success, latency_ms, ttft_ms,
-            generation_ms, reasoning_tokens";
+            generation_ms, reasoning_tokens, image_usage_json";
         static REQUEST: LazyLock<String> =
             LazyLock::new(|| format!("{COLUMNS} FROM request_logs WHERE request_id = ?1"));
         static ATTEMPT: LazyLock<String> = LazyLock::new(|| {
@@ -64,8 +64,8 @@ impl UsageRecordKind {
                 service_tier, applied_service_tier, routing_json, tool_use_json, error_origin,
                 requested_reasoning_effort, effective_reasoning_effort, cache_write_ttl,
                 usage_aggregate_recorded, client_context_id, upstream_error_json, image_usage_json,
-                routing_diagnostics_id, tool_diagnostics_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32, ?33, ?34, ?35)
+                routing_diagnostics_id, tool_diagnostics_id, is_image_usage
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, 1, ?31, ?32, ?33, ?34, ?35, ?33 IS NOT NULL)
             ON CONFLICT({conflict_columns}) DO UPDATE SET
                 created_at = CURRENT_TIMESTAMP,
                 attempt = excluded.attempt,
@@ -103,6 +103,7 @@ impl UsageRecordKind {
                 client_context_id = excluded.client_context_id,
                 upstream_error_json = excluded.upstream_error_json,
                 image_usage_json = excluded.image_usage_json,
+                is_image_usage = excluded.is_image_usage,
                 usage_aggregate_recorded = 1
             WHERE excluded.attempt >= {table_name}.attempt
               AND (excluded.attempt > {table_name}.attempt
@@ -319,6 +320,7 @@ impl TelemetryDb {
                 }
                 let logical_totals = usage_totals_from_sample(UsageTotalsSample {
                     success: event.success,
+                    is_image: event.image_usage.is_some(),
                     latency_ms: request_latency_ms,
                     ttft_ms: request_ttft_ms,
                     generation_ms: event.generation_ms,
@@ -346,7 +348,7 @@ impl TelemetryDb {
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction().map_err(db_error)?;
         transaction
-            .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history;")
+            .execute_batch("DELETE FROM request_logs; DELETE FROM request_attempts; DELETE FROM usage_candidate_rollups; DELETE FROM usage_image_price_rollups; DELETE FROM weekly_capacity_anchors; DELETE FROM weekly_capacity_history;")
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         self.clear_cached_usage_totals()?;
@@ -421,12 +423,16 @@ fn previous_usage_log(
         .prepare_cached(kind.previous_sql())
         .map_err(db_error)?
         .query_row(parameters, |row| {
+            let image_json = row.get::<_, Option<String>>(17)?;
+            let is_image = image_json.is_some();
             Ok(PreviousUsageLog {
                 attempt: row.get(0)?,
                 aggregated: row.get(1)?,
-                aggregate: UsageAggregate::from_row_current(row, 2)?,
+                aggregate: UsageAggregate::from_row_current(row, 2)?
+                    .with_image(image_json.and_then(|json| serde_json::from_str(&json).ok())),
                 totals: UsageTotalsSample {
                     success: row.get(12)?,
+                    is_image,
                     latency_ms: non_negative_i64(row.get(13)?),
                     ttft_ms: row.get::<_, Option<i64>>(14)?.map(non_negative_i64),
                     generation_ms: row.get::<_, Option<i64>>(15)?.map(non_negative_i64),

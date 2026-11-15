@@ -33,7 +33,8 @@ function validTotals(value: unknown): value is UsageTotals {
   const { apiEquivalent, ...fields } = emptyUsageTotals();
   const equivalent = counters["apiEquivalent"];
   return Object.keys(fields).every((key) => validCounter(counters[key])
-    || (counters[key] === undefined && (key === "cacheWriteInputTokens" || key === "cacheWriteInputSamples")))
+    || (counters[key] === undefined && (key === "cacheWriteInputTokens" || key === "cacheWriteInputSamples"
+      || key === "cacheRateInputTokens" || key === "cacheRateCachedInputTokens")))
     && equivalent != null && typeof equivalent === "object" && !Array.isArray(equivalent)
     && Object.keys(apiEquivalent).every((key) => validCounter((equivalent as Record<string, unknown>)[key]));
 }

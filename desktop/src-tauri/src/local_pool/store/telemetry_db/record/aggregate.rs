@@ -20,9 +20,44 @@ pub(in crate::local_pool::store::telemetry_db) struct UsageAggregate {
     output_samples: i64,
     total_tokens: i64,
     total_samples: i64,
+    image: Option<zenith_relay_core::usage::ImageUsage>,
 }
 
 impl UsageAggregate {
+    pub(in crate::local_pool::store::telemetry_db) fn with_image(
+        mut self,
+        image: Option<zenith_relay_core::usage::ImageUsage>,
+    ) -> Self {
+        self.image = image;
+        self
+    }
+
+    pub(in crate::local_pool::store::telemetry_db) fn apply_image_delta(
+        &self,
+        transaction: &Transaction<'_>,
+        multiplier: i64,
+    ) -> Result<()> {
+        let Some(image) = &self.image else {
+            return Ok(());
+        };
+        let usage = zenith_relay_core::ApiEquivalentUsage {
+            input_tokens: (self.input_samples > 0).then_some(self.input_tokens.max(0) as u64),
+            output_tokens: (self.output_samples > 0).then_some(self.output_tokens.max(0) as u64),
+            total_tokens: (self.total_samples > 0).then_some(self.total_tokens.max(0) as u64),
+            ..Default::default()
+        }
+        .with_aggregate_rates(&self.price_class, &self.context_band);
+        let parts = zenith_relay_core::usage::image_price_components(&self.model, usage, image);
+        super::super::image_pricing::apply_delta(
+            transaction,
+            &self.candidate_kind,
+            &self.candidate_id,
+            &self.model,
+            &parts,
+            multiplier,
+        )
+    }
+
     pub(in crate::local_pool::store::telemetry_db) fn with_context_band(
         mut self,
         band: &str,
@@ -67,6 +102,7 @@ impl UsageAggregate {
             event.total_tokens,
             event.applied_service_tier.as_deref(),
         )
+        .with_image(event.image_usage.clone())
     }
 
     pub(in crate::local_pool::store::telemetry_db) fn from_row(
@@ -167,6 +203,7 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_aggregate_delta(
     aggregate: &UsageAggregate,
     multiplier: i64,
 ) -> Result<()> {
+    aggregate.apply_image_delta(transaction, multiplier)?;
     transaction
         .prepare_cached(
             "INSERT INTO usage_candidate_rollups(

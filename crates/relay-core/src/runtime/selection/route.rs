@@ -143,9 +143,9 @@ impl GatewayRuntime {
         if account.oauth_client_kind != crate::providers::chatgpt::OAuthClientKind::Codex {
             return None;
         }
-        crate::poison::read(&account.model_inventory)
-            .image_main_model
-            .as_ref()?;
+        if !super::super::is_image_model_id(model) {
+            return None;
+        }
         Some(self.account_executor_route(account, model.to_owned(), allowed_protocols))
     }
 

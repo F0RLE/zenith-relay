@@ -1,5 +1,12 @@
 use super::*;
-use zenith_relay_core::{IMAGE_API_MODEL, protocol::PoolMembershipInput};
+use zenith_relay_core::{CODEX_IMAGE_MODELS, protocol::PoolMembershipInput};
+
+fn assert_native_images_only(models: &[String]) {
+    assert_eq!(models.len(), CODEX_IMAGE_MODELS.len());
+    for model in CODEX_IMAGE_MODELS {
+        assert!(models.iter().any(|value| value == model), "missing {model}");
+    }
+}
 
 async fn close_fixture(state: DesktopState, runtime: std::sync::Arc<GatewayRuntime>) {
     let database = std::sync::Arc::downgrade(&state.telemetry);
@@ -109,13 +116,17 @@ async fn codex_text_opt_in_rebuilds_live_routes_without_enrolling_or_removing_ac
         let current = state.gateway.runtime().await.unwrap();
         let models = visible(&current);
         assert_eq!(models.iter().any(|model| model == "gpt-test"), enabled);
-        assert!(models.iter().any(|model| model == IMAGE_API_MODEL));
+        for model in CODEX_IMAGE_MODELS {
+            assert!(models.iter().any(|value| value == model));
+        }
         assert!(current.block_degraded_routes_enabled());
         assert_eq!(
             pool::canonical_pool_model(&state, "gpt-test").is_ok(),
             enabled
         );
-        assert!(pool::canonical_pool_model(&state, IMAGE_API_MODEL).is_ok());
+        for model in CODEX_IMAGE_MODELS {
+            assert!(pool::canonical_pool_model(&state, model).is_ok());
+        }
         assert_eq!(state.gateway.address().await.unwrap(), address);
         assert_eq!(
             state.store().unwrap().account(&account_id).unwrap(),
@@ -233,9 +244,9 @@ async fn explicit_codex_image_membership_survives_restart_and_revokes_live_acces
             .unwrap();
         let summary = view.accounts.iter().find(|a| a.id == account_id).unwrap();
         assert!(summary.in_pool);
-        assert_eq!(summary.models, [IMAGE_API_MODEL]);
+        assert_native_images_only(&summary.models);
     }
-    assert_eq!(visible(&runtime), [IMAGE_API_MODEL]);
+    assert_native_images_only(&visible(&runtime));
     // Refreshes and editable model rules cannot turn an image member into a text member.
     assert!(runtime.update_account_models(&account_id, &["gpt-new".into()]));
     let mut policy_account = state.store().unwrap().account(&account_id).unwrap().clone();
@@ -248,14 +259,14 @@ async fn explicit_codex_image_membership_survives_restart_and_revokes_live_acces
     assert!(
         runtime.update_account_policy(&account_id, runtime_account_policy(&policy_account, now))
     );
-    assert_eq!(visible(&runtime), [IMAGE_API_MODEL]);
+    assert_native_images_only(&visible(&runtime));
     close_fixture(state, runtime).await;
 
     let state = DesktopState::open(root.clone()).unwrap();
     let saved = state.store().unwrap().account(&account_id).unwrap().clone();
     assert!(saved.image_pool_enabled && saved.account.in_pool);
     let runtime = runtime_from_store(&state).await.unwrap();
-    assert_eq!(visible(&runtime), [IMAGE_API_MODEL]);
+    assert_native_images_only(&visible(&runtime));
     state.gateway.start(runtime.clone(), 0).await.unwrap();
     {
         let _setup = state.setup_guard().await;

@@ -96,6 +96,20 @@ impl GatewayRuntime {
         let upstream_response = self
             .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
             .await?;
+        let upstream_response = if upstream_response.status() == StatusCode::UNAUTHORIZED
+            && !endpoint_observes_codex_quota(upstream_response.url().path())
+            && (prepared.token_generation.is_some() || prepared.agent_task_id.is_some())
+            && let Some(budget) = budget
+        {
+            let (response, replay_safe) =
+                super::image_rejection::inspect(upstream_response, budget).await;
+            if !replay_safe {
+                return Ok(self.accept_authorized_response(candidate_id, response, &prepared));
+            }
+            response
+        } else {
+            upstream_response
+        };
         if upstream_response.status() == StatusCode::UNAUTHORIZED
             && let Some(task_id) = prepared.agent_task_id.as_deref()
         {

@@ -149,6 +149,11 @@ pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut Usag
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
+    if !runtime.diagnostics_enabled()
+        && let Some(routing) = event.routing.as_mut()
+    {
+        routing.images = None;
+    }
     event.normalize_client_cancellation();
     if event.success
         && event.error_category.is_none()

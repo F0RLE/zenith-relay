@@ -15,9 +15,9 @@ export function formatMicroUsd(microUsdAmount: number, locale: string, fractionD
   return formatUsd(microUsdAmount / 1_000_000, locale, fractionDigits);
 }
 
-/** Converts a priced API-equivalent total to USD. Unpriced-only totals stay empty. */
+/** Token-based or per-image estimates can prove cost; unpriced-only totals stay empty. */
 export function pricedUsd(priceSummary: { microUsd: number; pricedTokens: number }): number | null {
-  if (priceSummary.pricedTokens <= 0) return null;
+  if (priceSummary.pricedTokens <= 0 && priceSummary.microUsd <= 0) return null;
   return priceSummary.microUsd / 1_000_000;
 }
 

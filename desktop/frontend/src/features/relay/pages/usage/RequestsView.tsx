@@ -7,7 +7,7 @@ import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { tokenSpeed } from "../../usageSpeed";
 import { usageSpeedSample, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatTiming, requestStatusHint, requestStatusKind } from "./usageReportFormat";
+import { formatDurationMs, formatTiming, requestStatusHint, requestStatusKind } from "./usageReportFormat";
 import { UsageModel, CompactNumber, SpeedValue, RequestStatusGlyph } from "./usageReportParts";
 import { UsageTableRow, type UsageColumns } from "./UsageTableRow";
 
@@ -53,7 +53,7 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     },
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     connection: { label: t("usage.poolMember"), cell: (row) => <span className="usage-request-connection">{row.connection}</span> },
-    timing: { label: t("usage.timing"), cell: (row) => <span data-relay-tooltip={t("usage.elapsedTiming")}>{formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t)}</span> },
+    timing: { label: t("usage.timing"), cell: (row) => <span data-relay-tooltip={t(row.imageUsage ? "usage.responseTime" : "usage.elapsedTiming")}>{row.imageUsage ? formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t) : formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t)}</span> },
     speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={row.imageUsage ? null : tokenSpeed(usageSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },

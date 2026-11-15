@@ -12,6 +12,7 @@ pub struct CatalogEntry {
     pub provider: Option<String>,
     pub token: Option<TokenPrice>,
     pub image: Option<ImageModelPrice>,
+    pub image_generation: bool,
     pub request_micro_usd: Option<u64>,
 }
 
@@ -26,6 +27,7 @@ impl CatalogEntry {
             provider,
             token: None,
             image: None,
+            image_generation: false,
             request_micro_usd: Some(request_micro_usd),
         }
     }
@@ -37,6 +39,7 @@ impl CatalogEntry {
         self.provider == other.provider
             && self.token == other.token
             && self.image == other.image
+            && self.image_generation == other.image_generation
             && self.request_micro_usd == other.request_micro_usd
     }
 }

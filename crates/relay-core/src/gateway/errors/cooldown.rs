@@ -7,20 +7,6 @@ pub(crate) use rate_limit::{RateLimitBodyHint, rate_limit_body_hint, rate_limit_
 #[cfg(test)]
 pub(crate) use rate_limit::{rate_limit_body_hint_at, retry_after_ms};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn settle_status_failure(
-    runtime: &GatewayRuntime,
-    lease: &crate::runtime::CandidateLease,
-    model: &str,
-    status: StatusCode,
-    category: &'static str,
-    headers: &reqwest::header::HeaderMap,
-    response_body: Option<&[u8]>,
-) -> FailureState {
-    let hint = response_body.map(rate_limit_body_hint).unwrap_or_default();
-    settle_classified_failure(runtime, lease, model, status, category, headers, hint)
-}
-
 pub(crate) fn settle_attempt_failure(
     runtime: &GatewayRuntime,
     lease: &crate::runtime::CandidateLease,

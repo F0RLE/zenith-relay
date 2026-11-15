@@ -73,6 +73,19 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_buckets(
             usage_pricing_usage_from_row(row, 6).map_err(db_error)?,
         ));
     }
+    for image in super::super::image_pricing::estimates(
+        connection,
+        where_sql,
+        query_parameters,
+        resolver,
+        false,
+        Some((query.from_ms.unwrap_or_default(), bucket_ms)),
+    )? {
+        super::super::image_pricing::add_priced(
+            &mut buckets.entry(image.at_ms).or_default().api_equivalent,
+            image.value,
+        );
+    }
     Ok(buckets
         .into_iter()
         .map(|(start_ms, totals)| UsageBucket {

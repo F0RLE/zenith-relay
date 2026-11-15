@@ -201,7 +201,19 @@ pub(super) fn usage_model_equivalents(
         members.entry(member).or_default().merge(estimate);
         model_rows.push((model, estimate, source));
     }
-    let (models, sources) = merge_model_equivalents(model_rows);
+    let (mut models, mut sources) = merge_model_equivalents(model_rows);
+    for image in super::image_pricing::estimates(
+        connection,
+        where_sql,
+        query_parameters,
+        resolver,
+        use_rollup,
+        None,
+    )? {
+        super::image_pricing::add_priced(members.entry(image.member).or_default(), image.value);
+        super::image_pricing::add_priced(models.entry(image.model).or_default(), image.value);
+        sources.push(image.source);
+    }
     Ok(GroupEquivalents {
         models,
         members,

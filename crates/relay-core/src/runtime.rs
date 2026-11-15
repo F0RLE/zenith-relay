@@ -102,16 +102,7 @@ use crate::{
     CandidateKind, UsageEvent, normalize_source_protocol_bindings, unix_time_ms as current_time_ms,
 };
 pub(crate) use images::is_image_model_id;
-pub use images::normalize_image_base_model;
-
-/// Relay's virtual Image API model for OAuth account routes.
-///
-/// The account bridge sends this model in the Responses `image_generation`
-/// tool while the top-level Responses model remains the account's selected
-/// text model. Keep the public virtual id aligned with the current stable
-/// GPT Image model; provider routes still use the model selected by their own
-/// source catalog.
-pub const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
+pub use images::{CODEX_IMAGE_MODELS, IMAGE_API_MODEL, normalize_image_base_model};
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 pub(crate) const WEBSOCKET_FAST_PATH_BACKOFF_MS: u64 = 30 * 1_000;
@@ -216,7 +207,6 @@ struct ChatGptAccountExecutor {
 
 struct AccountModelInventory {
     configured_models: BTreeSet<String>,
-    image_main_model: Option<String>,
 }
 
 #[derive(Clone)]

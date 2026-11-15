@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 mod account;
+mod diagnostics;
 mod execute;
 mod multipart;
 mod native;
@@ -18,7 +19,7 @@ mod tests;
 
 const IMAGE_PROTOCOLS: &[WireApi] = &[WireApi::Responses, WireApi::ChatCompletions];
 // Bounds apply to decoded bodies, not a potentially compressed Content-Length.
-const MAX_IMAGE_BODY_BYTES: usize = 128 * 1024 * 1024;
+use crate::protocol::images::MAX_IMAGE_BODY_BYTES;
 const MAX_IMAGE_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq)]

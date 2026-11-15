@@ -1,4 +1,4 @@
-import type { UsageTotals } from "./api/types";
+import type { LocalUsage, UsageTotals } from "./api/types";
 import { getNumberFormatter } from "./numberFormatting";
 import { isReasonableTokenSpeed, measureTokenSpeed } from "./usageSpeed";
 
@@ -15,6 +15,7 @@ export type UsageTotalsSample = {
   outputTokens: number | null;
   totalTokens: number | null;
   apiEquivalent?: UsageTotals["apiEquivalent"] | null;
+  imageUsage?: LocalUsage["imageUsage"];
 };
 
 export function emptyUsageTotals(): UsageTotals {
@@ -30,6 +31,8 @@ export function emptyUsageTotals(): UsageTotals {
     inputTokens: 0,
     cachedInputTokens: 0,
     cachedInputSamples: 0,
+    cacheRateInputTokens: 0,
+    cacheRateCachedInputTokens: 0,
     cacheWriteInputTokens: 0,
     cacheWriteInputSamples: 0,
     reasoningTokens: 0,
@@ -41,19 +44,28 @@ export function emptyUsageTotals(): UsageTotals {
   };
 }
 
+/** Token-weighted rate for valid paired cache measurements, excluding unknowns. */
+export function cacheHitRate(totals: UsageTotals): number | null {
+  const input = totals.cacheRateInputTokens;
+  const cached = totals.cacheRateCachedInputTokens;
+  if (!Number.isFinite(input) || !Number.isFinite(cached)
+    || input <= 0 || cached < 0 || cached > input) return null;
+  return cached / input * 100;
+}
+
 /** Aggregates runtime telemetry with one accounting policy. */
 export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): UsageTotals {
   const usageTotals = emptyUsageTotals();
   for (const sample of samples) {
-    const outputTokens = sample.success ? Math.max(0, sample.outputTokens ?? 0) : 0;
+    const outputTokens = sample.success && !sample.imageUsage ? Math.max(0, sample.outputTokens ?? 0) : 0;
     usageTotals.requests += 1;
     usageTotals.successfulRequests += Number(sample.success);
     usageTotals.latencyMs += sample.latencyMs;
-    if (sample.ttftMs != null) {
+    if (!sample.imageUsage && sample.ttftMs != null) {
       usageTotals.ttftMs += sample.ttftMs;
       usageTotals.ttftSamples += 1;
     }
-    const generation = measureTokenSpeed({
+    const generation = sample.imageUsage ? null : measureTokenSpeed({
       success: sample.success,
       outputTokens: sample.outputTokens,
       reasoningTokens: sample.reasoningTokens,
@@ -68,6 +80,12 @@ export function totalsFromUsageSamples(samples: Iterable<UsageTotalsSample>): Us
     if (sample.cachedInputTokens != null) {
       usageTotals.cachedInputTokens += sample.cachedInputTokens;
       usageTotals.cachedInputSamples += 1;
+    }
+    if (sample.inputTokens != null && Number.isFinite(sample.inputTokens) && sample.inputTokens > 0
+      && sample.cachedInputTokens != null && Number.isFinite(sample.cachedInputTokens)
+      && sample.cachedInputTokens >= 0 && sample.cachedInputTokens <= sample.inputTokens) {
+      usageTotals.cacheRateInputTokens += sample.inputTokens;
+      usageTotals.cacheRateCachedInputTokens += sample.cachedInputTokens;
     }
     if (sample.cacheWriteInputTokens != null) {
       usageTotals.cacheWriteInputTokens = (usageTotals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens;

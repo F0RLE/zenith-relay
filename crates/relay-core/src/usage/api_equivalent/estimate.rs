@@ -240,11 +240,15 @@ pub fn estimate_api_equivalent_breakdown_with_token_price(
             cache_read,
             cache_write,
             output,
+            image: None,
         },
     )
 }
 
-fn component_value(tokens: Option<u64>, rate: Option<u64>) -> Option<ApiEquivalentSummary> {
+pub(super) fn component_value(
+    tokens: Option<u64>,
+    rate: Option<u64>,
+) -> Option<ApiEquivalentSummary> {
     tokens.map(|tokens| match rate {
         Some(rate) => ApiEquivalentSummary {
             micro_usd: token_cost(tokens, rate),
@@ -258,7 +262,7 @@ fn component_value(tokens: Option<u64>, rate: Option<u64>) -> Option<ApiEquivale
     })
 }
 
-fn sum_component_values<const N: usize>(
+pub(super) fn sum_component_values<const N: usize>(
     values: [Option<ApiEquivalentSummary>; N],
 ) -> Option<ApiEquivalentSummary> {
     values.into_iter().flatten().reduce(|mut sum, value| {
@@ -291,7 +295,9 @@ pub fn resolve_candidate_price(query: CandidatePriceQuery<'_>) -> ResolvedPrice 
         provider_price,
         manual_price,
     } = query;
-    let Some(model) = model.filter(|model| !crate::runtime::is_image_model_id(model)) else {
+    let Some(model) = model.filter(|model| {
+        !crate::runtime::is_image_model_id(model) && !catalog.is_image_generation(model)
+    }) else {
         return ResolvedPrice {
             quote: None,
             source: PriceSource::Unpriced,
@@ -344,8 +350,8 @@ pub fn estimate_candidate_api_equivalent_with_catalog(
 /// decision: which catalog price applies, what that usage is worth, and which
 /// revision key invalidates a derived cache.
 pub struct CatalogPriceResolver<'a> {
-    catalog: &'a PricingCatalog,
-    context: &'a PricingContext,
+    pub(super) catalog: &'a PricingCatalog,
+    pub(super) context: &'a PricingContext,
     revision: String,
 }
 

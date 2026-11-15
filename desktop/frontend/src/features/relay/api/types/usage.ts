@@ -119,7 +119,8 @@ export type RoutingDiagnostics = {
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
     connectionReused?: boolean | null;
-    connectionResetReason?: "new_session" | "missing_context" | "session_unavailable" | "session_expired" | "credential_changed" | "authorization_changed" | "connection_expired" | "connection_closed" | "pending_frame" | "heartbeat_failed" | "response_interrupted" | "response_failed" | "unproven_output" | null;
+    connectionResetReason?: "new_session" | "missing_context" | "session_unavailable" | "session_wait_timeout" | "session_capacity_exceeded" | "session_expired" | "credential_changed" | "authorization_changed" | "connection_expired" | "connection_closed" | "pending_frame" | "heartbeat_failed" | "response_interrupted" | "response_failed" | "unproven_output" | null;
+    sessionWaitMs?: number | null;
     reauth?: boolean | null;
     responseHeadersMs?: number | null;
     /** Stream parser/reasoning offsets; not raw wire or CPU measurements. */
@@ -324,11 +325,21 @@ type UsageEventRecord = {
   imageUsage?: {
     inputTextTokens?: number | null;
     inputImageTokens?: number | null;
+    cachedInputTokens?: number | null;
     cachedTextTokens?: number | null;
     cachedImageTokens?: number | null;
     outputImageTokens?: number | null;
+    outputTextTokens?: number | null;
+    svgUsage?: {
+      model?: string | null;
+      inputTokens?: number | null;
+      outputTokens?: number | null;
+      reasoningTokens?: number | null;
+      totalTokens?: number | null;
+    } | null;
     generatedImages: number;
     inputDetailsConsistent?: boolean | null;
+    outputDetailsConsistent?: boolean | null;
   } | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
@@ -366,6 +377,9 @@ export type UsageTotals = {
   inputTokens: number;
   cachedInputTokens: number;
   cachedInputSamples: number;
+  /** Valid input/cache pairs from physical sends, independent of logical requests. */
+  cacheRateInputTokens: number;
+  cacheRateCachedInputTokens: number;
   cacheWriteInputTokens?: number;
   cacheWriteInputSamples?: number;
   reasoningTokens: number;

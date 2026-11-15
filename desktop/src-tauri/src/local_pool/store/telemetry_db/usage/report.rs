@@ -133,6 +133,28 @@ pub(in crate::local_pool::store::telemetry_db) fn scoped_report_summary(
         sources.push(resolver.source(&kind, &member, model_ref));
         sends.add(query, &model, &member, totals);
     }
+    for image in super::super::image_pricing::estimates(
+        connection, where_sql, parameters, resolver, false, None,
+    )? {
+        super::super::image_pricing::add_priced(&mut sends.totals.api_equivalent, image.value);
+        if query.includes_models() {
+            super::super::image_pricing::add_priced(
+                &mut sends.models.entry(image.model).or_default().api_equivalent,
+                image.value,
+            );
+        }
+        if query.includes_pool_members() {
+            super::super::image_pricing::add_priced(
+                &mut sends
+                    .members
+                    .entry(image.member)
+                    .or_default()
+                    .api_equivalent,
+                image.value,
+            );
+        }
+        sources.push(image.source);
+    }
     Ok(ReportSummary {
         sends: sends.totals.requests,
         totals: priced_totals(requests.totals, sends.totals),

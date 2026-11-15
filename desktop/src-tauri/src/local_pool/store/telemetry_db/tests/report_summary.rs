@@ -11,13 +11,14 @@ fn split_totals_projections_preserve_counts_nulls_and_speed_guards() {
                 &format!(
                     "WITH samples(success, latency_ms, ttft_ms, generation_ms,
              input_tokens, cached_input_tokens, cache_write_input_tokens,
-             reasoning_tokens, output_tokens, total_tokens) AS (VALUES
-             (1, 100, 10, 50, 100, 50, 10, 1, 20, 120),
-             (0, 200, NULL, 100, 50, NULL, NULL, NULL, 5, 55),
-             (1, 0, NULL, 0, NULL, 0, 0, 0, 0, 0),
-             (1, 10, 0, 1, 10, 5, 0, 20, 5, 15),
-             (1, 1, 0, 1, 1, 0, 0, 0, 1000, 1001),
-             (1, 100, 20, 20, 0, NULL, 1, NULL, 1, NULL))
+             reasoning_tokens, output_tokens, total_tokens, is_image_usage) AS (VALUES
+             (1, 100, 10, 50, 100, 50, 10, 1, 20, 120, 0),
+             (0, 200, NULL, 100, 50, NULL, NULL, NULL, 5, 55, 0),
+             (1, 0, NULL, 0, NULL, 0, 0, 0, 0, 0, 0),
+             (1, 10, 0, 1, 10, 5, 0, 20, 5, 15, 0),
+             (1, 1, 0, 1, 1, 0, 0, 0, 1000, 1001, 0),
+             (1, 100, 20, 20, 0, NULL, 1, NULL, 1, NULL, 0),
+             (1, 10000, 20, 5000, 10, NULL, 0, 0, 1000, 1010, 1))
              SELECT {columns} FROM samples{filter}"
                 ),
                 [],

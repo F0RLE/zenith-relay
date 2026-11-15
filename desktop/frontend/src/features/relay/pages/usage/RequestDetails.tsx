@@ -131,7 +131,7 @@ export function RequestDetails({ row, local, onClose }: {
         </dl>
       </div>
       <dl className="request-details-metrics">
-        {row.ttft != null ? <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} /> : null}
+        {row.ttft != null && !row.imageUsage ? <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} /> : null}
         <RequestDetailMetric label={t("usage.responseTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
         {generationSpeed != null && !row.imageUsage ? <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} /> : null}
         {row.imageUsage ? <RequestDetailMetric label={t("usage.imagesCompleted")} value={formatTokens(row.imageUsage.generatedImages)} /> : null}
@@ -162,11 +162,13 @@ export function RequestDetails({ row, local, onClose }: {
           <div className="request-details-token-group">
             <div className="request-details-token-group-heading"><dt>{t("usage.inputTokens")}</dt><RequestTokenValue tokens={breakdown.inputTotal} price={prices?.input} /></div>
             {row.imageUsage ? <>
-              <div className="request-details-token-child"><dt>{t("usage.imageTextInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputTextTokens ?? null} included /></div>
-              <div className="request-details-token-child"><dt>{t("usage.imageImageInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputImageTokens ?? null} included /></div>
+              <div className="request-details-token-child"><dt>{t("usage.imageTextInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputTextTokens ?? null} price={prices?.image?.inputText} /></div>
+              <div className="request-details-token-child"><dt>{t("usage.imageImageInput")}</dt><RequestTokenValue tokens={row.imageUsage.inputImageTokens ?? null} price={prices?.image?.inputImage} /></div>
+              {row.imageUsage.svgUsage ? <div className="request-details-token-child"><dt>{t("usage.imageSvgInput")}</dt><RequestTokenValue tokens={row.imageUsage.svgUsage.inputTokens ?? null} price={prices?.image?.svgInput} /></div> : null}
+              {row.imageUsage.cachedInputTokens != null ? <div className="request-details-token-child"><dt>{t("usage.imageCachedInput")}</dt><RequestTokenValue tokens={row.imageUsage.cachedInputTokens} included includedHint={t("usage.imageCacheIncluded")} /></div> : null}
             </> : null}
             {!row.imageUsage && hasTokenValue(breakdown.uncachedInput) ? <div className="request-details-token-child"><dt>{t("usage.uncachedInputTokens")}</dt><RequestTokenValue tokens={breakdown.uncachedInput} price={prices?.uncachedInput} /></div> : null}
-            {showCacheCounters ? <>
+            {showCacheCounters && !row.imageUsage ? <>
               <div className="request-details-token-child">
                 <dt>{t("usage.cachedInputTokens")}</dt>
                 <RequestTokenValue tokens={breakdown.cacheRead} price={prices?.cacheRead} />
@@ -180,6 +182,11 @@ export function RequestDetails({ row, local, onClose }: {
           </div>
           <div className="request-details-token-group">
             <div className="request-details-token-group-heading"><dt>{t("usage.outputTokens")}</dt><RequestTokenValue tokens={breakdown.outputTotal} price={prices?.output} /></div>
+            {row.imageUsage ? <>
+              <div className="request-details-token-child"><dt>{t("usage.imageImageOutput")}</dt><RequestTokenValue tokens={row.imageUsage.outputImageTokens ?? null} price={prices?.image?.outputImage} /></div>
+              {hasTokenValue(row.imageUsage.outputTextTokens ?? null) ? <div className="request-details-token-child"><dt>{t("usage.imageTextOutput")}</dt><RequestTokenValue tokens={row.imageUsage.outputTextTokens ?? null} price={prices?.image?.outputText} /></div> : null}
+              {row.imageUsage.svgUsage ? <div className="request-details-token-child"><dt>{t("usage.imageSvgOutput")}</dt><RequestTokenValue tokens={row.imageUsage.svgUsage.outputTokens ?? null} price={prices?.image?.svgOutput} /></div> : null}
+            </> : null}
             {hasTokenValue(breakdown.reasoning) && breakdown.visibleOutput != null ? <div className="request-details-token-child"><dt>{t("usage.visibleOutputTokens")}</dt><RequestTokenValue tokens={breakdown.visibleOutput} included /></div> : null}
             {hasTokenValue(breakdown.reasoning) ? <div className="request-details-token-child"><dt>{t("usage.reasoningTokens")}</dt><RequestTokenValue tokens={breakdown.reasoning} included /></div> : null}
           </div>

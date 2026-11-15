@@ -100,6 +100,19 @@ impl TelemetryDb {
                 .merge(estimate);
         }
         drop(statement);
+        for image in
+            super::super::image_pricing::estimates(&connection, "", &[], resolver, true, None)?
+        {
+            let by_candidate = if image.kind == "account" {
+                &mut equivalents.accounts
+            } else {
+                &mut equivalents.sources
+            };
+            super::super::image_pricing::add_priced(
+                by_candidate.entry(image.member).or_default(),
+                image.value,
+            );
+        }
         drop(connection);
         if self.usage_revision.load(Ordering::Acquire) == usage_revision {
             self.api_equivalent_cache

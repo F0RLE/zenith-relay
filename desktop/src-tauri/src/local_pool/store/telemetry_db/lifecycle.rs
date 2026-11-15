@@ -203,6 +203,12 @@ impl TelemetryDb {
         if version <= 45 {
             migrate_046(&mut connection)?;
         }
+        if version <= 46 {
+            migrate_047(&mut connection)?;
+        }
+        if version <= 47 {
+            migrate_048(&mut connection)?;
+        }
         // Retention reads before writing. Acquire the writer reservation first:
         // a finishing background sample on another connection must not turn
         // that read snapshot into an un-upgradable SQLITE_BUSY_SNAPSHOT.

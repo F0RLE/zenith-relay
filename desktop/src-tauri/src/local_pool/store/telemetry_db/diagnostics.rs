@@ -126,7 +126,13 @@ fn retained_json(json: Option<&str>, expired: bool, routing: bool) -> Option<Str
             return json.to_owned();
         };
         let fields: &[&str] = if routing {
-            &["cacheContext", "cacheAffinity", "routeLatency", "transport"]
+            &[
+                "cacheContext",
+                "cacheAffinity",
+                "routeLatency",
+                "transport",
+                "images",
+            ]
         } else {
             &[
                 "clientContext",

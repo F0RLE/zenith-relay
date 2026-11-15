@@ -34,14 +34,14 @@ for (const scenario of [
     await page.getByRole("button", { name: ru ? "Добавить участника" : "Add member", exact: true }).first().click();
     const dialog = page.getByRole("dialog", { name: ru ? "Добавить подключения в пул" : "Add connections to pool" });
     const row = dialog.locator(".pool-picker-option").filter({ hasText: "Personal Plus" });
-    await expect(row.getByText(badge, { exact: true })).toBeVisible();
+    await expect(row.getByText(badge, { exact: true })).toHaveCount(0);
     await row.getByRole("checkbox").check();
     await expect.poll(() => dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
     await dialog.screenshot({ path: `output/playwright/image-pool-picker-${scenario.locale}-${scenario.width}.png` });
     await dialog.getByRole("button", { name: ru ? "Добавить выбранные (1)" : "Add selected (1)", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     const member = page.locator(".pool-member-card").filter({ hasText: "Personal Plus" });
-    await expect(member.getByText(badge, { exact: true })).toBeVisible();
+    await expect(member.getByText(badge, { exact: true })).toHaveCount(0);
     await member.screenshot({ path: `output/playwright/image-pool-member-${scenario.locale}-${scenario.width}.png` });
     await expect.poll(() => member.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
     const calls = await page.evaluate(() => (window as unknown as {

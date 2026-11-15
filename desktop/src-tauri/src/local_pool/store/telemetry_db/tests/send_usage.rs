@@ -1,5 +1,93 @@
 use super::*;
 
+#[test]
+fn cache_rate_uses_paired_physical_measurements_not_logical_requests() {
+    let root = crate::files::test_temp_root("relay-observed-cache-rate");
+    let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+    let cases = [
+        ("retry", 1, Some(100), Some(25), false),
+        ("retry", 2, Some(300), Some(225), true),
+        ("unknown-cache", 1, Some(200), None, true),
+        ("no-usage", 1, None, None, false),
+        ("invalid-cache", 1, Some(10), Some(11), true),
+        ("unpaired-cache", 1, None, Some(5), true),
+        ("zero-cache", 1, Some(100), Some(0), true),
+    ];
+    for (id, attempt, input, cached, success) in cases {
+        let mut event = aggregate_test_event(id, attempt, input.unwrap_or_default(), 0, None, 1);
+        event.input_tokens = input;
+        event.cached_input_tokens = cached;
+        event.success = success;
+        database.record(&event).unwrap();
+        assert_cache_matches_scan(&database);
+    }
+    let page = database.usage_page(&UsageQuery::default()).unwrap();
+    assert_eq!(page.totals.requests, 6);
+    assert_eq!(page.totals.cached_input_samples, 5);
+    assert_eq!(page.totals.input_tokens, 710);
+    assert_eq!(page.totals.cache_rate_input_tokens, 500);
+    assert_eq!(page.totals.cache_rate_cached_input_tokens, 250);
+
+    let grouped = database
+        .usage_page(&UsageQuery {
+            from_ms: Some(0),
+            bucket_ms: Some(86_400_000),
+            ..UsageQuery::default()
+        })
+        .unwrap();
+    for groups in [&grouped.models, &grouped.pool_members] {
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| g.totals.cache_rate_input_tokens)
+                .sum::<u64>(),
+            500
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| g.totals.cache_rate_cached_input_tokens)
+                .sum::<u64>(),
+            250
+        );
+    }
+    assert_eq!(
+        grouped
+            .buckets
+            .iter()
+            .map(|b| b.totals.cache_rate_input_tokens)
+            .sum::<u64>(),
+        500
+    );
+    assert_eq!(
+        grouped
+            .buckets
+            .iter()
+            .map(|b| b.totals.cache_rate_cached_input_tokens)
+            .sum::<u64>(),
+        250
+    );
+
+    // A corrected observation replaces the old pair rather than accumulating it.
+    let mut correction = aggregate_test_event("retry", 1, 120, 0, None, 1);
+    correction.cached_input_tokens = Some(60);
+    correction.success = false;
+    database.record(&correction).unwrap();
+    database.record(&correction).unwrap();
+    assert_cache_matches_scan(&database);
+    let corrected = database.usage_page(&UsageQuery::default()).unwrap();
+    assert_eq!(corrected.totals.cache_rate_input_tokens, 520);
+    assert_eq!(corrected.totals.cache_rate_cached_input_tokens, 285);
+    correction.cached_input_tokens = None;
+    database.record(&correction).unwrap();
+    assert_cache_matches_scan(&database);
+    let unknown = database.usage_page(&UsageQuery::default()).unwrap();
+    assert_eq!(unknown.totals.cache_rate_input_tokens, 400);
+    assert_eq!(unknown.totals.cache_rate_cached_input_tokens, 225);
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn pre_dispatch_rejection(request_id: &str) -> UsageEvent {
     let mut event = aggregate_test_event(request_id, 0, 0, 0, None, 0);
     event.source_id = "relay".into();

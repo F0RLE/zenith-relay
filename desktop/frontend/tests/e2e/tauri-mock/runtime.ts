@@ -565,23 +565,27 @@ export function initializeTauriMock(input: MockOptions) {
         total: events.length, page, pageSize: 2, totalPages: Math.ceil(events.length / 2),
       };
     }
-    function usageTotals(events: Array<{ requestId?: string; attempt?: number; success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens?: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
+    function usageTotals(events: Array<{ requestId?: string; attempt?: number; success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens?: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; imageUsage?: unknown; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const final = !item.requestId || !localUsage.some((other) => other.requestId === item.requestId && other.attempt > (item.attempt ?? 1));
-        const outputTokens = item.success ? Math.max(0, item.outputTokens ?? 0) : 0;
+        const outputTokens = item.success && !item.imageUsage ? Math.max(0, item.outputTokens ?? 0) : 0;
         const reasoningTokens = Math.min(outputTokens, Math.max(0, item.reasoningTokens ?? 0));
         const measuredOutputTokens = Math.max(0, outputTokens - reasoningTokens - 1);
         if (final) {
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
-        if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
+        if (!item.imageUsage && item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
         if (item.success && item.generationMs != null && item.generationMs > 0 && measuredOutputTokens > 0 && measuredOutputTokens <= item.generationMs) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += measuredOutputTokens; }
         }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null); totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
+        if (item.inputTokens != null && item.inputTokens > 0 && item.cachedInputTokens != null && item.cachedInputTokens >= 0 && item.cachedInputTokens <= item.inputTokens) {
+          totals.cacheRateInputTokens += item.inputTokens;
+          totals.cacheRateCachedInputTokens += item.cachedInputTokens;
+        }
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (outputTokens && item.latencyMs && outputTokens <= item.latencyMs) { totals.speedOutputTokens += outputTokens; totals.speedDurationMs += item.latencyMs; }
         totals.apiEquivalent.microUsd += item.apiEquivalent?.microUsd ?? 0; totals.apiEquivalent.pricedTokens += item.apiEquivalent?.pricedTokens ?? 0; totals.apiEquivalent.unpricedTokens += item.apiEquivalent?.unpricedTokens ?? item.totalTokens ?? 0;
         return totals;
-      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
+      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheRateInputTokens: 0, cacheRateCachedInputTokens: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
     let diagnosticDebugEnabled = input.diagnosticDebug ?? false;
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];

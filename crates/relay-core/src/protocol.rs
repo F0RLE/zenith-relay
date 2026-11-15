@@ -2,6 +2,7 @@ mod account_trash;
 mod adapter;
 pub(crate) mod agent_messages;
 pub(crate) mod completion;
+pub(crate) mod images;
 pub(crate) mod interactions;
 mod management;
 pub(crate) mod response_models;

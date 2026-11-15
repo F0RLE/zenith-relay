@@ -26,6 +26,16 @@ const source = (overrides: Partial<PoolSource> = {}): PoolSource => ({
 });
 
 describe("pool economics", () => {
+  test("includes known image costs in payback even when token pricing is unavailable", () => {
+    const totals = poolEconomics([account({
+      apiEquivalent: { microUsd: 40_000, pricedTokens: 0, unpricedTokens: 120 },
+      purchaseCostMicroUsd: 100_000,
+    })]);
+    expect(totals.recoveredMicroUsd).toBe(40_000);
+    expect(totals.payback).toBe(0.4);
+    expect(totals.paybackApproximate).toBe(true);
+  });
+
   test("counts native shared history and purchase cost once across linked routes", () => {
     const economics = {
       groupId: "route:shared", apiEquivalent: { microUsd: 50_000_000, pricedTokens: 250, unpricedTokens: 10 },

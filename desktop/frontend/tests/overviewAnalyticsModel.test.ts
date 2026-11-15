@@ -11,6 +11,7 @@ import {
 } from "../src/features/relay/pages/overview/overviewAnalyticsModel";
 import { sourceHost, sourcePort } from "../src/features/relay/sourceUrl";
 import { observedTokensPerSecond } from "../src/features/relay/usageSpeed";
+import { cacheHitRate } from "../src/features/relay/usageTotals";
 
 const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
   createdAtMs: 1_000,
@@ -29,6 +30,45 @@ const sample = (overrides: Partial<UsageSample> = {}): UsageSample => ({
 });
 
 describe("overview analytics model", () => {
+  test("computes observed cache rate only from valid paired input measurements", () => {
+    expect(cacheHitRate(totalsFromSamples([sample()]))).toBe(25);
+    expect(cacheHitRate(totalsFromSamples([sample({ cachedInputTokens: 0 })]))).toBe(0);
+    expect(cacheHitRate(totalsFromSamples([]))).toBeNull();
+    expect(cacheHitRate(totalsFromSamples([sample({ cachedInputTokens: null })]))).toBeNull();
+    const mixed = totalsFromSamples([
+      sample(),
+      sample({ inputTokens: 200, cachedInputTokens: null }),
+    ]);
+    expect(mixed.inputTokens).toBe(300);
+    expect(mixed.cachedInputTokens).toBe(25);
+    expect(mixed.cacheRateInputTokens).toBe(100);
+    expect(mixed.cacheRateCachedInputTokens).toBe(25);
+    expect(cacheHitRate(mixed)).toBe(25);
+    expect(cacheHitRate(totalsFromSamples([sample({ cachedInputTokens: 101 })]))).toBeNull();
+  });
+
+  test("does not compare physical cache measurements with logical request counts", () => {
+    const totals = totalsFromSamples([
+      sample(),
+      sample({ inputTokens: 300, cachedInputTokens: 225 }),
+      sample({ success: false, inputTokens: null, cachedInputTokens: null }),
+    ]);
+    expect(cacheHitRate(totals)).toBe(62.5);
+    expect(cacheHitRate({ ...totals, requests: 1, successfulRequests: 1 })).toBe(62.5);
+    expect(cacheHitRate({ ...totals, requests: 5, successfulRequests: 1 })).toBe(62.5);
+  });
+
+  test("does not let invalid or unpaired cache usage distort valid measurements", () => {
+    for (const unknown of [
+      sample({ inputTokens: null }), sample({ inputTokens: 0 }),
+      sample({ cachedInputTokens: -1 }), sample({ cachedInputTokens: 101 }),
+      sample({ inputTokens: Number.NaN }), sample({ cachedInputTokens: Number.POSITIVE_INFINITY }),
+    ]) {
+      expect(cacheHitRate(totalsFromSamples([unknown]))).toBeNull();
+      expect(cacheHitRate(totalsFromSamples([sample(), unknown]))).toBe(25);
+    }
+  });
+
   test("creates stable local-time windows for each range", () => {
     const now = new Date(2026, 7, 28, 12, 30);
     const today = chartWindows("today", "en-US", now);
@@ -44,6 +84,25 @@ describe("overview analytics model", () => {
     expect(month).toHaveLength(30);
   });
 
+  test("image usage contributes tokens and duration but never text speed or first-token timing", () => {
+    const text = sample();
+    const image = sample({
+      latencyMs: 10_000, ttftMs: 25, generationMs: 4_500,
+      inputTokens: 45, outputTokens: 4_000, totalTokens: 4_045,
+      imageUsage: { generatedImages: 1, outputImageTokens: 4_000 },
+    });
+    const baseline = totalsFromSamples([text]);
+    const mixed = totalsFromSamples([text, image]);
+    expect(mixed.requests).toBe(2);
+    expect(mixed.totalTokens).toBe(4_156);
+    expect(mixed.latencyMs).toBe(10_200);
+    for (const field of ["ttftMs", "ttftSamples", "generationMs", "generationSamples",
+      "generationOutputTokens", "speedOutputTokens", "speedDurationMs"] as const) {
+      expect(mixed[field]).toBe(baseline[field]);
+      expect(totalsFromSamples([image])[field]).toBe(0);
+    }
+  });
+
   test("aggregates usage, cache counters, speed, and priced tokens", () => {
     const totals = totalsFromSamples([
       sample(),
@@ -56,6 +115,8 @@ describe("overview analytics model", () => {
       inputTokens: 200,
       cachedInputTokens: 50,
       cachedInputSamples: 2,
+      cacheRateInputTokens: 200,
+      cacheRateCachedInputTokens: 50,
       cacheWriteInputTokens: 20,
       cacheWriteInputSamples: 2,
       outputTokens: 31,

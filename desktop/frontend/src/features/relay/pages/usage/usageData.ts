@@ -165,6 +165,8 @@ export function totalsFromRows(rows: UsageRow[]): UsageTotals {
   return { ...requests,
     inputTokens: sends.inputTokens, cachedInputTokens: sends.cachedInputTokens,
     cachedInputSamples: sends.cachedInputSamples, cacheWriteInputTokens: sends.cacheWriteInputTokens ?? 0,
+    cacheRateInputTokens: sends.cacheRateInputTokens,
+    cacheRateCachedInputTokens: sends.cacheRateCachedInputTokens,
     cacheWriteInputSamples: sends.cacheWriteInputSamples ?? 0, reasoningTokens: sends.reasoningTokens,
     outputTokens: sends.outputTokens, totalTokens: sends.totalTokens, apiEquivalent: sends.apiEquivalent,
   };
@@ -194,6 +196,7 @@ function usageTotalsSampleFromRow(row: UsageRow): UsageTotalsSample {
     outputTokens: row.outputTokens,
     totalTokens: row.tokens,
     apiEquivalent: row.apiEquivalent,
+    imageUsage: row.imageUsage,
   };
 }
 
@@ -202,7 +205,7 @@ export function usageSpeedSample(row: UsageRow): TokenSpeedSample {
     success: row.success,
     outputTokens: row.outputTokens,
     reasoningTokens: row.reasoningTokens,
-    durationMs: row.generationMs,
+    durationMs: row.imageUsage ? null : row.generationMs,
   };
 }
 

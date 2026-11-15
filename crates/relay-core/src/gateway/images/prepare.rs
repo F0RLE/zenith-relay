@@ -67,12 +67,20 @@ pub(super) async fn prepare_request(
             error_codes::INVALID_REQUEST,
         ));
     }
+    if endpoint == ImageEndpoint::Edits
+        && mask_image.is_some()
+        && request_fields
+            .get("markup")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "markup and mask cannot be combined",
+            error_codes::INVALID_REQUEST,
+        ));
+    }
 
-    let requested_model = request_fields
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
+    let requested_model = optional_text_field(&request_fields, "model")?
         .map(str::to_string)
         .unwrap_or_else(|| match key.model_prefix.as_deref() {
             Some(prefix) => format!("{prefix}/{IMAGE_API_MODEL}"),
@@ -98,20 +106,16 @@ pub(super) async fn prepare_request(
 
     let stream = match request_fields.get("stream") {
         Some(Value::Bool(stream)) => *stream,
+        Some(Value::Null) | None => false,
         Some(_) => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                "stream must be a boolean",
+                "stream must be a boolean or null",
                 error_codes::INVALID_REQUEST,
             ));
         }
-        None => false,
     };
-    let response_format = request_fields
-        .get("response_format")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|format| !format.is_empty())
+    let response_format = optional_text_field(&request_fields, "response_format")?
         .unwrap_or("b64_json")
         .to_ascii_lowercase();
     if !matches!(response_format.as_str(), "b64_json" | "url") {
@@ -128,7 +132,7 @@ pub(super) async fn prepare_request(
             error_codes::INVALID_REQUEST,
         ));
     }
-    if let Some(count) = request_fields.get("n")
+    if let Some(count) = request_fields.get("n").filter(|count| !count.is_null())
         && count.as_u64().is_none_or(|count| count == 0 || count > 10)
     {
         return Err(api_error(
@@ -150,6 +154,22 @@ pub(super) async fn prepare_request(
         response_format,
         client_context_id: client_context_fingerprint(headers),
     })
+}
+
+#[allow(clippy::result_large_err)]
+fn optional_text_field<'a>(
+    fields: &'a Map<String, Value>,
+    name: &str,
+) -> Result<Option<&'a str>, Response<Body>> {
+    match fields.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        Some(_) => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("{name} must be a string or null"),
+            error_codes::INVALID_REQUEST,
+        )),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -183,6 +203,7 @@ fn parse_json(
             return Err(invalid_image_reference());
         };
         for image in image_entries {
+            reject_file_reference(image)?;
             let Some(url) = image
                 .get("image_url")
                 .and_then(Value::as_str)
@@ -193,6 +214,9 @@ fn parse_json(
             };
             push_non_empty(&mut images, url);
         }
+    }
+    if let Some(mask) = request_fields.get("mask") {
+        reject_file_reference(mask)?;
     }
     let mask = request_fields.get("mask").and_then(|mask| {
         mask.get("image_url")
@@ -210,6 +234,21 @@ fn parse_json(
         return Err(invalid_image_reference());
     }
     Ok((request_fields, images, mask))
+}
+
+#[allow(clippy::result_large_err)]
+fn reject_file_reference(reference: &Value) -> Result<(), Response<Body>> {
+    if reference
+        .get("file_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "file_id image and mask references are not supported; provide only an image_url or multipart file",
+            error_codes::INVALID_REQUEST,
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_image_reference() -> Response<Body> {
@@ -244,7 +283,9 @@ pub(super) async fn parse_multipart(
         let file_name = field.file_name().map(str::to_string);
         let content_type = field.content_type().map(ToString::to_string);
         let field_bytes = field.bytes().await.map_err(multipart_error)?;
-        if matches!(field_name.as_str(), "image" | "image[]" | "mask") && file_name.is_some() {
+        if matches!(field_name.as_str(), "image" | "image[]" | "mask" | "markup")
+            && file_name.is_some()
+        {
             if field_bytes.is_empty() {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
@@ -253,10 +294,13 @@ pub(super) async fn parse_multipart(
                 ));
             }
             let data_url = image_data_url(&field_bytes, content_type.as_deref());
-            if field_name == "mask" {
-                mask = Some(data_url);
-            } else {
-                images.push(data_url);
+            match field_name.as_str() {
+                "mask" => mask = Some(data_url),
+                "markup" => {
+                    multipart_fields
+                        .insert("markup".into(), serde_json::json!({"image_url": data_url}));
+                }
+                _ => images.push(data_url),
             }
             continue;
         }
@@ -267,6 +311,10 @@ pub(super) async fn parse_multipart(
                 error_codes::INVALID_REQUEST,
             )
         })?;
+        if field_name == "prompt" {
+            multipart_fields.insert(field_name, Value::String(field_text));
+            continue;
+        }
         let field_text = field_text.trim();
         if field_text.is_empty() {
             continue;
@@ -275,6 +323,8 @@ pub(super) async fn parse_multipart(
             images.push(field_text.to_string());
         } else if field_name == "mask" {
             mask = Some(field_text.to_string());
+        } else if field_name == "markup" {
+            multipart_fields.insert(field_name, serde_json::json!({"image_url": field_text}));
         } else if matches!(field_name.as_str(), "stream") {
             let parsed = match field_text.to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
@@ -290,7 +340,7 @@ pub(super) async fn parse_multipart(
             multipart_fields.insert(field_name, Value::Bool(parsed));
         } else if matches!(
             field_name.as_str(),
-            "n" | "output_compression" | "partial_images"
+            "n" | "output_compression" | "partial_images" | "frame_count" | "frame_duration_ms"
         ) {
             let parsed = field_text.parse::<u64>().map_err(|_| {
                 api_error(

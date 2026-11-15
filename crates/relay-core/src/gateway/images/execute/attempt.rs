@@ -70,18 +70,25 @@ pub(super) async fn run_selected_attempt(
         direct_request_body(prepared, &route.source_model)
     };
 
+    let request_body = axum::body::Bytes::from(request_body);
+    let content_type = if account_route {
+        HeaderValue::from_static("application/json")
+    } else {
+        prepared.content_type.clone()
+    };
+    super::super::diagnostics::observe_request(
+        runtime,
+        &mut route,
+        prepared,
+        &request_body,
+        content_type.to_str().unwrap_or_default(),
+    )
+    .await;
     let started = Instant::now();
     let mut upstream = runtime
         .request_client(&route.candidate_id)
         .post(upstream_url)
-        .header(
-            CONTENT_TYPE,
-            if account_route {
-                HeaderValue::from_static("application/json")
-            } else {
-                prepared.content_type.clone()
-            },
-        )
+        .header(CONTENT_TYPE, content_type)
         .header(
             ACCEPT,
             if prepared.stream {

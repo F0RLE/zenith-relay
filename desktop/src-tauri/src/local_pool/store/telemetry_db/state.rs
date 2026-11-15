@@ -155,6 +155,9 @@ impl TelemetryDb {
                     [account_id],
                 )
                 .map_err(db_error)?;
+            transaction.execute(
+                "DELETE FROM usage_image_price_rollups WHERE candidate_kind='account' AND candidate_id=?1", [account_id]
+            ).map_err(db_error)?;
             transaction
                 .execute(
                     "DELETE FROM response_affinity WHERE candidate_id = ?1",

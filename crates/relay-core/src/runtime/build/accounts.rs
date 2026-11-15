@@ -1,5 +1,5 @@
 use super::super::{
-    AccountModelInventory, ChatGptAccountExecutor, IMAGE_API_MODEL, PassiveQuotaState,
+    AccountModelInventory, CODEX_IMAGE_MODELS, ChatGptAccountExecutor, PassiveQuotaState,
     RuntimeHttpClients, model_rules, normalized_responses_url, normalized_set,
     require_runtime_value,
 };
@@ -87,16 +87,14 @@ pub(super) fn build_accounts(
         let models = normalized_set(account.models.iter());
         // Native Images is a separate operation, not a GPT text-tool bridge.
         // Publishing the route is not proof of the account's image quota.
-        let image_main_model = (account.oauth_client_kind == OAuthClientKind::Codex)
-            .then(|| IMAGE_API_MODEL.to_owned());
         let mut candidate_models = if images_only {
             BTreeSet::new()
         } else {
             models.clone()
         };
-        if image_main_model.is_some() {
-            candidate_models.insert(IMAGE_API_MODEL.to_string());
-            published_models.push(IMAGE_API_MODEL.to_string());
+        if account.oauth_client_kind == OAuthClientKind::Codex {
+            candidate_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
+            published_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
         }
         let candidate = RuntimeCandidate {
             id: account.id.clone(),
@@ -150,7 +148,6 @@ pub(super) fn build_accounts(
                 basis_points_url,
                 model_inventory: RwLock::new(AccountModelInventory {
                     configured_models: models,
-                    image_main_model,
                 }),
                 image_bridge_revision: Arc::new(AtomicU64::new(0)),
                 token_authority: auth.token_authority.clone(),

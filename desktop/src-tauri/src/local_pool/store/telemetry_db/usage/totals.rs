@@ -12,6 +12,7 @@ use zenith_relay_core::{
 #[derive(Clone, Copy, Debug, Default)]
 pub(in crate::local_pool::store::telemetry_db) struct UsageTotalsSample {
     pub(in crate::local_pool::store::telemetry_db) success: bool,
+    pub(in crate::local_pool::store::telemetry_db) is_image: bool,
     pub(in crate::local_pool::store::telemetry_db) latency_ms: u64,
     pub(in crate::local_pool::store::telemetry_db) ttft_ms: Option<u64>,
     pub(in crate::local_pool::store::telemetry_db) generation_ms: Option<u64>,
@@ -28,6 +29,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_totals_from_event(
 ) -> UsageTotals {
     usage_totals_from_sample(UsageTotalsSample {
         success: event.success,
+        is_image: event.image_usage.is_some(),
         latency_ms: event.latency_ms,
         ttft_ms: event.ttft_ms,
         generation_ms: event.generation_ms,
@@ -55,7 +57,14 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_totals_from_sample(
         total_tokens: sample.total_tokens.unwrap_or_default(),
         ..UsageTotals::default()
     };
-    if let Some(ttft_ms) = sample.ttft_ms {
+    if let (Some(input), Some(cached)) = (sample.input_tokens, sample.cached_input_tokens)
+        && input > 0
+        && cached <= input
+    {
+        totals.cache_rate_input_tokens = input;
+        totals.cache_rate_cached_input_tokens = cached;
+    }
+    if let Some(ttft_ms) = sample.ttft_ms.filter(|_| !sample.is_image) {
         totals.ttft_ms = ttft_ms;
         totals.ttft_samples = 1;
     }
@@ -63,7 +72,7 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_totals_from_sample(
         totals.cache_write_input_tokens = cache_write_input_tokens;
         totals.cache_write_input_samples = 1;
     }
-    if let Some(generation_ms) = sample.generation_ms {
+    if let Some(generation_ms) = sample.generation_ms.filter(|_| !sample.is_image) {
         let generation_output_tokens = sample
             .output_tokens
             .unwrap_or_default()
@@ -82,7 +91,8 @@ pub(in crate::local_pool::store::telemetry_db) fn usage_totals_from_sample(
             totals.generation_output_tokens = generation_output_tokens;
         }
     }
-    if sample.success
+    if !sample.is_image
+        && sample.success
         && sample.output_tokens.is_some_and(|tokens| tokens > 0)
         && sample.latency_ms > 0
         && sample.output_tokens.unwrap_or_default() <= sample.latency_ms
@@ -118,6 +128,8 @@ pub(in crate::local_pool::store::telemetry_db) fn apply_usage_totals_delta(
     adjust!(input_tokens);
     adjust!(cached_input_tokens);
     adjust!(cached_input_samples);
+    adjust!(cache_rate_input_tokens);
+    adjust!(cache_rate_cached_input_tokens);
     adjust!(cache_write_input_tokens);
     adjust!(cache_write_input_samples);
     adjust!(reasoning_tokens);
@@ -137,6 +149,8 @@ pub(in crate::local_pool::store::telemetry_db) fn consumption_totals(
         input_tokens: totals.input_tokens,
         cached_input_tokens: totals.cached_input_tokens,
         cached_input_samples: totals.cached_input_samples,
+        cache_rate_input_tokens: totals.cache_rate_input_tokens,
+        cache_rate_cached_input_tokens: totals.cache_rate_cached_input_tokens,
         cache_write_input_tokens: totals.cache_write_input_tokens,
         cache_write_input_samples: totals.cache_write_input_samples,
         reasoning_tokens: totals.reasoning_tokens,

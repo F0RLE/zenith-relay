@@ -256,20 +256,19 @@ pub(super) fn price_events(events: &mut [UsageLog], resolver: &CatalogPriceResol
             .resolved_model
             .as_deref()
             .or(event.requested_model.as_deref());
-        (event.api_equivalent, event.api_equivalent_breakdown) = resolver.estimate_breakdown(
-            kind,
-            member,
-            model,
-            zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
-                event.input_tokens,
-                event.cached_input_tokens,
-                event.cache_write_input_tokens,
-                event.cache_write_ttl.as_deref(),
-                event.output_tokens,
-                event.total_tokens,
-            )
-            .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens),
-        );
+        let usage = zenith_relay_core::ApiEquivalentUsage::from_reported_tokens(
+            event.input_tokens,
+            event.cached_input_tokens,
+            event.cache_write_input_tokens,
+            event.cache_write_ttl.as_deref(),
+            event.output_tokens,
+            event.total_tokens,
+        )
+        .with_observed_rates(event.applied_service_tier.as_deref(), event.input_tokens);
+        (event.api_equivalent, event.api_equivalent_breakdown) = match &event.image_usage {
+            Some(image) => resolver.estimate_image_breakdown(kind, member, model, usage, image),
+            None => resolver.estimate_breakdown(kind, member, model, usage),
+        };
     }
 }
 

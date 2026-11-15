@@ -29,7 +29,6 @@ pub(super) use cooldown::{
     CooldownInput, RateLimitBodyHint, apply_failure_state, current_failure_state, failure_cooldown,
     rate_limit_body_hint, rate_limit_body_hint_value, settle_attempt_failure,
     settle_classified_failure, settle_image_capability_failure, settle_route_failure,
-    settle_status_failure,
 };
 
 pub(crate) use failure::failure_category_affects_account_state;

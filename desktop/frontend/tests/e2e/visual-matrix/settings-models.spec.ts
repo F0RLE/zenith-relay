@@ -91,7 +91,7 @@ test("Codex text opt-in remains off after save failure and blocks duplicate conf
   await expect(toggle).not.toBeChecked();
 });
 
-test("Codex text opt-in respects saved state and leaves image-only badges consistent", async ({ page }) => {
+test("Codex text opt-in respects saved state without adding image-only badges", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountOAuthClientKind: "codex", poolMembers: true, codexTextModelsEnabled: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -103,7 +103,7 @@ test("Codex text opt-in respects saved state and leaves image-only badges consis
   await expect(toggle).not.toBeChecked();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.getByText("Images only", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Images only", { exact: true })).toHaveCount(0);
 });
 
 test("Codex text opt-in cannot run on a backend without the capability", async ({ page }) => {

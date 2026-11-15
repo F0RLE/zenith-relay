@@ -1,6 +1,6 @@
 use super::super::super::errors::{
     AttemptFailure, TRANSIENT_COOLDOWN_MS, api_error, apply_failure_state, retryable_route_failure,
-    route_forbids_fallback, settle_image_capability_failure, settle_status_failure,
+    route_forbids_fallback, settle_attempt_failure, settle_image_capability_failure,
 };
 use super::super::super::now_ms;
 use super::super::super::response::{
@@ -33,55 +33,66 @@ pub(super) fn handle_collected_image(
     if !status.is_success() {
         let upstream_error =
             crate::usage::UpstreamErrorDetails::from_response_body(Some(status.as_u16()), &bytes);
-        let mut failure = AttemptFailure::status_with_body(status, Some(&bytes));
+        let mut failure =
+            AttemptFailure::status_with_headers(status, Some(&bytes), &response_headers);
+        let envelope = serde_json::from_slice::<ImageEnvelope<'_>>(&bytes).ok();
+        if envelope
+            .as_ref()
+            .is_some_and(ImageEnvelope::has_generation_evidence)
+        {
+            failure.execution = crate::scheduler::rotation::ExecutionObservation::accepted();
+        } else if envelope.is_none()
+            && failure.execution.certainty
+                == crate::scheduler::rotation::ExecutionCertainty::NotSent
+        {
+            // A malformed image envelope cannot prove that no output was produced.
+            failure.execution = crate::scheduler::rotation::ExecutionObservation::unknown();
+        }
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
-        if (retryable_route_failure(route, status, &failure, false) || capability_failure)
-            && !route_forbids_fallback(route, status, &failure)
-        {
-            let failure_state = if capability_failure {
-                settle_image_capability_failure(
-                    runtime,
-                    lease,
-                    &prepared.resolved_model,
-                    TRANSIENT_COOLDOWN_MS,
-                )
+        let retry = failure.execution.certainty
+            == crate::scheduler::rotation::ExecutionCertainty::NotSent
+            && (retryable_route_failure(route, status, &failure, false) || capability_failure)
+            && !route_forbids_fallback(route, status, &failure);
+        let failure_state = if retry && capability_failure {
+            settle_image_capability_failure(
+                runtime,
+                lease,
+                &prepared.resolved_model,
+                TRANSIENT_COOLDOWN_MS,
+            )
+        } else {
+            settle_attempt_failure(
+                runtime,
+                lease,
+                &prepared.resolved_model,
+                &failure,
+                &response_headers,
+            )
+        };
+        let mut event = observed.event(
+            false,
+            status,
+            Some(if retry && capability_failure {
+                error_codes::IMAGE_GENERATION_NOT_ENABLED.to_string()
             } else {
-                settle_status_failure(
-                    runtime,
-                    lease,
-                    &prepared.resolved_model,
-                    status,
-                    failure.category,
-                    &response_headers,
-                    Some(&bytes),
-                )
-            };
-            let mut event = observed.event(
-                false,
-                status,
-                Some(if capability_failure {
-                    error_codes::IMAGE_GENERATION_NOT_ENABLED.to_string()
-                } else {
-                    failure.category.to_string()
-                }),
-            );
-            event.upstream_error = Some(upstream_error);
-            populate_tokens(&mut event, &bytes);
-            if let Ok(envelope) = serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
-                envelope.observe_usage(&mut event);
-            }
-            apply_failure_state(&mut event, failure_state);
-            emit_usage(runtime, event);
-            return ImageAttemptStep::Retry(failure);
-        }
-        let mut event = observed.event(false, status, Some(failure.category.to_string()));
+                failure.category.to_string()
+            }),
+        );
         populate_tokens(&mut event, &bytes);
-        if let Ok(envelope) = serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
+        super::super::diagnostics::observe_response(runtime, &mut event, &bytes);
+        if let Some(envelope) = envelope {
             envelope.observe_usage(&mut event);
+            if let Some(image_usage) = event.image_usage.as_mut() {
+                image_usage.generated_images = envelope.output_count() as u64;
+            }
         }
         event.upstream_error = Some(upstream_error);
+        apply_failure_state(&mut event, failure_state);
         emit_usage(runtime, event);
+        if retry {
+            return ImageAttemptStep::Retry(failure);
+        }
         let origin = route_error_origin(route).for_category(failure.category);
         let error_response = super::super::super::response::proxy_error_response(
             status,
@@ -95,6 +106,7 @@ pub(super) fn handle_collected_image(
     }
 
     let mut event = observed.event(false, status, None);
+    super::super::diagnostics::observe_response(runtime, &mut event, &bytes);
     let error = match serde_json::from_slice::<ImageEnvelope<'_>>(&bytes) {
         Ok(envelope) => {
             envelope.observe_usage(&mut event);
@@ -143,7 +155,14 @@ pub(super) fn handle_collected_image(
     ImageAttemptStep::Respond(proxy_json_response(
         status,
         &response_headers,
-        Body::from(normalize_response(bytes, &prepared.response_format)),
+        Body::from(normalize_response(
+            bytes,
+            &prepared.response_format,
+            prepared
+                .fields
+                .get("output_format")
+                .and_then(serde_json::Value::as_str),
+        )),
     ))
 }
 

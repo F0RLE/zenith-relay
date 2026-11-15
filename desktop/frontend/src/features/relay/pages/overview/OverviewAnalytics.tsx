@@ -7,7 +7,7 @@ import { formatApproximateUsd, formatScaledUsd, pricedUsd } from "../../currency
 import { OptionMenu, Tabs } from "../../components/Ui";
 import { formatNumber } from "../../numberFormatting";
 import { formatTokenSpeed, observedTokensPerSecond } from "../../usageSpeed";
-import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
+import { cacheHitRate, emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import { fillBuckets, lineSegments, type Analytics, type Range, type WindowBucket } from "./overviewAnalyticsModel";
 
 type AnalyticsPanelProps = {
@@ -114,23 +114,14 @@ function TokenUsageTrend({ buckets, totals, windows }: { buckets: UsageTotals[];
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const tokenSeries = [
-    { key: "input", label: t("overview.tokenTrend.input"), color: "input", points: buckets.map((totals) => totals.requests > 0 ? totals.inputTokens : null) },
-    { key: "output", label: t("overview.tokenTrend.output"), color: "output", points: buckets.map((totals) => totals.requests > 0 ? totals.outputTokens : null) },
+    { key: "input", label: t("overview.tokenTrend.input"), color: "input", points: buckets.map((totals) => totals.requests > 0 || totals.inputTokens > 0 ? totals.inputTokens : null) },
+    { key: "output", label: t("overview.tokenTrend.output"), color: "output", points: buckets.map((totals) => totals.requests > 0 || totals.outputTokens > 0 ? totals.outputTokens : null) },
     { key: "cacheWrite", label: t("overview.tokenTrend.cacheWrite"), color: "cache-write", points: buckets.map((totals) => totals.cacheWriteInputSamples ? totals.cacheWriteInputTokens ?? 0 : null) },
     { key: "cacheRead", label: t("overview.tokenTrend.cacheRead"), color: "cache-read", points: buckets.map((totals) => totals.cachedInputSamples ? totals.cachedInputTokens : null) },
   ];
   const maxTokens = Math.max(0, ...tokenSeries.flatMap((series) => series.points.filter((tokenValue): tokenValue is number => tokenValue != null))) || 1;
-  const cacheRateValues = buckets.map((totals) => totals.requests > 0 && totals.inputTokens > 0 && totals.cachedInputSamples ? Math.min(100, totals.cachedInputTokens / totals.inputTokens * 100) : null);
-  const cacheTotals = buckets.reduce((tokenTotals, totals) => {
-    if (totals.cachedInputSamples > 0 && totals.inputTokens > 0) {
-      tokenTotals.inputTokens += totals.inputTokens;
-      tokenTotals.cachedInputTokens += Math.min(totals.cachedInputTokens, totals.inputTokens);
-    }
-    return tokenTotals;
-  }, { inputTokens: 0, cachedInputTokens: 0 });
-  const averageCacheRate = cacheTotals.inputTokens > 0
-    ? Math.min(100, cacheTotals.cachedInputTokens / cacheTotals.inputTokens * 100)
-    : null;
+  const cacheRateValues = buckets.map(cacheHitRate);
+  const averageCacheRate = cacheHitRate(totals);
   const hasData = tokenSeries.some((series) => series.points.some((tokenValue) => tokenValue != null && tokenValue > 0));
   return <article className="overview-chart tokens overview-token-trend">
     <header className="overview-token-trend-header">
