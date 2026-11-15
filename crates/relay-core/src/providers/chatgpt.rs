@@ -2,6 +2,7 @@ mod agent_identity;
 mod basis_points_headers;
 mod codex_identity;
 mod codex_release;
+pub mod connector;
 mod models;
 mod oauth;
 mod passive_quota;
@@ -20,9 +21,8 @@ use reqwest::header::{HeaderValue, InvalidHeaderValue};
 pub use agent_identity::{
     AgentIdentityCredential, AgentIdentityError, is_agent_identity_task_invalid_response,
 };
-pub(crate) use basis_points_headers::basis_points_headers;
 pub use basis_points_headers::{
-    BasisPointsCapturedHeaders, BasisPointsHeader, BasisPointsHeadersError,
+    BasisPointsCapturedHeaders, BasisPointsHeader, BasisPointsHeadersError, basis_points_headers,
 };
 pub use codex_identity::{
     CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_STABLE_FALLBACK_VERSION, CodexIdentityEnvelope,

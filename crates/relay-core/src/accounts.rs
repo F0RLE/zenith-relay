@@ -2,10 +2,15 @@ mod export;
 mod import;
 mod jwt;
 mod login_notes;
+pub mod management;
 mod quota_state;
 mod record;
+pub mod removal;
 mod routes;
+mod secrets;
 mod token_authority;
+
+pub use secrets::{SecretBackend, SecretBackendError};
 
 /// Upper bound for a user-entered account purchase cost in micro-USD.
 /// This is presentation metadata used only for the payback ratio.
@@ -28,7 +33,7 @@ pub use import::{
     ImportPreview, ImportPreviewRow, ImportPreviewStatus, ImportQuotaStatus, ImportSecretMaterial,
     ImportWarning, ImportWarningCode, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, MAX_JSON_DEPTH,
     ParsedImport, ParsedImportItem, chatgpt_token_identity_key, combine_import_documents,
-    parse_import,
+    normalize_selected_item_ids, parse_import,
 };
 pub use jwt::decode_unverified_jwt_payload;
 pub use login_notes::{

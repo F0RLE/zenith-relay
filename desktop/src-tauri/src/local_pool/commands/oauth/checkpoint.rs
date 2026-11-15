@@ -262,7 +262,8 @@ where
     let checkpoint =
         OAuthCompletionCheckpoint::from_tokens(&start.login_id, client_kind, tokens, now_ms)?;
     let encoded = encode_completion_checkpoint(&checkpoint)?;
-    store_completion_checkpoint(&start.login_id, &encoded)?;
+    flow.store_exchange_checkpoint(&start.login_id, &encoded)
+        .map_err(flow_error)?;
     Ok((checkpoint, encoded, start.target_account_id))
 }
 

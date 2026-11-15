@@ -38,16 +38,11 @@ pub(in crate::local_pool) fn validate_pool_account(
     credentials: &StoredCodexCredentials,
     image_pool_enabled: bool,
 ) -> Result<()> {
-    if credentials.oauth_client_kind()
-        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
-        && !image_pool_enabled
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "Enable this Codex connection explicitly for image generation before adding it to the pool.",
-        ));
-    }
-    require_plan_permission(credentials)
+    zenith_relay_core::providers::chatgpt::connector::credentials::validate_pool_account(
+        credentials,
+        image_pool_enabled,
+    )
+    .map_err(LocalPoolError::invalid_state)
 }
 
 /// Only an explicit membership action grants the native Images opt-in.
@@ -73,18 +68,10 @@ pub(in crate::local_pool) fn set_pool_membership(
 pub(in crate::local_pool) fn require_plan_permission(
     credentials: &StoredCodexCredentials,
 ) -> Result<()> {
-    if credentials.oauth_client_kind()
-        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc
-        && !credentials
-            .siwc_registration()
-            .is_some_and(|r| r.plan_use_enabled())
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT plan use is disabled. Sign in again to authorize plan usage.",
-        ));
-    }
-    Ok(())
+    zenith_relay_core::providers::chatgpt::connector::credentials::require_plan_permission(
+        credentials,
+    )
+    .map_err(LocalPoolError::invalid_state)
 }
 
 pub fn new_account_record(

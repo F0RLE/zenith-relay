@@ -195,7 +195,7 @@ pub(crate) async fn prepare_account_credentials(
         CodexOAuthClient::new_with_proxy_for_kind(stored.oauth_client_kind(), proxy.as_ref())
             .map_err(LocalPoolError::invalid_state)?,
     );
-    let refresh = StoredRefreshAdapter::new(
+    let refresh = default_refresh_adapter(
         state.transient_root(),
         credentials.clone(),
         oauth,
@@ -207,7 +207,7 @@ pub(crate) async fn prepare_account_credentials(
             "failed to initialize account refresh locks",
         )
     })?;
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         credentials.clone(),
         state.account_metadata_sink(),
         state.transient_root(),

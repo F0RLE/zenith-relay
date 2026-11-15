@@ -21,14 +21,7 @@ use snapshot::{
     write_snapshot_new,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SecretBackendError;
-
-pub trait SecretBackend {
-    fn save(&self, secret_ref: &str, secret_value: &str) -> Result<(), SecretBackendError>;
-    fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError>;
-    fn delete(&self, secret_ref: &str) -> Result<(), SecretBackendError>;
-}
+pub use zenith_relay_core::accounts::{SecretBackend, SecretBackendError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

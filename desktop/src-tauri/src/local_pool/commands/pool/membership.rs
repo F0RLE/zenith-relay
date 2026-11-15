@@ -9,14 +9,6 @@ pub(in crate::local_pool) async fn apply_local_pool_membership(
 ) -> CommandResult<(LocalPoolSnapshot, bool, Vec<String>)> {
     let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
     let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
-    if account_ids.is_empty() && source_ids.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "at least one pool member is required",
-        )
-        .into());
-    }
-
     let (old_sources, old_accounts, old_keys) = {
         let store = state.store()?;
         (
@@ -25,56 +17,53 @@ pub(in crate::local_pool) async fn apply_local_pool_membership(
             store.keys().to_vec(),
         )
     };
-    if source_ids.iter().any(|source_id| {
-        !old_sources
-            .iter()
-            .any(|source_record| &source_record.id == source_id)
-    }) || account_ids.iter().any(|account_id| {
-        !old_accounts
-            .iter()
-            .any(|account_record| &account_record.account.id == account_id)
-    }) {
-        return Err(LocalPoolError::new(ErrorCode::NotFound, "pool member not found").into());
-    }
-    if input.in_pool
-        && old_accounts.iter().any(|account_record| {
-            account_ids.contains(&account_record.account.id) && account_record.recovery.is_some()
-        })
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "account requires local recovery before joining the pool",
-        )
-        .into());
-    }
-    if input.in_pool {
-        let selected_routes = {
-            let store = state.store()?;
-            account_ids
-                .iter()
-                .all(|id| store.gateway().account_route_is_selected(id))
-        };
-        if !selected_routes {
-            return Err(LocalPoolError::new(
+    let known_sources = old_sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<Vec<_>>();
+    let verified_sources = old_sources
+        .iter()
+        .filter(|source| input.in_pool && source_ids.contains(&source.id))
+        .filter(|source| source.supports_any_wire_api().unwrap_or(false))
+        .map(|source| source.id.as_str())
+        .collect::<Vec<_>>();
+    let routes = state.store()?.gateway().account_routes.clone();
+    use zenith_relay_core::accounts::management::{
+        MembershipError, PoolMembershipEvidence, validate_pool_membership,
+    };
+    validate_pool_membership(
+        &old_accounts,
+        &PoolMembershipEvidence {
+            requested_accounts: &account_ids,
+            requested_sources: &source_ids,
+            known_source_ids: &known_sources,
+            verified_source_ids: &verified_sources,
+            routes: &routes,
+            in_pool: input.in_pool,
+        },
+    )
+    .map_err(|error| {
+        let (code, message) = match error {
+            MembershipError::Empty => (
+                ErrorCode::InvalidState,
+                "at least one pool member is required",
+            ),
+            MembershipError::Missing => (ErrorCode::NotFound, "pool member not found"),
+            MembershipError::RecoveryRequired => (
+                ErrorCode::Conflict,
+                "account requires local recovery before joining the pool",
+            ),
+            MembershipError::UnselectedRoute => (
                 ErrorCode::Conflict,
                 "Select this account route before adding it to the pool",
-            )
-            .into());
-        }
-        for source in old_sources
-            .iter()
-            .filter(|source| source_ids.contains(&source.id))
-        {
-            let supports_any_protocol = source.supports_any_wire_api().unwrap_or(false);
-            if !supports_any_protocol {
-                return Err(LocalPoolError::new(
-                    ErrorCode::Conflict,
-                    "source must expose at least one verified API route before joining the local pool",
-                )
-                .into());
-            }
-        }
-    }
+            ),
+            MembershipError::UnverifiedSource => (
+                ErrorCode::Conflict,
+                "source must expose at least one verified API route before joining the local pool",
+            ),
+        };
+        LocalPoolError::new(code, message)
+    })?;
 
     let mut sources = old_sources.clone();
     let mut accounts = old_accounts.clone();

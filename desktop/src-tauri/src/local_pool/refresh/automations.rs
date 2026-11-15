@@ -22,7 +22,7 @@ use zenith_relay_core::{
 
 #[cfg(test)]
 mod reserve_tests;
-mod reset_policy;
+use zenith_relay_core::automations::reset_policy;
 mod weekly_threshold;
 
 pub(super) fn evaluate_updated_transitions(

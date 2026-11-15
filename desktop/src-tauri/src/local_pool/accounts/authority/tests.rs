@@ -150,7 +150,7 @@ async fn twenty_concurrent_refreshes_make_one_network_rotation() {
         calls: AtomicUsize::new(0),
     });
     let adapter = Arc::new(
-        StoredRefreshAdapter::with_lock_config(
+        refresh_adapter_with_config(
             root.clone(),
             store.clone(),
             client.clone(),
@@ -218,7 +218,7 @@ async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() 
     let client = Arc::new(RefreshOnce {
         calls: AtomicUsize::new(0),
     });
-    let adapter = StoredRefreshAdapter::with_lock_config(
+    let adapter = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         client.clone(),
@@ -227,7 +227,7 @@ async fn unresolved_siwc_checkpoint_stops_refresh_and_persists_recovery_state() 
     )
     .unwrap();
     let metadata = Arc::new(CaptureMetadata::default());
-    let persistence = CredentialPersistence::new(store.clone(), metadata.clone(), root.clone());
+    let persistence = credential_persistence(store.clone(), metadata.clone(), root.clone());
     let authority = TokenAuthority::new(1).unwrap();
     authority
         .register(
@@ -313,7 +313,7 @@ async fn metadata_failure_stays_pending_and_retries_without_second_refresh() {
     let client = Arc::new(RefreshOnce {
         calls: AtomicUsize::new(0),
     });
-    let refresh = StoredRefreshAdapter::with_lock_config(
+    let refresh = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         client.clone(),
@@ -323,7 +323,7 @@ async fn metadata_failure_stays_pending_and_retries_without_second_refresh() {
     .unwrap();
     let metadata = Arc::new(CaptureMetadata::default());
     metadata.fail_generation.store(true, Ordering::SeqCst);
-    let persistence = CredentialPersistence::new(store, metadata.clone(), root.clone());
+    let persistence = credential_persistence(store, metadata.clone(), root.clone());
     let authority = TokenAuthority::new(1).unwrap();
     authority
         .register("relay_account_1", initial_tokens, AccountAuthState::Active)
@@ -387,7 +387,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
         release: tokio::sync::Notify::new(),
     });
     let adapter = Arc::new(
-        StoredRefreshAdapter::with_lock_config(
+        refresh_adapter_with_config(
             root.clone(),
             store.clone(),
             client.clone(),
@@ -396,7 +396,7 @@ async fn removed_account_refresh_cannot_overwrite_a_readded_credential() {
         )
         .unwrap(),
     );
-    let persistence = Arc::new(CredentialPersistence::new(
+    let persistence = Arc::new(credential_persistence(
         store.clone(),
         Arc::new(CaptureMetadata::default()),
         root.clone(),
@@ -465,7 +465,7 @@ async fn pending_token_persistence_cannot_write_into_a_readded_account() {
         )
         .await
         .unwrap();
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         store.clone(),
         Arc::new(CaptureMetadata::default()),
         root.clone(),
@@ -514,7 +514,7 @@ async fn stale_agent_task_result_cannot_update_a_replaced_identity_with_no_task(
     )
     .unwrap();
     store.save(&replacement).unwrap();
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         store.clone(),
         Arc::new(CaptureMetadata::default()),
         root.clone(),
@@ -619,7 +619,7 @@ async fn transient_refresh_backoff_survives_adapter_restart_grows_and_clears_on_
         (16_000, "token_refresh_backoff"),
     ] {
         // Recreate the adapter and reread the vault on every attempt.
-        let adapter = StoredRefreshAdapter::with_lock_config(
+        let adapter = refresh_adapter_with_config(
             root.clone(),
             store.clone(),
             client.clone(),
@@ -641,14 +641,9 @@ async fn transient_refresh_backoff_survives_adapter_restart_grows_and_clears_on_
         assert_eq!(saved.generation(), 7);
     }
     assert_eq!(client.calls.load(Ordering::SeqCst), 2);
-    let adapter = StoredRefreshAdapter::with_lock_config(
-        root.clone(),
-        store.clone(),
-        client,
-        0,
-        fast_lock_config(),
-    )
-    .unwrap();
+    let adapter =
+        refresh_adapter_with_config(root.clone(), store.clone(), client, 0, fast_lock_config())
+            .unwrap();
     assert!(
         adapter
             .refresh("relay_account_1", "ignored", 30_000)
@@ -678,7 +673,7 @@ async fn usable_tokens_and_new_login_are_not_blocked_by_refresh_backoff() {
         calls: AtomicUsize::new(0),
         failure_kind: TokenRefreshFailureKind::Transient,
     });
-    let adapter = StoredRefreshAdapter::with_lock_config(
+    let adapter = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         client.clone(),
@@ -716,14 +711,9 @@ async fn terminal_grant_errors_do_not_become_retry_backoff() {
         calls: AtomicUsize::new(0),
         failure_kind: TokenRefreshFailureKind::InvalidGrant,
     });
-    let adapter = StoredRefreshAdapter::with_lock_config(
-        root.clone(),
-        store.clone(),
-        client,
-        0,
-        fast_lock_config(),
-    )
-    .unwrap();
+    let adapter =
+        refresh_adapter_with_config(root.clone(), store.clone(), client, 0, fast_lock_config())
+            .unwrap();
     assert_eq!(
         adapter
             .refresh("relay_account_1", "ignored", 1_000)
@@ -764,14 +754,8 @@ async fn concurrent_failed_refreshes_share_the_persisted_pause() {
         failure_kind: TokenRefreshFailureKind::Transient,
     });
     let adapter = Arc::new(
-        StoredRefreshAdapter::with_lock_config(
-            root.clone(),
-            store,
-            client.clone(),
-            0,
-            fast_lock_config(),
-        )
-        .unwrap(),
+        refresh_adapter_with_config(root.clone(), store, client.clone(), 0, fast_lock_config())
+            .unwrap(),
     );
     let mut tasks = Vec::new();
     for _ in 0..20 {
@@ -804,14 +788,9 @@ async fn failed_backoff_persistence_preserves_credentials_and_reports_storage_fa
         calls: AtomicUsize::new(0),
         failure_kind: TokenRefreshFailureKind::Transient,
     });
-    let adapter = StoredRefreshAdapter::with_lock_config(
-        root.clone(),
-        store.clone(),
-        client,
-        0,
-        fast_lock_config(),
-    )
-    .unwrap();
+    let adapter =
+        refresh_adapter_with_config(root.clone(), store.clone(), client, 0, fast_lock_config())
+            .unwrap();
     let error = adapter
         .refresh("relay_account_1", "ignored", 1_000)
         .await
@@ -914,7 +893,7 @@ async fn invalid_grant_after_new_authorization_reads_the_new_credentials() {
     let store = CredentialStore::new(Arc::new(MemorySecrets::default()));
     let initial = expired_credentials();
     store.save(&initial).unwrap();
-    let adapter = StoredRefreshAdapter::with_lock_config(
+    let adapter = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         Arc::new(ReplacedGrant {

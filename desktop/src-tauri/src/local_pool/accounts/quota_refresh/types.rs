@@ -6,7 +6,8 @@ pub(in crate::local_pool::accounts) use zenith_relay_core::accounts::TOKEN_REFRE
 pub(in crate::local_pool::accounts) const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration =
     Duration::from_secs(5);
 
-pub(in crate::local_pool::accounts) const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
+pub(in crate::local_pool::accounts) const QUOTA_REFRESH_BATCH_SIZE: usize =
+    zenith_relay_core::providers::chatgpt::connector::import::IMPORT_QUOTA_BATCH_SIZE;
 
 // A profile observation is best effort. It must never hold a request or quota
 // refresh behind an automatic credential rotation for the normal five-second
@@ -18,20 +19,7 @@ pub(in crate::local_pool::accounts) const MANAGED_PROFILE_OBSERVATION_LOCK: Proc
         stale_after_ms: 120_000,
     };
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "snake_case", tag = "status")]
-pub enum AccountQuotaOutcome {
-    Skipped,
-    Updated {
-        transitions: Vec<QuotaTransition>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        exhaustion_transitions: Vec<QuotaTransition>,
-    },
-    Failed {
-        code: String,
-        retryable: bool,
-    },
-}
+pub use zenith_relay_core::providers::chatgpt::connector::observations::QuotaReadOutcome as AccountQuotaOutcome;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

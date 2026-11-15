@@ -1,6 +1,6 @@
 use super::{quota_refresh::verify_reset_account_quota, refresh_observations::AccountRefreshScope};
 use crate::local_pool::{
-    error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+    error::{CommandError, LocalPoolError, Result as LocalResult},
     refresh,
     state::DesktopState,
 };
@@ -9,34 +9,12 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
-const RESET_CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
-const RESET_CREDITS_CONSUME_URL: &str =
-    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
-const MAX_RESET_CREDITS_RESPONSE_BYTES: usize = 256 * 1024;
-const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResetCredit {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reset_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub granted_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redeemed_at: Option<i64>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResetCreditsSnapshot {
-    pub available_count: Option<u32>,
-    pub credits: Vec<ResetCredit>,
-    pub next_expires_at: Option<i64>,
-}
+#[cfg(test)]
+use zenith_relay_core::providers::chatgpt::connector::reset_credits::ResetCreditsSnapshot;
+use zenith_relay_core::providers::chatgpt::connector::reset_credits::{
+    ResetHttpResponse,
+    workflow::{self, ResetHost},
+};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,11 +22,6 @@ pub struct ConsumeResetCreditResponse {
     pub refreshed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_error: Option<String>,
-}
-
-struct ResetHttpResponse {
-    status: StatusCode,
-    response_body: Vec<u8>,
 }
 
 #[tauri::command]
@@ -114,48 +87,85 @@ pub(crate) async fn consume_reset_credit_when<F, Fut>(
     should_consume: F,
 ) -> LocalResult<bool>
 where
-    F: Fn(Option<u64>) -> Fut,
-    Fut: std::future::Future<Output = LocalResult<bool>>,
+    F: Fn(Option<u64>) -> Fut + Sync,
+    Fut: std::future::Future<Output = LocalResult<bool>> + Send,
 {
-    let account_id = &fence.account_id;
-    let lock = state.quota_account_lock(account_id)?;
-    {
-        let _guard = lock.lock().await;
-        state.store()?.ensure_account_refresh_current(fence)?;
-        let mut prepared = refresh::request_authorization_now(state, fence).await?;
-        let available =
-            fetch_reset_snapshot_with_retry(state, account_id, &mut prepared, true).await?;
-        let expiry_ms = available_reset_expiry(&available)?;
-        if !record_reset_dispatch(state, fence, attempt_fingerprint, || {
-            should_consume(expiry_ms)
-        })
-        .await?
-        {
-            return Ok(false);
-        }
+    let lock = state.quota_account_lock(&fence.account_id)?;
+    let _guard = lock.lock().await;
+    workflow::redeem(
+        &DesktopResetHost {
+            state,
+            fence,
+            attempt_fingerprint,
+            should_consume,
+        },
+        &Uuid::new_v4().to_string(),
+    )
+    .await
+}
 
-        let redeem_request_id = Uuid::new_v4().to_string();
-        let reset_response = post_reset_credit(&prepared, &redeem_request_id).await?;
-        if reset_response.status == StatusCode::UNAUTHORIZED {
-            clear_rejected_reset(state, fence, attempt_fingerprint, reset_response.status)?;
-            prepared = retry_authorization(state, account_id, &prepared).await?;
-            if !record_reset_dispatch(state, fence, attempt_fingerprint, || {
-                should_consume(expiry_ms)
-            })
-            .await?
-            {
-                return Ok(false);
-            }
-            let retry_response = post_reset_credit(&prepared, &redeem_request_id).await?;
-            clear_rejected_reset(state, fence, attempt_fingerprint, retry_response.status)?;
-            ensure_reset_success(retry_response)?;
-        } else {
-            clear_rejected_reset(state, fence, attempt_fingerprint, reset_response.status)?;
-            ensure_reset_success(reset_response)?;
-        }
+struct DesktopResetHost<'a, F> {
+    state: &'a DesktopState,
+    fence: &'a crate::local_pool::store::AccountRefreshFence,
+    attempt_fingerprint: Option<&'a str>,
+    should_consume: F,
+}
+
+impl<F, Fut> ResetHost for DesktopResetHost<'_, F>
+where
+    F: Fn(Option<u64>) -> Fut + Sync,
+    Fut: std::future::Future<Output = LocalResult<bool>> + Send,
+{
+    type Authorization = super::quota_refresh::PreparedAccountAuthorization;
+    type Error = LocalPoolError;
+
+    fn validate(&self) -> LocalResult<()> {
+        self.state
+            .store()?
+            .ensure_account_refresh_current(self.fence)
     }
 
-    Ok(true)
+    fn error(
+        error: zenith_relay_core::providers::chatgpt::connector::reset_credits::ResetCreditsError,
+    ) -> Self::Error {
+        http::local_error(error)
+    }
+
+    async fn prepare(&self) -> LocalResult<Self::Authorization> {
+        refresh::request_authorization_now(self.state, self.fence).await
+    }
+
+    async fn recover(&self, rejected: &Self::Authorization) -> LocalResult<Self::Authorization> {
+        http::retry_authorization(self.state, &self.fence.account_id, rejected).await
+    }
+
+    async fn balance(&self, authorization: &Self::Authorization) -> LocalResult<ResetHttpResponse> {
+        http::get_reset_credits(authorization).await
+    }
+
+    async fn record_dispatch(&self, expiry_ms: Option<u64>) -> LocalResult<bool> {
+        record_reset_dispatch(self.state, self.fence, self.attempt_fingerprint, || {
+            (self.should_consume)(expiry_ms)
+        })
+        .await
+    }
+
+    fn clear_rejected(&self) -> LocalResult<()> {
+        clear_rejected_reset(
+            self.state,
+            self.fence,
+            self.attempt_fingerprint,
+            StatusCode::UNAUTHORIZED,
+        )
+    }
+
+    async fn redeem(
+        &self,
+        authorization: &Self::Authorization,
+        request_id: &str,
+    ) -> LocalResult<ResetHttpResponse> {
+        http::post_reset_credit(authorization, request_id).await
+    }
 }
 
 async fn record_reset_dispatch<F, Fut>(
@@ -187,42 +197,28 @@ fn clear_rejected_reset(
     fingerprint: Option<&str>,
     status: StatusCode,
 ) -> LocalResult<()> {
-    if status.is_client_error()
-        && !matches!(
-            status,
-            StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT | StatusCode::TOO_EARLY
-        )
+    state.store()?.ensure_account_refresh_current(fence)?;
+    if workflow::definitely_rejected(status)
         && let Some(fingerprint) = fingerprint
     {
-        state.clear_weekly_reset_attempt(&fence.account_id, fingerprint)?;
+        state.clear_weekly_reset_attempt(fence, fingerprint)?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn available_reset_expiry(snapshot: &ResetCreditsSnapshot) -> LocalResult<Option<u64>> {
-    let message = match snapshot.available_count {
-        Some(1..) => {
-            return Ok(snapshot
-                .next_expires_at
-                .and_then(|expiry| u64::try_from(expiry).ok())
-                .and_then(|expiry| expiry.checked_mul(1_000)));
-        }
-        Some(0) => "no reset credits are currently available for this account",
-        None => "reset credit availability is not confirmed for this account",
-    };
-    Err(LocalPoolError::new(ErrorCode::Conflict, message))
+    workflow::available_expiry(snapshot).map_err(http::local_error)
 }
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
 mod http;
-mod snapshot;
+#[cfg(test)]
+use zenith_relay_core::providers::chatgpt::connector::reset_credits::snapshot;
 
 #[cfg(test)]
 use http::reset_http_error;
-use http::{
-    ensure_reset_success, fetch_reset_snapshot_with_retry, post_reset_credit, retry_authorization,
-};
 #[cfg(test)]
 use snapshot::{is_codex_credit, parse_snapshot};
 

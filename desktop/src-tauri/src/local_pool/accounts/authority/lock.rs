@@ -7,8 +7,9 @@ use std::{
 };
 use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
-use zenith_relay_core::accounts::{TokenRefreshFailure, TokenRefreshFailureKind};
-use zenith_relay_core::error_codes;
+use zenith_relay_core::accounts::TokenRefreshFailure;
+pub use zenith_relay_core::providers::chatgpt::connector::authority::CredentialLockError as ProcessLockError;
+use zenith_relay_core::providers::chatgpt::connector::authority::CredentialLocks;
 use zenith_relay_core::unix_time_ms as now_ms;
 
 const MAX_LOCK_BYTES: u64 = 4 * 1024;
@@ -28,15 +29,6 @@ impl Default for ProcessLockConfig {
             stale_after_ms: 120_000,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProcessLockError {
-    InvalidConfiguration,
-    InvalidIdentity,
-    Io,
-    Timeout,
-    UnsafePath,
 }
 
 #[derive(Clone)]
@@ -254,14 +246,19 @@ fn validate_local_account_id(account_id: &str) -> Result<(), ProcessLockError> {
     }
 }
 
-pub(super) fn lock_refresh_failure(error: ProcessLockError) -> TokenRefreshFailure {
-    let code = match error {
-        ProcessLockError::Timeout => error_codes::REFRESH_LOCK_TIMEOUT,
-        ProcessLockError::InvalidIdentity => error_codes::INVALID_ACCOUNT_ID,
-        ProcessLockError::InvalidConfiguration => error_codes::REFRESH_LOCK_CONFIGURATION,
-        ProcessLockError::Io | ProcessLockError::UnsafePath => {
-            error_codes::REFRESH_LOCK_UNAVAILABLE
-        }
-    };
-    TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, code)
+impl CredentialLocks for ProcessAccountLocks {
+    fn acquire<'a>(
+        &'a self,
+        account_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Box<dyn Send>, ProcessLockError>> {
+        Box::pin(async move {
+            ProcessAccountLocks::acquire(self, account_id)
+                .await
+                .map(|guard| Box::new(guard) as Box<dyn Send>)
+        })
+    }
+
+    fn renewal_failed(&self, account_id: &str, failure: &TokenRefreshFailure) {
+        super::diagnostics::record_renewal_failure(account_id, failure);
+    }
 }

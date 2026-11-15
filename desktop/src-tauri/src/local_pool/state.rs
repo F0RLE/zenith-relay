@@ -361,10 +361,12 @@ impl DesktopState {
 
     pub(crate) fn clear_weekly_reset_attempt(
         &self,
-        account_id: &str,
+        fence: &crate::local_pool::store::AccountRefreshFence,
         fingerprint: &str,
     ) -> Result<()> {
         let mut store = self.store()?;
+        store.ensure_account_refresh_current(fence)?;
+        let account_id = &fence.account_id;
         let mut automations = store.automations().clone();
         if automations
             .weekly_reset_fingerprints

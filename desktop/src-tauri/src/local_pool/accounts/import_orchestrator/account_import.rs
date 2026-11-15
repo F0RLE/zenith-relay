@@ -1,33 +1,34 @@
 use super::{
-    ImportItemError, ImportRowContext, ItemResult, account_auth_mode,
-    build_import_credential_material, credential_item_error, ensure_account_import_item,
-    merge_existing_account, model_item_error, persist_imported_account, proxy_item_error,
-    validate_label,
+    ImportItemError, ImportRowContext, ItemResult, build_import_credential_material,
+    credential_item_error, model_item_error, persist_imported_account, proxy_item_error,
 };
-use crate::local_pool::accounts::credentials::CredentialStore;
-use crate::local_pool::accounts::proxy::ensure_account_proxy;
-use crate::local_pool::accounts::quota_refresh::AccountQuotaOutcome;
-use crate::local_pool::accounts::{NativeSecretBackend, records};
-use crate::local_pool::models::LocalAccountRecord;
-use crate::local_pool::runtime::current_time_ms;
-use crate::local_pool::state::DesktopState;
-use zenith_relay_core::accounts::ParsedImportItem;
-use zenith_relay_core::error_codes;
-use zenith_relay_core::providers::chatgpt::AccountModelsClient;
+use crate::local_pool::{
+    accounts::{
+        NativeSecretBackend,
+        credentials::{CredentialStore, StoredCodexCredentials},
+        proxy::ensure_account_proxy,
+        quota_refresh::AccountQuotaOutcome,
+        records,
+    },
+    models::{GatewaySettings, LocalAccountRecord},
+    runtime::current_time_ms,
+    state::DesktopState,
+};
+use zenith_relay_core::{
+    accounts::{AccountAuthMode, ParsedImportItem},
+    error_codes,
+    providers::chatgpt::{
+        AccountModelsClient,
+        connector::import::{self as shared, ImportHost, ImportRecord, ResolvedImport},
+    },
+};
 
 mod quota_probe;
 mod reconcile;
-
 use quota_probe::probe_import_quota;
 pub(super) use quota_probe::{account_import_proxy, import_proxy};
 use reconcile::reconcile_imported_credentials;
-
-pub(super) struct AccountImportOptions<'a> {
-    pub(super) add_to_pool: bool,
-    pub(super) discover_models: bool,
-    pub(super) probe_quota: bool,
-    pub(super) configured_models: &'a [String],
-}
+pub(super) use shared::AccountImportOptions;
 
 pub(super) async fn import_account_item(
     state: &DesktopState,
@@ -37,23 +38,6 @@ pub(super) async fn import_account_item(
     options: AccountImportOptions<'_>,
     account_check_endpoint: &url::Url,
 ) -> ItemResult<(LocalAccountRecord, AccountQuotaOutcome)> {
-    let AccountImportOptions {
-        add_to_pool,
-        discover_models,
-        probe_quota,
-        configured_models,
-    } = options;
-    ensure_account_import_item(&import_item)?;
-    let item_hash = crate::diagnostics::hash_identifier(&import_item.item_id);
-    crate::diagnostics::breadcrumb(
-        "account-import",
-        "item_processing_started",
-        &[("item", item_hash.clone())],
-    );
-    let issued_at_ms = current_time_ms();
-    let item_label = import_item.label.clone();
-    let imported_tags = import_item.tags.clone();
-    let item_priority = import_item.priority;
     let settings = state
         .store()
         .map_err(|_| {
@@ -64,39 +48,106 @@ pub(super) async fn import_account_item(
         })?
         .gateway()
         .clone();
-    let proxy = import_proxy(state, credential_store, &settings, &import_item)?;
-    let import_proxy = proxy.as_ref();
-    ensure_account_proxy(&settings, import_proxy).map_err(proxy_item_error)?;
-    let material = build_import_credential_material(
+    let item_hash = crate::diagnostics::hash_identifier(&import_item.item_id);
+    crate::diagnostics::breadcrumb(
+        "account-import",
+        "item_processing_started",
+        &[("item", item_hash.clone())],
+    );
+    let result = shared::import_account(
+        &DesktopImport {
+            state,
+            credential_store,
+            context,
+            settings,
+            account_check_endpoint,
+        },
         import_item,
-        issued_at_ms,
-        context.plan.as_deref(),
-        context.subscription_active_until_ms,
-        import_proxy,
-        settings.quota_request_timeout_seconds,
-        account_check_endpoint,
+        context.auth_mode,
+        options,
     )
     .await?;
     crate::diagnostics::breadcrumb(
         "account-import",
-        "credentials_resolved",
-        &[("item", item_hash.clone())],
+        "item_processing_completed",
+        &[("item", item_hash)],
     );
-    let reconciled =
-        reconcile_imported_credentials(state, credential_store, &settings, issued_at_ms, material)?;
-    let reconcile::ReconciledImportCredentials {
-        credentials,
-        old_credential,
-        existing_account,
-        preserved_refresh_token,
-        subscription_active_until_ms,
-        proxy,
-        provider_account_id,
-        identity_is_registered,
-    } = reconciled;
-    let is_siwc = credentials.siwc_registration().is_some();
-    let discovered_models = if discover_models && identity_is_registered && !is_siwc {
-        let client = AccountModelsClient::new_with_proxy(proxy.as_ref())
+    Ok(result)
+}
+
+struct DesktopImport<'a> {
+    state: &'a DesktopState,
+    credential_store: &'a CredentialStore<NativeSecretBackend>,
+    context: &'a ImportRowContext,
+    settings: GatewaySettings,
+    account_check_endpoint: &'a url::Url,
+}
+
+impl ImportRecord for LocalAccountRecord {
+    fn configured_models(&self) -> &[String] {
+        &self.models
+    }
+    fn discovered_models(&self) -> Option<&[String]> {
+        self.discovered_models.as_deref()
+    }
+    fn set_discovered_models(&mut self, models: Option<Vec<String>>) {
+        self.discovered_models = models;
+    }
+    fn preserve_host_settings(&mut self, previous: &Self) {
+        self.recovery = previous.recovery.clone();
+        self.allowed_models = previous.allowed_models.clone();
+        self.excluded_models = previous.excluded_models.clone();
+        self.priority = previous.priority;
+        self.weight = previous.weight;
+    }
+    fn normalize(&mut self) {
+        LocalAccountRecord::normalize(self);
+    }
+}
+
+impl ImportHost for DesktopImport<'_> {
+    type Account = LocalAccountRecord;
+    type Error = ImportItemError;
+    fn error(code: &'static str, message: &'static str) -> Self::Error {
+        ImportItemError::new(code, message)
+    }
+    fn now_ms(&self) -> u64 {
+        current_time_ms()
+    }
+
+    async fn resolve(
+        &self,
+        item: ParsedImportItem,
+        issued_at_ms: u64,
+    ) -> ItemResult<ResolvedImport<Self::Account>> {
+        let proxy = import_proxy(self.state, self.credential_store, &self.settings, &item)?;
+        ensure_account_proxy(&self.settings, proxy.as_ref()).map_err(proxy_item_error)?;
+        let material = build_import_credential_material(
+            item,
+            issued_at_ms,
+            self.context.plan.as_deref(),
+            self.context.subscription_active_until_ms,
+            proxy.as_ref(),
+            self.settings.quota_request_timeout_seconds,
+            self.account_check_endpoint,
+        )
+        .await?;
+        reconcile_imported_credentials(
+            self.state,
+            self.credential_store,
+            &self.settings,
+            issued_at_ms,
+            material,
+        )
+    }
+
+    async fn discover(
+        &self,
+        resolved: &ResolvedImport<Self::Account>,
+        issued_at_ms: u64,
+    ) -> ItemResult<Vec<String>> {
+        let credentials = &resolved.credentials;
+        let client = AccountModelsClient::new_with_proxy(resolved.proxy.as_ref())
             .map_err(model_item_error)?
             .with_oauth_client_kind(credentials.oauth_client_kind());
         let client_version =
@@ -106,7 +157,7 @@ pub(super) async fn import_account_item(
                 credentials
                     .authorization(issued_at_ms)
                     .map_err(credential_item_error)?,
-                &provider_account_id,
+                &resolved.provider_account_id,
                 &client_version,
                 crate::diagnostics::is_debug_enabled(),
             )
@@ -115,7 +166,7 @@ pub(super) async fn import_account_item(
                 crate::local_pool::accounts::model_probe::record_failure(
                     credentials.local_account_id(),
                     credentials.oauth_client_kind(),
-                    proxy.is_some(),
+                    resolved.proxy.is_some(),
                     &error,
                 );
                 model_item_error(error)
@@ -123,118 +174,57 @@ pub(super) async fn import_account_item(
         if let Some(catalog) = &discovery.basis_points_diagnostics {
             crate::local_pool::accounts::model_probe::record_catalog(
                 credentials.local_account_id(),
-                proxy.is_some(),
+                resolved.proxy.is_some(),
                 catalog,
             );
         }
-        Some(discovery.models)
-    } else {
-        None
-    };
-    let models = if let Some(existing) = &existing_account {
-        existing.models.clone()
-    } else if !configured_models.is_empty() {
-        configured_models.to_vec()
-    } else if let Some(discovered_models) = &discovered_models {
-        discovered_models.clone()
-    } else {
-        Vec::new()
-    };
-    let auth_mode = if preserved_refresh_token {
-        existing_account
-            .as_ref()
-            .map(|account| account.account.auth_mode)
-            .unwrap_or(account_auth_mode(context.auth_mode)?)
-    } else {
-        account_auth_mode(context.auth_mode)?
-    };
-    let priority = existing_account
-        .as_ref()
-        .map(|existing_account| existing_account.priority)
-        .or(item_priority);
-    let mut account = records::new_account_record(
-        &credentials,
-        auth_mode,
-        models,
-        priority.unwrap_or_default(),
-        issued_at_ms,
-    )
-    .map_err(|_| {
-        ImportItemError::new(
-            error_codes::INVALID_ACCOUNT,
-            "imported account record is invalid",
-        )
-    })?;
-    account.discovered_models = discovered_models.or_else(|| {
-        existing_account
-            .as_ref()
-            .and_then(|existing_account| existing_account.discovered_models.clone())
-    });
-    merge_existing_account(&mut account, existing_account.as_ref());
-    account.account.in_pool = if credentials.oauth_client_kind()
-        == zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
-    {
-        // Reauthentication preserves a prior explicit opt-in; importing a
-        // login alone never grants native Images participation.
-        account.account.in_pool && account.image_pool_enabled
-    } else {
-        account.image_pool_enabled = false;
-        account.account.in_pool || (add_to_pool && !is_siwc)
-    };
-    if let Some(active_until_ms) = subscription_active_until_ms {
-        account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
-            zenith_relay_core::quota::SubscriptionInput {
-                plan_type: account.account.subscription.plan_type.clone(),
-                active_until_ms: Some(active_until_ms),
-                forbidden: false,
-                observed_at_ms: issued_at_ms,
+        Ok(discovery.models)
+    }
+
+    fn new_record(
+        &self,
+        credentials: &StoredCodexCredentials,
+        auth: AccountAuthMode,
+        models: Vec<String>,
+        priority: i32,
+        issued_at_ms: u64,
+    ) -> ItemResult<Self::Account> {
+        records::new_account_record(credentials, auth, models, priority, issued_at_ms).map_err(
+            |_| {
+                ImportItemError::new(
+                    error_codes::INVALID_ACCOUNT,
+                    "imported account record is invalid",
+                )
             },
-        );
-    }
-    if existing_account.is_none() && !item_label.trim().is_empty() {
-        account.account.label = item_label;
-    }
-    // Existing account metadata is authoritative. Imported tags initialize a
-    // new account only, so re-importing a credential cannot erase local tags
-    // selected for automation or operator notes.
-    if existing_account.is_none() {
-        account.account.tags = imported_tags;
-    }
-    validate_label(&account.account.label).map_err(|_| {
-        ImportItemError::new(
-            error_codes::INVALID_LABEL,
-            "imported account label is invalid",
         )
-    })?;
-    account.normalize();
-    let quota = if probe_quota && identity_is_registered && !is_siwc {
+    }
+
+    async fn probe_quota(
+        &self,
+        account: &mut Self::Account,
+        resolved: &ResolvedImport<Self::Account>,
+    ) -> AccountQuotaOutcome {
         probe_import_quota(
-            &mut account,
-            &credentials,
-            proxy.as_ref(),
-            settings.quota_request_timeout_seconds,
+            account,
+            &resolved.credentials,
+            resolved.proxy.as_ref(),
+            self.settings.quota_request_timeout_seconds,
         )
         .await
-    } else {
-        AccountQuotaOutcome::Skipped
-    };
-    crate::diagnostics::breadcrumb(
-        "account-import",
-        "persist_ready",
-        &[("item", item_hash.clone())],
-    );
-    persist_imported_account(
-        state,
-        credential_store,
-        &credentials,
-        old_credential.as_ref(),
-        account.clone(),
-    )
-    .await?;
-    crate::diagnostics::breadcrumb(
-        "account-import",
-        "item_processing_completed",
-        &[("item", item_hash)],
-    );
-    Ok((account, quota))
+    }
+
+    async fn commit(
+        &self,
+        account: &Self::Account,
+        resolved: &ResolvedImport<Self::Account>,
+    ) -> ItemResult<()> {
+        persist_imported_account(
+            self.state,
+            self.credential_store,
+            &resolved.credentials,
+            resolved.old_credential.as_ref(),
+            account.clone(),
+        )
+        .await
+    }
 }

@@ -38,11 +38,14 @@ h2 = "0.4.20"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-proxy"] }
 jsonschema = { version = "0.60.2", default-features = false }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 hex = "0.4.3"
+hmac = "0.13.0"
 memchr = "2.8.3"
 multer = "3.1.0"
 os_info = "3.15.0"
-reqwest = { version = "0.13.5", default-features = false, features = ["http2", "http3", "json", "query", "rustls", "stream"] }
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["form", "http2", "http3", "json", "query", "rustls", "stream"] }
 reqwest-websocket = "0.6.0"
 regex = "1.13.1"
 ring = "0.17.14"
@@ -50,6 +53,7 @@ serde = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.154", features = ["arbitrary_precision", "preserve_order", "raw_value"] }
 semver = "1.0.28"
 sha2 = "0.11.1"
+sha1 = "0.11.0"
 subtle = "2.6.1"
 tokio = { version = "1.54.1", features = ["macros", "time"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }

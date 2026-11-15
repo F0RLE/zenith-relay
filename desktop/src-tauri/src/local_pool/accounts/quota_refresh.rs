@@ -9,8 +9,8 @@ use super::refresh_observations::{
 };
 use crate::local_pool::accounts::NativeSecretBackend;
 use crate::local_pool::accounts::authority::{
-    CredentialPersistence, ProcessAccountLocks, ProcessLockConfig, ProcessLockError,
-    StoredRefreshAdapter,
+    ProcessAccountLocks, ProcessLockConfig, ProcessLockError, credential_persistence,
+    default_refresh_adapter,
 };
 use crate::local_pool::accounts::credentials::{
     CredentialStore, StoredCodexCredentials, bearer_authorization,
@@ -36,11 +36,11 @@ use tauri::{AppHandle, State};
 use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::accounts::{AccountAuthState, ReauthReason, TokenSet};
 use zenith_relay_core::error_codes;
+#[cfg(test)]
+use zenith_relay_core::providers::chatgpt::CodexSubscriptionMetadata;
 use zenith_relay_core::providers::chatgpt::{
     AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, CodexSubscriptionClient,
-    CodexSubscriptionMetadata, CodexSubscriptionRead, ModelDiscoveryFailure,
-    ModelDiscoveryFailureCode, QuotaRefreshOutcome, is_agent_identity_task_invalid_failure,
-    merge_subscription_metadata_at, subscription_refresh_due,
+    CodexSubscriptionRead, ModelDiscoveryFailure, ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};
 use zenith_relay_core::scheduler::refresh::{RefreshKind, http::ManagementHttpScope};

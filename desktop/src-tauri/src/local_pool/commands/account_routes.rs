@@ -29,39 +29,12 @@ fn route_is_linked(gateway: &GatewaySettings, current: &str, next: &str) -> bool
         .is_some_and(|group| group.account_ids.iter().any(|id| id == next))
 }
 
-fn copy_route_settings(destination: &mut LocalAccountRecord, source: &LocalAccountRecord) {
-    destination.account.label = source.account.label.clone();
-    destination.account.tags = source.account.tags.clone();
-    destination.account.enabled = source.account.enabled;
-    destination.account.draining = source.account.draining;
-    destination.account.in_pool = source.account.in_pool;
-    destination.priority = source.priority;
-    destination.weight = source.weight;
-    destination.purchase_cost_micro_usd = source.purchase_cost_micro_usd;
-}
-
 fn restore_route_records(
     current: &mut [LocalAccountRecord],
     previous: &[LocalAccountRecord],
 ) -> Result<()> {
-    for previous in previous {
-        let destination = current
-            .iter_mut()
-            .find(|record| {
-                record.account.id == previous.account.id
-                    && record.account.identity.identity_hash
-                        == previous.account.identity.identity_hash
-            })
-            .ok_or_else(|| {
-                LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    "Account changed during route rollback",
-                )
-            })?;
-        copy_route_settings(destination, previous);
-        destination.image_pool_enabled = previous.image_pool_enabled;
-    }
-    Ok(())
+    zenith_relay_core::accounts::management::restore_route_records(current, previous)
+        .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))
 }
 
 fn original_login_email(
@@ -291,45 +264,15 @@ fn select_group_records(
     next_kind: OAuthClientKind,
     group: AccountRouteGroup,
 ) -> Result<Vec<String>> {
-    if !gateway.account_route_is_selected(current) {
-        return Err(conflict(
-            "The selected account route changed; refresh and try again",
-        ));
-    }
-    let next = group.selected_account_id.as_str();
-    let source = accounts
-        .iter()
-        .find(|a| a.account.id == current)
-        .cloned()
-        .ok_or_else(|| conflict("Account route was not found"))?;
-    let destination = accounts
-        .iter_mut()
-        .find(|a| a.account.id == next)
-        .ok_or_else(|| conflict("Account route was not found"))?;
-    if source.recovery.is_some() || destination.recovery.is_some() {
-        return Err(conflict("Recover the account before changing its route"));
-    }
-    copy_route_settings(destination, &source);
-    // Route switching does not transfer or revive native Images consent.
-    destination.image_pool_enabled = false;
-    destination.account.in_pool &= next_kind != OAuthClientKind::Codex;
-    for account in accounts.iter_mut() {
-        if group.account_ids.contains(&account.account.id) && account.account.id != next {
-            account.account.in_pool = false;
-            account.image_pool_enabled = false;
-        }
-    }
-    if let Some(policy) = &mut gateway.pool_routing {
-        group.retarget_pool_routing(policy, current, next_kind);
-    }
-    gateway.account_routes.retain(|existing| {
-        !existing
-            .account_ids
-            .iter()
-            .any(|id| group.account_ids.contains(id))
-    });
-    let ids = group.account_ids.clone();
-    gateway.account_routes.push(group);
+    let ids = zenith_relay_core::accounts::management::select_route_records(
+        accounts,
+        &mut gateway.account_routes,
+        &mut gateway.pool_routing,
+        current,
+        next_kind,
+        group,
+    )
+    .map_err(conflict)?;
     gateway.validate().map_err(LocalPoolError::invalid_state)?;
     Ok(ids)
 }

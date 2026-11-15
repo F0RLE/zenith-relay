@@ -1,4 +1,5 @@
 use super::*;
+use zenith_relay_core::providers::chatgpt::connector::import::merge_existing_account;
 
 #[test]
 fn reauthentication_preserves_only_existing_explicit_image_membership() {

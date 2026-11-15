@@ -106,87 +106,10 @@ fn optional_expiry_missing(failure: &QuotaRefreshFailure) -> bool {
         && failure.response_mitigation().is_none()
 }
 
-pub(super) fn apply_subscription_read(
-    quota: &mut QuotaRefreshOutcome,
-    subscription: &mut Subscription,
-    metadata: CodexSubscriptionMetadata,
-    observed_at_ms: u64,
-) {
-    apply_subscription_metadata(subscription, metadata, observed_at_ms);
-    match quota {
-        QuotaRefreshOutcome::Updated(result) => {
-            result.quota.subscription = Some(zenith_relay_core::quota::SubscriptionInput {
-                plan_type: subscription.plan_type.clone(),
-                active_until_ms: subscription.active_until_ms,
-                forbidden: false,
-                observed_at_ms,
-            });
-        }
-        QuotaRefreshOutcome::Failed {
-            subscription: previous,
-            ..
-        } => {
-            *previous = subscription.clone();
-        }
-    }
-}
-
-pub(in crate::local_pool::accounts) fn apply_subscription_metadata(
-    subscription: &mut Subscription,
-    metadata: CodexSubscriptionMetadata,
-    observed_at_ms: u64,
-) {
-    let mut plan_type = subscription.plan_type.clone();
-    let mut active_until_ms = subscription.active_until_ms;
-    merge_subscription_metadata_at(
-        &mut plan_type,
-        &mut active_until_ms,
-        metadata,
-        Some(observed_at_ms),
-    );
-    *subscription = Subscription::normalize(zenith_relay_core::quota::SubscriptionInput {
-        plan_type,
-        active_until_ms,
-        forbidden: false,
-        observed_at_ms,
-    });
-}
-
-pub(super) fn apply_partial_subscription_read(
-    quota: &mut QuotaRefreshOutcome,
-    subscription: &mut Subscription,
-    metadata: CodexSubscriptionMetadata,
-    observed_at_ms: u64,
-) {
-    let plan_changed = zenith_relay_core::quota::subscription_plan_changed(
-        subscription.plan_type.as_deref(),
-        metadata.plan_type.as_deref(),
-    );
-    let previous_updated_at_ms = subscription.updated_at_ms;
-    let mut plan_type = subscription.plan_type.clone();
-    let mut active_until_ms = subscription.active_until_ms;
-    // A failed expiry lookup cannot refresh or clear a retained same-plan date.
-    merge_subscription_metadata_at(&mut plan_type, &mut active_until_ms, metadata, None);
-    let mut partial = Subscription::normalize(zenith_relay_core::quota::SubscriptionInput {
-        plan_type,
-        active_until_ms,
-        forbidden: subscription.status == zenith_relay_core::quota::SubscriptionStatus::Forbidden,
-        observed_at_ms,
-    });
-    partial.updated_at_ms = if plan_changed {
-        None
-    } else {
-        previous_updated_at_ms
-    };
-    *subscription = partial;
-    if let QuotaRefreshOutcome::Failed {
-        subscription: previous,
-        ..
-    } = quota
-    {
-        *previous = subscription.clone();
-    }
-}
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use zenith_relay_core::providers::chatgpt::connector::monitoring::{
+    apply_partial_subscription_read, apply_subscription_metadata, apply_subscription_read,
+};
 
 pub(super) async fn request_account_quota_metadata(
     prepared: &PreparedAccountAuthorization,
@@ -216,20 +139,6 @@ pub(super) async fn request_account_quota_metadata(
         ),
     )
     .await)
-}
-
-pub(super) fn respect_quota_retry_after(
-    state: &DesktopState,
-    scope: &AccountRefreshScope,
-    refresh_result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
-) {
-    if let Ok(QuotaRefreshOutcome::Failed { failure, .. }) = refresh_result
-        && let Some(delay) = failure.retry_after_ms()
-    {
-        state
-            .refresh
-            .respect_retry_after(&scope.fence.identity(), RefreshKind::Quota, delay);
-    }
 }
 
 #[cfg(test)]

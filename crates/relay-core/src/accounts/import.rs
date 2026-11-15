@@ -10,6 +10,9 @@ mod formats;
 mod item;
 mod parse;
 mod sanitization;
+mod selection;
+
+pub use selection::normalize_selected_item_ids;
 
 pub const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IMPORT_ITEMS: usize = 1_024;

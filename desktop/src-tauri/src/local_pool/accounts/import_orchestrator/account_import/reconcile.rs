@@ -8,19 +8,10 @@ use crate::local_pool::accounts::proxy::effective_proxy_config;
 use crate::local_pool::models::{GatewaySettings, LocalAccountRecord};
 use crate::local_pool::state::DesktopState;
 use uuid::Uuid;
-use zenith_relay_core::ProxyConfig;
 use zenith_relay_core::error_codes;
 
-pub(super) struct ReconciledImportCredentials {
-    pub(super) credentials: StoredCodexCredentials,
-    pub(super) old_credential: Option<StoredCodexCredentials>,
-    pub(super) existing_account: Option<LocalAccountRecord>,
-    pub(super) preserved_refresh_token: bool,
-    pub(super) subscription_active_until_ms: Option<u64>,
-    pub(super) proxy: Option<ProxyConfig>,
-    pub(super) provider_account_id: String,
-    pub(super) identity_is_registered: bool,
-}
+type ReconciledImportCredentials =
+    zenith_relay_core::providers::chatgpt::connector::import::ResolvedImport<LocalAccountRecord>;
 
 /// Match imported material to a local account and keep secrets the import did
 /// not replace.

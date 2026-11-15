@@ -109,7 +109,7 @@ pub(in crate::local_pool::accounts) async fn ensure_local_agent_identity_task(
             format!("failed to register Agent Identity task: {error}"),
         )
     })?;
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         CredentialStore::from_backend(NativeSecretBackend),
         state.account_metadata_sink(),
         state.transient_root(),
@@ -123,28 +123,7 @@ pub(in crate::local_pool::accounts) async fn ensure_local_agent_identity_task(
         .map_err(credential_local_error)
 }
 
-pub(in crate::local_pool::accounts) fn quota_refresh_has_invalid_agent_task(
-    result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
-) -> bool {
-    matches!(
-        result,
-        Ok(QuotaRefreshOutcome::Failed { failure, .. })
-            if is_agent_identity_task_invalid_failure(failure)
-    )
-}
-
-pub(in crate::local_pool::accounts) fn model_discovery_has_invalid_agent_task(
-    result: &Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
-) -> bool {
-    matches!(
-        result,
-        Some(Err(ModelDiscoveryFailure {
-            code: ModelDiscoveryFailureCode::AgentTaskInvalid,
-            ..
-        }))
-    )
-}
-
+#[cfg(test)]
 pub(in crate::local_pool::accounts) fn quota_refresh_was_unauthorized(
     result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
 ) -> bool {
@@ -155,6 +134,7 @@ pub(in crate::local_pool::accounts) fn quota_refresh_was_unauthorized(
     )
 }
 
+#[cfg(test)]
 pub(in crate::local_pool::accounts) fn model_discovery_was_unauthorized(
     result: &Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
 ) -> bool {
@@ -177,7 +157,7 @@ pub(in crate::local_pool::accounts) async fn recover_account_authorization(
         LocalPoolError::invalid_state("rejected token authorization revision is missing")
     })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         credentials,
         state.account_metadata_sink(),
         state.transient_root(),
@@ -193,30 +173,6 @@ pub(in crate::local_pool::accounts) async fn recover_account_authorization(
             )
         })?;
     prepare_account_credentials(state, account_id).await
-}
-
-pub(in crate::local_pool::accounts) fn account_requires_reauthentication(
-    state: &DesktopState,
-    account_id: &str,
-) -> LocalResult<bool> {
-    let auth_state = state
-        .store()?
-        .account(account_id)
-        .map(|account| account.account.auth_state)
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    Ok(auth_state.requires_fresh_login())
-}
-
-pub(in crate::local_pool::accounts) fn account_auth_is_access_only(
-    state: &DesktopState,
-    account_id: &str,
-) -> LocalResult<bool> {
-    let auth_state = state
-        .store()?
-        .account(account_id)
-        .map(|account| account.account.auth_state)
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    Ok(auth_state == AccountAuthState::DegradedAccessOnly)
 }
 
 pub(in crate::local_pool::accounts) async fn mark_access_only_reauthentication(

@@ -1,47 +1,26 @@
 use crate::local_pool::models::{GatewaySettings, LocalAccountRecord};
 use crate::local_pool::state::AccountCredentialFacts;
 use std::collections::HashMap;
-use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState},
-    automations::{WakeTask, WakeTrigger},
-    providers::chatgpt::OAuthClientKind,
-};
-
-fn weekly_reset_registration_eligible(record: &LocalAccountRecord) -> bool {
-    let account = &record.account;
-    record.recovery.is_none()
-        && account.enabled
-        && !account.draining
-        && account.auth_state == AccountAuthState::Active
-        && (account.health == AccountHealthState::Healthy
-            || (account.health == AccountHealthState::Degraded
-                && account.last_error_code.as_deref() == Some("upstream_route_degraded")))
-}
-
-/// A generation-route failure does not revoke authenticated quota operations.
-/// Reset admission still checks current ledger evidence and the matching rule.
-pub(crate) fn weekly_reset_pool_member_eligible(record: &LocalAccountRecord) -> bool {
-    record.account.in_pool && weekly_reset_registration_eligible(record)
-}
+#[cfg(test)]
+use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
+use zenith_relay_core::automations::WakeTask;
+#[cfg(test)]
+use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+use zenith_relay_core::providers::chatgpt::connector::reset_credits::supports_reset_credits;
 
 /// An explicitly linked reader may serve the selected pool connection without
 /// becoming a dispatch member or acquiring its credentials.
+#[cfg(test)]
 pub(crate) fn selected_pool_account<'a>(
     settings: &GatewaySettings,
     accounts: &'a [LocalAccountRecord],
     reader: &LocalAccountRecord,
 ) -> Option<&'a LocalAccountRecord> {
-    if !weekly_reset_registration_eligible(reader) {
-        return None;
-    }
-    let selected_id = settings
-        .account_routes
-        .iter()
-        .find(|group| group.account_ids.contains(&reader.account.id))
-        .map_or(&reader.account.id, |group| &group.selected_account_id);
-    accounts.iter().find(|record| {
-        record.account.id == *selected_id && weekly_reset_pool_member_eligible(record)
-    })
+    zenith_relay_core::automations::reset_resources::selected_pool_account(
+        &settings.account_routes,
+        accounts,
+        reader,
+    )
 }
 
 pub(crate) fn weekly_reset_rule_matches(
@@ -49,10 +28,7 @@ pub(crate) fn weekly_reset_rule_matches(
     reader: &LocalAccountRecord,
     selected: &LocalAccountRecord,
 ) -> bool {
-    task.enabled
-        && task.trigger == WakeTrigger::Weekly
-        && (task.account_selector.matches(&reader.account)
-            || task.account_selector.matches(&selected.account))
+    zenith_relay_core::automations::reset_resources::rule_matches(task, reader, selected)
 }
 
 /// Keep one automatic redeemer per linked ledger even when several native
@@ -63,59 +39,47 @@ pub(crate) fn weekly_reset_member<'a>(
     reader: &LocalAccountRecord,
     credentials: &HashMap<String, Option<AccountCredentialFacts>>,
 ) -> Option<&'a LocalAccountRecord> {
-    let selected = selected_pool_account(settings, accounts, reader)?;
-    let Some(group) = settings
-        .account_routes
-        .iter()
-        .find(|group| group.account_ids.contains(&reader.account.id))
-    else {
-        return Some(selected);
-    };
-    let owner = accounts
-        .iter()
-        .filter(|candidate| {
-            group.account_ids.contains(&candidate.account.id)
-                && credentials
-                    .get(&candidate.account.id)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|facts| {
-                        matches!(
-                            facts.oauth_client_kind,
-                            OAuthClientKind::Codex | OAuthClientKind::ExcelBps
-                        ) && (facts.has_oauth || facts.agent_identity)
-                    })
-                && selected_pool_account(settings, accounts, candidate).is_some()
-        })
-        .min_by_key(|candidate| {
-            (
-                candidate.account.id != selected.account.id,
-                &candidate.account.id,
-            )
-        })?;
-    (owner.account.id == reader.account.id).then_some(selected)
-}
-
-/// Attempt history belongs to the linked ledger, even after switching its
-/// selected connection or disabling the previous reader.
-pub(crate) fn linked_reset_attempts<'a>(
-    settings: &'a GatewaySettings,
-    records: &'a crate::local_pool::models::AutomationRecords,
-    account_id: &'a str,
-) -> impl Iterator<Item = &'a str> {
-    let group = settings.account_route_group(account_id);
-    records
-        .weekly_reset_fingerprints
-        .iter()
-        .filter_map(move |(id, marker)| {
-            (id == account_id || group.is_some_and(|group| group.account_ids.contains(id)))
-                .then_some(marker.as_str())
-        })
+    let standalone = settings.account_route_group(&reader.account.id).is_none();
+    zenith_relay_core::automations::reset_resources::reset_member(
+        &settings.account_routes,
+        accounts,
+        reader,
+        |id| {
+            let facts = credentials.get(id).and_then(Option::as_ref);
+            // A standalone ledger has no competing reader to elect. Its saved
+            // connector can establish capability without opening credentials;
+            // dispatch still prepares and fences current authorization.
+            if standalone {
+                return facts
+                    .map(|facts| facts.oauth_client_kind)
+                    .or(reader.oauth_client_kind)
+                    .is_some_and(supports_reset_credits);
+            }
+            facts.is_some_and(|facts| {
+                supports_reset_credits(facts.oauth_client_kind)
+                    && (facts.has_oauth || facts.agent_identity)
+            })
+        },
+    )
 }
 
 #[cfg(test)]
 pub(in crate::local_pool) mod tests {
     use super::*;
     use crate::local_pool::{models::AccountRouteGroup, refresh::tests::account};
+
+    #[test]
+    fn standalone_ledger_keeps_capability_separate_from_credential_availability() {
+        let mut reader = account();
+        reader.account.in_pool = true;
+        let settings = GatewaySettings::default();
+        let facts = HashMap::new();
+        assert!(weekly_reset_member(&settings, &[reader.clone()], &reader, &facts).is_some());
+        for kind in [Some(OAuthClientKind::Siwc), None] {
+            reader.oauth_client_kind = kind;
+            assert!(weekly_reset_member(&settings, &[reader.clone()], &reader, &facts).is_none());
+        }
+    }
 
     pub(in crate::local_pool) fn native_facts(
         accounts: &[LocalAccountRecord],

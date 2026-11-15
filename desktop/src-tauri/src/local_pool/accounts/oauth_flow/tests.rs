@@ -5,6 +5,7 @@ use super::callback::render_callback_success_html;
 use super::snapshot::validate_snapshot;
 use super::snapshot::{ensure_pending_directory, pending_directory};
 use super::*;
+use crate::local_pool::accounts::oauth::OAuthClientKind;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -480,6 +481,7 @@ fn persisted_authorization_url_is_strictly_validated() {
         authorization_url,
         callback_secret_ref: callback_secret_ref(&login_id),
         status: OAuthFlowStatus::Pending,
+        exchange_started: false,
         target_account_id: None,
         notes_account_id: None,
         sign_in_proxy_id: None,

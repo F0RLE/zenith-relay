@@ -86,8 +86,9 @@ pub(super) fn validate_snapshot(
         || snapshot.callback_secret_ref != callback_secret_ref(expected_login_id)
         || !matches!(
             snapshot.status,
-            OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
+            OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived | OAuthFlowStatus::Failed
         )
+        || (snapshot.exchange_started && snapshot.status != OAuthFlowStatus::CallbackReceived)
         || snapshot.pending.created_at_ms() == 0
         || (snapshot.pending.client_kind().is_local_callback()
             && callback_port(&snapshot.pending).is_err())
@@ -160,9 +161,7 @@ pub(super) fn pending_directory(root: &Path) -> PathBuf {
     root.join("oauth_pending")
 }
 
-pub(crate) fn callback_secret_ref(login_id: &str) -> String {
-    format!("oauth-callback:{login_id}")
-}
+use super::callback_secret_ref;
 
 pub(super) fn validate_login_id(login_id: &str) -> Result<String, OAuthFlowError> {
     let login_id = login_id.trim();

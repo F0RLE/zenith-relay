@@ -7,7 +7,7 @@ pub(crate) mod import_session;
 pub(crate) mod login;
 pub(crate) mod model_probe;
 pub(crate) mod mutations;
-pub(crate) mod oauth;
+pub(crate) use zenith_relay_core::providers::chatgpt::connector::oauth;
 pub(crate) mod oauth_flow;
 pub(crate) mod pool_resources;
 pub(crate) mod proxy;

@@ -208,7 +208,7 @@ async fn exercise_recovery(cancel: bool) {
     client.fail.store(!cancel, Ordering::SeqCst);
     client.pause.store(cancel, Ordering::SeqCst);
     let adapter = Arc::new(
-        StoredRefreshAdapter::with_lock_config(
+        refresh_adapter_with_config(
             root.clone(),
             store.clone(),
             client.clone(),
@@ -243,7 +243,7 @@ async fn exercise_recovery(cancel: bool) {
     );
     client.fail.store(false, Ordering::SeqCst);
     client.pause.store(false, Ordering::SeqCst);
-    let restarted = StoredRefreshAdapter::with_lock_config(
+    let restarted = refresh_adapter_with_config(
         root.clone(),
         CredentialStore::new(backend),
         client.clone(),
@@ -308,7 +308,7 @@ async fn siwc_renewal_window_does_not_claim_a_grant_or_increment_failure_backoff
         .unwrap();
     store.save(&before).unwrap();
     let client = client(&store, false);
-    let adapter = StoredRefreshAdapter::with_lock_config(
+    let adapter = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         client.clone(),
@@ -350,7 +350,7 @@ async fn siwc_lost_reply_preserves_live_access_after_restart_without_resending_t
     before.expire_access_at(10_000);
     store.save(&before).unwrap();
     let client = client(&store, true);
-    let adapter = StoredRefreshAdapter::with_lock_config(
+    let adapter = refresh_adapter_with_config(
         root.clone(),
         store.clone(),
         client.clone(),
@@ -359,7 +359,7 @@ async fn siwc_lost_reply_preserves_live_access_after_restart_without_resending_t
     )
     .unwrap();
     let metadata = Arc::new(CaptureMetadata::default());
-    let persistence = CredentialPersistence::new(store.clone(), metadata.clone(), root.clone());
+    let persistence = credential_persistence(store.clone(), metadata.clone(), root.clone());
     let authority = TokenAuthority::new(1).unwrap();
     authority
         .register(

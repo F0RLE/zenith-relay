@@ -7,8 +7,6 @@ fn default_true() -> bool {
     true
 }
 
-pub(in crate::local_pool::accounts) const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
-
 pub(in crate::local_pool::accounts) const MAX_MODELS: usize = zenith_relay_core::MAX_MODEL_LIST_LEN;
 
 pub(in crate::local_pool::accounts) const DEFAULT_OPENAI_SOURCE_URL: &str =

@@ -3,8 +3,7 @@
 
 use super::{
     import_orchestrator::{
-        apply_model_discovery, apply_model_discovery_failure, apply_quota_outcome_with_transitions,
-        preserve_newer_account_state,
+        apply_model_discovery, apply_model_discovery_failure, preserve_newer_account_state,
     },
     quota_refresh::AccountQuotaOutcome,
     quota_service::apply_quota_failure,
@@ -16,10 +15,12 @@ use crate::local_pool::{
     state::DesktopState,
     store::{AccountRefreshFence, AppliedAccountRefresh, LocalPoolStore},
 };
+#[cfg(test)]
+use zenith_relay_core::quota::Subscription;
 use zenith_relay_core::{
     error_codes,
     providers::chatgpt::{ModelDiscoveryFailure, OAuthClientKind, QuotaRefreshOutcome},
-    quota::{QuotaRefreshFailure, QuotaSnapshot, QuotaTransition, QuotaWindow, Subscription},
+    quota::{QuotaRefreshFailure, QuotaTransition},
 };
 
 pub(in crate::local_pool) struct AccountRefreshScope {
@@ -65,17 +66,7 @@ pub(in crate::local_pool) struct AppliedQuotaRead {
     pub models_changed: bool,
 }
 
-pub(in crate::local_pool) enum SubscriptionObservation {
-    Timestamped(Subscription),
-    /// Authenticated fields from an account check whose optional lookup failed.
-    Partial(Subscription),
-}
-
-impl From<Subscription> for SubscriptionObservation {
-    fn from(subscription: Subscription) -> Self {
-        Self::Timestamped(subscription)
-    }
-}
+pub(in crate::local_pool) use zenith_relay_core::providers::chatgpt::connector::observations::SubscriptionObservation;
 
 pub(in crate::local_pool) fn apply_quota_read(
     store: &mut LocalPoolStore,
@@ -84,71 +75,16 @@ pub(in crate::local_pool) fn apply_quota_read(
     subscription: impl Into<SubscriptionObservation>,
     models: Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
 ) -> Result<AppliedAccountRefresh<AppliedQuotaRead>> {
-    let (subscription, partial_subscription) = match subscription.into() {
-        SubscriptionObservation::Timestamped(subscription) => (subscription, false),
-        SubscriptionObservation::Partial(subscription) => (subscription, true),
-    };
     store.apply_account_refresh(&scope.fence, |account| {
         let account_snapshot = account.clone();
-        let observed_subscription = match &quota {
-            QuotaRefreshOutcome::Updated(result) => result
-                .quota
-                .subscription
-                .clone()
-                .map(Subscription::normalize),
-            QuotaRefreshOutcome::Failed { subscription, .. } => Some(subscription.clone()),
-        };
-        let subscription = observed_subscription
-            .filter(|observed| {
-                !partial_subscription
-                    && (observed.updated_at_ms > subscription.updated_at_ms
-                        || (observed.updated_at_ms == subscription.updated_at_ms
-                            && (observed.active_until_ms.is_some()
-                                || subscription.active_until_ms.is_none()
-                                || zenith_relay_core::quota::subscription_plan_changed(
-                                    subscription.plan_type.as_deref(),
-                                    observed.plan_type.as_deref(),
-                                ))))
-            })
-            .unwrap_or(subscription);
-        let (outcome, exhaustion_transitions) = if quota_is_newer(account, scope) {
-            // No transition may be emitted from superseded evidence, including
-            // a late exhaustion/full result that could trigger a paid action.
-            // The ledger has its own clock: continuous response headers must
-            // not starve complete credit observations while preserving windows.
-            let credits_updated = match &quota {
-                QuotaRefreshOutcome::Updated(result) => result
-                    .quota
-                    .clone()
-                    .normalize(&account.account.quota)
-                    .is_ok_and(|(snapshot, _)| {
-                        account.account.quota.merge_provider_credits(&snapshot)
-                    }),
-                QuotaRefreshOutcome::Failed { .. } => false,
-            };
-            let outcome = if credits_updated {
-                AccountQuotaOutcome::Updated {
-                    transitions: Vec::new(),
-                    exhaustion_transitions: Vec::new(),
-                }
-            } else {
-                AccountQuotaOutcome::Skipped
-            };
-            (outcome, Vec::new())
-        } else {
-            apply_quota_outcome_with_transitions(account, quota, scope.started_at_ms)
-        };
-        // Passive quota headers do not supersede an independent subscription read.
-        if account_snapshot.account.subscription != scope.initial_account.account.subscription
-            || (!partial_subscription
-                && (subscription.updated_at_ms.is_none()
-                    || subscription.updated_at_ms
-                        < scope.initial_account.account.subscription.updated_at_ms))
-        {
-            account.account.subscription = account_snapshot.account.subscription.clone();
-        } else {
-            account.account.subscription = subscription;
-        }
+        let (outcome, exhaustion_transitions) =
+            zenith_relay_core::providers::chatgpt::connector::observations::apply_quota_read(
+                &mut account.account,
+                &scope.initial_account.account,
+                quota,
+                subscription,
+                scope.started_at_ms,
+            );
         let models_changed = models
             .map(|models| apply_model_discovery(account, models))
             .unwrap_or(false);
@@ -266,53 +202,10 @@ pub(in crate::local_pool) fn apply_read_error(
 }
 
 fn quota_is_newer(account: &LocalAccountRecord, scope: &AccountRefreshScope) -> bool {
-    // Passive headers move reset timers while a full /wham/usage read is in
-    // flight. That clock shift is not a newer remainder, so it must not discard
-    // the complete response. A changed remainder, limit, credit ledger, or
-    // supplemental window still wins over the late read.
-    QuotaSchedulingEvidence::from_snapshot(&account.account.quota)
-        != QuotaSchedulingEvidence::from_snapshot(&scope.initial_account.account.quota)
-}
-
-/// The quota fields that make an in-flight refresh stale. Reset timers are
-/// intentionally absent.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct QuotaSchedulingEvidence {
-    primary_remaining: Option<u16>,
-    secondary_remaining: Option<u16>,
-    limit_reached: bool,
-    reset_credits_available: Option<u32>,
-    available_credits_micro_units: Option<u64>,
-    provider_credits_available: bool,
-    provider_credits_unlimited: bool,
-    provider_credits_observed_at_ms: Option<u64>,
-    direct_balance_micro_usd: Option<u64>,
-    supplemental: Vec<(String, Option<u16>)>,
-}
-
-impl QuotaSchedulingEvidence {
-    fn from_snapshot(quota: &QuotaSnapshot) -> Self {
-        Self {
-            primary_remaining: window_remaining(quota.primary.as_ref()),
-            secondary_remaining: window_remaining(quota.secondary.as_ref()),
-            limit_reached: quota.limit_reached,
-            reset_credits_available: quota.reset_credits_available,
-            available_credits_micro_units: quota.available_credits_micro_units,
-            provider_credits_available: quota.provider_credits_available,
-            provider_credits_unlimited: quota.provider_credits_unlimited,
-            provider_credits_observed_at_ms: quota.provider_credits_observed_at_ms,
-            direct_balance_micro_usd: quota.direct_balance_micro_usd,
-            supplemental: quota
-                .supplemental
-                .iter()
-                .map(|window| (window.id.clone(), window.window.available_basis_points))
-                .collect(),
-        }
-    }
-}
-
-fn window_remaining(window: Option<&QuotaWindow>) -> Option<u16> {
-    window.and_then(|window| window.available_basis_points)
+    zenith_relay_core::providers::chatgpt::connector::observations::quota_is_newer(
+        &account.account.quota,
+        &scope.initial_account.account.quota,
+    )
 }
 
 fn quota_refresh_error_kind(code: ErrorCode) -> Option<&'static str> {

@@ -1,4 +1,8 @@
 use super::*;
+use zenith_relay_core::providers::chatgpt::{
+    OAuthClientKind,
+    connector::monitoring::{self, ModelMonitorHost, MonitorHost, QuotaMonitorHost},
+};
 
 pub(crate) async fn refresh_account_quota_once(
     state: &DesktopState,
@@ -19,256 +23,280 @@ pub(in crate::local_pool) async fn read_account_quota_once(
 ) -> LocalResult<AccountQuotaRefreshResponse> {
     let quota_lock = state.quota_account_lock(&scope.fence.account_id)?;
     let _quota_guard = quota_lock.lock().await;
-    scope.validate(state)?;
-    let quota_result = read_account_quota(state, scope, force_subscription_refresh).await;
-    if let Err(error) = &quota_result {
+    let result =
+        monitoring::refresh_quota(&DesktopMonitor { state, scope }, force_subscription_refresh)
+            .await;
+    if let Err(error) = &result {
         record_read_error(state, scope, RefreshReadKind::Quota, error).await;
     }
-    quota_result
+    result
 }
 
-async fn read_account_quota(
-    state: &DesktopState,
-    scope: &AccountRefreshScope,
-    force_subscription_refresh: bool,
-) -> LocalResult<AccountQuotaRefreshResponse> {
-    let account_id = &scope.fence.account_id;
-    let mut prepared = refresh::request_authorization(state, &scope.fence).await?;
-    scope.validate(state)?;
-    if prepared.oauth_client_kind == zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc {
-        return Ok(AccountQuotaRefreshResponse {
-            account: scope.initial_account.clone(),
-            quota: AccountQuotaOutcome::Skipped,
-            exhaustion_transitions: Vec::new(),
-        });
+struct DesktopMonitor<'a> {
+    state: &'a DesktopState,
+    scope: &'a AccountRefreshScope,
+}
+
+impl MonitorHost for DesktopMonitor<'_> {
+    type Authorization = PreparedAccountAuthorization;
+    type Error = LocalPoolError;
+
+    fn validate(&self) -> LocalResult<()> {
+        self.scope.validate(self.state)
     }
-    let http_scope = scope.http_scope(state);
-    let now_ms = current_time_ms();
-    let request_timeout =
-        Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
-    let account_before_refresh = &scope.initial_account;
-    let mut subscription = account_before_refresh.account.subscription.clone();
-    // Import/login owns token hints. A later poll must not resurrect a date
-    // cleared by the provider, or promote an old JWT claim to fresh evidence.
-    scope.validate(state)?;
-    let mut refreshed = subscription::request_account_quota_metadata(
-        &prepared,
-        request_timeout,
-        now_ms,
-        &subscription,
-        &http_scope,
-    )
-    .await?;
-    subscription::respect_quota_retry_after(state, scope, &refreshed);
-    scope.validate(state)?;
-    if let Some(rejected_tokens) = prepared
-        .tokens
-        .as_ref()
-        .filter(|_| quota_refresh_was_unauthorized(&refreshed))
-    {
-        match recover_account_authorization(state, account_id, &prepared, current_time_ms()).await {
-            Ok(recovered) => {
-                prepared = PreparedAccountAuthorization::from_tokens(recovered)?;
-                scope.validate(state)?;
-                refreshed = subscription::request_account_quota_metadata(
-                    &prepared,
-                    request_timeout,
-                    current_time_ms(),
-                    &subscription,
-                    &http_scope,
-                )
-                .await?;
-                subscription::respect_quota_retry_after(state, scope, &refreshed);
-            }
-            Err(_) if account_auth_is_access_only(state, account_id)? => {
-                mark_access_only_reauthentication(state, account_id, rejected_tokens).await?;
-            }
-            Err(_) if !account_requires_reauthentication(state, account_id)? => {
-                refreshed = Ok(QuotaRefreshOutcome::Failed {
-                    failure: QuotaRefreshFailure::new(error_codes::QUOTA_TOKEN_REFRESH, true),
-                    subscription: subscription.clone(),
-                });
-            }
-            Err(_) => {}
-        }
-    } else if let Some(task_id) = prepared.agent_task_id.as_deref() {
-        let invalid_task = quota_refresh_has_invalid_agent_task(&refreshed);
-        if invalid_task {
-            let stored = CredentialStore::from_backend(NativeSecretBackend)
-                .require(account_id)
-                .map_err(credential_local_error)?;
-            prepared = match ensure_local_agent_identity_task(
-                state,
-                account_id,
-                stored.clone(),
-                Some(task_id),
-            )
-            .await
-            {
-                Ok(_) => prepare_account_request_authorization(state, account_id).await?,
-                Err(_) if stored.has_oauth() => PreparedAccountAuthorization::from_tokens(
-                    prepare_account_credentials(state, account_id).await?,
-                )?,
-                Err(error) => return Err(error),
-            };
-            scope.validate(state)?;
-            refreshed = subscription::request_account_quota_metadata(
-                &prepared,
-                request_timeout,
+    fn now_ms(&self) -> u64 {
+        current_time_ms()
+    }
+    fn client_kind(auth: &Self::Authorization) -> OAuthClientKind {
+        auth.oauth_client_kind
+    }
+    fn has_tokens(auth: &Self::Authorization) -> bool {
+        auth.tokens.is_some()
+    }
+    fn has_agent_task(auth: &Self::Authorization) -> bool {
+        auth.agent_task_id.is_some()
+    }
+
+    async fn prepare(&self) -> LocalResult<Self::Authorization> {
+        refresh::request_authorization(self.state, &self.scope.fence).await
+    }
+
+    async fn recover(&self, rejected: &Self::Authorization) -> LocalResult<Self::Authorization> {
+        PreparedAccountAuthorization::from_tokens(
+            recover_account_authorization(
+                self.state,
+                &self.scope.fence.account_id,
+                rejected,
                 current_time_ms(),
-                &subscription,
-                &http_scope,
             )
-            .await?;
-            subscription::respect_quota_retry_after(state, scope, &refreshed);
+            .await?,
+        )
+    }
+
+    async fn restore_task(
+        &self,
+        rejected: &Self::Authorization,
+    ) -> LocalResult<Self::Authorization> {
+        let account_id = &self.scope.fence.account_id;
+        let stored = CredentialStore::from_backend(NativeSecretBackend)
+            .require(account_id)
+            .map_err(credential_local_error)?;
+        match ensure_local_agent_identity_task(
+            self.state,
+            account_id,
+            stored.clone(),
+            rejected.agent_task_id.as_deref(),
+        )
+        .await
+        {
+            Ok(_) => prepare_account_request_authorization(self.state, account_id).await,
+            Err(_) if stored.has_oauth() => PreparedAccountAuthorization::from_tokens(
+                prepare_account_credentials(self.state, account_id).await?,
+            ),
+            Err(error) => Err(error),
         }
     }
 
-    let mut quota = refreshed.unwrap_or_else(|_| QuotaRefreshOutcome::Failed {
-        failure: QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true),
-        subscription: subscription.clone(),
-    });
-    if let QuotaRefreshOutcome::Updated(result) = &quota
-        && let Some(input) = &result.quota.subscription
-    {
-        subscription = Subscription::normalize(input.clone());
+    fn auth_state(&self) -> LocalResult<AccountAuthState> {
+        self.state
+            .store()?
+            .account(&self.scope.fence.account_id)
+            .map(|account| account.account.auth_state)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))
     }
-    // The independent read has one owner and runs after authorization recovery.
-    // Quota-only replies must neither duplicate it nor postpone its next poll.
-    let observed_at_ms = current_time_ms();
-    let mut successful_subscription = false;
-    let mut partial_subscription = false;
-    if force_subscription_refresh
-        || subscription_refresh_due(
-            subscription.active_until_ms,
-            subscription.updated_at_ms,
-            observed_at_ms,
-        )
-    {
-        let identity = scope.fence.identity();
-        // The account's quota lock owns single-flight. Keep the shared floor
-        // mutex out of network I/O and persistence for unrelated accounts.
-        let can_refresh = {
-            let mut subscription_guard = state.subscription_refresh_guard().await;
-            scope.validate(state)?;
-            subscription_guard.can_refresh(&identity, state.refresh.now_ms())
-        };
-        if can_refresh {
-            let observed_at_ms = current_time_ms();
-            let subscription_started = std::time::Instant::now();
-            let metadata = subscription::request_subscription_metadata(
-                &prepared,
-                request_timeout,
-                observed_at_ms,
-                &http_scope,
-            )
-            .await;
-            scope.validate(state)?;
-            match metadata {
-                Ok(Some(read)) => {
-                    if let Some(failure) = read.fallback_failure {
-                        partial_subscription = true;
-                        subscription::apply_partial_subscription_read(
-                            &mut quota,
-                            &mut subscription,
-                            read.metadata,
-                            observed_at_ms,
-                        );
-                        subscription::record_subscription_failure(
-                            account_id,
-                            &prepared,
-                            &failure,
-                            subscription_started.elapsed(),
-                        );
-                        let mut subscription_guard = state.subscription_refresh_guard().await;
-                        scope.validate(state)?;
-                        subscription_guard.record_failure(
-                            &identity,
-                            state.refresh.now_ms(),
-                            &failure,
-                        );
-                    } else {
-                        subscription::apply_subscription_read(
-                            &mut quota,
-                            &mut subscription,
-                            read.metadata,
-                            observed_at_ms,
-                        );
-                        successful_subscription = true;
-                    }
-                }
-                Ok(None) => {}
-                Err(failure) => {
-                    subscription::record_subscription_failure(
-                        account_id,
-                        &prepared,
-                        &failure,
-                        subscription_started.elapsed(),
-                    );
-                    let mut subscription_guard = state.subscription_refresh_guard().await;
-                    scope.validate(state)?;
-                    subscription_guard.record_failure(&identity, state.refresh.now_ms(), &failure);
-                }
-            }
+
+    async fn mark_access_only_rejected(&self, rejected: &Self::Authorization) -> LocalResult<()> {
+        if let Some(tokens) = &rejected.tokens {
+            mark_access_only_reauthentication(self.state, &self.scope.fence.account_id, tokens)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn respect_retry_after(&self, kind: RefreshKind, delay_ms: u64) {
+        self.state
+            .refresh
+            .respect_retry_after(&self.scope.fence.identity(), kind, delay_ms);
+    }
+}
+
+impl QuotaMonitorHost for DesktopMonitor<'_> {
+    type Output = AccountQuotaRefreshResponse;
+
+    fn initial_subscription(&self) -> Subscription {
+        self.scope.initial_account.account.subscription.clone()
+    }
+
+    fn skipped(&self) -> Self::Output {
+        AccountQuotaRefreshResponse {
+            account: self.scope.initial_account.clone(),
+            quota: AccountQuotaOutcome::Skipped,
+            exhaustion_transitions: Vec::new(),
         }
     }
-    let _mutation = state.setup_guard().await;
-    let applied = {
-        let mut store = state.store()?;
-        let subscription = if partial_subscription {
-            SubscriptionObservation::Partial(subscription)
-        } else {
-            SubscriptionObservation::Timestamped(subscription)
+
+    async fn read_quota(
+        &self,
+        auth: &Self::Authorization,
+        previous: &Subscription,
+    ) -> LocalResult<QuotaRefreshOutcome> {
+        let timeout =
+            Duration::from_secs(self.state.store()?.gateway().quota_request_timeout_seconds);
+        Ok(subscription::request_account_quota_metadata(
+            auth,
+            timeout,
+            current_time_ms(),
+            previous,
+            &self.scope.http_scope(self.state),
+        )
+        .await?
+        .unwrap_or_else(|_| QuotaRefreshOutcome::Failed {
+            failure: QuotaRefreshFailure::new(error_codes::QUOTA_TIMEOUT, true),
+            subscription: previous.clone(),
+        }))
+    }
+
+    async fn can_read_subscription(&self) -> LocalResult<bool> {
+        let mut guard = self.state.subscription_refresh_guard().await;
+        self.validate()?;
+        Ok(guard.can_refresh(&self.scope.fence.identity(), self.state.refresh.now_ms()))
+    }
+
+    async fn read_subscription(
+        &self,
+        auth: &Self::Authorization,
+        observed_at_ms: u64,
+    ) -> Result<Option<CodexSubscriptionRead>, QuotaRefreshFailure> {
+        let timeout = self
+            .state
+            .store()
+            .map_err(|_| QuotaRefreshFailure::new(error_codes::SUBSCRIPTION_CONFIGURATION, false))?
+            .gateway()
+            .quota_request_timeout_seconds;
+        subscription::request_subscription_metadata(
+            auth,
+            Duration::from_secs(timeout),
+            observed_at_ms,
+            &self.scope.http_scope(self.state),
+        )
+        .await
+    }
+
+    async fn subscription_failed(
+        &self,
+        auth: &Self::Authorization,
+        failure: &QuotaRefreshFailure,
+        elapsed: Duration,
+    ) -> LocalResult<()> {
+        subscription::record_subscription_failure(
+            &self.scope.fence.account_id,
+            auth,
+            failure,
+            elapsed,
+        );
+        let mut guard = self.state.subscription_refresh_guard().await;
+        self.validate()?;
+        guard.record_failure(
+            &self.scope.fence.identity(),
+            self.state.refresh.now_ms(),
+            failure,
+        );
+        Ok(())
+    }
+
+    async fn subscription_succeeded(&self) -> LocalResult<()> {
+        let mut guard = self.state.subscription_refresh_guard().await;
+        self.validate()?;
+        guard.record_success(&self.scope.fence.identity(), self.state.refresh.now_ms());
+        Ok(())
+    }
+
+    async fn commit_quota(
+        &self,
+        quota: QuotaRefreshOutcome,
+        subscription: SubscriptionObservation,
+    ) -> LocalResult<Self::Output> {
+        let _mutation = self.state.setup_guard().await;
+        let applied = {
+            let mut store = self.state.store()?;
+            apply_quota_read(&mut store, self.scope, quota, subscription, None)?
         };
-        apply_quota_read(&mut store, scope, quota, subscription, None)?
-    };
-    if zenith_relay_core::quota::subscription_plan_changed(
-        applied
-            .previous_account
-            .account
-            .subscription
-            .plan_type
-            .as_deref(),
-        applied.account.account.subscription.plan_type.as_deref(),
-    ) {
-        state
-            .refresh
-            .mark_dirty(&scope.fence.identity(), RefreshKind::Models);
+        if zenith_relay_core::quota::subscription_plan_changed(
+            applied
+                .previous_account
+                .account
+                .subscription
+                .plan_type
+                .as_deref(),
+            applied.account.account.subscription.plan_type.as_deref(),
+        ) {
+            self.state
+                .refresh
+                .mark_dirty(&self.scope.fence.identity(), RefreshKind::Models);
+        }
+        sync_refreshed_account_or_rollback(
+            self.state,
+            applied.previous_account,
+            applied.account.clone(),
+            applied.refresh_result.models_changed,
+        )
+        .await?;
+        Ok(AccountQuotaRefreshResponse {
+            account: applied.account,
+            quota: applied.refresh_result.outcome,
+            exhaustion_transitions: applied.refresh_result.exhaustion_transitions,
+        })
     }
-    sync_refreshed_account_or_rollback(
-        state,
-        applied.previous_account,
-        applied.account.clone(),
-        applied.refresh_result.models_changed,
-    )
-    .await?;
-    if successful_subscription {
-        let mut subscription_guard = state.subscription_refresh_guard().await;
-        scope.validate(state)?;
-        subscription_guard.record_success(&scope.fence.identity(), state.refresh.now_ms());
+}
+
+impl ModelMonitorHost for DesktopMonitor<'_> {
+    async fn read_models(
+        &self,
+        auth: &Self::Authorization,
+    ) -> Result<Vec<String>, ModelDiscoveryFailure> {
+        models::discover_account_models(
+            self.state,
+            &self.scope.fence.account_id,
+            auth,
+            &self.scope.http_scope(self.state),
+        )
+        .await
     }
-    Ok(AccountQuotaRefreshResponse {
-        account: applied.account,
-        quota: applied.refresh_result.outcome,
-        exhaustion_transitions: applied.refresh_result.exhaustion_transitions,
-    })
+
+    async fn commit_models(
+        &self,
+        client: OAuthClientKind,
+        models: Result<Vec<String>, ModelDiscoveryFailure>,
+    ) -> LocalResult<()> {
+        let _mutation = self.state.setup_guard().await;
+        let applied = {
+            let mut store = self.state.store()?;
+            apply_models_read(&mut store, self.scope, client, models)?
+        };
+        sync_refreshed_account_or_rollback(
+            self.state,
+            applied.previous_account,
+            applied.account,
+            applied.refresh_result,
+        )
+        .await
+    }
 }
 
 mod authorization;
-/// Request the independent model-kind job (not an inline quota subrequest).
 mod models;
 mod subscription;
 
+pub(in crate::local_pool) use authorization::prepare_account_request_authorization;
+pub(in crate::local_pool::accounts) use authorization::{
+    ensure_local_agent_identity_task, mark_access_only_reauthentication,
+    recover_account_authorization,
+};
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use authorization::{
+    model_discovery_was_unauthorized, quota_refresh_was_unauthorized,
+};
 pub(in crate::local_pool) use models::read_account_models_once;
 pub(crate) use models::refresh_account_models_once;
 #[cfg(test)]
 pub(in crate::local_pool::accounts) use subscription::apply_subscription_metadata;
-
-pub(in crate::local_pool) use authorization::prepare_account_request_authorization;
-pub(in crate::local_pool::accounts) use authorization::{
-    account_auth_is_access_only, account_requires_reauthentication,
-    ensure_local_agent_identity_task, mark_access_only_reauthentication,
-    model_discovery_has_invalid_agent_task, model_discovery_was_unauthorized,
-    quota_refresh_has_invalid_agent_task, quota_refresh_was_unauthorized,
-    recover_account_authorization,
-};

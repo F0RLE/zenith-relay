@@ -3,7 +3,7 @@ use super::{current_time_ms, local_pool_member_ids, runtime_account_operational_
 use crate::local_pool::{
     accounts::{
         NativeSecretBackend,
-        authority::{CredentialPersistence, StoredRefreshAdapter},
+        authority::{credential_persistence, default_refresh_adapter},
         credentials::{
             CredentialStore, StoredCodexCredentials,
             credential_invalid_state_error as account_credential_error,
@@ -153,7 +153,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
     }
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
-        StoredRefreshAdapter::new(
+        default_refresh_adapter(
             state.transient_root(),
             credentials.clone(),
             oauth,
@@ -166,7 +166,7 @@ pub(in crate::local_pool) async fn runtime_from_store(
             )
         })?,
     );
-    let persistence = Arc::new(CredentialPersistence::new(
+    let persistence = Arc::new(credential_persistence(
         credentials,
         state.account_metadata_sink(),
         state.transient_root(),

@@ -1,15 +1,22 @@
-mod error;
-mod store;
-mod stored;
-mod totp;
-mod wire;
+use crate::local_pool::error::{ErrorCode, LocalPoolError};
+pub use zenith_relay_core::providers::chatgpt::connector::credentials::{
+    CredentialError, CredentialErrorCode, CredentialRefresh, CredentialStore,
+    StoredCodexCredentials, bearer_authorization, credential_secret_ref, totp_code,
+};
 
-pub(in crate::local_pool::accounts) use error::bearer_authorization;
-pub use error::{CredentialError, CredentialErrorCode};
-pub(in crate::local_pool) use error::{credential_invalid_state_error, credential_local_error};
-pub use store::{CredentialStore, credential_secret_ref};
-pub use stored::{CredentialRefresh, StoredCodexCredentials};
-pub(in crate::local_pool::accounts) use totp::totp_code;
+pub(in crate::local_pool) fn credential_local_error(error: CredentialError) -> LocalPoolError {
+    let code = match error.code {
+        CredentialErrorCode::SecretMissing => ErrorCode::NotFound,
+        CredentialErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
+        CredentialErrorCode::RotationOutcomeUnknown
+        | CredentialErrorCode::RotationCheckpointInvalid => ErrorCode::RecoveryRequired,
+        _ => ErrorCode::InvalidState,
+    };
+    LocalPoolError::new(code, error.message)
+}
 
-#[cfg(test)]
-mod tests;
+pub(in crate::local_pool) fn credential_invalid_state_error(
+    error: CredentialError,
+) -> LocalPoolError {
+    LocalPoolError::new(ErrorCode::InvalidState, error.message)
+}

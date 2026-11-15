@@ -18,19 +18,7 @@ where
     }
 
     pub fn report_diagnostic(&self, login_id: &str, diagnostic: OAuthFlowDiagnostic) {
-        let _mutation = lock(&self.inner.mutation);
-        // Progress is advisory; canceled/expired/completed attempts cannot emit it.
-        let Ok(snapshot) = read_snapshot(&self.inner.root, login_id) else {
-            return;
-        };
-        if snapshot.pending.expires_at_ms() <= now_ms() {
-            return;
-        }
-        self.inner.events.emit(OAuthFlowEvent {
-            login_id: login_id.to_string(),
-            status: snapshot.status,
-            diagnostic: Some(diagnostic),
-        });
+        shared::report_diagnostic(self.inner.as_ref(), login_id, diagnostic, now_ms());
     }
 
     pub fn advance_diagnostic(
@@ -73,14 +61,13 @@ where
             if snapshot.pending.client_kind() != client_kind {
                 continue;
             }
-            if !matches!(
-                snapshot.status,
-                OAuthFlowStatus::Pending | OAuthFlowStatus::CallbackReceived
+            if !shared::reusable(
+                &snapshot,
+                client_kind,
+                target_account_id,
+                notes_account_id,
+                now_ms,
             ) {
-                self.inner.cleanup(&snapshot.login_id)?;
-                continue;
-            }
-            if snapshot.pending.expires_at_ms() <= now_ms {
                 self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
@@ -138,23 +125,15 @@ where
             (None, 0)
         };
         let login_id = Uuid::new_v4().hyphenated().to_string();
-        let start = oauth.begin(port, now_ms).map_err(|_| {
-            OAuthFlowError::new(
-                OAuthFlowErrorCode::ListenerUnavailable,
-                "OAuth login could not be initialized",
-            )
-        })?;
-        let snapshot = PendingSnapshot {
-            version: SNAPSHOT_VERSION,
-            login_id: login_id.clone(),
-            authorization_url: start.authorization_url().to_string(),
-            callback_secret_ref: callback_secret_ref(&login_id),
-            status: OAuthFlowStatus::Pending,
-            target_account_id: target_account_id.map(str::to_string),
-            notes_account_id: notes_account_id.map(str::to_string),
-            sign_in_proxy_id: sign_in_proxy_id.map(str::to_string),
-            pending: start.into_pending(),
-        };
+        let snapshot = shared::new_attempt(
+            oauth,
+            login_id.clone(),
+            port,
+            now_ms,
+            target_account_id,
+            notes_account_id,
+            sign_in_proxy_id,
+        )?;
         write_snapshot(&self.inner.root, &snapshot)?;
         if let Some(listener) = listener {
             self.spawn_listener(listener, snapshot.clone(), now_ms);
@@ -228,63 +207,28 @@ where
         login_id: &str,
     ) -> Result<OAuthExchangeMaterial, OAuthFlowError> {
         let login_id = validate_login_id(login_id)?;
-        let _mutation = lock(&self.inner.mutation);
-        let snapshot = read_snapshot(&self.inner.root, &login_id)?;
-        if snapshot.status != OAuthFlowStatus::CallbackReceived {
-            return Err(OAuthFlowError::new(
-                OAuthFlowErrorCode::SecretMissing,
-                "OAuth callback has not been received",
-            )
-            .for_login(&login_id));
-        }
-        let callback_url = self
-            .inner
-            .secrets
-            .load(&snapshot.callback_secret_ref)
-            .map_err(|_| {
-                OAuthFlowError::new(
-                    OAuthFlowErrorCode::SecretStoreUnavailable,
-                    "OAuth callback secret store is unavailable",
-                )
-                .for_login(&login_id)
-            })?
-            .ok_or_else(|| {
-                OAuthFlowError::new(
-                    OAuthFlowErrorCode::SecretMissing,
-                    "OAuth callback secret is missing",
-                )
-                .for_login(&login_id)
-            })?;
-        let callback = snapshot
-            .pending
-            .parse_callback(&callback_url, now_ms())
-            .map_err(|_| {
-                OAuthFlowError::new(
-                    OAuthFlowErrorCode::CallbackInvalid,
-                    "OAuth callback is invalid",
-                )
-                .for_login(&login_id)
-            })?;
-        Ok(OAuthExchangeMaterial {
-            pending: snapshot.pending,
-            callback,
-        })
+        shared::exchange_material(self.inner.as_ref(), &login_id, now_ms())
+    }
+
+    pub fn store_exchange_checkpoint(
+        &self,
+        login_id: &str,
+        encoded: &str,
+    ) -> Result<(), OAuthFlowError> {
+        let login_id = validate_login_id(login_id)?;
+        shared::store_exchange_checkpoint(self.inner.as_ref(), &login_id, encoded, now_ms())
     }
 
     pub async fn cancel(&self, login_id: &str) -> Result<(), OAuthFlowError> {
         let login_id = validate_login_id(login_id)?;
         self.stop_listener(&login_id).await;
-        self.inner.cleanup(&login_id)?;
-        self.inner.emit(&login_id, OAuthFlowStatus::Canceled);
-        Ok(())
+        shared::finish(self.inner.as_ref(), &login_id, OAuthFlowStatus::Canceled)
     }
 
     pub async fn complete(&self, login_id: &str) -> Result<(), OAuthFlowError> {
         let login_id = validate_login_id(login_id)?;
         self.stop_listener(&login_id).await;
-        self.inner.cleanup(&login_id)?;
-        self.inner.emit(&login_id, OAuthFlowStatus::Completed);
-        Ok(())
+        shared::finish(self.inner.as_ref(), &login_id, OAuthFlowStatus::Completed)
     }
 
     #[cfg(test)]

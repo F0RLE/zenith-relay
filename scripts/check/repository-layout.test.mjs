@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { repoRoot, tauriInvocation } from "../lib/tauri-env.mjs";
@@ -9,6 +9,23 @@ const read = (path) => readFileSync(resolve(root, path), "utf8");
 const json = (path) => JSON.parse(read(path));
 
 describe("Desktop and Hosted repository layout", () => {
+  test("shared account services cannot depend on Desktop state or Tauri", () => {
+    const core = Bun.TOML.parse(read("crates/relay-core/Cargo.toml"));
+    expect(Object.keys(core.dependencies).some(name => name.startsWith("tauri"))).toBe(false);
+    const visit = (directory) => {
+      for (const entry of readdirSync(resolve(root, directory), { withFileTypes: true })) {
+        const path = `${directory}/${entry.name}`;
+        if (entry.isDirectory()) visit(path);
+        else if (entry.name.endsWith(".rs")) {
+          expect(read(path)).not.toMatch(/\b(?:tauri::|crate::local_pool::|crate::diagnostics::)/);
+        }
+      }
+    };
+    visit("crates/relay-core/src/providers/chatgpt/connector");
+    expect(existsSync(resolve(root, "crates/relay-core/tests/host_management.rs"))).toBe(true);
+    expect(existsSync(resolve(root, "desktop/src-tauri/src/local_pool/accounts/oauth.rs"))).toBe(false);
+  });
+
   test("keeps independent packages and their lockfiles in product directories", () => {
     for (const directory of ["desktop/frontend", "hosted/web"]) {
       const pkg = json(`${directory}/package.json`);

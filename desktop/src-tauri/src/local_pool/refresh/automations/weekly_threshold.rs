@@ -1,23 +1,11 @@
 use super::*;
-use crate::local_pool::accounts::pool_resources::weekly_reset_pool_member_eligible;
 use crate::local_pool::models::AutomationRecords;
 use zenith_relay_core::quota::QuotaWindow;
 
-const PREFIX: &str = "weekly-threshold:";
-const PENDING: &str = ":pending";
-
-pub(super) fn subscription_allows_reset(
-    subscription: &zenith_relay_core::quota::Subscription,
-    now_ms: u64,
-) -> bool {
-    !matches!(
-        subscription.status,
-        zenith_relay_core::quota::SubscriptionStatus::Expired
-            | zenith_relay_core::quota::SubscriptionStatus::Forbidden
-    ) && subscription
-        .active_until_ms
-        .is_none_or(|expiry| expiry > now_ms)
-}
+pub(super) use zenith_relay_core::automations::reset_resources::subscription_allows_reset;
+use zenith_relay_core::automations::reset_resources::{
+    PENDING_SUFFIX as PENDING, THRESHOLD_PREFIX as PREFIX,
+};
 
 pub(super) fn has_matching_rule(
     state: &DesktopState,
@@ -45,39 +33,13 @@ fn due_window<'a>(
     selected: &crate::local_pool::models::LocalAccountRecord,
     now_ms: u64,
 ) -> Option<&'a QuotaWindow> {
-    if !matches!(response.quota, AccountQuotaOutcome::Updated { .. })
-        || response.account.recovery.is_some()
-        || !weekly_reset_pool_member_eligible(selected)
-        || !subscription_allows_reset(&response.account.account.subscription, now_ms)
-        || response.account.account.quota.reset_credits_available == Some(0)
-    {
-        return None;
-    }
-    let window = response.account.account.quota.secondary.as_ref()?;
-    let remaining = window.available_basis_points?;
-    if window.kind != QuotaWindowKind::Secondary
-        || remaining >= 10_000
-        || window.explicitly_full == Some(true)
-        || window
-            .window_minutes
-            .is_some_and(|minutes| minutes != 10_080)
-        || window.reset_at_ms.is_none_or(|reset| reset <= now_ms)
-        || !now_ms
-            .checked_sub(window.observed_at_ms)
-            .is_some_and(|age| age <= zenith_relay_core::scheduler::QUOTA_STALE_AFTER_MS)
-    {
-        return None;
-    }
-    records
-        .tasks
-        .iter()
-        .any(|task| {
-            weekly_reset_rule_matches(task, &response.account, selected)
-                && task
-                    .weekly_reset_remaining_basis_points
-                    .is_some_and(|threshold| threshold <= 10_000 && remaining <= threshold)
-        })
-        .then_some(window)
+    zenith_relay_core::automations::reset_resources::threshold_window(
+        &response.account,
+        selected,
+        &records.tasks,
+        matches!(response.quota, AccountQuotaOutcome::Updated { .. }),
+        now_ms,
+    )
 }
 
 pub(super) fn has_pending_redemption(
@@ -85,10 +47,11 @@ pub(super) fn has_pending_redemption(
     settings: &crate::local_pool::models::GatewaySettings,
     account_id: &str,
 ) -> bool {
-    crate::local_pool::accounts::pool_resources::linked_reset_attempts(
-        settings, records, account_id,
+    zenith_relay_core::automations::reset_resources::has_pending_redemption(
+        &settings.account_routes,
+        &records.weekly_reset_fingerprints,
+        account_id,
     )
-    .any(|value| value.starts_with(PREFIX) && value.ends_with(PENDING))
 }
 
 pub(super) fn has_pending_confirmation(
@@ -97,38 +60,12 @@ pub(super) fn has_pending_confirmation(
     settings: &crate::local_pool::models::GatewaySettings,
     account_id: &str,
 ) -> bool {
-    let group = settings.account_route_group(account_id);
-    has_pending_redemption(records, settings, account_id)
-        || accounts.iter().any(|account| {
-            (account.account.id == account_id
-                || group.is_some_and(|group| group.account_ids.contains(&account.account.id)))
-                && account.recovery.is_none()
-                && (account.account.in_pool
-                    || settings
-                        .account_route_group(&account.account.id)
-                        .is_some_and(|group| {
-                            accounts.iter().any(|selected| {
-                                selected.account.id == group.selected_account_id
-                                    && selected.account.in_pool
-                            })
-                        }))
-                && [
-                    account.account.quota.primary.as_ref(),
-                    account.account.quota.secondary.as_ref(),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|window| {
-                    window.available_basis_points == Some(0)
-                        && window
-                            .exhaustion_transition_fingerprint
-                            .as_ref()
-                            .is_some_and(|id| {
-                                records.weekly_reset_fingerprints.get(&account.account.id)
-                                    == Some(id)
-                            })
-                })
-        })
+    zenith_relay_core::automations::reset_resources::has_pending_confirmation(
+        &settings.account_routes,
+        &records.weekly_reset_fingerprints,
+        accounts,
+        account_id,
+    )
 }
 
 fn already_attempted(
@@ -137,19 +74,12 @@ fn already_attempted(
     account_id: &str,
     now_ms: u64,
 ) -> bool {
-    crate::local_pool::accounts::pool_resources::linked_reset_attempts(
-        settings, records, account_id,
+    zenith_relay_core::automations::reset_resources::already_attempted(
+        &settings.account_routes,
+        &records.weekly_reset_fingerprints,
+        account_id,
+        now_ms,
     )
-    .any(|value| {
-        value.strip_prefix(PREFIX).is_some_and(|value| {
-            value.ends_with(PENDING)
-                || value
-                    .split(':')
-                    .next()
-                    .and_then(|deadline| deadline.parse::<u64>().ok())
-                    .is_some_and(|deadline| deadline > now_ms)
-        })
-    })
 }
 
 /// Only a fresh complete weekly ledger confirms an ambiguous redemption.

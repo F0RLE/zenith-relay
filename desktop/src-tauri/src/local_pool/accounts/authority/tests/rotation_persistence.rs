@@ -71,8 +71,8 @@ async fn successful_native_rotation_is_retained_until_persistence_can_retry() {
                 outage,
             });
             let adapter =
-                StoredRefreshAdapter::new(root.clone(), store.clone(), client.clone(), 0).unwrap();
-            let persistence = CredentialPersistence::new(
+                default_refresh_adapter(root.clone(), store.clone(), client.clone(), 0).unwrap();
+            let persistence = credential_persistence(
                 store.clone(),
                 Arc::new(CaptureMetadata::default()),
                 root.clone(),
@@ -114,7 +114,7 @@ async fn successful_native_rotation_is_retained_until_persistence_can_retry() {
             // belong to the shared authority, not the discarded adapter.
             drop(adapter);
             let adapter =
-                StoredRefreshAdapter::new(root.clone(), store.clone(), client.clone(), 0).unwrap();
+                default_refresh_adapter(root.clone(), store.clone(), client.clone(), 0).unwrap();
             let prepared = authority
                 .prepare_and_persist("relay_account_1", 11, 0, &adapter, &persistence)
                 .await
@@ -146,7 +146,7 @@ async fn native_rotation_checkpoint_recovers_after_restart_without_exchanging_ag
             outage: Outage::PrimaryWrite,
         });
         let adapter =
-            StoredRefreshAdapter::new(root.clone(), store.clone(), client.clone(), 0).unwrap();
+            default_refresh_adapter(root.clone(), store.clone(), client.clone(), 0).unwrap();
         let authority = TokenAuthority::new(1).unwrap();
         authority
             .register(
@@ -156,7 +156,7 @@ async fn native_rotation_checkpoint_recovers_after_restart_without_exchanging_ag
             )
             .await
             .unwrap();
-        let persistence = CredentialPersistence::new(
+        let persistence = credential_persistence(
             store.clone(),
             Arc::new(CaptureMetadata::default()),
             root.clone(),
@@ -181,7 +181,7 @@ async fn native_rotation_checkpoint_recovers_after_restart_without_exchanging_ag
             .await
             .unwrap();
         let adapter =
-            StoredRefreshAdapter::new(root.clone(), store.clone(), client.clone(), 0).unwrap();
+            default_refresh_adapter(root.clone(), store.clone(), client.clone(), 0).unwrap();
         let prepared = restarted
             .prepare_and_persist("relay_account_1", 11, 0, &adapter, &persistence)
             .await
@@ -212,8 +212,7 @@ async fn total_storage_outage_leaves_a_restart_barrier_instead_of_replaying_the_
         calls: AtomicUsize::new(0),
         outage: Outage::AllWrites,
     });
-    let adapter =
-        StoredRefreshAdapter::new(root.clone(), store.clone(), client.clone(), 0).unwrap();
+    let adapter = default_refresh_adapter(root.clone(), store.clone(), client.clone(), 0).unwrap();
     let authority = TokenAuthority::new(1).unwrap();
     authority
         .register(
@@ -223,7 +222,7 @@ async fn total_storage_outage_leaves_a_restart_barrier_instead_of_replaying_the_
         )
         .await
         .unwrap();
-    let persistence = CredentialPersistence::new(
+    let persistence = credential_persistence(
         store.clone(),
         Arc::new(CaptureMetadata::default()),
         root.clone(),

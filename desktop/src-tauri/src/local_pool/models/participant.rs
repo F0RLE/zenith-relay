@@ -131,19 +131,24 @@ pub struct TrashedLocalAccount {
 
 impl LocalAccountRecord {
     pub fn pool_models(&self, codex_text_models_enabled: bool) -> impl Iterator<Item = &String> {
-        static IMAGE_MODEL: std::sync::LazyLock<String> =
-            std::sync::LazyLock::new(|| zenith_relay_core::IMAGE_API_MODEL.to_string());
+        static IMAGE_MODELS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+            zenith_relay_core::CODEX_IMAGE_MODELS
+                .iter()
+                .map(|model| (*model).to_owned())
+                .collect()
+        });
         let text_enabled = !self.image_pool_enabled || codex_text_models_enabled;
         let models = self.effective_models();
-        let append_image = self.image_pool_enabled
-            && (!text_enabled
-                || !models
-                    .iter()
-                    .any(|model| model.eq_ignore_ascii_case(&IMAGE_MODEL)));
         models
             .iter()
             .filter(move |_| text_enabled)
-            .chain(append_image.then_some(&*IMAGE_MODEL))
+            .chain(IMAGE_MODELS.iter().filter(move |image_model| {
+                self.image_pool_enabled
+                    && (!text_enabled
+                        || !models
+                            .iter()
+                            .any(|model| model.eq_ignore_ascii_case(image_model)))
+            }))
     }
 
     /// Compares the operational record while ignoring Codex client-login
@@ -182,6 +187,39 @@ impl PoolParticipant for LocalAccountRecord {
             allowed_models: &self.allowed_models,
             excluded_models: &self.excluded_models,
         }
+    }
+}
+
+impl zenith_relay_core::accounts::management::ManagedAccount for LocalAccountRecord {
+    fn account(&self) -> &AccountRecord {
+        &self.account
+    }
+    fn account_mut(&mut self) -> &mut AccountRecord {
+        &mut self.account
+    }
+    fn requires_recovery(&self) -> bool {
+        self.recovery.is_some()
+    }
+    fn route_settings(&self) -> zenith_relay_core::accounts::management::AccountRouteSettings {
+        zenith_relay_core::accounts::management::AccountRouteSettings {
+            priority: self.priority,
+            weight: self.weight,
+            purchase_cost_micro_usd: self.purchase_cost_micro_usd,
+        }
+    }
+    fn set_route_settings(
+        &mut self,
+        settings: zenith_relay_core::accounts::management::AccountRouteSettings,
+    ) {
+        self.priority = settings.priority;
+        self.weight = settings.weight;
+        self.purchase_cost_micro_usd = settings.purchase_cost_micro_usd;
+    }
+    fn images_enabled(&self) -> bool {
+        self.image_pool_enabled
+    }
+    fn set_images_enabled(&mut self, enabled: bool) {
+        self.image_pool_enabled = enabled;
     }
 }
 

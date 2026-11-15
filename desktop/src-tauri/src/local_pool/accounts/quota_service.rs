@@ -1,39 +1,15 @@
 use crate::local_pool::models::LocalAccountRecord;
-use zenith_relay_core::{
-    accounts::{AccountQuotaOutcome, AccountQuotaUpdate, reduce_account_quota},
-    quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
-};
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AppliedQuota {
-    pub transitions: Vec<QuotaTransition>,
-    pub exhaustion_transitions: Vec<QuotaTransition>,
-}
+pub use zenith_relay_core::providers::chatgpt::connector::observations::AppliedQuota;
+use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaRefreshResult};
 
 pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
     quota_result: QuotaRefreshResult,
 ) -> Result<AppliedQuota, &'static str> {
-    let observed_at_ms = quota_result.quota.observed_at_ms;
-    let update = reduce_account_quota(
-        &account.account.quota,
-        &account.account.subscription,
-        account.account.health,
-        account.account.last_error_code.as_deref(),
-        Ok(quota_result),
-        observed_at_ms,
+    zenith_relay_core::providers::chatgpt::connector::observations::apply_quota_success(
+        &mut account.account,
+        quota_result,
     )
-    .map_err(|_| "quota response could not be normalized")?;
-    let transitions = match &update.outcome {
-        AccountQuotaOutcome::Updated { transitions } => transitions.clone(),
-        AccountQuotaOutcome::Failed { .. } => return Err("quota result kind is invalid"),
-    };
-    let exhaustion_transitions = update.exhaustion_transitions.clone();
-    apply_update(account, update);
-    Ok(AppliedQuota {
-        transitions,
-        exhaustion_transitions,
-    })
 }
 
 pub fn apply_quota_failure(
@@ -41,23 +17,11 @@ pub fn apply_quota_failure(
     failure: &QuotaRefreshFailure,
     now_ms: u64,
 ) {
-    let update = reduce_account_quota(
-        &account.account.quota,
-        &account.account.subscription,
-        account.account.health,
-        account.account.last_error_code.as_deref(),
-        Err(failure.clone()),
+    zenith_relay_core::providers::chatgpt::connector::observations::apply_quota_failure(
+        &mut account.account,
+        failure,
         now_ms,
-    )
-    .expect("quota failure reduction does not normalize provider data");
-    apply_update(account, update);
-}
-
-fn apply_update(account: &mut LocalAccountRecord, update: AccountQuotaUpdate) {
-    account.account.quota = update.quota;
-    account.account.subscription = update.subscription;
-    account.account.health = update.health;
-    account.account.last_error_code = update.last_error_code;
+    );
 }
 
 #[cfg(test)]

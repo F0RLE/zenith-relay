@@ -7,7 +7,7 @@ use crate::local_pool::state::DesktopState;
 use std::path::PathBuf;
 use std::time::Instant;
 use tauri::{AppHandle, State};
-use zenith_relay_core::accounts::{ImportAuthMode, MAX_IMPORT_ITEMS};
+use zenith_relay_core::accounts::ImportAuthMode;
 
 mod account_import;
 mod account_lookup;
@@ -56,15 +56,13 @@ pub(super) use identity::normalized_profile_account_id;
 pub(super) use identity::{masked_account_identity, provider_identity_key, timestamp_from_ms};
 pub(in crate::local_pool::accounts) use persistence::persist_imported_account;
 pub(super) use policy::{
-    account_auth_mode, account_model_state_is_valid, ensure_account_import_item,
-    merge_existing_account, normalize_models, normalize_selected_item_ids,
+    account_model_state_is_valid, normalize_models, normalize_selected_item_ids,
     preserve_newer_account_state, should_probe_import_quota, validate_label,
 };
 use prepared_items::{parsed_item_json, parsed_item_json_with_material};
 use preview::{prepare_import_preview, preview_account_import_documents};
 pub(in crate::local_pool::accounts) use refresh_state::{
     apply_model_discovery, apply_model_discovery_failure, apply_quota_outcome,
-    apply_quota_outcome_with_transitions,
 };
 
 pub(super) use sources::*;
@@ -100,7 +98,7 @@ fn record_import_command_result<T>(
 mod types;
 pub(super) use types::{
     ACCOUNT_IMPORT_PROGRESS_EVENT, AccountImportProgressEvent, DEFAULT_OPENAI_SOURCE_URL,
-    ImportRowContext, MAX_ACCOUNT_LABEL_BYTES, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES, MAX_MODELS,
+    ImportRowContext, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES, MAX_MODELS,
 };
 pub use types::{
     ConfirmAccountImportInput, ImportItemStatus, ImportSessionResponse, PrepareAccountImportInput,

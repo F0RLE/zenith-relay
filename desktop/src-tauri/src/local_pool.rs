@@ -15,8 +15,6 @@ mod state;
 mod store;
 mod usage_writer;
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng;
 use std::{fs, path::Path, time::Instant};
 
 pub use state::DesktopState;
@@ -86,22 +84,4 @@ fn create_storage_directory(path: &Path) -> error::Result<()> {
 
 fn layout_error(message: impl Into<String>) -> error::LocalPoolError {
     error::LocalPoolError::new(error::ErrorCode::Io, message)
-}
-
-pub(crate) fn random_urlsafe(bytes: usize) -> String {
-    let mut random_bytes = vec![0_u8; bytes];
-    rand::rng().fill_bytes(&mut random_bytes);
-    URL_SAFE_NO_PAD.encode(random_bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn urlsafe_tokens_are_unpadded_and_keep_the_requested_entropy() {
-        let token = random_urlsafe(32);
-        assert!(!token.contains('='));
-        assert_eq!(URL_SAFE_NO_PAD.decode(token).unwrap().len(), 32);
-    }
 }

@@ -1,14 +1,12 @@
 use super::model_failure_code;
 use crate::local_pool::accounts::quota_refresh::AccountQuotaOutcome;
-use crate::local_pool::accounts::quota_service::{apply_quota_failure, apply_quota_success};
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::accounts::{
     accept_discovered_models,
     apply_model_discovery_failure as apply_account_model_discovery_failure,
 };
-use zenith_relay_core::error_codes;
 use zenith_relay_core::providers::chatgpt::{ModelDiscoveryFailure, QuotaRefreshOutcome};
-use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition};
+use zenith_relay_core::quota::QuotaTransition;
 
 pub(in crate::local_pool::accounts) fn apply_quota_outcome(
     account: &mut LocalAccountRecord,
@@ -23,43 +21,11 @@ pub(in crate::local_pool::accounts) fn apply_quota_outcome_with_transitions(
     outcome: QuotaRefreshOutcome,
     now_ms: u64,
 ) -> (AccountQuotaOutcome, Vec<QuotaTransition>) {
-    match outcome {
-        QuotaRefreshOutcome::Updated(quota_data) => match apply_quota_success(account, *quota_data)
-        {
-            Ok(applied) => (
-                AccountQuotaOutcome::Updated {
-                    transitions: applied.transitions,
-                    exhaustion_transitions: applied.exhaustion_transitions.clone(),
-                },
-                applied.exhaustion_transitions,
-            ),
-            Err(_) => {
-                let failure = QuotaRefreshFailure::new(error_codes::QUOTA_INVALID_RESPONSE, false);
-                apply_quota_failure(account, &failure, now_ms);
-                (
-                    AccountQuotaOutcome::Failed {
-                        code: failure.code,
-                        retryable: failure.retryable,
-                    },
-                    Vec::new(),
-                )
-            }
-        },
-        QuotaRefreshOutcome::Failed {
-            failure,
-            subscription,
-        } => {
-            account.account.subscription = subscription;
-            apply_quota_failure(account, &failure, now_ms);
-            (
-                AccountQuotaOutcome::Failed {
-                    code: failure.code,
-                    retryable: failure.retryable,
-                },
-                Vec::new(),
-            )
-        }
-    }
+    zenith_relay_core::providers::chatgpt::connector::observations::apply_quota_outcome(
+        &mut account.account,
+        outcome,
+        now_ms,
+    )
 }
 
 pub(in crate::local_pool::accounts) fn apply_model_discovery(
