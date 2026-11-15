@@ -186,6 +186,40 @@ fn countdown_changes_request_a_shared_refresh_only_for_selected_pool_accounts() 
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn weekly_countdown_refresh_requires_a_known_reset_capable_connector() {
+    use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+
+    let root = crate::files::test_temp_root("countdown-connector");
+    let state = DesktopState::open(root.clone()).unwrap();
+    let mut task = build_task(
+        "wake_test".into(),
+        input(WakeModelPolicy::Explicit("gpt-test".into())),
+        10,
+        20,
+    )
+    .unwrap();
+    task.trigger = WakeTrigger::Weekly;
+    task.account_selector = AccountSelector::AccountIds(["eligible".into()].into());
+    for client_kind in [None, Some(OAuthClientKind::Siwc)] {
+        let mut candidate = account("eligible", &["gpt-test"]);
+        candidate.oauth_client_kind = client_kind;
+        state
+            .store()
+            .unwrap()
+            .replace_accounts_and_keys(vec![candidate], Vec::new())
+            .unwrap();
+        let changes = state.store().unwrap().refresh_changes();
+        for threshold in [None, Some(2_000)] {
+            task.weekly_reset_remaining_basis_points = threshold;
+            schedule_countdown_refresh(&task, &state).unwrap();
+            assert!(!changes.has_changed().unwrap(), "{client_kind:?}");
+        }
+    }
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn account(id: &str, models: &[&str]) -> LocalAccountRecord {
     LocalAccountRecord {
         account: AccountRecord {
@@ -217,7 +251,7 @@ fn account(id: &str, models: &[&str]) -> LocalAccountRecord {
             last_used_at_ms: None,
             last_error_code: None,
         },
-        oauth_client_kind: None,
+        oauth_client_kind: Some(zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex),
         image_pool_enabled: false,
         provider_family: Some("openai".into()),
         purchase_cost_micro_usd: None,

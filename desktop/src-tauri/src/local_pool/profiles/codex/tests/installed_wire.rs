@@ -234,7 +234,10 @@ fn installed_codex_completes_gateway_tool_cycle() {
         &runtime,
         zenith_relay_core::gateway::router(Arc::new(gateway)),
     );
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap();
     let mut command = std::process::Command::new("bun");
     command
         .current_dir(repository)

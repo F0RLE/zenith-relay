@@ -37,8 +37,8 @@ test("identical output preserves file and directory timestamps without skipping 
 test("changed content keeps fresh timestamps even when size is unchanged", () => fixture(({ asset, finish, info }) => {
   writeFileSync(asset, "export const value = 2;");
   finish();
-  expect(statSync(asset).mtimeMs).toBeGreaterThan(1000000);
   expect(readFileSync(asset, "utf8")).toContain("2");
+  expect(statSync(asset).mtimeMs).toBeGreaterThan(1000000);
   expect(info).toHaveLength(0);
 }));
 

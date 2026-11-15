@@ -176,6 +176,7 @@ fn installed_wire_command(
     );
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(std::path::Path::parent)
         .unwrap();
     let mut command = std::process::Command::new("bun");
     command
@@ -202,6 +203,13 @@ fn installed_wire_arguments_keep_values_attached_to_their_options() {
     cli_argument.push(cli);
     assert_eq!(arguments.len(), 4);
     assert_eq!(arguments[0], "scripts/check/check-claude-effort-wire.mjs");
+    assert!(
+        command
+            .get_current_dir()
+            .unwrap()
+            .join(arguments[0])
+            .is_file()
+    );
     assert_eq!(arguments[1], cli_argument);
     assert_eq!(
         arguments[2],

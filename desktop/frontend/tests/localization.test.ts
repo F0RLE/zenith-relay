@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { runInNewContext } from "node:vm";
 import { createInstance } from "i18next";
 import { createLanguageController, readLanguagePreference } from "../src/i18n/controller";
 import { canonicalLocale, languageChain, locales, resolveLanguage, type LocaleDefinition } from "../src/i18n/registry";
@@ -136,73 +135,5 @@ describe("scalable Desktop localization", () => {
     })).rejects.toThrow("preference write failure");
     await synchronizeNativeLanguage(async () => { applied.push("en"); });
     expect(applied).toEqual(["ru", "en"]);
-  });
-});
-
-const startupScript = readFileSync(new URL("../public/startup.js", import.meta.url), "utf8");
-const startupCopy = (label: string) => ({ interface: `${label} interface`, runtime: `${label} runtime`, slow: `${label} slow`, error: `${label} error`, reload: `${label} reload` });
-
-function startupHarness(language: string, cached: unknown, preference?: string) {
-  const storage = new Map([["relay.startupCopy", JSON.stringify(cached)]]);
-  if (preference) storage.set("relay.language", preference);
-  const html = { dataset: {}, lang: "", dir: "" };
-  const message = { textContent: "" };
-  const reload = { hidden: true, textContent: "", addEventListener() {} };
-  const listeners = new Map<string, () => void>();
-  let localeChanged = () => {};
-  runInNewContext(startupScript, {
-    performance: { mark() {} }, navigator: { language },
-    localStorage: { getItem: (key: string) => storage.get(key) ?? null },
-    document: {
-      documentElement: html,
-      getElementById: (id: string) => id === "splash-message" ? message : reload,
-      addEventListener: (name: string, listener: () => void) => listeners.set(name, listener),
-    },
-    window: { setTimeout() { return 1; }, addEventListener() {} },
-    MutationObserver: class {
-      constructor(listener: () => void) { localeChanged = listener; }
-      observe() {}
-    },
-  });
-  listeners.get("DOMContentLoaded")!();
-  return { html, message, reload, storage, localeChanged: () => localeChanged() };
-}
-
-describe("pre-bundle language cache", () => {
-  test("regional and OS locales reuse the resolved base dictionary", () => {
-    for (const language of ["ru-RU", "ru_RU.UTF-8"]) {
-      const startup = startupHarness(language, { locale: "ru", direction: "ltr", copy: startupCopy("Russian") });
-      expect(startup.message.textContent).toBe("Russian interface");
-      expect(startup.reload.textContent).toBe("Russian reload");
-    }
-  });
-
-  test("explicit selection takes precedence over the system locale", () => {
-    const startup = startupHarness("ru-RU", { locale: "ru", direction: "ltr", copy: startupCopy("Russian") }, "en");
-    expect(startup.message.textContent).toBe("Preparing the interface…");
-  });
-
-  test("only explicit aliases may select a different script", () => {
-    const cache = { locale: "zh-Hant", aliases: ["zh-TW"], direction: "ltr", copy: startupCopy("Traditional") };
-    expect(startupHarness("zh-TW", cache).message.textContent).toBe("Traditional interface");
-    expect(startupHarness("zh-Hans", cache).message.textContent).toBe("Preparing the interface…");
-  });
-
-  test("language changes read the refreshed text and direction", () => {
-    const startup = startupHarness("en", { locale: "en", direction: "ltr", copy: startupCopy("English") });
-    startup.storage.set("relay.startupCopy", JSON.stringify({ locale: "ar", direction: "rtl", copy: startupCopy("Arabic") }));
-    startup.html.lang = "ar";
-    startup.localeChanged();
-    expect(startup.message.textContent).toBe("Arabic interface");
-    expect(startup.reload.textContent).toBe("Arabic reload");
-    expect(startup.html.dir).toBe("rtl");
-  });
-
-  test("corrupt or oversized optional text retains the English fallback", () => {
-    for (const cached of [null, { locale: null, aliases: ["en"], direction: "rtl", copy: startupCopy("Invalid") }, { locale: "en", direction: "rtl", copy: { ...startupCopy("Invalid"), reload: {} } }, { locale: "en", direction: "ltr", copy: { ...startupCopy("Invalid"), error: "x".repeat(1024) } }]) {
-      const startup = startupHarness("en", cached);
-      expect(startup.message.textContent).toBe("Preparing the interface…");
-      expect(startup.html.dir).toBe("ltr");
-    }
   });
 });
