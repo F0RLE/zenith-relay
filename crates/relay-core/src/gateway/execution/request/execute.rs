@@ -167,6 +167,10 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         };
         let Some((selected, lease)) = selected else {
             state.continuation.release_repair_owner(&runtime);
+            // A rejected alternative must not disable waiting for a compatible
+            // owner. Keep permanent preparation exclusions, not tried/cooldown
+            // members, out of the set that can recover.
+            let has_compatible_route = admitted.keys().any(|id| !incompatible.contains(id));
             match handle_selection_miss(SelectionMissInput {
                 budget: &budget,
                 runtime: &runtime,
@@ -180,6 +184,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 has_previous_response_id,
                 retry_context: &retry_context,
                 retry_until_available,
+                has_compatible_route,
             })
             .await
             {

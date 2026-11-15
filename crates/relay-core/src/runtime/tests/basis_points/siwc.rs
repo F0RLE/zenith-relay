@@ -9,6 +9,7 @@ mod errors;
 mod inventory;
 mod json;
 mod output_limits;
+mod queue;
 mod reasoning;
 mod streaming;
 mod transport;
@@ -109,6 +110,9 @@ async fn siwc_uses_websocket_upstream_for_both_client_modes_and_preserves_tool_h
         );
         let transport = attempts[0].routing.as_ref().unwrap().transport.as_ref();
         assert_eq!(transport.is_some(), debug);
+        if debug {
+            assert_eq!(transport.unwrap().session_wait_ms, Some(0));
+        }
         if debug && !stream {
             let transport = transport.unwrap();
             assert_eq!(transport.upstream_response_ms, Some(attempts[0].latency_ms));

@@ -82,6 +82,8 @@ impl StreamBootstrapObservation<'_> {
 
 pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) execution: crate::scheduler::rotation::ExecutionObservation,
+    /// Local fixed-label validation evidence, never a provider-supplied field name.
+    pub(in crate::gateway) validation_parameter: Option<&'static str>,
     pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
     pub(in crate::gateway) failure: AttemptFailure,
     pub(in crate::gateway) preserved: Option<PreservedUpstreamError>,
@@ -94,6 +96,7 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
     fn from(failure: AttemptFailure) -> Self {
         Self {
             execution: crate::scheduler::rotation::ExecutionObservation::unknown(),
+            validation_parameter: None,
             failure,
             upstream_error: None,
             preserved: None,
@@ -253,6 +256,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                             } else {
                                 failure.execution
                             },
+                            validation_parameter: None,
                             failure,
                             upstream_error: event.upstream_error,
                             preserved: event.preserved_error,

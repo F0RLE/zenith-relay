@@ -330,7 +330,7 @@ pub(in crate::gateway) fn completed_upstream_response(
                 &upstream_json,
             ) == crate::protocol::completion::ResponseCompletion::Invalid
         {
-            return Err(invalid_buffered_response());
+            return Err(invalid_buffered_response("response.terminal"));
         }
         return Ok(bytes.to_vec());
     }
@@ -363,10 +363,12 @@ pub(in crate::gateway) fn completed_upstream_response(
             return Err(Box::new(failure));
         }
         if terminal.has_data && !terminal.valid {
-            return Err(Box::new(StreamBootstrapFailure {
-                upstream_error: terminal.upstream_error,
-                ..AttemptFailure::stream(error_codes::STREAM_INVALID).into()
-            }));
+            let mut failure = invalid_buffered_response("stream.event.json");
+            if let Some(mut details) = terminal.upstream_error {
+                details.parameter = Some("stream.event.json".to_owned());
+                failure.upstream_error = Some(details);
+            }
+            return Err(failure);
         }
         if let Some(output_item) = terminal.output_item {
             let raw_index = terminal
@@ -408,13 +410,13 @@ pub(in crate::gateway) fn completed_upstream_response(
                         .is_some_and(Vec::is_empty)
                     {
                         if malformed_output_index {
-                            return Err(invalid_buffered_response());
+                            return Err(invalid_buffered_response("response.output_item.index"));
                         }
                         response["output"] = Value::Array(
                             crate::protocol::response_snapshots::ordered_completed_output(
                                 output_items,
                             )
-                            .map_err(|_| invalid_buffered_response())?,
+                            .map_err(snapshot_failure)?,
                         );
                     } else if let Some(output) =
                         response.get_mut("output").and_then(Value::as_array_mut)
@@ -423,18 +425,17 @@ pub(in crate::gateway) fn completed_upstream_response(
                             &output_items,
                             output,
                         )
-                        .map_err(|_| invalid_buffered_response())?;
+                        .map_err(snapshot_failure)?;
                     }
                     if crate::protocol::completion::ResponseCompletion::for_protocol(
                         crate::WireApi::Responses,
                         &response,
                     ) == crate::protocol::completion::ResponseCompletion::Invalid
                     {
-                        return Err(invalid_buffered_response());
+                        return Err(invalid_buffered_response("response.terminal"));
                     }
-                    return serde_json::to_vec(&response).map_err(|_| {
-                        Box::new(AttemptFailure::stream(error_codes::STREAM_INVALID).into())
-                    });
+                    return serde_json::to_vec(&response)
+                        .map_err(|_| invalid_buffered_response("response.serialization"));
                 }
             }
             None => {}
@@ -452,10 +453,11 @@ pub(in crate::gateway) fn validate_upstream_response(
     expected_model: Option<&str>,
 ) -> Result<(), Box<StreamBootstrapFailure>> {
     if !upstream_json.is_object() {
-        return Err(invalid_buffered_response());
+        return Err(invalid_buffered_response("response.json"));
     }
     let response_payload = upstream_json.get("response").unwrap_or(upstream_json);
-    let bytes = serde_json::to_vec(upstream_json).map_err(|_| invalid_buffered_response())?;
+    let bytes = serde_json::to_vec(upstream_json)
+        .map_err(|_| invalid_buffered_response("response.serialization"))?;
     if response_payload
         .get("error")
         .is_some_and(|error| !error.is_null())
@@ -495,9 +497,36 @@ pub(in crate::gateway) fn validate_upstream_response(
     Ok(())
 }
 
-fn invalid_buffered_response() -> Box<StreamBootstrapFailure> {
+fn snapshot_failure(error: crate::AdapterError) -> Box<StreamBootstrapFailure> {
+    invalid_buffered_response_detail(
+        error.parameter().unwrap_or("response.output_item.changed"),
+        Some(error),
+    )
+}
+
+fn invalid_buffered_response(parameter: &'static str) -> Box<StreamBootstrapFailure> {
+    invalid_buffered_response_detail(parameter, None)
+}
+
+fn invalid_buffered_response_detail(
+    parameter: &'static str,
+    detail: Option<crate::AdapterError>,
+) -> Box<StreamBootstrapFailure> {
     let mut failure: StreamBootstrapFailure =
         AttemptFailure::stream(error_codes::STREAM_INVALID).into();
     failure.execution = crate::scheduler::rotation::ExecutionObservation::unknown();
+    failure.validation_parameter = Some(parameter);
+    let error = serde_json::json!({"error": {
+        "type": error_codes::STREAM_ERROR,
+        "code": error_codes::STREAM_INVALID,
+        "param": parameter,
+        "message": match detail {
+            Some(detail) => format!("{detail} (parameter: {parameter})"),
+            None => format!("{} (parameter: {parameter})", failure.failure.message),
+        },
+    }});
+    failure.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(None, &error));
+    failure.preserved =
+        super::super::errors::preserved_upstream_error_value(&failure.failure, &error);
     Box::new(failure)
 }

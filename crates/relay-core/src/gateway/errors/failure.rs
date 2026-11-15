@@ -310,7 +310,7 @@ impl AttemptFailure {
                 error_codes::STREAM_IDLE_TIMEOUT => {
                     "Basis Points response stopped making progress; the request was not repeated"
                 }
-                _ => "upstream stream failed before client output",
+                _ => "upstream stream could not be completed safely",
             },
             cooldown_hint: RateLimitBodyHint::default(),
         }

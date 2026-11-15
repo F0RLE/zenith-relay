@@ -12,6 +12,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 mod idle;
 mod planner;
+mod store;
 mod stream;
 #[cfg(test)]
 mod tests;
@@ -91,57 +92,8 @@ pub(crate) struct PendingSocket {
 pub(crate) struct SocketDiagnostics {
     pub(crate) reused: bool,
     pub(crate) handshake_ms: Option<u64>,
+    pub(crate) session_wait_ms: Option<u64>,
     pub(crate) reset_reason: Option<ConnectionResetReason>,
-}
-
-impl SocketStore {
-    fn acquire_or_isolate(&self, key: Option<planner::Fingerprint>) -> OwnedMutexGuard<Lane> {
-        key.and_then(|key| self.acquire(key)).unwrap_or_else(|| {
-            let mut lane = Lane::new();
-            lane.reset_reason = Some(if key.is_some() {
-                ConnectionResetReason::SessionUnavailable
-            } else {
-                ConnectionResetReason::MissingContext
-            });
-            Arc::new(AsyncMutex::new(lane))
-                .try_lock_owned()
-                .expect("new lane")
-        })
-    }
-
-    fn acquire(&self, key: planner::Fingerprint) -> Option<OwnedMutexGuard<Lane>> {
-        let mut lanes = crate::poison::mutex(&self.lanes);
-        let expired = lanes.get(&key).is_some_and(|lane| {
-            lane.try_lock()
-                .is_ok_and(|lane| lane.touched.elapsed() >= IDLE_TTL)
-        });
-        lanes.retain(|_, lane| {
-            lane.try_lock()
-                .map_or(true, |lane| lane.touched.elapsed() < IDLE_TTL)
-        });
-        if !lanes.contains_key(&key) && lanes.len() >= MAX_SESSIONS {
-            // Reclaim only an unlocked lane. Busy owners keep their socket and
-            // checkpoint; new sessions must not displace an in-flight turn.
-            let oldest = lanes
-                .iter()
-                .filter_map(|(key, lane)| lane.try_lock().ok().map(|lane| (*key, lane.touched)))
-                .min_by_key(|(_, touched)| *touched)
-                .map(|(key, _)| key)?;
-            lanes.remove(&oldest);
-        }
-        lanes
-            .entry(key)
-            .or_insert_with(|| {
-                let mut lane = Lane::new();
-                if expired {
-                    lane.reset_reason = Some(ConnectionResetReason::SessionExpired);
-                }
-                Arc::new(AsyncMutex::new(lane))
-            })
-            .clone()
-            .try_lock_owned()
-            .ok()
-    }
 }
 
 impl GatewayRuntime {
@@ -193,14 +145,29 @@ impl GatewayRuntime {
                 candidate,
                 context,
                 request.url(),
+                crate::protocol::UsageWorkload::from_request_origin(
+                    self.request_origin(&event.request_id),
+                ),
             ))
         });
-        // Context-free and overlapping turns use isolated full-history sockets.
-        let mut lane = self.session_state.siwc_sockets.acquire_or_isolate(key);
-        lane.bind(SocketAuthority {
-            credential: prepared.credential_fingerprint(),
-            incarnation: prepared.incarnation(),
-        });
+        let (mut lane, session_wait_ms) = self
+            .session_state
+            .siwc_sockets
+            .acquire_or_isolate(key)
+            .await;
+        if !dispatch.budget.expect("checked budget").can_dispatch() {
+            return Err(AuthorizedRequestError::DispatchBudgetExhausted);
+        }
+        {
+            // Waiting must not let a stale preparation discard a newer socket.
+            let _guard = prepared
+                .dispatch_guard(self, candidate)
+                .ok_or(AuthorizedRequestError::NotReplayable)?;
+            lane.bind(SocketAuthority {
+                credential: prepared.credential_fingerprint(),
+                incarnation: prepared.incarnation(),
+            });
+        }
         let mut connection = match lane.idle.take() {
             Some(idle) => match idle.resume().await {
                 Ok(connection) => Some(connection),
@@ -313,6 +280,7 @@ impl GatewayRuntime {
             diagnostics: SocketDiagnostics {
                 reused,
                 handshake_ms,
+                session_wait_ms: diagnostics_mode.map(|_| session_wait_ms),
                 reset_reason,
             },
             payload_diagnostics,
@@ -349,12 +317,14 @@ fn session_key(
     candidate: &str,
     context: &str,
     url: &url::Url,
+    workload: crate::protocol::UsageWorkload,
 ) -> planner::Fingerprint {
     planner::fingerprint(&serde_json::json!([
         local_key,
         candidate,
         context,
-        url.as_str()
+        url.as_str(),
+        workload
     ]))
 }
 
@@ -394,6 +364,7 @@ impl SocketDiagnostics {
         transport.connection_reused = Some(self.reused);
         transport.connection_reset_reason = self.reset_reason;
         transport.handshake_ms = self.handshake_ms;
+        transport.session_wait_ms = self.session_wait_ms;
     }
 }
 

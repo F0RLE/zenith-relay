@@ -1,5 +1,5 @@
 pub(super) use crate::protocol::response_snapshots::{
-    retain_completed_reasoning, validate_unchanged,
+    retain_completed_reasoning, retain_completed_web_search, validate_unchanged,
 };
 
 #[cfg(test)]

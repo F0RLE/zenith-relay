@@ -72,6 +72,8 @@ fn messages_tool_search_keeps_responses_prefix_stable_after_discovery() {
         let initial = initial.upstream_body();
         let loaded = loaded.upstream_body();
         assert_eq!(request, original);
+        assert!(initial.get("tools").is_none());
+        assert!(loaded.get("tools").is_none());
         assert_eq!(loaded["tools"], initial["tools"]);
         let prefix = initial["input"].as_array().unwrap();
         let input = loaded["input"].as_array().unwrap();
@@ -169,7 +171,7 @@ fn messages_tool_search_compacted_and_forced_tools_keep_their_original_schema() 
     request["tool_choice"] = json!({"type":"tool","name":"lookup"});
     let forced = prepare_discovery(WireApi::Responses, &request, false);
     let body = forced.upstream_body();
-    assert!(body["tools"].as_array().unwrap().is_empty());
+    assert!(body.get("tools").is_none());
     assert_eq!(body["input"][0]["tools"][0]["name"], "ToolSearch");
     assert_eq!(body["input"][1]["role"], "system");
     assert_eq!(body["input"][3]["type"], "additional_tools");
@@ -611,10 +613,7 @@ fn messages_tool_search_preserves_opaque_reasoning_ownership_across_discovery() 
             })
             .unwrap();
         if id == "lookup_1" {
-            assert_eq!(
-                prepared.upstream_body()["tools"].as_array().unwrap().len(),
-                0
-            );
+            assert!(prepared.upstream_body().get("tools").is_none());
             let additions: Vec<_> = prepared.upstream_body()["input"]
                 .as_array()
                 .unwrap()

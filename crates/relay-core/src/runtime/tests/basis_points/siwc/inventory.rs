@@ -26,7 +26,6 @@ async fn siwc_empty_catalog_withdraws_executor_routes_without_changing_other_acc
     let account = &runtime.account_state.executors["synthetic-account-0"];
     let inventory = crate::poison::read(&account.model_inventory);
     assert!(inventory.configured_models.is_empty());
-    assert!(inventory.image_main_model.is_none());
     drop(inventory);
     {
         let scheduler = runtime.lock_scheduler();

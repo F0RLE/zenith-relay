@@ -719,6 +719,7 @@ impl TranslationStream {
                 .filter(|state| state.closed)
             {
                 snapshots::retain_completed_reasoning(&state.item, item)?;
+                snapshots::retain_completed_web_search(&state.item, item)?;
             }
         }
         let output = terminal_response

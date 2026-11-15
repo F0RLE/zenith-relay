@@ -1,6 +1,8 @@
 use super::super::structured_output::requires_buffering;
 use super::{DiscoverySession, capture};
-use crate::gateway::errors::{AttemptFailure, apply_failure_state, settle_route_failure};
+use crate::gateway::errors::{
+    AttemptFailure, PreservedUpstreamError, apply_failure_state, settle_route_failure,
+};
 use crate::gateway::execution::{
     attempt_error_response, request::adapter_error_response_for_origin,
 };
@@ -226,7 +228,7 @@ pub(in crate::gateway::execution) async fn resolve(
                 } else {
                     crate::error_codes::STREAM_ERROR
                 });
-                return Err(context.fail(event, failure, &headers));
+                return Err(context.fail(event, failure, &headers, None));
             }
         };
         populate_tokens(&mut event, &raw);
@@ -240,7 +242,7 @@ pub(in crate::gateway::execution) async fn resolve(
                 &raw,
                 &headers,
             ));
-            return Err(context.fail(event, failure, &headers));
+            return Err(context.fail(event, failure, &headers, None));
         }
         let bytes = match completed_upstream_response(&raw, true, expected_model) {
             Ok(bytes) => bytes,
@@ -249,7 +251,13 @@ pub(in crate::gateway::execution) async fn resolve(
                     details.http_status = Some(status.as_u16());
                     details
                 });
-                return Err(context.fail(event, failure.failure, &headers));
+                return Err(context.fail(
+                    event,
+                    failure.failure,
+                    &headers,
+                    // Provider text keeps its existing canonical client message.
+                    failure.validation_parameter.and(failure.preserved.as_ref()),
+                ));
             }
         };
         let mut terminal: Value = match serde_json::from_slice(&bytes) {
@@ -340,7 +348,7 @@ pub(in crate::gateway::execution) async fn resolve(
                 if context.budget.dispatches() != before {
                     event = context.event(failure.status);
                 }
-                return Err(context.fail(event, failure, &Default::default()));
+                return Err(context.fail(event, failure, &Default::default(), None));
             }
         };
     }
@@ -492,6 +500,7 @@ impl DiscoveryExecution<'_> {
         mut event: UsageEvent,
         failure: AttemptFailure,
         headers: &axum::http::HeaderMap,
+        preserved: Option<&PreservedUpstreamError>,
     ) -> Response<Body> {
         event.success = false;
         event.http_status = failure.status.as_u16();
@@ -512,7 +521,12 @@ impl DiscoveryExecution<'_> {
             );
         }
         emit_usage(self.runtime, event);
-        attempt_error_response(failure, None, self.selected_error_origin, self.request_id)
+        attempt_error_response(
+            failure,
+            preserved,
+            self.selected_error_origin,
+            self.request_id,
+        )
     }
 
     fn adapter_failure(&self, event: UsageEvent, error: crate::AdapterError) -> Response<Body> {

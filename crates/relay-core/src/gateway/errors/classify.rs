@@ -99,16 +99,25 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     if status == StatusCode::BAD_GATEWAY {
         for path in ["", "/error", "/response/error", "/body/error"] {
             if !path.is_empty()
-                && error_payload.pointer(path).is_some_and(|error| {
+                && let Some(error) = error_payload.pointer(path).filter(|error| {
                     error.get("type").and_then(Value::as_str) == Some(error_codes::STREAM_ERROR)
-                        && error.get("code").and_then(Value::as_str)
-                            == Some(error_codes::STREAM_EVENT_TOO_LARGE)
                 })
             {
-                return UpstreamErrorClassification {
-                    category: error_codes::STREAM_EVENT_TOO_LARGE,
-                    message: "Upstream streaming event exceeded Relay's size limit",
-                };
+                match error.get("code").and_then(Value::as_str) {
+                    Some(error_codes::STREAM_INVALID) => {
+                        return UpstreamErrorClassification {
+                            category: error_codes::STREAM_INVALID,
+                            message: "Upstream stream could not be completed safely",
+                        };
+                    }
+                    Some(error_codes::STREAM_EVENT_TOO_LARGE) => {
+                        return UpstreamErrorClassification {
+                            category: error_codes::STREAM_EVENT_TOO_LARGE,
+                            message: "Upstream streaming event exceeded Relay's size limit",
+                        };
+                    }
+                    _ => {}
+                }
             }
             if let Some(error) = error_payload.pointer(path).filter(|error| {
                 let kind = error.get("type").and_then(Value::as_str);
@@ -118,6 +127,15 @@ pub(in crate::gateway) fn classify_upstream_error_value(
                     "relay_adapter"
                 })
             }) {
+                if path.is_empty()
+                    && error.get("code").and_then(Value::as_str)
+                        == Some(error_codes::STREAM_INVALID)
+                {
+                    return UpstreamErrorClassification {
+                        category: error_codes::STREAM_INVALID,
+                        message: "Upstream stream could not be completed safely",
+                    };
+                }
                 let adapter = match error.get("code").and_then(Value::as_str) {
                     Some(error_codes::ADAPTER_UPSTREAM_RESPONSE_INVALID) => {
                         Some(crate::AdapterError::upstream_response_invalid())

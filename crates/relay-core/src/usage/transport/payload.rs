@@ -186,6 +186,7 @@ impl ExecutorRoute {
                     transport.upstream = crate::UsageTransport::Http;
                     transport.handshake_ms = None;
                     transport.connection_reused = None;
+                    transport.session_wait_ms = None;
                     transport.connection_reset_reason = None;
                     transport.response_format = None;
                     transport.fallback_reason = (self.client_transport

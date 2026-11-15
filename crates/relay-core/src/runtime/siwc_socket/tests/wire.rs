@@ -6,6 +6,8 @@ use axum::{
 };
 use std::collections::VecDeque;
 
+mod queue;
+
 struct Fixture {
     url: url::Url,
     server: tokio::task::JoinHandle<()>,
@@ -86,9 +88,9 @@ impl Fixture {
     }
 
     async fn pending(&self, store: &SocketStore, body: &Value) -> PendingSocket {
-        let mut lane = store
-            .acquire(planner::fingerprint(&json!("conversation")))
-            .unwrap();
+        let (mut lane, session_wait_ms) = store
+            .acquire_or_isolate(Some(planner::fingerprint(&json!("conversation"))))
+            .await;
         let reused = lane.idle.is_some();
         let connection = if let Some(connection) = lane.idle.take() {
             connection.resume().await.unwrap()
@@ -121,6 +123,7 @@ impl Fixture {
             diagnostics: SocketDiagnostics {
                 reused,
                 handshake_ms: (!reused).then_some(1),
+                session_wait_ms: Some(session_wait_ms),
                 reset_reason: (!reused).then_some(ConnectionResetReason::NewSession),
             },
             payload_diagnostics,

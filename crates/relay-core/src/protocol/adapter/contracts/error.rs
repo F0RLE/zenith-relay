@@ -27,11 +27,20 @@ struct SchemaDiagnostic {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotDiagnostic {
+    item_kind: &'static str,
+    reason: &'static str,
+    before: &'static str,
+    after: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterDiagnostic {
     Json(JsonParseDiagnostic),
     Shape(ShapeDiagnostic),
     Schema(SchemaDiagnostic),
     ToolIdentity(&'static str),
+    Snapshot(SnapshotDiagnostic),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +93,48 @@ impl AdapterError {
 
     pub(crate) const fn with_diagnostics_from(mut self, cause: Self) -> Self {
         self.diagnostic = cause.diagnostic;
+        self
+    }
+
+    pub(crate) fn with_snapshot_diagnostic(
+        mut self,
+        item: &serde_json::Value,
+        reason: &'static str,
+        before: Option<&serde_json::Value>,
+        after: Option<&serde_json::Value>,
+    ) -> Self {
+        let shape = |value: Option<&serde_json::Value>| match value {
+            None => "missing",
+            Some(serde_json::Value::Null) => "null",
+            Some(serde_json::Value::Bool(_)) => "boolean",
+            Some(serde_json::Value::Number(_)) => "number",
+            Some(serde_json::Value::String(_)) => "string",
+            Some(serde_json::Value::Array(_)) => "array",
+            Some(serde_json::Value::Object(_)) => "object",
+        };
+        let item_kind = match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => "message",
+            Some("reasoning") => "reasoning",
+            Some("function_call") => "function_call",
+            Some("custom_tool_call") => "custom_tool_call",
+            Some("web_search_call") => "web_search_call",
+            Some("file_search_call") => "file_search_call",
+            Some("computer_call") => "computer_call",
+            Some("image_generation_call") => "image_generation_call",
+            Some("code_interpreter_call") => "code_interpreter_call",
+            Some("mcp_call") => "mcp_call",
+            Some("mcp_list_tools") => "mcp_list_tools",
+            Some("mcp_approval_request") => "mcp_approval_request",
+            Some("tool_search_call") => "tool_search_call",
+            Some("compaction") => "compaction",
+            _ => "other",
+        };
+        self.diagnostic = Some(AdapterDiagnostic::Snapshot(SnapshotDiagnostic {
+            item_kind,
+            reason,
+            before: shape(before),
+            after: shape(after),
+        }));
         self
     }
 
@@ -375,6 +426,13 @@ impl fmt::Display for AdapterError {
         }
         if let Some(AdapterDiagnostic::ToolIdentity(reason)) = self.diagnostic {
             write!(formatter, " (tool_identity_reason={reason})")?;
+        }
+        if let Some(AdapterDiagnostic::Snapshot(diagnostic)) = self.diagnostic {
+            write!(
+                formatter,
+                " (item_kind={}, snapshot_reason={}, before={}, after={})",
+                diagnostic.item_kind, diagnostic.reason, diagnostic.before, diagnostic.after
+            )?;
         }
         Ok(())
     }

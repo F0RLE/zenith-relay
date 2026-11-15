@@ -24,6 +24,7 @@ pub(super) struct SelectionMissInput<'a> {
     pub(super) has_previous_response_id: bool,
     pub(super) retry_context: &'a CandidateRetryContext<'a>,
     pub(super) retry_until_available: bool,
+    pub(super) has_compatible_route: bool,
 }
 
 /// No reserved candidate is available for this attempt. Recover a pinned
@@ -181,8 +182,9 @@ async fn wait_for_candidate_availability(
     if !should_wait_for_candidate_availability(
         input.retry_until_available,
         &input.state.retry.last_failure,
-        !input.state.retry.preparation_exclusions.is_empty()
-            || input.state.retry.last_adapter_error.is_some(),
+        !input.has_compatible_route
+            && (!input.state.retry.preparation_exclusions.is_empty()
+                || input.state.retry.last_adapter_error.is_some()),
         input.has_previous_response_id,
     ) {
         return None;

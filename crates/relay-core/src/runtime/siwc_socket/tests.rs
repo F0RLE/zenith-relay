@@ -5,6 +5,7 @@ mod diagnostics;
 mod idle_lifecycle;
 mod replay;
 mod settings;
+mod store_lifecycle;
 mod wire;
 
 fn request(input: Value) -> Value {
@@ -184,38 +185,44 @@ fn failed_incomplete_and_missing_output_do_not_checkpoint() {
     }
 }
 
-#[test]
-fn busy_lanes_are_isolated_and_store_is_bounded() {
+#[tokio::test(start_paused = true)]
+async fn busy_lanes_wait_then_isolate_and_store_is_bounded() {
     let store = SocketStore::default();
     let guards: Vec<_> = (0..MAX_SESSIONS)
         .map(|id| store.acquire(planner::fingerprint(&json!(id))).unwrap())
         .collect();
     assert!(store.acquire(planner::fingerprint(&json!(0))).is_none());
-    let mut isolated = store.acquire_or_isolate(Some(planner::fingerprint(&json!(0))));
+    let (mut isolated, waited_ms) = store
+        .acquire_or_isolate(Some(planner::fingerprint(&json!(0))))
+        .await;
+    assert_eq!(waited_ms, 2_000);
     isolated.authority = Some(SocketAuthority {
         credential: [7; 32],
         incarnation: crate::runtime::AuthorizationIncarnation::Agent(1),
     });
     assert!(guards[0].authority.is_none());
-    assert!(store.acquire_or_isolate(None).authority.is_none());
+    assert!(store.acquire_or_isolate(None).await.0.authority.is_none());
     assert_eq!(
-        store.acquire_or_isolate(None).reset_reason,
+        store.acquire_or_isolate(None).await.0.reset_reason,
         Some(ConnectionResetReason::MissingContext)
     );
     assert_eq!(
         isolated.reset_reason,
-        Some(ConnectionResetReason::SessionUnavailable)
+        Some(ConnectionResetReason::SessionWaitTimeout)
     );
     assert!(
         store
             .acquire(planner::fingerprint(&json!(MAX_SESSIONS)))
             .is_none()
     );
-    assert!(
-        store
-            .acquire_or_isolate(Some(planner::fingerprint(&json!(MAX_SESSIONS))))
-            .idle
-            .is_none()
+    let (at_capacity, waited_ms) = store
+        .acquire_or_isolate(Some(planner::fingerprint(&json!(MAX_SESSIONS))))
+        .await;
+    assert!(at_capacity.idle.is_none());
+    assert_eq!(waited_ms, 0);
+    assert_eq!(
+        at_capacity.reset_reason,
+        Some(ConnectionResetReason::SessionCapacityExceeded)
     );
     assert_eq!(crate::poison::mutex(&store.lanes).len(), MAX_SESSIONS);
     drop(guards);
@@ -340,17 +347,21 @@ fn external_continuations_and_unsupported_wire_fields_are_rejected() {
 
 #[test]
 fn session_keys_separate_local_keys_accounts_contexts_and_endpoints() {
+    use crate::protocol::UsageWorkload::{Background, Conversation, Memory};
     let url = "https://api.openai.com/v1/responses".parse().unwrap();
-    let key = session_key("key", "account", "context", &url);
+    let key = session_key("key", "account", "context", &url, Conversation);
     for scoped in [
-        session_key("other", "account", "context", &url),
-        session_key("key", "other", "context", &url),
-        session_key("key", "account", "other", &url),
+        session_key("other", "account", "context", &url, Conversation),
+        session_key("key", "other", "context", &url, Conversation),
+        session_key("key", "account", "other", &url, Conversation),
+        session_key("key", "account", "context", &url, Memory),
+        session_key("key", "account", "context", &url, Background),
         session_key(
             "key",
             "account",
             "context",
             &"https://other.invalid/v1/responses".parse().unwrap(),
+            Conversation,
         ),
     ] {
         assert_ne!(key, scoped);

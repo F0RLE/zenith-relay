@@ -185,6 +185,17 @@ pub enum UsageWorkload {
     Background,
 }
 
+impl UsageWorkload {
+    /// Classify the runtime's pre-dispatch origin, before usage is finalized.
+    pub fn from_request_origin(origin: Option<&str>) -> Self {
+        match origin {
+            Some("memory_extraction" | "memory_consolidation") => Self::Memory,
+            Some("activity_summary" | "task_title" | "wake") => Self::Background,
+            _ => Self::Conversation,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageQuery {

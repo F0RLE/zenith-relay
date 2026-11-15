@@ -235,6 +235,32 @@ fn typed_adapter_stream_errors_keep_their_category_without_authorizing_replay() 
 }
 
 #[test]
+fn typed_stream_validation_keeps_its_category_and_does_not_authorize_replay() {
+    for body in [
+        serde_json::json!({"type":"error","code":"stream_invalid","param":"response.output_item.content"}),
+        serde_json::json!({"error":{"type":"stream_error","code":"stream_invalid"}}),
+        serde_json::json!({"type":"error","error":{"type":"stream_error","code":"stream_invalid"}}),
+        serde_json::json!({"type":"response.failed","response":{"error":{"type":"stream_error","code":"stream_invalid"}}}),
+    ] {
+        let classified = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body);
+        assert_eq!(classified.category, error_codes::STREAM_INVALID);
+        let failure = AttemptFailure::classified_with_hint(
+            StatusCode::BAD_GATEWAY,
+            classified.category,
+            Default::default(),
+        );
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+            error_codes::UPSTREAM_UNAUTHORIZED
+        );
+    }
+}
+
+#[test]
 fn basis_points_access_and_policy_refusals_are_not_quota_errors() {
     for (body, category) in [
         (br#"{"error":{"code":"basispoints_model_access_changed"}}"#.as_slice(), error_codes::UPSTREAM_MODEL_UNAVAILABLE),

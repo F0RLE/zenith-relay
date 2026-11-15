@@ -73,6 +73,10 @@ pub(in crate::gateway::streaming) struct DiscoveryProgress {
 
 enum DiscoveryFailure {
     Adapter(AdapterError),
+    InvalidStream {
+        parameter: &'static str,
+        message: String,
+    },
     Upstream(Box<AttemptFailure>),
 }
 
@@ -263,6 +267,11 @@ impl DiscoveryStream {
         self.update_progress();
         self.output.push_back(match error {
             DiscoveryFailure::Adapter(error) => adapter_failure(error),
+            DiscoveryFailure::InvalidStream { parameter, message } => {
+                let mut event = failure_event(crate::error_codes::STREAM_INVALID, Some(parameter));
+                event["message"] = json!(message);
+                failure_frame(event)
+            }
             DiscoveryFailure::Upstream(error) => {
                 crate::poison::mutex(&self.progress).cooldown_hint = error.cooldown_hint;
                 let mut event = failure_event(error.category, None);
@@ -308,7 +317,18 @@ impl DiscoveryStream {
                     details.http_status = Some(self.status.as_u16());
                     details
                 });
-            DiscoveryFailure::Upstream(Box::new(failure.failure))
+            match failure.validation_parameter {
+                // Only locally authored validation details take this path;
+                // provider failure messages retain their canonical handling.
+                Some(parameter) => DiscoveryFailure::InvalidStream {
+                    parameter,
+                    message: failure.preserved.map_or_else(
+                        || format!("{} (parameter: {parameter})", failure.failure.message),
+                        |error| error.message,
+                    ),
+                },
+                None => DiscoveryFailure::Upstream(Box::new(failure.failure)),
+            }
         })?;
         let mut terminal: Value = serde_json::from_slice(&bytes)
             .map_err(|_| AdapterError::upstream_response_invalid())?;

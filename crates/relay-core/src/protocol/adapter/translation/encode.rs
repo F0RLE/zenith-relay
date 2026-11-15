@@ -390,23 +390,26 @@ fn write_tools(
             Ok(())
         };
     }
-    let mut declarations = request
-        .tools
-        .iter()
-        .filter(|_| protocol != WireApi::Responses || request.deferred_tools.is_none())
-        .map(|tool| parts::function(tool, protocol))
-        .collect::<AdapterResult<Vec<_>>>()?;
-    if let Some(search) = &request.web_search {
-        declarations.push(search.clone());
+    // Deferred Responses catalogs are declared incrementally in input. A root
+    // `tools: []` would revoke those declarations rather than leave them active.
+    if protocol != WireApi::Responses || request.deferred_tools.is_none() {
+        let mut declarations = request
+            .tools
+            .iter()
+            .map(|tool| parts::function(tool, protocol))
+            .collect::<AdapterResult<Vec<_>>>()?;
+        if let Some(search) = &request.web_search {
+            declarations.push(search.clone());
+        }
+        request_fields.insert(
+            "tools".into(),
+            if protocol == WireApi::Gemini {
+                json!([{"functionDeclarations": declarations}])
+            } else {
+                declarations.into()
+            },
+        );
     }
-    request_fields.insert(
-        "tools".into(),
-        if protocol == WireApi::Gemini {
-            json!([{"functionDeclarations": declarations}])
-        } else {
-            declarations.into()
-        },
-    );
     if let Some(choice) = &request.tool_choice {
         request_fields.insert(
             if protocol == WireApi::Gemini {

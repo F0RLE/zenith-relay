@@ -81,6 +81,9 @@ pub struct TransportDiagnostics {
     /// Native WS: false is selected-route setup before generation, true is reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_reused: Option<bool>,
+    /// Local session acquisition wait; collected only with detailed diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_wait_ms: Option<u64>,
     /// Why SIWC opened a fresh socket; bounded local state, not provider text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_reset_reason: Option<ConnectionResetReason>,
@@ -128,6 +131,8 @@ pub enum ConnectionResetReason {
     NewSession,
     MissingContext,
     SessionUnavailable,
+    SessionWaitTimeout,
+    SessionCapacityExceeded,
     SessionExpired,
     CredentialChanged,
     AuthorizationChanged,
@@ -230,6 +235,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms: None,
                 connection_reused: None,
+                session_wait_ms: None,
                 connection_reset_reason: None,
                 reauth: None,
                 response_headers_ms: None,
@@ -296,6 +302,7 @@ impl ExecutorRoute {
                 http_version: None,
                 handshake_ms,
                 connection_reused: Some(false),
+                session_wait_ms: None,
                 connection_reset_reason: None,
                 reauth: None,
                 response_headers_ms: None,
@@ -631,6 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn session_contention_diagnostics_preserve_historical_records() {
+        for reason in [
+            "session_unavailable",
+            "session_wait_timeout",
+            "session_capacity_exceeded",
+        ] {
+            let value = json!({
+                "upstream":"websocket", "mode":"native",
+                "connectionResetReason":reason
+            });
+            let decoded: TransportDiagnostics = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(decoded.session_wait_ms, None);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+    }
+
+    #[test]
     fn siwc_socket_diagnostics_do_not_report_synthetic_http_headers() {
         let mut route = route();
         route.observe_http_dispatch(None);
@@ -646,6 +670,7 @@ mod tests {
             .insert(crate::runtime::siwc_socket::SocketDiagnostics {
                 reused: true,
                 handshake_ms: None,
+                session_wait_ms: Some(75),
                 reset_reason: None,
             });
         route.observe_http_payload(&response);
@@ -657,6 +682,7 @@ mod tests {
             Some(TransportResponseFormat::WebsocketFrames)
         );
         assert_eq!(transport.connection_reused, Some(true));
+        assert_eq!(transport.session_wait_ms, Some(75));
         assert_eq!(transport.http_version, None);
         assert_eq!(transport.upstream_http_status, None);
         assert_eq!(transport.response_headers_ms, None);
@@ -670,6 +696,7 @@ mod tests {
         assert_eq!(transport.upstream, UsageTransport::Http);
         assert_eq!(transport.connection_reused, None);
         assert_eq!(transport.response_headers_ms, Some(20));
+        assert_eq!(transport.session_wait_ms, None);
     }
 
     #[test]

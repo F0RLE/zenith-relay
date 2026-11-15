@@ -1,5 +1,7 @@
 use super::*;
 
+mod validation;
+
 fn visible_message(text: &str) -> Value {
     json!({"id":"msg_visible","type":"message","role":"assistant","status":"completed",
         "content":[{"type":"output_text","text":text,"annotations":[]}]})
