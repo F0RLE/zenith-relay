@@ -60,12 +60,12 @@ function login({ label = "Continue", url = "https://auth.openai.com/log-in", inp
 
 describe("external login page language resources", () => {
   test("preserves every existing detection and blocked-action pattern", () => {
-    expect(locales.map((locale) => locale.loginTitle).join("|"))
+    expect(locales.flatMap((locale) => locale.loginTitle).join("|"))
       .toBe("sign in to chatgpt|войти в chatgpt|войдите в chatgpt");
-    expect(locales.map((locale) => locale.loginPrimaryAction).join("|"))
+    expect(locales.flatMap((locale) => locale.loginPrimaryAction).join("|"))
       .toBe("continue to sign in|sign in with chatgpt|продолжить вход|войти с помощью chatgpt");
-    expect(locales.map((locale) => locale.unsafeSubmit).join("|"))
-      .toBe("sign.?up|create|reset|forgot|google|apple|microsoft|consent|authorize|созда|сброс|разреш");
+    expect(locales.flatMap((locale) => locale.unsafeSubmit).join("|"))
+      .toBe("signup|sign up|sign-up|sign_up|create|reset|forgot|google|apple|microsoft|consent|authorize|созда|сброс|разреш");
   });
 
   test("recognizes English, Russian and mixed-language login pages", () => {
@@ -90,7 +90,7 @@ describe("external login page language resources", () => {
   });
 
   test("blocks account creation, reset, external providers and consent in both languages", () => {
-    for (const label of ["Sign up", "Create account", "Reset password", "Forgot password", "Google", "Apple", "Microsoft", "Consent", "Authorize", "Создать аккаунт", "Сбросить пароль", "Разрешить доступ"]) {
+    for (const label of ["Sign up", "Sign-up", "Signup", "Sign_up", "Create account", "Reset password", "Forgot password", "Google", "Apple", "Microsoft", "Consent", "Authorize", "Создать аккаунт", "Сбросить пароль", "Разрешить доступ"]) {
       expect(login({ label, input: { stage: "email", value: "synthetic@example.test" } }))
         .toEqual({ result: "manual", submissions: 0, value: "" });
     }
@@ -104,11 +104,22 @@ describe("external login page language resources", () => {
 
   test("rechecks localized safety after filling and fails closed on invalid resources", () => {
     expect(login({ input: { stage: "email", value: "synthetic@example.test" }, onInput: (button) => { button.textContent = "Разрешить доступ"; } }).submissions).toBe(0);
-    for (const patterns of [[], [{ unsafeSubmit: "[" }]]) {
+    for (const patterns of [[], null, [null], [{ unsafeSubmit: "[" }], [{ unsafeSubmit: [] }], [{ unsafeSubmit: [""] }], [{ unsafeSubmit: [null] }]]) {
       expect(login({ patterns }).result).toBe("manual");
     }
     expect(login({ url: "https://synthetic.example/log-in" }).result).toBe("manual");
     expect(login({ input: { expiresAtMs: 0 } }).result).toBe("manual");
+  });
+
+  test("language resources are literal phrases rather than executable patterns", () => {
+    const patterns = [{ unsafeSubmit: ["(a+)+$", ".*", "["] }];
+    expect(login({ patterns, input: { stage: "email", value: "synthetic@example.test" } }).result).toBe("submitted");
+    expect(login({ patterns, label: "Continue .*" }).result).toBe("manual");
+    const environment = {
+      location: { pathname: "/", hash: "" },
+      document: { querySelectorAll: () => [{ textContent: "Sign in" }] },
+    };
+    expect(authSnapshot([{ loginTitle: [".*"], loginPrimaryAction: ["["] }], environment).loginUiSignal).toBe(false);
   });
 
   test("checks accessible submit labels as well as visible button text", () => {

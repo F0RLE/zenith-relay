@@ -27,7 +27,11 @@ module.exports = function automaticLogin(locales, input, environment = globalThi
     const submitters = [...form.querySelectorAll('button:not([type]), button[type="submit"], input[type="submit"]')].filter((button) => visible(button) && !button.disabled);
     if (submitters.length !== 1) return "manual";
     const submitter = submitters[0];
-    const unsafeSubmit = new RegExp(locales.map((locale) => locale.unsafeSubmit).join("|"), "i");
+    if (!Array.isArray(locales) || !locales.length || !locales.every((locale) =>
+      Array.isArray(locale?.unsafeSubmit) && locale.unsafeSubmit.length
+      && locale.unsafeSubmit.every((phrase) => typeof phrase === "string" && phrase.trim()))) return "manual";
+    const unsafeSubmit = (label) => locales.some((locale) => locale.unsafeSubmit
+      .some((phrase) => label.toLowerCase().includes(phrase.toLowerCase())));
     const submitLabel = () => [
       submitter.textContent,
       submitter instanceof HTMLInputElement ? submitter.value : "",
@@ -39,7 +43,7 @@ module.exports = function automaticLogin(locales, input, environment = globalThi
       && !(submitter.hasAttribute("formaction") && new URL(submitter.formAction, location.href).origin !== location.origin)
       && !(submitter.hasAttribute("formmethod") && submitter.formMethod.toLowerCase() !== "post")
       && (!submitter.formTarget || submitter.formTarget === "_self")
-      && !unsafeSubmit.test(submitLabel());
+      && !unsafeSubmit(submitLabel());
     if (!safeForm()) return "manual";
     if (!input.stage) return stage;
     if (input.stage !== stage || typeof input.value !== "string") return "manual";

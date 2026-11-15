@@ -16,7 +16,13 @@ mod tests {
         assert_eq!(locales.len(), 2);
         for locale in locales {
             for key in ["loginTitle", "loginPrimaryAction", "unsafeSubmit"] {
-                assert!(locale[key].as_str().is_some_and(|value| !value.is_empty()));
+                let phrases = locale[key].as_array().unwrap();
+                assert!(!phrases.is_empty());
+                assert!(phrases.iter().all(|phrase| {
+                    phrase
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty())
+                }));
             }
         }
     }

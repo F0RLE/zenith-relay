@@ -10,7 +10,9 @@ module.exports = function authSnapshot(locales, environment = globalThis) {
     .filter(Boolean);
   const headings = textOf("h1,h2").join(" ");
   const controls = textOf("button,a").join(" ");
-  const matches = (key, text) => locales.some((locale) => new RegExp(locale[key], "i").test(text));
+  const matches = (key, text) => locales.some((locale) => Array.isArray(locale[key])
+    && locale[key].some((phrase) => typeof phrase === "string" && phrase.trim()
+      && text.toLowerCase().includes(phrase.toLowerCase())));
   const markers = [];
   if (matches("loginTitle", headings)) markers.push("login_title");
   if (matches("loginPrimaryAction", controls)) markers.push("login_primary_action");
