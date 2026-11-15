@@ -18,7 +18,8 @@ separates unfinished acceptance from implemented behavior.
 
 - For registration, callback, import, or reauthentication, combine this skill
   with [account connectors](../relay-account-connectors/SKILL.md). Start under
-  `desktop/src-tauri/src/local_pool/accounts/oauth/` and `commands/oauth/`.
+  `crates/relay-core/src/providers/chatgpt/connector/oauth/` and
+  `desktop/src-tauri/src/local_pool/commands/oauth/`.
 - For renewal, admission, quota, or removal, use
   [pool lifecycle](../relay-account-pool-lifecycle/SKILL.md) and the existing
   credential authority, rotation checkpoints, and account fences.

@@ -115,6 +115,19 @@ connector. Each family must qualify its own sign-in/import, token renewal,
 entitlements, quota, execution, usage, recovery, and commercial permission.
 Customer Google/Telegram sign-in is separate from these upstream credentials.
 
+The target product is multi-provider, not a ChatGPT-only pool. The initial
+qualified family limits launch support, not the domain model. Keep provider
+account family, issuing client/sign-in method, API source and model publisher
+distinct. Additional families reuse shared lifecycle and scheduling contracts;
+they do not masquerade as Codex/SIWC/BPS connections or introduce a second engine.
+Quota is a shared concept for subscription accounts; its units, scope, windows
+and observation methods are provider-specific. Missing quota telemetry means
+unknown, not no quota or unlimited capacity. Additional/manual quota resets and
+reset credits are optional capabilities, separate from normal quota renewal.
+Authentication methods and credential renewal follow each provider's qualified
+connector contract, not a common ChatGPT credential shape. Subscription expiry
+and transfer support also remain connector-qualified.
+
 Public release includes customer registration/sign-in, account recovery, model
 catalog and prices, payment/top-up, scoped request keys, working inference,
 usage/receipts, owner management, support diagnostics, and tested operations.
@@ -350,6 +363,12 @@ Default to Relay-owned implementation of these requirements, reusing our core an
 existing suitable utilities. No imported gateway, Go/Python sidecar, mandatory
 Redis, external analytics store or additional billing service is introduced by
 this reference inventory. Keep the recommended first-production stack unchanged.
+Before adapting an upstream fix, establish whether its failure is possible in
+Relay and add the applicable regression case. Language/runtime-specific workarounds
+are not portable requirements; Rust does not by itself prevent incorrect async
+ordering, duplicate accounting or unsafe retries. Record an already-excluded case
+as such rather than adding redundant machinery. Source comparisons do not establish
+a better scheduler, lower latency or higher provider cache-hit rate.
 In particular, an optional reference implementation's fail-open in-flight cache
 reservation is not our durable financial admission contract.
 
@@ -1038,6 +1057,76 @@ limits; output is independent. Unknown hard limits are not advertised guarantees
 Route identity includes public/upstream model, endpoint, protocol, adapter,
 evidence, and revision. Aliases/protocol bindings do not multiply physical capacity.
 
+### Shared rotation and Hosted admission
+
+Use one core selection policy for Desktop and Hosted. Connectors supply typed,
+fresh quota evidence in the provider's units and scope; quota-aware selection
+does not require an additional reset capability. The scheduler does not assume
+ChatGPT quota windows, manual resets or subscription deadlines for other families.
+Missing evidence stays unknown and cannot grant capacity or an expiry/reset
+preference. Connector-qualified admission remains authoritative when a provider
+does not report numeric quota.
+
+Separate two responsibilities: Hosted bounds and fairly admits work across
+workspaces/keys; the shared core selects a qualified connection for admitted work.
+Many keys cannot multiply a workspace allowance, and healthy account rotation
+does not prove fair customer admission. Qualify both under H09 without duplicating
+the core scheduler.
+
+All strategies first preserve authorization, route compatibility, physical limits,
+provider waits, execution certainty and continuation ownership. Within those
+constraints, Automatic balances independent work and fresh expiry/resource
+evidence while retaining eligible warm conversations. Expiring first prioritizes
+fresh deadlines for independent work; round-robin/request shares and primary/reserve
+retain their explicit user-selected meaning. Reuse the current core definitions
+in [PLANNING.md](../project/PLANNING.md#pool-and-execution), not another Hosted scoring formula.
+
+Qualify correctness separately from efficiency. Compare policies on matched
+synthetic workloads before permitted live measurements: completed/rejected work,
+queue delay, starvation, member switches and unused expiring capacity. Measure
+provider-reported cached tokens, first-output/end-to-end latency and supported
+cost evidence separately. An affinity hit is not a provider cache hit. Current
+thresholds are versioned heuristics, not an established optimum or proof of
+superiority to another implementation. Explain decisions through existing bounded,
+opt-in diagnostics, not continuous trace capture or a new mandatory UI panel.
+
+### Pool model controls and catalog order
+
+The web owner panel retains local-pool management semantics for every qualified
+account/API-source family. Its capabilities come from the backend; the browser
+does not calculate eligibility, rotation order or effective prices. The paired
+Desktop console retains its [limited scope](#desktop-hosted-scope); parity here
+means the full web owner panel versus local Computer-mode controls.
+
+Keep these controls distinct:
+
+| Control | Authoritative effect |
+| --- | --- |
+| Connection membership, enable/drain and per-member model rules | Determine which saved capacity may serve an eligible request; saving a connection does not admit it. |
+| Pool-wide model enablement | Combine with member rules, grants and qualified routes. Effective disablement fences new admission/dispatch; it does not delete history, reprice reservations or silently cancel dispatched work. |
+| Public catalog publication | Controls which safe descriptors/offers are exposed; visibility alone grants neither route access nor execution capacity. |
+| Retail tariff and supported context/service-tier variants | Use the revisioned [tariff contract](#initial-tariff-and-wallet-policy); upstream cost and Desktop API-equivalent estimates are not customer prices. |
+| Company/model display order | Changes presentation only, never member rotation, eligibility, capacity or billing. |
+
+Group models by validated catalog publisher/company identity, for example OpenAI,
+not by the serving account's sign-in method, gateway address or a guessed name
+prefix. A mixed-model API source can contribute to several publisher groups.
+Unresolved publisher metadata stays neutral rather than inventing an attribution.
+
+The backend owns one revisioned `modelDisplayOrder` of complete company blocks.
+Owners can reorder whole groups and models within their own group; dragging cannot
+change a model's publisher. Preserve disabled models' positions, append newly
+discovered models within their group and reject stale writes without losing other
+settings. Owner, authorized-customer and public projections preserve the applicable
+relative order after visibility/grant filtering. Search, collapse and temporary
+filters do not rewrite it or create a second client-side ordering policy.
+
+Show the model's readable name, effective state and prices with currency/per-million
+units; retain the exact ID for copying/details. Keep input, cache and output rates
+and applicable variants distinguishable. Blank/unknown is not free, and an enabled
+switch does not imply a runnable paid route. Pool inline edits and the Models/Tariffs
+pages use the same validated draft/publication workflow, not independent price stores.
+
 ## Provider onboarding and native API surfaces
 
 A connector records provider/product, credential kind, region, exact API/version,
@@ -1058,6 +1147,32 @@ replaced with only the selected vault credential at the provider boundary.
 Do not sell a route without permitted commercial use, supported billable usage,
 a valid tariff, and finite enforceable reservation bounds. Otherwise keep it
 private/BYOK-only where permitted, or disabled for paid serving.
+
+### Server-side provider connection onboarding
+
+The owner has two explicit entry paths: authorize/import a supported connection
+directly into Hosted, or transfer a selected local connection through the
+[preview/apply/recovery flow](#local-and-hosted-pool-transfer). Neither requires
+Desktop to remain an inference or renewal hop. Provider connection sign-in is
+separate from the owner's passkey and the customer's Google/Telegram/OIDC identity.
+
+For direct onboarding, choose a qualified family and method. Hosted owns the
+authorization attempt, binds it to the authorized actor, installation, connector,
+intended principal/target and expiry, and validates completion before vault storage.
+The owner may complete provider consent in a browser; exact redirects, device flows,
+client registration and renewal must be qualified for that provider. A local-only
+flow is not automatically valid on a server: offer a qualified transfer or sign-in
+method, not an invented callback or silent grant reuse.
+
+Cancellation, timeout, duplicate completion and replacement fence older attempts.
+Expired or terminal attempts discard temporary exchange secrets and retain only
+the bounded safe outcome required by the authentication/audit retention policy.
+Reauthentication preserves the intended connection's settings and rejects a
+different principal unless an explicit replacement operation is approved. Persist
+the issuing authority and credential generation; coordinate refresh through the
+existing ownership boundary. Browser persistence, logs and normal API projections
+never receive provider secrets. A saved connection remains outside the runnable
+pool until explicit admission and exact-route qualification succeed.
 
 ## Request lifecycle
 
@@ -1619,9 +1734,20 @@ atomically drain/disable the local refresh owner before transferring its secret.
 Secrets move only after confirmation over HTTPS directly into the destination
 vault. Unsupported transfers require destination sign-in.
 
+Transfer support is declared per connector/issuing client, not inferred from a
+ChatGPT-shaped token. Preview names the destination, selected connections, supported
+settings and proxy dependencies, omitted/nonportable fields and required destination
+sign-in. Preserve applicable model rules and rotation settings through core
+validation; map local IDs explicitly. Preview conflicts with existing server rules,
+catalog order or tariffs rather than overwriting unrelated configuration. A local
+reference price or purchase cost does not become a published server retail tariff.
+
 Validate/apply the target revision and return per-item outcomes. Failure before
-apply rolls back Hosted and restores the drained local account; success keeps
-the source drained until an explicit completion/restore. Delete the source only
+apply restores the source only after confirming no destination owner was activated.
+An uncertain apply response is reconciled by operation ID before resuming refresh
+or retrying transfer; never create two active OAuth refresh owners. Source recovery
+uses the latest verified credential generation, not a pre-transfer token snapshot.
+Success keeps the source drained until an explicit completion/restore. Delete the source only
 after operator verification and confirmation. Reverse transfer follows the same
 rules. No newer revision or opaque conversation state is overwritten/transferred.
 
@@ -2235,12 +2361,13 @@ do not store raw external profile payloads.
 
 | Table | Domain fields beyond common fields | Constraint and meaning |
 | --- | --- | --- |
-| `connections` | `owner_scope`, `workspace_id?`, `source_kind`, `core_connection_id`, `secret_ref`, `status`, `authorization_epoch` | Inventory independent of pool membership; explicit installation/private ownership |
+| `connections` | `owner_scope`, `workspace_id?`, `source_kind`, `connector_id`, `core_connection_id`, `secret_ref`, `status`, `authorization_epoch` | Inventory independent of pool membership; connector identity preserves provider family and credential semantics, not a default ChatGPT client |
+| `connection_auth_attempts` | `owner_scope`, `workspace_id?`, `actor_id`, `connector_id`, `target_connection_id?`, `expected_authorization_epoch?`, `connector_configuration_version`, `state`, `state_version`, `secret_ref?`, `expires_at`, `consumed_at?` | One-use provider connection onboarding/reauthentication, separate from customer/admin `auth_attempts`; protected exchange state, actor/target binding and cancellation/replacement fences |
 | `pools` | `owner_scope`, `workspace_id?`, `core_pool_id`, `status`, `policy_version`, `core_policy` | Reuse core validated pool policy; no new parallel scheduling semantics |
 | `pool_members` | `pool_id`, `connection_id`, `enabled`, `drain_state`, `core_policy_version`, `core_policy` | Physical identity shared across aliases/protocols, not multiplied capacity |
 | `route_qualifications` | `connection_id`, `public_model_id`, `upstream_model_id`, `operation`, `protocol`, `credential_class`, `evidence_version`, `status`, `expires_at?` | Exact-route permission/usage/bounds evidence, not trust in model names |
 | `model_grants` | `workspace_id`, `public_model_id`, `route_scope`, `allowed_operations`, `status`, `authorization_epoch` | Can only narrow eligible capacity; no client-selected foreign source |
-| `configuration_revisions` | `scope`, `subject_id`, `previous_revision?`, `schema_version`, `safe_configuration`, `actor_id` | Validated monotonic configuration with no secrets |
+| `configuration_revisions` | `scope`, `subject_id`, `previous_revision?`, `schema_version`, `safe_configuration`, `actor_id` | Validated monotonic configuration with no secrets; catalog-scoped configuration owns the canonical `modelDisplayOrder` |
 | `requests` | `workspace_id`, `key_id`, `assigned_user_id?`, `endpoint`, `public_model_id`, `execution_state`, `state_version`, `terminal_reason?`, `admitted_at?`, `dispatched_at?`, `terminal_at?`, `reconciliation_deadline?` | Logical execution/minimal financial anchor; no prompt/answer column |
 | `request_details` | `workspace_id`, `request_id`, `safe_labels`, `user_agent_label?`, `timings`, `safe_error?`, `expires_at` | Short-lived detail separate from retained settlement evidence |
 | `request_attempts` | `workspace_id`, `request_id`, `attempt_number`, `connection_id`, `route_revision`, `execution_certainty`, `state`, `observed_usage`, `usage_completeness`, `expense_evidence`, `started_at`, `ended_at?` | Unique request/attempt number; physical expense separate from logical charge |
@@ -2520,6 +2647,11 @@ Admin resource families are `/admin/connections`, `/admin/pools`, `/admin/models
 `/admin/credentials`. H05/H07/H08/H15 enumerate each allowed verb/action, including
 park/drain/trash/restore, revision conflict, secret export and fresh verification.
 No generic arbitrary-SQL, arbitrary-URL fetch or generic credential-read endpoint.
+
+H07 owns bounded start/status/complete/cancel operations for connection authorization
+attempts and the connector-specific import contract under `/admin/connections`.
+They follow [provider onboarding](#server-side-provider-connection-onboarding), not
+the customer/admin identity-login API; status responses expose no exchange secrets.
 
 The [Desktop scope](#desktop-hosted-scope) is an operation and response-projection
 allowlist, not access to entire resource families. H05/H07/H12/H15 and HD-12 must

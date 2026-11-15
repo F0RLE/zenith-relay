@@ -142,6 +142,11 @@ resume ordinary selection; SIWC requires an explicit structured transient code
 and cannot gain a cross-account fallback from this temporary-error policy.
 Quota, authentication, partial output and uncertain
 execution keep their separate recovery contracts.
+An incompatible alternative route does not disable persistent recovery while
+at least one configured route still accepts the request. The compatibility set
+excludes permanent preparation failures, not temporarily exhausted or already-tried
+members. Opaque continuation stays with its valid owner; turning recovery off
+wakes the waiter and returns the original refusal without another dispatch.
 An internal HTTP materialization retry moves its existing state, retaining
 consumed repairs and request-local preparation exclusions.
 `runtime/models.rs` owns model registry and editable model policy while retaining
@@ -501,6 +506,46 @@ languages, translation checks and separate startup/resource budgets.
 
 ## Connections, discovery, and metadata
 
+### Shared account management
+
+`relay-core` owns provider sign-in/token exchange, credential validation and
+rotation checkpoints under `providers::chatgpt::connector`. Renewal and durable
+credential updates use host-supplied `SecretBackend`, `CredentialLocks` and
+`AccountMetadataSink` implementations; they do not open Desktop storage or emit
+Tauri events. The host must use the same account lock for renewal, replacement
+and removal, and keep revision checks across the final durable write.
+
+`accounts::management` owns route-selection and membership rules through a
+typed account view. `automations::reset_resources` owns linked-ledger selection,
+thresholds and pending-reset decisions. Quota/credit observations are reduced
+in the connector before the host commits them under its current account fence.
+Quota does not imply support for additional resets.
+
+`connector::monitoring` owns quota/model read ordering, bounded authorization
+recovery, subscription fallback and success acknowledgement after durable/runtime
+commit. `connector::reset_credits::workflow` owns balance confirmation, dispatch
+markers and the single proven-401 retry with the same redemption ID. Ambiguous
+responses retain the marker; a stale account revision cannot clear it.
+
+`connector::oauth_flow` owns callback acceptance, persisted exchange claims,
+completion checkpoints and cancellation. An authorization code is released only
+after its claim is durable. A canceled attempt cannot persist a late token reply;
+an already started exchange resumes from its saved checkpoint or requires a new
+sign-in, never an unproven replay of the authorization code.
+
+`connector::import` owns metadata preservation, discovery/quota probe order and
+explicit admission rules. `accounts::removal` owns batch prepare/commit/rollback
+ordering and runtime retirement after commit. Hosts implement transactional
+storage and conditional recovery through these ports; they must not replace a
+newer credential/record with an older operation's rollback snapshot.
+
+Desktop owns sign-in windows and callback listeners, storage transactions,
+process locks, local profile updates, runtime publication and UI events. These
+adapters call the shared policies rather than maintaining a second version.
+In-memory host and workflow tests exercise reuse and failure ordering without Tauri;
+they do not implement or
+qualify the Hosted server, tenant isolation or additional provider logins.
+
 ### Connection checks and sign-in
 
 Explicit source connection checks use saved endpoints, authentication and proxy
@@ -648,11 +693,19 @@ renewal and model discovery keep their HTTP transports.
 This policy leaves image-generation operations and image endpoints unchanged;
 images in a text request's input remain intact.
 Identified conversations can retain one authenticated upstream socket per local
-key, account and conversation. The store holds at most 32 retained lanes, expires
+key, account, conversation, endpoint and workload. Explicit pre-dispatch task
+origins separate conversation, memory extraction/consolidation, and other known
+background work; missing or unknown origins remain conversation work. These
+workloads share one bounded store, not separate reserved capacity.
+An overlapping turn waits up to two seconds for the same lane before using an
+isolated socket. Cancelling that wait sends nothing and releases its queue slot.
+The store holds at most 32 retained lanes, expires
 idle lanes after 30 minutes, and replaces sockets older than 55 minutes between turns.
-At capacity, a new conversation reclaims the least recently used unlocked lane;
-busy owners remain isolated and cannot be evicted. A renewed grant or authorization
-revision discards the old lane state.
+At capacity, a new session reclaims the least recently used unlocked lane with
+no pending borrower; active owners and queued borrowers cannot be evicted.
+Authorization and dispatch budget are rechecked after waiting, before binding
+or taking the socket. A renewed grant or authorization revision discards old
+lane state only after the current authority is verified.
 Reset diagnostics distinguish a changed bearer (`credential_changed`) from a new
 authorization incarnation with the same bearer (`authorization_changed`). Neither
 reason exposes credential material or weakens dispatch fences. Repeated preparation
@@ -708,9 +761,9 @@ unindexed sequence without IDs.
 Omitted replay terminal fields can use observed
 state; explicit invalid IDs/output shapes and conflicting response IDs cannot
 be repaired into a valid checkpoint.
-Changed or unproven history sends the complete input over WebSocket. Context-free turns, busy lanes
-and exhausted retained-lane capacity use isolated full-history sockets without
-sharing continuation state. A failed upgrade returns an error rather than an HTTP
+Changed or unproven history sends the complete input over WebSocket. Context-free
+turns, expired session waits and exhausted retained-lane capacity use isolated
+full-history sockets without sharing continuation state. A failed upgrade returns an error rather than an HTTP
 generation; provider authorization and quota rejections retain their existing error
 semantics. Unknown frame-send outcomes, interrupted streams,
 and failed/incomplete terminals discard the socket without replay. Lease, principal,
@@ -719,6 +772,10 @@ the existing shared budget separately. WebSocket events enter the shared SSE
 pipeline, while diagnostics retain the actual upstream transport and payload size.
 Fresh-socket diagnostics include a bounded reset reason for session isolation,
 expiry, changed authorization, peer closure, pending frames or unproven output.
+`session_wait_timeout` distinguishes a busy-lane wait from
+`session_capacity_exceeded`; historical `session_unavailable` remains readable.
+Opt-in `sessionWaitMs` measures local lane acquisition, not provider TTFT or an
+additional phase to add to the request's elapsed duration.
 Full-history payload diagnostics distinguish missing socket checkpoints, changed
 settings, edited prior input, mismatched output and an absent new suffix.
 With diagnostics enabled, the first mismatched output within the first 32 items
@@ -1505,7 +1562,12 @@ this does not require launching the Codex application. Membership alone does
 not enable text requests; the separate `codexTextModelsEnabled` opt-in does.
 Native Codex accounts call their `/images/*` endpoints directly with the image
 model; no text-model Responses tool request is inserted. Text-model inventory
-or pricing changes do not choose an image model. The legacy `imageBaseModel`
+or pricing changes do not choose an image model. The shared core publishes
+`gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`, `gpt-image-2.5-sunburst` and
+`gpt-image-2.5-flare` for native Codex image participants. An omitted model defaults
+to `gpt-image-2.6-sunburst`; an explicit selection is preserved. Catalog refresh
+and Desktop snapshots use the same inventory, subject to existing pool/key rules.
+The legacy `imageBaseModel`
 setting remains import-compatible but has no effect on native image execution.
 Native account requests carry a Relay-owned `x-codex-image-turn-id`, stable
 through authorization recovery; API sources do not receive this account header.
@@ -1515,34 +1577,94 @@ Excel/BPS and SIWC are not image executors. Published native image routes do
 not prove account entitlement or available image quota, and plan names alone
 neither grant capability nor exclude Free accounts.
 
-JSON and multipart edits preserve image ordering and masks. API-source
+JSON and multipart edits preserve image ordering, masks and markup overlays.
+Prompts retain their exact whitespace in both formats; whitespace-only prompts
+are rejected. Nullable `n` and `stream` use their omitted defaults. Invalid model
+or response-format types are rejected rather than selecting a default model.
+Edit image and mask references reject unsupported `file_id` values, including
+references that also supply `image_url`; an account route never silently picks
+one of two conflicting locators.
+Multipart markup files become image-URL objects on native Codex routes; combining
+markup and a mask is rejected before dispatch. API-source
 multipart requests replace the public model alias without changing uploaded
 bytes. GPT Image's legacy `response_format` is handled locally: nonstreaming
 `url` results are data URLs, not hosted files. Streaming requires `b64_json`.
+Existing nonempty image URLs from compatible API sources remain unchanged;
+empty base64 fields neither hide nor replace those results.
+Data-URL media types follow per-image output metadata, then envelope metadata,
+then the requested format, with PNG as the omitted default. SVG and GIF retain
+their media types; unknown formats use `application/octet-stream`, not PNG.
+Native request fields, including `complexity`, remain unchanged; multipart GIF
+`frame_count` and `frame_duration_ms` become JSON integers for account requests.
+These wire-preservation rules do not grant SVG/GIF preview access or override
+upstream format, model, edit, mask or streaming restrictions.
 Decoded requests and buffered responses are limited to 128 MiB; a buffered SSE
-event is limited to 64 MiB. No new account generation timeout is imposed.
+event is limited to 64 MiB independently of network chunk boundaries. Multiple
+valid events in one chunk do not consume one shared event allowance.
+No new account generation timeout is imposed.
 
 SSE partial images are forwarded as they arrive. The response body owns its
 lease and finalization guard. Completion, missing output, invalid/truncated
 streams, provider errors and client cancellation are distinct; accepted or
 uncertain execution is never replayed. Already observed usage survives errors
 and cancellation and is recorded once, not once per preview.
+Error-status responses carrying image output or SVG authoring evidence also
+stop retries, including the same-account token-refresh path after a 401. That
+path inspects the bounded response before refreshing; malformed or interrupted
+refusals do not authorize replay. Capability rejection is read only from the
+structured error;
+echoed request fields cannot disable an image route.
+Native Codex edits normalize upstream `image_generation.*` events to
+`image_edit.*` in both the JSON type and SSE event header. API-source event names
+are not rewritten; image bytes and unrelated fields retain their meaning.
 
 `imageUsage` stores text/image/cache token subsets and completed-image counts
-on retained sends and in diagnostics. Subsets are included in ordinary token
-totals, never added a second time. Missing counters remain unknown. Current
-token-only price aggregates cannot price a mixed-modality image request and
-keep it unpriced rather than apply a text rate; API equivalents are not actual
-subscription credit debits. The detailed split follows existing request
-retention; archived aggregate token totals remain available.
+on retained sends and in diagnostics. Output subsets come from
+`output_tokens_details`, not an assumption that all output tokens are images.
+`svgUsage` retains the author model and its separate token counters. Observed
+rendering and authoring input/output/total counters are combined once in the
+ordinary totals; a missing component stays unknown. Reasoning remains a subset
+of output, never an extra charge. Repeated snapshots do not accumulate twice.
+Rendering cache counts remain in `imageUsage.cachedInputTokens`. When SVG
+authoring is present, whole-request cached input stays unknown because that
+stage does not report cache coverage. Overview cache-hit percentages use paired
+input/cache measurements from physical sends, weighted by their input tokens,
+independently of logical request counts. Missing or inconsistent pairs are
+excluded, not counted as uncached input. Chart tooltips show only the time and
+observed cache-hit percentage.
+Missing counters remain unknown. Image API equivalents use the catalog's separate
+Standard text/image input, cached input and output rates. SVG authoring uses its
+reported model's token schedule; reasoning is not added again. A token-priced
+image output does not also incur a per-image estimate. Unsplit mixed-modality
+cache, inconsistent counters and missing tariffs remain unpriced. An unknown
+cache count does not invent a discount. These are API-equivalent estimates, not
+actual subscription credit debits or evidence of consumption of the text quota.
+Request details show the same backend-calculated components; image rows show
+total response time without text TTFT or token speed. Image observations do not
+contribute to aggregate text TTFT, generation throughput, or end-to-end token
+speed; their request counts, total duration, tokens and costs remain included.
+The indexed image-usage flag is derived from the saved modality data on every
+write and backfilled for retained history; aggregate timing reads stay covered
+by the compact report index instead of scanning image JSON.
+Known per-image costs stay visible even without token counts, including in
+overview totals, request details and pool payback. Retained image observations
+are revalued on upgrade. Price-independent modality rollups survive request
+retention and catalog refresh; previously pruned modality detail cannot be
+reconstructed. Account deletion and explicit usage clearing remove these rollups.
 
 The public wire reference is OpenAI's image-generation guide:
 <https://developers.openai.com/api/docs/guides/image-generation>.
+Generation fields and formats follow
+<https://developers.openai.com/api/reference/resources/images/methods/generate>.
 Native OAuth routing is observed, not an official account API guarantee:
-CLIProxyAPI `8289ec4c71ad914d0612c2776352b76ba3d355a6`,
-`internal/runtime/executor/codex_openai_images.go`, and codex-proxy-rs
-`31974bc289b13e65856cbfefc082941a84dc3a88`,
+CLIProxyAPI `e96d4c4818851cf0e96d27b2bc8b67379e449d9e`,
+`internal/runtime/executor/codex_openai_images.go`, Sub2API
+`0e8e97aa23afd8e88a61ea64a84a8fb84f1bfdc6`,
+`backend/internal/service/openai_images_direct.go`, and codex-proxy-rs
+`0f5bf03e13a43b34c43b9e3a6dee935ad43f6d2b`,
 `backend/crates/providers/openai/src/transport/endpoints.rs`.
+OpenAI Codex `ee344ca9458351a6ea102795fa73110ad3ede5dc`,
+`codex-rs/codex-api/src/endpoint/images.rs`, also implements direct image endpoints.
 Synthetic tests do not establish entitlement or charges on a real account.
 
 Explicit cache keys remain stronger than session hints. Nonblank provider keys
@@ -2472,8 +2594,8 @@ disable reasoning, or turn unsupported controls into prompt text. Official
 references and the [conversation acceptance matrix](../../.agents/skills/relay-protocol-adapters/references/acceptance.md)
 own field-level review; third-party proxies are comparisons, not specifications.
 
-Completed Responses items remain immutable between `output_item.done` and the
-terminal snapshot. Only documented nullable fields may alternate between omission
+Completed Responses identities, content and executable arguments remain immutable
+between `output_item.done` and the terminal snapshot. Documented nullable fields may alternate between omission
 and `null`: message `phase`, reasoning `encrypted_content`, and tool `caller`.
 Completed reasoning's string `encrypted_content` comes from
 `response.output_item.done`, as required for replay by the official Responses SDK.
@@ -2482,7 +2604,18 @@ the terminal omits, nulls or replaces its copy. Invalid terminal ciphertext type
 still fail. Other non-null values, content, identities, arguments, and lifecycle
 states must match. Without a completed reasoning item, the terminal remains the
 source of continuation state. Mismatch diagnostics name only fixed protocol
-fields, never provider keys or values.
+fields, never provider keys or values. They distinguish index/identity failures
+from changed fields and carry an allowlisted item kind, addition/removal/change
+reason and before/after value shapes. BPS JSON, SSE and stored usage preserve
+these locally authored details without relaxing completion validation.
+Hosted web-search actions additionally reconcile their documented optional
+`query`, `queries`, `sources` and open-page `url` metadata. Missing/null projections
+retain already observed values; terminal metadata may fill absent fields and append
+sources. Existing non-null values, action kind, item identity and lifecycle cannot
+be replaced. Unknown action extensions remain strict. The shared rule covers
+buffered BPS, native replay and converted streams; rejected nested fields use
+fixed diagnostic paths without query text or URLs. The field shapes follow the
+[official web-search item type](https://github.com/openai/openai-python/blob/main/src/openai/types/responses/response_function_web_search.py).
 
 ### Conversation and routing contracts
 
@@ -2686,6 +2819,11 @@ fields, never provider keys or values.
   signatures are replayed unchanged only to their compatible owner. Public
   summaries are not signatures. Missing opaque state cannot be reconstructed
   from visible reasoning or an invented sentinel.
+  Completed Responses reasoning snapshots may omit their optional `status`
+  while another completed snapshot reports `completed`. This equivalence only
+  affects comparison: the original payload stays intact, and explicit partial,
+  null or invalid states never become completed. Buffered BPS and foreign-stream
+  conversion share this check.
 - Image history fingerprints retain non-default `detail`. Omitted detail and
   `auto` share the documented default; other changes cannot reuse an older
   native checkpoint. Wrong detail types and misplaced controls fail before
@@ -3123,6 +3261,23 @@ Failures after local BPS catalog lookup retain the bounded, redacted provider
 error fields and observed upstream HTTP status in usage diagnostics, for both
 buffered and streamed responses. Client-facing discovery errors remain generic;
 retaining diagnostics does not authorize another generation or route replay.
+
+Image debug diagnostics keep normalized client-requested options, options read
+from the final outbound JSON/multipart body, provider-reported envelope/item
+metadata, and observed raster-header dimensions separate in `routing.images`.
+Collection uses the existing diagnostics gate. Only final SSE images are probed;
+previews are excluded. PNG, JPEG, WebP and GIF probes decode at most 16 KiB of
+header bytes per output, with at most ten output records. This is not full image
+validation. URL outputs are not downloaded; missing, unsupported or malformed
+headers remain unknown and do not change response bytes or retry policy.
+`sentSizeMatches` compares an observed header with an explicit sent size;
+`auto` and absent dimensions do not imply a match or mismatch. Provider metadata
+does not prove the serving model or applied quality. Only known public model
+names, allowlisted options and dimensions are retained, never prompts, image
+bytes, URLs or custom identifiers. Support exports reapply this allowlist.
+These diagnostics expire under the existing seven-day detail retention;
+usage accounting is unchanged. Disabling diagnostics before finalization removes
+the image detail from the emitted usage event.
 
 ### Reported usage and cache evidence
 

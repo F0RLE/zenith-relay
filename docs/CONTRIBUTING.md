@@ -566,6 +566,31 @@ safe headers only. Account ids, credentials, URLs, and bodies are omitted from J
 Both subscription requests must complete for `status: complete`; inspect their
 individual statuses rather than interpreting completion as authorization success.
 
+### Experimental BPS image probe
+
+With explicit permission to consume the selected subscription's image quota:
+
+~~~powershell
+& .\desktop\src-tauri\target\debug\zenith-relay.exe --probe-bps-images "$env:LOCALAPPDATA\Zenith Relay" --allow-generation 1024x1024
+~~~
+
+This separate diagnostic sends exactly one synthetic image request per invocation
+to the BPS Images endpoint, with `gpt-image-2`, high quality, PNG and `n=1`.
+It omits `stream`, which the observed BPS contract rejects even when false.
+It reads an eligible Excel account's existing credentials and explicit proxy
+route without refreshing, migrating, modifying the pool or starting Desktop.
+Redirects, transport retries, account switching and Codex fallback are disabled.
+An interrupted request remains execution-uncertain and must not be replayed.
+
+Allowed experimental sizes are `1024x1024`, `2048x2048` and `3840x2160`;
+these are probe cases, not advertised BPS capabilities. Supply the returned
+`accountRef` as the final argument to keep later probes on that same account.
+Inspect `status` and actual PNG-header `dimensions`, not just HTTP success or
+requested metadata. Results include bounded metadata, reported token counters
+and sanitized errors; image bytes are not retained. These direct research sends
+are not added to the working pool's usage history (`poolUsageRecorded=false`).
+The CLI does not enable BPS image participants or establish 2K/4K support.
+
 ### Focused checks
 
 Changes only to contributor documentation need content/link and diff checks.

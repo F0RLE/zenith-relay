@@ -8,7 +8,85 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ## [Unreleased]
 
+Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-relay/pull/102).
+
 ### Changed
+
+- Route recovery continues waiting for a compatible quota-blocked owner even
+  when other pool members cannot accept its conversation history. Switching
+  recovery off releases the wait without another provider request.
+
+- Hosted web-search streams accept optional final action metadata and additional
+  sources while preserving earlier observations. Conflicting action data still
+  fails with a specific nested field diagnostic.
+
+- Claude Code tool catalogs no longer disappear on converted BPS requests when
+  deferred tool search is enabled. File and shell tools remain callable, while
+  unloaded tools, explicit catalog revocations and tool-choice limits stay enforced.
+
+- Completed reasoning snapshots no longer fail BPS or converted streams solely
+  because one snapshot omits the optional `completed` status. Explicit partial
+  states are not promoted to completed; native reasoning and tool-result
+  continuation stay intact.
+
+- BPS terminal-validation errors retain the rejected field or stage in bounded
+  diagnostics instead of collapsing into an unspecified upstream failure.
+  Snapshot errors distinguish identity/index conflicts from field changes and
+  preserve safe item-kind and value-shape details through JSON, SSE and history. Errors
+  after streamed text no longer claim that no output was sent. Completion guards,
+  reported usage and no-replay behavior remain intact.
+
+- Overlapping SIWC turns briefly wait for their retained WebSocket instead of
+  immediately opening a fresh connection. Conversation, memory and background
+  work use separate session keys. Opt-in diagnostics distinguish a busy-session
+  timeout from retained-slot exhaustion and report the local wait duration.
+
+- Image usage no longer distorts aggregate text TTFT or token speed. Known
+  per-image costs remain visible in charts, request details and pool payback
+  even when the provider does not report image token counts.
+
+- Overview cache-hit rates use paired input/cache measurements from physical
+  sends, not logical request counts. Missing measurements are excluded;
+  retries and failures without usage no longer hide
+  measured rates or token traffic.
+
+- Opt-in image diagnostics separate requested and sent options, provider-reported
+  metadata and bounded output-header dimensions. Size mismatches remain
+  observational: no resizing, extra generations or retry changes. Image data,
+  prompts and URLs are excluded; detail uses existing diagnostic retention.
+
+- Image API-equivalent costs now use parsed text/image/cache rates, including
+  separate SVG authoring. Request details itemize the estimate; account totals
+  retain repriceable image usage after history retention. Unknown components
+  stay unpriced. Image timing shows total duration, not text first-token timing.
+
+- Image failures with generated output or SVG work are not replayed on another
+  participant or after token renewal. Capability errors no longer match echoed
+  request fields, and edit
+  inputs cannot silently discard a conflicting file reference. SVG rendering
+  cache remains recorded separately and does not infer unknown authoring cache.
+
+- Image requests preserve multipart prompt whitespace, accept nullable defaults,
+  and reject invalid model/response-format types without dispatch. Empty base64
+  no longer hides or replaces a valid provider URL. The image SSE size limit
+  applies per event, not to combined network chunks.
+
+- Image telemetry separates text/image output and retains SVG authoring usage
+  without double-counting repeated snapshots. Native Codex edits accept uploaded
+  markup overlays and normalize generation-named SSE events to edit events.
+  Requests combining a mask and markup fail before an upstream send.
+
+- Native Codex image participants expose Sunburst and Flare 2.5/2.6 from one
+  shared-core catalog. Requests without a model default to 2.6 Sunburst; explicit
+  models are not substituted. URL-compatible image responses retain SVG/GIF
+  media types, and multipart GIF frame settings reach the upstream as numbers.
+
+- Provider sign-in, credential renewal/checkpoints, quota/model monitoring,
+  account import/removal ordering, route/membership policies and optional reset
+  redemption now run through shared-core services. Desktop supplies storage,
+  locks, windows and event adapters. OAuth exchanges have a durable single-use
+  claim, and canceled attempts cannot save a late token result. Shared-host tests
+  do not imply Hosted server availability.
 
 - Repository layout groups Desktop under `desktop/`, the Hosted preview under
   `hosted/web/`, and bundled model policies under `crates/relay-core/catalog/`.

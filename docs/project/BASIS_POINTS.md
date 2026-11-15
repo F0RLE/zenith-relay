@@ -174,10 +174,28 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   Discovery and direct streaming share native tool identity/index validation;
   completed terminals with changed or missing calls fail before catalog
   continuation or client release.
+  Completed reasoning snapshots accept an omitted optional `status` versus
+  explicit `completed`, without rewriting either payload. Explicit partial,
+  null or invalid statuses remain distinct; tool identity, content and opaque
+  state checks are unchanged.
   Discovery preserves canonical upstream failure messages. A normalized
   `upstream_rate_limited` stays a
   rate-limit failure through SSE conversion and usage recording, never a generic
   `upstream_terminal`; output already sent does not authorize replay.
+  Buffered and streamed terminal validation retain fixed-label failure reasons
+  such as `response.output_item.content`, `response.output_item.index` and
+  `response.terminal`. `stream_invalid` stays a distinct failure through discovery
+  and usage recording. These labels contain no output values or provider-defined
+  field names, and the message does not assume that client output has not begun.
+  Snapshot failures also retain a fixed item-kind label, addition/removal/change
+  reason and value shapes through JSON, SSE and stored usage. Index and identity
+  failures are separate from field changes; unknown item kinds and field names
+  remain generic, and no snapshot values are recorded.
+  Hosted web-search completion accepts typed optional action metadata and
+  append-only sources instead of comparing the whole action object literally.
+  Previously observed metadata survives an omitted/null terminal projection;
+  changed queries, action kinds, identities and existing source entries still
+  fail with a fixed nested field path.
   Untyped SSE error envelopes retain their category. Provider retry delays and
   scope survive client-error normalization in request-local settlement state;
   they are not shortened to the default cooldown or exposed as raw error bodies.
@@ -600,6 +618,12 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   the tool catalog. The catalog preload hint cache is separate and cannot restore
   a conversation. Non-Standard tiers, native strict output, native web search/image
   generation and Agent Identity remain unsupported.
+  This Responses-tool restriction is separate from Office's standalone Images
+  endpoints. The opt-in [BPS image probe](../CONTRIBUTING.md#experimental-bps-image-probe)
+  can test those endpoints with existing Excel credentials without enabling a
+  pool route. It preserves one account and proxy, omits unsupported `stream`,
+  and measures returned PNG headers. Probe sizes and requested model names are
+  not evidence of server capability, serving-model identity or 2K/4K support.
 - JSON-object mode and a JSON schema with non-strict output buffer the final
   answer and validate it locally without a Relay-private request flag. Schema
   validation uses the unchanged self-contained schema; JSON-object mode requires

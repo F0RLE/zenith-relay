@@ -73,6 +73,21 @@ Useful search anchors, rather than unstable minified offsets:
 Inspect public artifacts as text, without executing downloaded application code.
 Keep minimal attributable observations rather than entire bundles or prompts.
 
+### Image executor snapshot
+
+Inspected on 2026-11-15 through the manifest's entrypoint and
+`legacy-office-warning-BHYrQ12A.js` imports:
+[public client asset](https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/assets/x-square-B7-OWktk.js),
+SHA-256 `6cbf86156b31c7aaa6864d6ca6583b4557bb3e8006f50b7dd8b7431da234f31b`.
+`sOt` builds generation JSON; `lOt`/`cOt` build edit fields/multipart.
+They send model, prompt, background, quality, size, PNG output format and
+optional `n`, not `stream`. `fOt` accepts `auto`, `1024x1024`, `1536x1024`,
+`1024x1536` and `1280x720`; `Dse` accepts `gpt-image-2`. This is the observed
+client allowlist, not proof that other server values are supported or forbidden.
+`eOt`/`pMr` separate direct API mode from the BPS proxy; an SDK Images class alone
+does not prove which authenticated endpoint executes a request. Pool support
+and account-specific live acceptance remain separate from this source evidence.
+
 ## Research on the Office client
 
 ### hewliyang/reversing

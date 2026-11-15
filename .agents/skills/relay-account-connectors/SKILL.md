@@ -27,7 +27,10 @@ workflow.
   Record its inspected commit and paths and compare against the official
   contract. Use local source for callback/state fixes. New API's product-user OAuth is unrelated
   to provider account credentials.
-- Trace the affected owner under `desktop/src-tauri/src/local_pool/accounts/oauth/` or
+- Provider exchange, credentials and renewal live under
+  `crates/relay-core/src/providers/chatgpt/connector/`. Shared attempt lifecycle
+  and import orchestration live in its `oauth_flow/` and `import.rs` services.
+  Trace native snapshot/listener adapters under
   `desktop/src-tauri/src/local_pool/accounts/oauth_flow/`, then
   `desktop/src-tauri/src/local_pool/commands/oauth/{flow,checkpoint,completion,account}.rs`.
   Imports belong to `desktop/src-tauri/src/local_pool/accounts/import_orchestrator/`

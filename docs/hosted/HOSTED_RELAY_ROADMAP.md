@@ -168,15 +168,33 @@ Runtime and commercial qualification follow implementation.
 `gateway::router`, `gateway::network_router`, core adapters/usage and Desktop
 vault/refresh/configuration flows. Do not rewrite the four codecs.
 
+Existing shared account entry points now include
+`providers::chatgpt::connector`, `accounts::management` and
+`automations::reset_resources`. The in-memory host fixture covers reuse without
+Tauri; server authorization context, durable jobs and tenant isolation still
+require H01 qualification.
+
+Quota/model monitoring, reset redemption, OAuth attempt/checkpoint lifecycle,
+account import and batch removal now expose shared workflow ports. Desktop calls
+these services with its native locks, credential store, transactions and events.
+Hosted must implement tenant-scoped ports and prove its own durable ownership;
+the Desktop extraction alone does not close H01 acceptance.
+
 - **H01.01 — Integration:** identify core entry points, cancellation/lease/refresh ownership and restart boundaries.
 - **H01.02 — Auth context:** carry server-created tenant/key/request identity, not caller-supplied attribution.
 - **H01.03 — Evidence:** capture terminal, usage and attempt certainty before conversion for each offered protocol.
 - **H01.04 — Retry:** verify pre-execution proof, ownership and output visibility; adapt connector failure tests.
 - **H01.05 — Reuse:** make the smallest shared interface/vault change and check Desktop/server callers.
 - **H01.06 — Parity:** resolve or exclude unsupported mutations, including weekly quota wake.
+- **H01.07 — Rotation qualification:** implement the [shared selection and Hosted admission checks](HOSTED_RELAY_ARCHITECTURE.md#shared-rotation-and-hosted-admission). Cover supported strategies, warm/opaque ownership, fresh/missing expiry/reset evidence and mixed account/API capacity with deterministic workloads. Compare policy efficiency separately from correctness; affinity counters are not provider cache-hit measurements.
 
 **Acceptance:** existing core tests and a Hosted-context fixture prove isolation
 without Desktop regressions. Qualify account connectors separately from codecs.
+Synthetic alternate-family fixtures must cover known quota without additional
+reset support, provider-specific authorization and unknown quota telemetry.
+Missing ChatGPT-specific metadata must not erase known quota, imply unlimited
+capacity or invent reset support or a ChatGPT credential type. These fixtures do
+not qualify that family for real sign-in or serving.
 
 #### H02 — Hosted composition, database and contract foundations
 
@@ -266,30 +284,33 @@ No second wallet, email-based merge or customer leakage. Authorize live login se
 #### H07 — Credential inventory, pools, catalog and route grants
 
 **Owns:** HC-04/09, HD-01/12. Target: `src/management.rs`, `src/management/`,
-`src/catalog.rs`, `src/catalog/`, capacity migrations and `tests/pool_catalog.rs`.
+`src/catalog.rs`, `src/catalog/`, capacity migrations and
+`tests/{pool_catalog,provider_onboarding}.rs`.
 
 - **H07.01 — Inventory:** scoped account/API sources, secret generations, refresh and health; saving is not pool admission.
 - **H07.02 — Lifecycle:** separate add/reauthenticate/park/enable/disable/drain/trash/restore/remove; fence dispatch and ownership.
 - **H07.03 — Parity:** reuse local validators for controls, proxies, automations and request/publication policies.
 - **H07.04 — Catalog:** separate granted customer routes from bounded public descriptors/tariffs at `GET /public/models`.
   Preserve freshness/privacy; prices do not belong in `/public/config`, and aliases add no capacity.
-  Group by validated Relay catalog company identity, never by account kind or model-name guesses.
-  Persist a canonical `modelDisplayOrder` of complete company blocks: owners can move a company
-  or reorder models inside it, not reassign their company. Keep disabled model positions;
-  append new discoveries within their company and ignore stale IDs in projections.
-  Admin, granted customer catalog and public sales descriptors share this order after their
-  respective visibility/grant filters; no client-side alphabetical or popularity re-sort.
+  Implement the canonical publisher grouping, `modelDisplayOrder` and role-filtered
+  projections from [pool model controls](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order).
 - **H07.05 — Qualification:** require HD-01 and finite billable bounds for paid routes; reuse core discovery/validation.
 - **H07.06 — Races:** revision-check refresh/removal, activation, tariffs and draining; reads cannot activate or probe providers.
   Revision-check display-order mutations too: reject stale writes without losing new discoveries,
   prices or enablement; reordering is presentation only and never changes routing priority,
   eligibility, grants or billing. Return the canonical accepted order to all projections.
 - **H07.07 — Publication:** implement [SC-06](HOSTED_RELAY_ARCHITECTURE.md#price-and-model-change-walkthrough), preserving holds and fencing failed/superseded activation.
+- **H07.08 — Provider onboarding:** implement [direct server sign-in/import](HOSTED_RELAY_ARCHITECTURE.md#server-side-provider-connection-onboarding), supported-method discovery and protected attempt state. Keep provider credentials separate from customer/admin identity and pool admission; qualify cancellation, duplicate callbacks, wrong-principal reauthentication, expiry and restart.
+- **H07.09 — Model controls:** combine per-member and pool-wide rules with grants and route evidence. Bind pool inline pricing and Models/Tariffs to one revisioned publication owner; effective model disablement preserves historical prices, inventory and already dispatched outcomes.
 
 **Acceptance:** `tests/pool_catalog.rs` covers lifecycle/revision/grant isolation,
 alias capacity, unknown quota and controlled-clock publication/notice races, plus company-block
 and within-company ordering, disabled-position retention, discovery reconciliation and stale-order rejection.
 Qualify Desktop/server families together; disclose unsupported mutations.
+`tests/provider_onboarding.rs` proves actor/connector/target isolation, one-use
+completion and that direct Hosted onboarding works without a Desktop runtime.
+Pool tests distinguish configured enablement from runtime eligibility and public
+visibility; reordering/collapsing groups cannot change rotation or settlement.
 
 #### H08 — Payments, receipts, refunds and external reconciliation
 
@@ -321,7 +342,7 @@ admission parts of `src/inference/` and `tests/admission_postgres.rs`.
 - **H09.04 — Idempotency:** authenticated scoped digests/default snapshots; conflict on changed requests, never redispatch uncertain/terminal duplicates.
 - **H09.05 — Transaction:** atomically claim/check/reserve/persist; recover lost acknowledgement through the same operation.
 - **H09.06 — Queue:** bound/cancel/expire work and atomically revalidate holds; no silent tariff increase beyond approved spend.
-- **H09.07 — Fencing/fairness:** service mode, authorization epoch, due policy and budgets apply at reserve and dispatch through the shared scheduler.
+- **H09.07 — Fencing/fairness:** service mode, authorization epoch, due policy and budgets apply at reserve and dispatch through the shared scheduler. Qualify bounded waiting and starvation resistance across workspaces separately from connection selection; extra keys cannot multiply a workspace's share or limits.
 
 **Acceptance:** `tests/admission_postgres.rs` covers concurrent keys, foreign/revoked
 IDs, exact balance, unknown/zero price, overflow, deadlines, digest conflicts and
@@ -444,6 +465,7 @@ treating web sign-in as synchronization.
 - **H15.06 — Desktop console:** implement Overview, Usage, and Connections and pool with explicit active-server identity and operation-scoped pairing. Reuse revision/fresh-proof policy for allowed actions without inheriting full owner authority or overwriting local profiles.
 - **H15.07 — Web investigation:** canonical error/detail routes, nested attempts and bounded capture; no raw-payload or replay console. Desktop reads only granted safe request/error detail, not capture administration.
 - **H15.08 — Web lifecycle:** implement SC-01/06/07/08 setup, readiness, guarded transitions and change/closure confirmations; do not duplicate service administration in Desktop.
+- **H15.09 — Model workspace:** bind publisher-group and within-group ordering, per-model enablement, readable price components and variant selection to H07/H04. Use the same controls and meanings as local pool management where applicable; expose server tariff draft/publication state rather than a second price editor.
 
 **Acceptance:** `tests/{management_parity,transfer_recovery}.rs` and
 `hosted/web/tests/e2e/{admin,diagnostics,service-lifecycle}.spec.ts` cover advertised actions,
@@ -455,6 +477,10 @@ revocation failures and rejection of direct calls to web-only operations. Mode
 switches do not upload local accounts, overwrite profiles or stop the local API;
 closing Desktop does not stop server inference. Confirmed transfers retain the
 existing ownership and recovery guarantees.
+Web acceptance covers direct provider authorization and explicit local transfer
+as separate flows, supported versus unavailable connector methods, and grouped
+model controls with keyboard/mobile operation and stale-save recovery. Read-only
+customer catalogs retain authorized prices/order without exposing owner controls.
 
 Transfer acceptance also covers account/API-specific proxies, inherited local
 common proxies, explicit direct overrides, shared-proxy ID remapping and protected
@@ -462,6 +488,12 @@ proxy authentication. Verify the same effective route after a server restart and
 with Desktop closed. Missing/unreachable proxy dependencies must leave the target
 blocked and preserve source recovery; reject secret leakage, endpoint-only proxy
 deduplication and silent changes to unrelated server bindings.
+Also cover per-connector transferability, ID/settings mapping, conflicts with
+existing destination policies and uncertain apply acknowledgements. Reconciliation
+must prevent two active OAuth refresh owners; transfer cannot publish local price
+estimates as retail tariffs or overwrite unrelated server catalog settings.
+Recovery after staged token rotation must use the current verified credential
+generation rather than restore an obsolete source token.
 
 #### H16 — Deployment, operations and recoverable release
 

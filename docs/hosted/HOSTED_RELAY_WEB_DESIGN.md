@@ -489,10 +489,12 @@ current customer's permitted record and does not disclose an unauthorized ID.
 
 **Header:** `Models and prices`; explanatory subtitle says these
 are the models/prices applicable to this account. Search and supported capability/
-protocol filters precede the list. Group by a clear public model family only where
-the authorized projection provides one; do not infer capability from a name.
+protocol filters precede the list. Use the authorized publisher groups and relative
+model order from the [catalog contract](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order),
+without alphabetical/popularity re-sorting or inferring capability from a name.
 
-**Row/card:** public name and exact model ID; supported protocols/capabilities;
+**Row/card:** readable public name, with exact model ID available for copying/details;
+supported protocols/capabilities;
 input, cached input and output rates with currency/per-million unit; band/details
 indicator; availability explanation; Connect. Desktop uses a comparative table;
 mobile uses labelled stacked rows. Never show internal account counts or inventories.
@@ -696,7 +698,8 @@ incidents; historical request/error/latency panels; posted customer charges and
 separately evidenced provider expense; recent administrative changes.
 
 Capacity table columns: model, eligibility/availability, active logical requests,
-active attempts, bounded queue, quota/reset evidence where known and observed at.
+active attempts, bounded queue, quota evidence and observation time. Include known
+quota renewal timing; show additional reset capability only where supported.
 Counts describe current ownership, not requests started in the last minute.
 Historical filters do not affect those counts. Expense unavailable is not zero
 and does not create a fabricated profit number. Noncustomer operational work is
@@ -715,9 +718,11 @@ choice. Tabs Accounts and API providers, status/family/search filters and Trash
 view. Saved inventory and pool membership are separate facts everywhere.
 
 **Table:** safe label/family, credential/auth state, pool membership, enabled models
-summary, observed quota/reset, last refresh/action and row menu. Show freshness
-and partial data. API provider rows show safe endpoint/label and masked credential
-metadata, never query credentials or full secrets. Endpoint display is sanitized.
+summary, observed quota with known renewal timing, last refresh/action and row
+menu. Show freshness and partial data; additional resets are separate and appear
+only where supported. API provider rows show safe endpoint/label and masked
+credential metadata, never query credentials or full secrets. Endpoint display is
+sanitized.
 
 **Detail sheet/extended page:** Summary; Authentication; Models/quota; Connection
 settings; Automation; Recent safe events. Show only supported controls for that
@@ -731,6 +736,14 @@ method -> obtain explicit authority/consent -> validate/save to protected storag
 sale/enablement just because login succeeded. Credential entry is transient, never
 browser-drafted; imported files use bounded approved formats, not executable content.
 Do not offer unqualified future connectors or accept arbitrary callback URLs.
+
+Offer two explicit paths: a supported server sign-in/import method, or transfer
+from paired Desktop with the revisioned preview. Show the selected server and
+provider family before consent. This adds a provider connection, not a customer
+login or an owner passkey. Follow [server onboarding](HOSTED_RELAY_ARCHITECTURE.md#server-side-provider-connection-onboarding)
+for pending, cancelled, expired, saved/parked and failed states; future families
+reuse this flow only when their connector is qualified. No Desktop process is
+required for a supported direct server method.
 
 **Action semantics:**
 
@@ -769,6 +782,19 @@ automatic proxy-derived timezones and other qualified parity items. Use labelled
 effective inherited values. Pricing links to the canonical tariff flow.
 Unsupported controls show an explanation only when useful; never appear enabled.
 
+Keep participant rotation separate from model display order. The rotation editor
+shows only backend-qualified strategies and connector-supported controls. Quota
+uses shared terminology with provider-specific units and windows; unknown data
+is not unlimited capacity. Additional reset controls appear only when supported,
+independently of quota display. Authentication methods vary by provider. A
+provider account, an authorization method and a model publisher are distinct.
+
+Model rules reuse the grouped model workspace in WS-16: readable company/model
+labels, per-model enabled state, prices and applicable variants. Inline price
+editing creates/updates the same canonical tariff draft; it does not bypass
+publication or create a competing price store. Saved policy and current route
+availability remain separately visible.
+
 Review shows changed fields, affected models/sources, validation and impact on new
 versus in-flight requests. Save with expected revision, then display durable saved
 revision and runtime activation independently. An activation failure is not success;
@@ -781,11 +807,28 @@ writes. Mobile uses stacked policy sections and full-width review.
 `/admin/tariffs`, not two conflicting editors. Model detail connects them by exact
 public identity and version. Search/filter state survives the return to a list.
 
-**Models:** columns public ID, supported operations/protocols, qualification/grant
+**Models:** readable model name with exact ID available for copying/details,
+supported operations/protocols, qualification/grant
 evidence, effective availability, public-publication state, tariff completeness
 and Actions. Qualification, publication and paid enablement are separate decisions.
 No switch creates capability or upstream permission. Explain why a route is blocked
 and which permitted setup action can resolve it without exposing data to customers.
+
+**Grouped workspace:** use the existing compact publisher-group pattern, such as
+OpenAI with its model rows, under the [canonical model-order contract](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order).
+Group headers collapse/expand and expose accessible reorder controls; model rows
+move only within their publisher group. Dragging has keyboard/button equivalents.
+Collapse changes presentation only, not enablement. Keep disabled rows editable
+for the owner and retain their saved positions.
+
+Align model name, configured state and currency/per-million price components in
+one readable surface rather than nested model cards. Preserve the Hosted design
+system; on narrow screens use labelled rows with reachable state/order controls.
+Show the selected context/service-tier variant and distinguish input, cache and
+output prices without guessed zeroes. Customer views project the authorized order
+and published tariffs, not private routes, draft prices or management switches.
+Conflicting saves retain the user's draft and offer a fresh server revision; never
+silently overwrite newer order, model settings or prices.
 
 **Tariff editor:** public model; currency and per-million unit; supported input/cache/
 output components; applicable context/service-tier bands; exact decimal values;
