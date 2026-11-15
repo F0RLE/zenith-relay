@@ -356,6 +356,103 @@ fn empty_secondary_provider_window_is_not_reported() {
     assert!(quota.secondary.is_none());
 }
 
+#[test]
+fn invalid_quota_windows_do_not_discard_valid_neighbors_or_reuse_old_capacity() {
+    for invalid in [
+        serde_json::json!({"used_percent":101}),
+        serde_json::json!({"used_percent":-1}),
+        serde_json::json!({"used_percent":"unknown"}),
+        serde_json::json!({"used_percent":50,"reset_at":"invalid"}),
+        serde_json::json!({}),
+        serde_json::json!([]),
+        serde_json::json!(false),
+    ] {
+        for invalid_primary in [true, false] {
+            let valid = serde_json::json!({
+                "used_percent":98,"limit_window_seconds":604800,"reset_after_seconds":60
+            });
+            let (primary, secondary) = if invalid_primary {
+                (invalid.clone(), valid)
+            } else {
+                (valid, invalid.clone())
+            };
+            let body = serde_json::json!({"rate_limit":{
+                "primary_window":primary,"secondary_window":secondary
+            }});
+            let before = parse_codex_usage(
+                br#"{"rate_limit":{"primary_window":{"used_percent":0},"secondary_window":{"used_percent":100,"limit_window_seconds":604800}}}"#,
+                1_000,
+            )
+            .unwrap()
+            .quota
+            .normalize(&QuotaSnapshot::default())
+            .unwrap()
+            .0;
+            let parsed = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 2_000).unwrap();
+            let (next, subscription) = parsed.quota.normalize(&before).unwrap();
+            assert!(subscription.is_none());
+            let mut saved = before;
+            saved.merge_observation(&next);
+            let (unknown, valid) = if invalid_primary {
+                (saved.primary.unwrap(), saved.secondary.unwrap())
+            } else {
+                (saved.secondary.unwrap(), saved.primary.unwrap())
+            };
+            assert_eq!(valid.available_basis_points, Some(200));
+            assert_eq!(valid.window_minutes, Some(10_080));
+            assert_eq!(valid.observed_at_ms, 2_000);
+            assert_eq!(unknown.available_basis_points, None, "{body}");
+            assert_eq!(unknown.reset_at_ms, None);
+            assert_eq!(unknown.observed_at_ms, 2_000);
+            assert!(!unknown.is_fully_available());
+            assert!(!unknown.is_exhausted());
+        }
+    }
+}
+
+#[test]
+fn partial_quota_reads_preserve_explicit_exhaustion_and_invalid_only_reads_fail() {
+    for (allowed, reached) in [(true, false), (false, true)] {
+        let body = serde_json::json!({"rate_limit":{
+            "allowed":allowed,"limit_reached":reached,
+            "primary_window":{"used_percent":0,"limit_window_seconds":18000},
+            "secondary_window":{"used_percent":101}
+        }});
+        let parsed = parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 2_000).unwrap();
+        assert_eq!(parsed.allowed, Some(allowed));
+        assert_eq!(parsed.reported_limit_reached, Some(reached));
+        assert_eq!(parsed.quota.limit_reached, reached);
+        assert_eq!(parsed.quota.secondary.unwrap().available_percent, None);
+    }
+    for body in [
+        serde_json::json!({"rate_limit":{"primary_window":false}}),
+        serde_json::json!({"rate_limit":{"secondary_window":{"used_percent":"bad"}}}),
+        serde_json::json!({"rate_limit":{"primary_window":{},"secondary_window":[]}}),
+    ] {
+        assert_eq!(
+            parse_codex_usage(&serde_json::to_vec(&body).unwrap(), 2_000)
+                .unwrap_err()
+                .code,
+            "quota_invalid_percentage"
+        );
+    }
+}
+
+#[test]
+fn malformed_supplemental_window_does_not_poison_account_quota() {
+    let parsed = parse_codex_usage(
+        br#"{"rate_limit":{"primary_window":{"used_percent":25}},"code_review_rate_limit":{"primary_window":false,"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#,
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(parsed.quota.primary.unwrap().available_percent, Some(75.0));
+    assert_eq!(parsed.quota.supplemental.len(), 1);
+    assert_eq!(
+        parsed.quota.supplemental[0].window.available_percent,
+        Some(90.0)
+    );
+}
+
 #[tokio::test]
 async fn quota_retains_provider_retry_after_for_the_shared_scheduler() {
     let (base, server) = spawn(Router::new().route(
