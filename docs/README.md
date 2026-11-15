@@ -57,7 +57,7 @@ zenith-relay/
 |-- desktop/                    Downloadable, independently built local application
 |   |-- frontend/               React UI, tests, assets and locked dependencies
 |   `-- src-tauri/              Native Rust package, permissions, icons and installers
-|-- hosted/                     Server-installed product area
+|-- hosted/                     Hosted preview and planned server product
 |   `-- web/                    Independent Hosted UI preview and tests
 |-- scripts/
 |   |-- build/                  Tauri and Cargo launchers

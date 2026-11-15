@@ -436,9 +436,10 @@ lookup failures, run the complete suite. Windows CI reports test compilation
 (`--no-run --timings`) separately from execution.
 `Check` requires successful runtime checks, every Desktop browser shard, Windows
 Rust tests and web-preview checks. Failed, skipped or cancelled dependencies fail
-the gate. The `main` ruleset requires `Check` and `Release context` on an up-to-date
-branch. CODEOWNERS identifies reviewers; the ruleset controls review requirements
-and merge bypasses.
+the gate. Configure the `main` ruleset to require `Check` and `Release context`
+on an up-to-date branch. CODEOWNERS identifies reviewers; GitHub rulesets control
+review requirements and merge bypasses. Local files do not prove those settings
+are enabled; verify them in the repository settings before a release.
 
 Third-party Actions are pinned to full commit IDs. Dependabot maintains those
 pins, both Cargo packages, and the actual Bun lockfiles in `desktop/frontend` and `hosted/web`.

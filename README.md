@@ -75,8 +75,9 @@ SIWC is the more experimental integration in Relay. Its shorter protocol path
 describes how it works, not a reliability ranking; access, limits and supported
 features depend on the selected authorization.
 
-The account-card badge selects the route. **Account connections** groups matching
-authorizations under one pool member; each keeps its own quota. Codex also supports
+The account-card badge selects the sign-in method. Choosing another method reuses
+a verified saved connection or starts sign-in to link it. Linked authorizations
+share one pool member; each keeps its own quota. Codex also supports
 linked SIWC quota display and explicit image-only pool membership. Codex text
 pool access requires separate consent in Settings; see the
 [experimental-access warning](docs/help/en/README.md#connect-an-application-through-the-pool).

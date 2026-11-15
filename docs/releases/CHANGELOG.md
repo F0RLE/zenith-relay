@@ -10,6 +10,10 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- Repository layout groups Desktop under `desktop/`, the Hosted preview under
+  `hosted/web/`, and bundled model policies under `crates/relay-core/catalog/`.
+  Build scripts, CI and contributor guides use these paths.
+
 - SIWC socket continuation tolerates clients omitting output-only `created_by`
   provenance without resending unchanged history. Content, tool identity and
   unknown extensions remain exact. Socket reset diagnostics distinguish changed
@@ -32,7 +36,7 @@ release entries summarize user-visible behavior and link to the relevant changes
 - Automatic rotation uses speed preferences after 20 measured successful requests
   per member and route within ten minutes, preserving normal rotation and warm
   chats while the latency history is insufficient.
-- Pool rotation presets, edits and card ordering are now owned by the backend.
+- Pool rotation policy edits and card ordering are now owned by the backend.
   The interface displays acknowledged settings and backend priority, including
   fresh subscription-expiry groups, while preserving all rotation modes and
   chat affinity. Lightweight activity refreshes also update the displayed order.
@@ -45,7 +49,7 @@ release entries summarize user-visible behavior and link to the relevant changes
   Debug cancels queued performance samples; recovery breadcrumbs and errors remain
   available. Client-auth observation backs off stable/idle checks, and unchanged
   usage storage waits for retention deadlines instead of running minute-by-minute
-  maintenance transactions. The frontend and request accounting are unchanged.
+  maintenance transactions. Request accounting remains active outside Debug.
 - Debug mode explains pool rotation in the existing Operations logs under
   `pool-rotation`: candidate eligibility, fixed-snapshot fallback order, expiry,
   resets, load and weights. Debug-off requests collect no rotation snapshots;

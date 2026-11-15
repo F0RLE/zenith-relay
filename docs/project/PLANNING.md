@@ -37,7 +37,7 @@ describes the planned service.
 | `desktop/src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
 | `crates/relay-core` | Shared discovery, routing, protocols, quota, scheduling, usage |
 | `hosted/web` | Independent Hosted UI preview; backend integration is planned |
-| `catalog` | Versioned model reference data and export contract |
+| `crates/relay-core/catalog` | Versioned model policies and export schemas bundled with the shared core |
 | `scripts` | Build, setup, verification, release and maintenance commands; shared helpers in `lib` |
 | `docs/project`, `docs/hosted`, `docs/help`, `docs/releases` | Current contracts and Desktop roadmap, future Hosted plans, localized user steps, release history; navigation in `docs/README.md` |
 
@@ -90,7 +90,7 @@ Paths in this table are under [relay-core/src](../../crates/relay-core/src).
 | `protocol/` | Wire contracts, native forwarding, typed codecs, terminal validation, replay |
 | `accounts/`, `providers/` | Token authority, account-route group policies and provider-specific account transport, including ChatGPT/BPS |
 | `sources/` | API-source endpoint configuration, discovery, service profiles, statistics |
-| `model_metadata/`, `catalog/` | Reference identity, capabilities, native-protocol and display policies |
+| `model_metadata/`, package-level `catalog/` | Reference identity, capabilities, native-protocol and display policies |
 | `quota/` | Provider quota observations and their freshness |
 | `usage/`, `pricing/` | Request/attempt telemetry and API-equivalent estimates |
 | `automations/`, `request_timezone.rs`, `tool_policy/` | Shared explicit background and request policies |

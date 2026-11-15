@@ -40,7 +40,7 @@ its artifacts, failure cases and checks. Complete affected
 [specification gates](HOSTED_RELAY_ARCHITECTURE.md#specification-before-implementation)
 before code; package prerequisites define ordering.
 
-The immediate implementation target is H00/H01 qualification followed by H02
+When implementation resumes, start with H00/H01 qualification followed by H02
 server foundations. Resolve the affected HD decisions at their existing owners;
 an open payment, commercial or external-notice decision blocks its dependent
 behavior, not an independent local fixture or configuration specification.

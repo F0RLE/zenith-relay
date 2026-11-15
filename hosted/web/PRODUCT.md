@@ -42,7 +42,7 @@ Use concise interface copy and attributable product claims.
 
 The working frontend and existing text in `src/features/landing` and
 `src/i18n/messages`; the maintained contracts in `README.md` and
-`../docs/hosted/HOSTED_RELAY_WEB_DESIGN.md`.
+`../../docs/hosted/HOSTED_RELAY_WEB_DESIGN.md`.
 
 ## Product Principles
 
