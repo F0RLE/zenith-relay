@@ -129,6 +129,7 @@ pub enum ConnectionResetReason {
     MissingContext,
     SessionUnavailable,
     SessionExpired,
+    CredentialChanged,
     AuthorizationChanged,
     ConnectionExpired,
     ConnectionClosed,

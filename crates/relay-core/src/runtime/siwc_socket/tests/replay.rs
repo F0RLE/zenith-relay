@@ -2,6 +2,7 @@ use super::*;
 use crate::usage::FullRequestReason;
 
 mod nullable;
+mod provenance;
 
 fn checkpoint(body: &Value, output: &Value) -> planner::Checkpoint {
     plan(body, None)

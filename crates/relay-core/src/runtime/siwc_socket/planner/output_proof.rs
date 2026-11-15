@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub(super) const MAX_ITEMS: usize = 32;
 const MAX_UNKNOWN_FIELDS: usize = 16;
 
-const FIELDS: [(&str, SocketReplayField); 26] = [
+const FIELDS: [(&str, SocketReplayField); 27] = [
     ("type", SocketReplayField::Type),
     ("id", SocketReplayField::Id),
     ("status", SocketReplayField::Status),
@@ -42,6 +42,7 @@ const FIELDS: [(&str, SocketReplayField); 26] = [
     ("recipient", SocketReplayField::Recipient),
     ("result", SocketReplayField::Result),
     ("revised_prompt", SocketReplayField::RevisedPrompt),
+    ("created_by", SocketReplayField::CreatedBy),
 ];
 
 /// Hashes remain volatile and are deliberately not serializable or debuggable.

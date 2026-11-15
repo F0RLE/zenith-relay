@@ -45,7 +45,16 @@ fn replay_item(value: &Value) -> std::borrow::Cow<'_, Value> {
         let empty_reasoning_content = kind == Some("reasoning")
             && field == "content"
             && field_value.as_array().is_some_and(Vec::is_empty);
-        if completed_reasoning_status || absent || empty_reasoning_content {
+        // OpenAI's toResponseInputItems omits output-only provenance. Keep
+        // unknown item kinds and malformed values in the comparison proof.
+        let output_provenance = field == "created_by"
+            && field_value.is_string()
+            && (matches!(
+                kind,
+                Some("reasoning" | "function_call" | "custom_tool_call")
+            ) || (kind == Some("message")
+                && item.get("role").and_then(Value::as_str) == Some("assistant")));
+        if completed_reasoning_status || absent || empty_reasoning_content || output_provenance {
             replay
                 .to_mut()
                 .as_object_mut()

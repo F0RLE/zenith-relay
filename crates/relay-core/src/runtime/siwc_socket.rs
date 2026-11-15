@@ -58,8 +58,12 @@ impl Lane {
     fn bind(&mut self, authority: SocketAuthority) {
         if self.authority.as_ref() != Some(&authority) {
             self.idle = None;
-            if self.authority.is_some() {
-                self.reset_reason = Some(ConnectionResetReason::AuthorizationChanged);
+            if let Some(previous) = &self.authority {
+                self.reset_reason = Some(if previous.credential != authority.credential {
+                    ConnectionResetReason::CredentialChanged
+                } else {
+                    ConnectionResetReason::AuthorizationChanged
+                });
             }
             self.authority = Some(authority);
         }

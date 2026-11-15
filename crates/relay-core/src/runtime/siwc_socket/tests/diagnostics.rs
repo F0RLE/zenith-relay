@@ -65,6 +65,32 @@ fn output_mismatch_reports_only_fixed_field_labels_and_relative_index() {
 }
 
 #[test]
+fn malformed_output_provenance_has_a_fixed_label_without_disclosing_its_value() {
+    let body = request(json!([{"role":"user","content":"synthetic"}]));
+    let output = json!({"type":"reasoning","id":"rs_test","summary":[],
+        "created_by":{"synthetic-private-key":"synthetic-private-value"}});
+    let checkpoint = checkpoint(&body, &json!([output]), true);
+    let mut replay = output;
+    replay.as_object_mut().unwrap().remove("created_by");
+    let mut next = body;
+    next["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend([replay, json!({"role":"user","content":"synthetic next"})]);
+    let planned = plan(&next, Some(&checkpoint));
+    assert_eq!(
+        planned.full_request_reason,
+        Some(FullRequestReason::SocketOutputChanged)
+    );
+    let mismatch = planned.output_mismatch.unwrap();
+    assert_eq!(mismatch.fields, vec![SocketReplayField::CreatedBy]);
+    assert!(mismatch.unknown_fields.is_none());
+    let encoded = serde_json::to_string(&mismatch).unwrap();
+    assert!(encoded.contains("created_by"));
+    assert!(!encoded.contains("synthetic"));
+}
+
+#[test]
 fn documented_semantic_fields_are_identified_without_relaxing_continuation() {
     let body = request(json!([{"role":"user","content":"synthetic"}]));
     for (kind, field, value, expected) in [

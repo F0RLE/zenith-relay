@@ -141,7 +141,8 @@ fn completed(id: &str, output: Value) -> Value {
 async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     let call = json!({"type":"function_call","id":"fc_test","call_id":"call_test",
         "name":"lookup","arguments":"{}","status":"completed","namespace":null,
-        "encrypted_function_args":null,"encrypted_content":null,"async":null});
+        "encrypted_function_args":null,"encrypted_content":null,"async":null,
+        "created_by":"synthetic-provider-provenance"});
     let fixture = Fixture::start(vec![
         vec![completed("first", json!([call]))],
         vec![completed("second", json!([]))],
@@ -160,6 +161,7 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     let text = response.text().await.unwrap();
     assert!(text.contains("response.completed"));
     assert!(text.contains("cached_tokens"));
+    assert!(text.contains("synthetic-provider-provenance"));
     let mut next = first.clone();
     let result = json!({"type":"function_call_output","call_id":"call_test","output":"ok"});
     let mut replay = call;
@@ -168,6 +170,7 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
         "encrypted_function_args",
         "encrypted_content",
         "async",
+        "created_by",
     ] {
         replay.as_object_mut().unwrap().remove(field);
     }

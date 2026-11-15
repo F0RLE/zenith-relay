@@ -60,6 +60,7 @@ pub enum SocketReplayField {
     Recipient,
     Result,
     RevisedPrompt,
+    CreatedBy,
     Other,
 }
 
