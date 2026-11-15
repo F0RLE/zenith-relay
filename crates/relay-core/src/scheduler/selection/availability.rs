@@ -38,7 +38,7 @@ impl PoolScheduler {
         } else {
             InFlightLane::Text
         };
-        self.select_for_operation(selection_request, lane, operation)
+        self.select_for_operation(selection_request, lane, operation, None, false)
             .is_some()
     }
 

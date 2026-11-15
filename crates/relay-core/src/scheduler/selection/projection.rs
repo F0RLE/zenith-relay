@@ -9,6 +9,7 @@ impl PoolScheduler {
             .as_ref()
             .map(|policy| match policy.mode {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
+                crate::PoolRoutingMode::SubscriptionExpiry => RotationMode::SubscriptionExpiry,
                 crate::PoolRoutingMode::WeightedRoundRobin => RotationMode::WeightedRoundRobin,
                 crate::PoolRoutingMode::Failover => RotationMode::Failover,
                 crate::PoolRoutingMode::RoundRobin => RotationMode::RoundRobin,
@@ -345,14 +346,38 @@ impl PoolScheduler {
         scope: &CandidateScope,
         now_ms: u64,
     ) -> bool {
-        !self.retired
-            && !self.retired_candidates.contains(&candidate.id)
-            && !self.execution_fences.contains_key(&candidate.id)
-            && !self
-                .capability_blocks
-                .contains(&(candidate.id.clone(), crate::model_id_key(model)))
-            && self.quota_reserve_allows(candidate, now_ms)
-            && candidate.is_configured(model, allowed_protocols, scope)
+        self.rotation_configuration_block(candidate, model, allowed_protocols, scope, now_ms)
+            .is_none()
+    }
+
+    pub(super) fn rotation_configuration_block(
+        &self,
+        candidate: &RuntimeCandidate,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<super::super::rotation::RotationConfigurationBlock> {
+        use super::super::rotation::RotationConfigurationBlock as Block;
+        if self.retired {
+            return Some(Block::RuntimeRetired);
+        }
+        if self.retired_candidates.contains(&candidate.id) {
+            return Some(Block::CandidateRetired);
+        }
+        if self.execution_fences.contains_key(&candidate.id) {
+            return Some(Block::ExecutionFence);
+        }
+        if self
+            .capability_blocks
+            .contains(&(candidate.id.clone(), crate::model_id_key(model)))
+        {
+            return Some(Block::CapabilityBlocked);
+        }
+        if !self.quota_reserve_allows(candidate, now_ms) {
+            return Some(Block::QuotaReserve);
+        }
+        candidate.configuration_block(model, allowed_protocols, scope)
     }
 }
 

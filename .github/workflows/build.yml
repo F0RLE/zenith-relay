@@ -55,7 +55,7 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-        working-directory: src
+        working-directory: desktop/frontend
       - name: Test development scripts
         run: bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build
       - name: Check documentation links
@@ -65,7 +65,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: desktop/src-tauri -> target
       - uses: taiki-e/install-action@59a357c0513d39d45e24a79eb9489a3a28086290 # cargo-audit
         with:
           tool: cargo-audit
@@ -84,8 +84,8 @@ jobs:
           sudo sed -i -E 's|https?://azure[.]archive[.]ubuntu[.]com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g; s|mirror[+]file:/etc/apt/apt-mirrors[.]txt|https://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --locked -- -D warnings
       - name: Agent guardrails
         run: bun ./scripts/check/check-agent-guardrails.mjs
       - name: No new duplicate code
@@ -96,9 +96,9 @@ jobs:
       - name: Bounded pool admission under contention
         run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file crates/relay-core/Cargo.lock
-      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file src-tauri/Cargo.lock
+      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file desktop/src-tauri/Cargo.lock
       - run: bun audit
-        working-directory: src
+        working-directory: desktop/frontend
       - name: Run verification with Linux Secret Service
         run: |
           dbus-run-session -- bash -euc '
@@ -106,9 +106,9 @@ jobs:
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
             bun run test:unit
             bun run build
-            bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+            bun ../../scripts/build/cargo.mjs test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1
           '
-        working-directory: src
+        working-directory: desktop/frontend
 
   check-ui:
     name: Check UI (${{ matrix.shard }}/4)
@@ -121,7 +121,7 @@ jobs:
         shard: [1, 2, 3, 4]
     defaults:
       run:
-        working-directory: src
+        working-directory: desktop/frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -177,12 +177,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: desktop/src-tauri -> target
       - name: Compile Windows Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --timings
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --no-run --timings
       - name: Run Windows Rust tests
         # The test keyring is process-global, so its system key must not be mutated concurrently.
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1
 
   check-web:
     name: Check web preview
@@ -191,7 +191,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: web
+        working-directory: hosted/web
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -239,9 +239,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: desktop/src-tauri -> target
       - run: bun install --frozen-lockfile
-        working-directory: src
+        working-directory: desktop/frontend
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
@@ -251,16 +251,18 @@ jobs:
       - name: Run platform Rust tests
         if: runner.os != 'Linux'
         # The test keyring is process-global, so its system key must not be mutated concurrently.
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1
       - name: Run Linux platform Rust tests with Secret Service
         if: runner.os == 'Linux'
         run: |
           dbus-run-session -- bash -euc '
             mkdir -p "$HOME/.local/share/keyrings"
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+            cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1
           '
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        with:
+          projectPath: desktop
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -275,9 +277,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          apps=(src-tauri/target/release/bundle/macos/*.app)
-          dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
-          archives=(src-tauri/target/release/bundle/macos/*.app.tar.gz)
+          apps=(desktop/src-tauri/target/release/bundle/macos/*.app)
+          dmgs=(desktop/src-tauri/target/release/bundle/dmg/*.dmg)
+          archives=(desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz)
           if (( ${#apps[@]} != 1 || ${#dmgs[@]} != 1 || ${#archives[@]} != 1 )); then
             echo 'Expected exactly one macOS app, DMG and updater archive.' >&2
             exit 1
@@ -337,21 +339,21 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           function Copy-Required($Filter, $Destination) {
-            $file = Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File -Filter $Filter | Select-Object -First 1
+            $file = Get-ChildItem -Path desktop/src-tauri/target/release/bundle -Recurse -File -Filter $Filter | Select-Object -First 1
             if (!$file) {
               throw "Missing required $env:RUNNER_OS release artifact: $Filter"
             }
             Copy-Item $file.FullName $Destination
           }
           $patterns = @("*.exe", "*.dmg", "*.app.tar.gz", "*.deb", "*.rpm", "*.AppImage", "*.sig", "latest.json")
-          Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
+          Get-ChildItem -Path desktop/src-tauri/target/release/bundle -Recurse -File |
             Where-Object { $file = $_; $patterns | Where-Object { $file.Name -like $_ } } |
             Copy-Item -Destination artifacts
           if ($env:RUNNER_OS -eq "Windows") {
-            if (!(Test-Path "src-tauri/target/release/zenith-relay.exe")) {
+            if (!(Test-Path "desktop/src-tauri/target/release/zenith-relay.exe")) {
               throw "Missing required Windows portable executable"
             }
-            Copy-Item "src-tauri/target/release/zenith-relay.exe" "artifacts/zenith-relay-${{ matrix.name }}.exe"
+            Copy-Item "desktop/src-tauri/target/release/zenith-relay.exe" "artifacts/zenith-relay-${{ matrix.name }}.exe"
             Copy-Required "*setup.exe" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe"
             Copy-Required "*setup.exe.sig" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe.sig"
           }
@@ -371,12 +373,12 @@ jobs:
       - name: Sign portable executable
         if: runner.os == 'Windows'
         shell: pwsh
-        working-directory: src
+        working-directory: desktop/frontend
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
-          $portable = "../artifacts/zenith-relay-${{ matrix.name }}.exe"
+          $portable = "../../artifacts/zenith-relay-${{ matrix.name }}.exe"
           bunx tauri signer sign $portable
           if (!(Test-Path "$portable.sig")) {
             throw "Portable updater signature was not created"

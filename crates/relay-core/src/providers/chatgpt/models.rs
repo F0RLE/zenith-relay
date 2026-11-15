@@ -145,9 +145,14 @@ impl AccountModelsClient {
         chatgpt_account_id: &str,
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
-        self.discover_authorized_with_diagnostics(authorization, chatgpt_account_id, client_version)
-            .await
-            .map(|discovery| discovery.models)
+        self.discover_authorized_with_diagnostics(
+            authorization,
+            chatgpt_account_id,
+            client_version,
+            false,
+        )
+        .await
+        .map(|discovery| discovery.models)
     }
 
     pub async fn discover_authorized_with_diagnostics(
@@ -155,6 +160,7 @@ impl AccountModelsClient {
         authorization: HeaderValue,
         chatgpt_account_id: &str,
         client_version: &str,
+        collect_diagnostics: bool,
     ) -> Result<AccountModelsDiscovery, ModelDiscoveryFailure> {
         parse::validate_account_id(chatgpt_account_id)?;
         let basis_points = self.client_kind == super::OAuthClientKind::ExcelBps;
@@ -213,10 +219,15 @@ impl AccountModelsClient {
             });
         }
 
-        let (models, basis_points_diagnostics) = if basis_points {
+        let (models, basis_points_diagnostics) = if basis_points && collect_diagnostics {
             let (access, diagnostics) =
                 parse_basis_points_model_access_with_diagnostics(&models_response_body)?;
             (access.model_ids(), Some(diagnostics))
+        } else if basis_points {
+            (
+                parse_basis_points_model_access(&models_response_body)?.model_ids(),
+                None,
+            )
         } else if siwc {
             (parse::parse_siwc_models(&models_response_body)?, None)
         } else {

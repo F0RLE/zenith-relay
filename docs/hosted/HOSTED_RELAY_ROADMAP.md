@@ -3,9 +3,9 @@
 Planned Hosted implementation and acceptance. The
 [Hosted architecture](HOSTED_RELAY_ARCHITECTURE.md) owns target contracts;
 the [Desktop roadmap](../project/ROADMAP.md) owns current-runtime work. Development and
-release checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+release checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-The [existing web preview](../../web/README.md) is UI work, not completion of the
+The [existing web preview](../../hosted/web/README.md) is UI work, not completion of the
 service packages below. Authentication, server operations and paid acceptance
 remain open independently of screen readiness.
 
@@ -180,7 +180,7 @@ without Desktop regressions. Qualify account connectors separately from codecs.
 
 #### H02 — Hosted composition, database and contract foundations
 
-**Owns:** HC-01/02/07/11, HD-04/08/10. Target: `relay-hosted/{Cargo.toml,src/,
+**Owns:** HC-01/02/07/11, HD-04/08/10. Target: `hosted/server/{Cargo.toml,src/,
 migrations/,openapi.yaml,tests/support/}`; existing builds remain independent.
 
 - **H02.01 — Process:** startup validation, graceful admission stop and bounded shutdown; no automatic legacy migration.
@@ -383,7 +383,7 @@ delivery failures cannot trigger inference or change money/access.
 
 #### H13 — Default web application and typed transport
 
-**Owns:** HC-01/07/10, HD-08/10. Target: `web/{package.json,src/,tests/,README.md}`
+**Owns:** HC-01/07/10, HD-08/10. Target: `hosted/web/{package.json,src/,tests/,README.md}`
 and the Hosted schema/client compatibility checks. No extraction to another repo.
 
 - **H13.01 — Build:** independent React/TypeScript/Vite static artifact; no Tauri, runtime Node or second money/auth backend.
@@ -393,14 +393,14 @@ and the Hosted schema/client compatibility checks. No extraction to another repo
 - **H13.05 — Browser safety:** scoped memory caches and late-response guards; persist only non-sensitive preferences.
 - **H13.06 — Accessibility:** keyboard/focus, mobile, reduced motion and chart tables across locales/themes.
 
-**Acceptance:** `web/tests/api-contract.test.ts` and `web/tests/e2e/shell.spec.ts`
+**Acceptance:** `hosted/web/tests/api-contract.test.ts` and `hosted/web/tests/e2e/shell.spec.ts`
 cover incompatibility, missing config, deep links, session/logout races and origin
 isolation. Review WS-01/02/11/24 and both shells against the design handoff;
 synthetic fixtures and private catalog data never supply public prices.
 
 #### H14 — Complete customer cabinet
 
-**Owns:** HC-07/08/10. Target feature directories under `web/src/features/`:
+**Owns:** HC-07/08/10. Target feature directories under `hosted/web/src/features/`:
 `overview/`, `usage/`, `models/`, `keys/`, `billing/`, `settings/`, `help/`.
 Implement [WS-03–WS-10](HOSTED_RELAY_WEB_DESIGN.md#customer-cabinet) with the shared
 design/interaction system; screen descriptions cannot weaken domain policy.
@@ -413,7 +413,7 @@ design/interaction system; screen descriptions cannot weaken domain policy.
 - **H14.06 — Failure states:** implement the [browser failure contract](HOSTED_RELAY_ARCHITECTURE.md#browser-failures-and-unavailable-services); safe reads cannot repeat mutations.
 - **H14.07 — Journey/notices:** implement [SC-02](HOSTED_RELAY_ARCHITECTURE.md#first-customer-request-walkthrough), own notices/preferences and service conditions within existing routes.
 
-**Acceptance:** `web/tests/e2e/customer-{journey,failures}.spec.ts` covers funded
+**Acceptance:** `hosted/web/tests/e2e/customer-{journey,failures}.spec.ts` covers funded
 journeys, duplicate/lost responses, revoked authority, render/network failures,
 SC-03 reconciliation and lifecycle/notice states across mobile, locales and themes.
 No repeated payment/key/generation or secret-bearing support copy. Chat, image UI,
@@ -421,7 +421,7 @@ teams and saved conversations remain outside scope.
 
 #### H15 — Owner web panel, scoped Desktop and explicit transfer
 
-**Owns:** HC-03/04/07/08/09/10, HD-12. Target: `web/src/features/admin/`, Hosted
+**Owns:** HC-03/04/07/08/09/10, HD-12. Target: `hosted/web/src/features/admin/`, Hosted
 management handlers, affected typed Desktop wrappers and transfer tests.
 Implement the [owner screen passports](HOSTED_RELAY_WEB_DESIGN.md#owner-panel)
 WS-11–WS-23 in the web owner panel with H13's shared design system and distinct
@@ -446,7 +446,7 @@ treating web sign-in as synchronization.
 - **H15.08 — Web lifecycle:** implement SC-01/06/07/08 setup, readiness, guarded transitions and change/closure confirmations; do not duplicate service administration in Desktop.
 
 **Acceptance:** `tests/{management_parity,transfer_recovery}.rs` and
-`web/tests/e2e/{admin,diagnostics,service-lifecycle}.spec.ts` cover advertised actions,
+`hosted/web/tests/e2e/{admin,diagnostics,service-lifecycle}.spec.ts` cover advertised actions,
 authority/revision races, source-preserving transfer, safe counters/capture and
 closure obligations. Polling/acknowledging cannot trigger inference, change money
 or bypass readiness. Check mobile/keyboard and RU/EN states. Desktop acceptance
@@ -465,8 +465,8 @@ deduplication and silent changes to unrelated server bindings.
 
 #### H16 — Deployment, operations and recoverable release
 
-**Owns:** HC-08/09/11, HD-05/07/09/10/11. Target: `relay-hosted/deploy/`,
-`relay-hosted/README.md`, `src/management/diagnostics.rs`, diagnostic-session schema,
+**Owns:** HC-08/09/11, HD-05/07/09/10/11. Target: `hosted/deploy/`,
+`hosted/server/README.md`, `src/management/diagnostics.rs`, diagnostic-session schema,
 web distribution guide and operations acceptance fixtures.
 
 - **H16.01 — Packaging:** pinned compatible artifacts and default/custom-site recipes; no production frontend build dependency.
@@ -552,11 +552,11 @@ artifacts, not files claimed to exist in the current repository.
 
 | Scenario | Principal acceptance artifacts | What must be proved |
 | --- | --- | --- |
-| SC-01 | `tests/bootstrap.rs`, `tests/readiness.rs`, `web/tests/e2e/service-lifecycle.spec.ts` | Default closed, recoverable owner setup, current evidence and explicit public activation |
-| SC-02 | `tests/customer_identity.rs`, `tests/admission_postgres.rs`, `web/tests/e2e/customer-journey.spec.ts` | One verified identity/wallet/key journey, honest paid request and safe lost-response recovery |
+| SC-01 | `tests/bootstrap.rs`, `tests/readiness.rs`, `hosted/web/tests/e2e/service-lifecycle.spec.ts` | Default closed, recoverable owner setup, current evidence and explicit public activation |
+| SC-02 | `tests/customer_identity.rs`, `tests/admission_postgres.rs`, `hosted/web/tests/e2e/customer-journey.spec.ts` | One verified identity/wallet/key journey, honest paid request and safe lost-response recovery |
 | SC-03 | `tests/accounting_postgres.rs`, `tests/payments_postgres.rs`, `tests/execution_recovery.rs` | Exact worked amounts, balanced journal and once-only reserve/charge/refund/correction |
-| SC-04 | `tests/diagnostics.rs`, `tests/diagnostic_capture.rs`, `web/tests/e2e/diagnostics.spec.ts` | Known versus unknown cause, safe investigation and bounded capture without replay |
-| SC-05 | `tests/notifications.rs`, `web/tests/e2e/customer-failures.spec.ts` | Recipient isolation, consent, deduplication, expiry and no financial side effects |
-| SC-06 | `tests/pool_catalog.rs`, `tests/admission_postgres.rs`, `web/tests/e2e/service-lifecycle.spec.ts` | Notice/effective-time behavior, saved tariffs and emergency-disable distinction |
+| SC-04 | `tests/diagnostics.rs`, `tests/diagnostic_capture.rs`, `hosted/web/tests/e2e/diagnostics.spec.ts` | Known versus unknown cause, safe investigation and bounded capture without replay |
+| SC-05 | `tests/notifications.rs`, `hosted/web/tests/e2e/customer-failures.spec.ts` | Recipient isolation, consent, deduplication, expiry and no financial side effects |
+| SC-06 | `tests/pool_catalog.rs`, `tests/admission_postgres.rs`, `hosted/web/tests/e2e/service-lifecycle.spec.ts` | Notice/effective-time behavior, saved tariffs and emergency-disable distinction |
 | SC-07 | `tests/service_modes.rs`, `tests/operations_recovery.rs`, isolated restore drill | Admission fence, surviving obligations, trustworthy recovery and independent outage signal |
 | SC-08 | `tests/service_closure.rs`, `tests/payments_postgres.rs`, isolated migration drill | Single active authority, funds/exports/late events and separately verified teardown |

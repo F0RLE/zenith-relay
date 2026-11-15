@@ -334,6 +334,8 @@ next quota check; an imminent natural weekly recovery takes precedence. Relay
 verifies recovery before another automatic reset. Manual reset remains available.
 A fresh subscription ending before natural weekly recovery can also release
 the reserve while its matching automatic reset rule is enabled.
+For linked connections, one native reader checks and redeems resets for the
+selected pool member. That reader can remain outside the pool.
 For an explicit quota threshold, choose **Reset timing → At a quota threshold**
 and enter the remaining weekly percentage. This option is off by default.
 0 or blank means exhausted only; a full quota never triggers a reset, even at
@@ -394,15 +396,29 @@ without closing your settings.
 #### Modes
 
 - **Automatic:** balances load, fresh quota/credits and request shares.
-  Quota-based switching needs a lead of at least 5 percentage points, or 10
-  for the primary prompt-cache connection while its quota is fresh and positive.
+  A warm chat stays on its primary connection while fresh remaining quota is
+  above 10%, even if another member has more. At 10% or below, quota-based
+  switching needs an alternative with at least 10 percentage points more.
+  Other quota comparisons keep the 5-point margin.
   Availability and concurrency limits still apply.
-  Expiring subscriptions receive a bounded larger share of new independent
-  work. Existing cache-affinity rules stay intact; stale dates provide no boost.
+  Speed affects selection after 20 measured successful requests per member and
+  route within ten minutes.
+  New independent work first uses the nearest at-risk subscription group:
+  up to 3 days remaining, over 3 through 6, and subsequent three-day bands.
+  Within the group, load and bounded request shares distribute work fairly.
+  Fresh reset counts add urgency only while the matching weekly reset rule is
+  enabled. Fresh dates determine group order; resets change shares within a group.
+  Existing cache-affinity rules stay intact; stale dates provide no boost.
+  Actual usage still depends on demand.
+- **Expiring first:** new independent requests prefer the eligible subscription
+  with the earliest fresh expiry date, including within the same three-day band.
+  Existing conversations keep their warm connection and quota safeguards. When
+  expiry dates are unavailable, Relay uses normal adaptive selection.
 - **Round robin:** independent requests cycle through available members in
   saved order. **Use custom request shares** enables weighted distribution.
 - **Primary & reserve:** the first compatible available member handles requests;
   later members are reserves when earlier ones are unavailable or full.
+  Reserve API requests may spend their balance.
 
 Reorder members by dragging or using the arrows. All modes skip incompatible
 models, unavailable members, and members at their concurrency limit.
@@ -412,18 +428,7 @@ protocol-owned conversations and different route availability affect distributio
 **Unlimited** (0) removes Relay's additional limit; provider limits still apply.
 Changes save automatically.
 
-#### Presets
-
-Three buttons apply a ready-made setup in one click:
-
-- **Recommended:** automatic selection by load and available resources.
-- **Even distribution:** independent requests cycle in the saved order.
-- **Accounts → API:** primary/reserve routing with accounts before API sources.
-  The order inside each group is preserved. Reserve API requests may spend
-  their balance.
-
-Presets reset shares to 1 and extra limits to 0. Strategy-only changes keep
-both. Manual overrides show **Custom**.
+Changing strategies preserves member order, request shares and concurrency limits.
 Switching strategies does not restart applications or the gateway, interrupt
 active requests, clear cooldowns, or move an opaque continuation to another account.
 
@@ -478,6 +483,9 @@ use actual tier/input size; missing prices show `—`, without Standard fallback
 
 Relay prefers the provider's price, then the reference catalog; a manual
 price is a fallback. Cache fields set read and write prices.
+Account cards combine lifetime usage across linked Codex, Excel/BPS and SIWC
+connections, with amounts by sign-in method below the total. Switching methods
+or signing in again preserves their retained usage; pool totals count it once.
 **Purchase cost, USD** estimates lifetime payback. **Weekly remaining** uses shared
 workload calibration, not cash; linked routes count once. Hover for details.
 Catalog updates revalue recent measurements in the background without consuming

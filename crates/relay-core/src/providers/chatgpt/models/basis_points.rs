@@ -108,11 +108,18 @@ pub fn basis_points_access_url(responses_url: &Url) -> Option<Url> {
 pub fn parse_basis_points_model_access(
     bytes: &[u8],
 ) -> Result<BasisPointsModelAccess, ModelDiscoveryFailure> {
-    parse_basis_points_model_access_with_diagnostics(bytes).map(|(access, _)| access)
+    parse_model_access(bytes, false).map(|(access, _)| access)
 }
 
 pub fn parse_basis_points_model_access_with_diagnostics(
     bytes: &[u8],
+) -> Result<(BasisPointsModelAccess, BasisPointsCatalogDiagnostics), ModelDiscoveryFailure> {
+    parse_model_access(bytes, true)
+}
+
+fn parse_model_access(
+    bytes: &[u8],
+    collect_diagnostics: bool,
 ) -> Result<(BasisPointsModelAccess, BasisPointsCatalogDiagnostics), ModelDiscoveryFailure> {
     #[derive(Deserialize)]
     struct Envelope {
@@ -139,7 +146,9 @@ pub fn parse_basis_points_model_access_with_diagnostics(
         ..Default::default()
     };
     if !allowed {
-        if let Some(models) = envelope.model_catalog.and_then(|catalog| catalog.models) {
+        if collect_diagnostics
+            && let Some(models) = envelope.model_catalog.and_then(|catalog| catalog.models)
+        {
             for (row, model) in models.iter().enumerate() {
                 diagnostics.observe(
                     row,
@@ -165,9 +174,13 @@ pub fn parse_basis_points_model_access_with_diagnostics(
     for (row, raw_model) in raw_models.into_iter().enumerate() {
         // Diagnose the same decision that supplies executable access; do not
         // reconstruct it with a second set of filtering rules.
-        let model_id = diagnostics.model_id(&raw_model);
+        let model_id = collect_diagnostics
+            .then(|| diagnostics.model_id(&raw_model))
+            .flatten();
         let Ok(mut model) = serde_json::from_value::<BasisPointsModel>(raw_model) else {
-            diagnostics.observe(row, model_id, BasisPointsModelOutcome::MalformedRow);
+            if collect_diagnostics {
+                diagnostics.observe(row, model_id, BasisPointsModelOutcome::MalformedRow);
+            }
             continue;
         };
         let normalized_id = model.id.trim();
@@ -193,7 +206,9 @@ pub fn parse_basis_points_model_access_with_diagnostics(
         } else {
             BasisPointsModelOutcome::Accepted
         };
-        diagnostics.observe(row, model_id, outcome);
+        if collect_diagnostics {
+            diagnostics.observe(row, model_id, outcome);
+        }
         if outcome == BasisPointsModelOutcome::Accepted {
             model.id = normalized_id.to_string();
             models.push(model);
@@ -205,6 +220,19 @@ pub fn parse_basis_points_model_access_with_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_catalog_diagnostics_preserve_access_without_detail_allocations() {
+        let bytes = br#"{"allowed":true,"model_catalog":{"models":[{"id":"available"},{"id":"blocked","enabled":false},{"id":"restricted"},{"id":"available"},{"id":42}],"restricted_models":["restricted"]}}"#;
+        let (quiet, quiet_diagnostics) = parse_model_access(bytes, false).unwrap();
+        let (debug, debug_diagnostics) = parse_model_access(bytes, true).unwrap();
+        assert_eq!(quiet.model_ids(), debug.model_ids());
+        assert_eq!(quiet.model_ids(), ["available"]);
+        assert!(quiet_diagnostics.models.is_empty());
+        assert_eq!(quiet_diagnostics.models.capacity(), 0);
+        assert_eq!(debug_diagnostics.models.len(), 5);
+        assert_eq!(debug_diagnostics.accepted_models, 1);
+    }
 
     #[test]
     fn reasoning_access_matches_wire_aliases_without_inventing_levels() {

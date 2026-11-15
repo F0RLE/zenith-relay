@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,11 +17,11 @@ function needs(job) {
 
 test("Rust checks share Desktop's target directory without changing packaging paths", () => {
   const config = Bun.TOML.parse(readFileSync(new URL("../../.cargo/config.toml", import.meta.url), "utf8"));
-  expect(config.build["target-dir"]).toBe("src-tauri/target");
+  expect(config.build["target-dir"]).toBe("desktop/src-tauri/target");
   const cases = [
-    ["build.yml", "check-runtime", ["src-tauri"]],
-    ["build.yml", "check-windows", ["src-tauri"]],
-    ["build.yml", "build", ["src-tauri"]],
+    ["build.yml", "check-runtime", ["desktop/src-tauri"]],
+    ["build.yml", "check-windows", ["desktop/src-tauri"]],
+    ["build.yml", "build", ["desktop/src-tauri"]],
   ];
   for (const [file, jobName, directories] of cases) {
     const job = workflow(file).jobs[jobName];
@@ -67,7 +67,7 @@ describe("desktop CI", () => {
   test("documentation checks use locked dependencies and cannot be skipped silently", () => {
     const steps = build.jobs["check-runtime"].steps;
     const install = steps.findIndex((step) => step.run === "bun install --frozen-lockfile"
-      && step["working-directory"] === "src");
+      && step["working-directory"] === "desktop/frontend");
     const scripts = steps.findIndex((step) => step.run === "bun test ./scripts/check ./scripts/lib ./scripts/maintenance ./scripts/build");
     const docs = steps.findIndex((step) => step.run === "bun ./scripts/check/check-docs.mjs");
     expect(install).toBeGreaterThan(-1);
@@ -84,7 +84,7 @@ describe("desktop CI", () => {
     expect(JSON.stringify(build)).not.toContain("relay-server/");
     const dependabot = Bun.YAML.parse(readFileSync(new URL("../../.github/dependabot.yml", import.meta.url), "utf8"));
     expect(dependabot.updates.filter((update) => update["package-ecosystem"] === "cargo")
-      .map((update) => update.directory).sort()).toEqual(["/crates/relay-core", "/src-tauri"]);
+      .map((update) => update.directory).sort()).toEqual(["/crates/relay-core", "/desktop/src-tauri"]);
   });
 
   test("an older pull request run is cancelled, but a tag or manual run is not", () => {
@@ -98,9 +98,9 @@ describe("desktop CI", () => {
     const run = steps.findIndex((step) => step.name === "Run Windows Rust tests");
     expect(compile).toBeGreaterThan(-1);
     expect(run).toBeGreaterThan(compile);
-    expect(steps[compile].run).toBe("cargo test --manifest-path src-tauri/Cargo.toml --locked --no-run --timings");
+    expect(steps[compile].run).toBe("cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --no-run --timings");
     expect(build.jobs["check-windows"].steps.at(-1).run)
-      .toContain("cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1");
+      .toContain("cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1");
     expect(build.jobs.build.needs).toBeUndefined();
     expect(needs(build.jobs["publish-release"])).toEqual(["check", "check-windows", "check-web", "build"]);
   });
@@ -108,7 +108,7 @@ describe("desktop CI", () => {
   test("web preview is checked independently and must pass before publication", () => {
     const web = build.jobs["check-web"];
     expect(web).toBeDefined();
-    expect(web.defaults.run["working-directory"]).toBe("web");
+    expect(web.defaults.run["working-directory"]).toBe("hosted/web");
     expect(web["continue-on-error"]).toBeUndefined();
     for (const command of [
       "bun install --frozen-lockfile",
@@ -133,7 +133,7 @@ describe("desktop CI", () => {
     expect(ui["continue-on-error"]).toBeUndefined();
     expect(ui.strategy["fail-fast"]).toBe(false);
     expect(ui.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
-    expect(ui.defaults.run["working-directory"]).toBe("src");
+    expect(ui.defaults.run["working-directory"]).toBe("desktop/frontend");
     const run = ui.steps.find((step) => step.name === "Run browser tests");
     expect(run.run).toBe("bun run test:e2e --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
     expect(run.if).toBeUndefined();
@@ -195,7 +195,7 @@ describe("desktop CI", () => {
     const prepare = steps.findIndex((step) => step.name === "Prepare RustSec advisory database");
     expect(steps[prepare].run).toContain("fetch --depth=1 origin refs/heads/main");
     expect(steps[prepare].run).toContain("RustSec snapshot: %H (%cI)");
-    for (const file of ["crates/relay-core/Cargo.lock", "src-tauri/Cargo.lock"]) {
+    for (const file of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock"]) {
       const audit = steps.findIndex((step) => step.run?.startsWith("cargo audit ") && step.run.includes(file));
       expect(audit).toBeGreaterThan(prepare);
       expect(steps[audit].run).toContain('--db "$RUSTSEC_ADVISORY_DB" --no-fetch');
@@ -205,9 +205,9 @@ describe("desktop CI", () => {
 
   test("Dependabot maintains the actual Bun lockfiles for Desktop and web", () => {
     const config = Bun.YAML.parse(readFileSync(new URL("../../.github/dependabot.yml", import.meta.url), "utf8"));
-    expect(config.updates.filter((entry) => entry["package-ecosystem"] === "bun").map((entry) => entry.directory).sort()).toEqual(["/src", "/web"]);
+    expect(config.updates.filter((entry) => entry["package-ecosystem"] === "bun").map((entry) => entry.directory).sort()).toEqual(["/desktop/frontend", "/hosted/web"]);
     expect(config.updates.some((entry) => entry["package-ecosystem"] === "npm")).toBe(false);
-    for (const directory of ["src", "web"]) expect(existsSync(new URL(`../../${directory}/bun.lock`, import.meta.url))).toBe(true);
+    for (const directory of ["desktop/frontend", "hosted/web"]) expect(existsSync(new URL(`../../${directory}/bun.lock`, import.meta.url))).toBe(true);
   });
 
   test("Linux checks use the canonical archive for direct and mirror-list APT sources", () => {
@@ -295,6 +295,52 @@ describe("desktop CI", () => {
 });
 
 describe("agent guardrails", () => {
+  test("checks added code in staged and unstaged directory moves without flagging unchanged history", () => {
+    const root = mkdtempSync(join(tmpdir(), "zenith-guardrails-move-"));
+    const script = fileURLToPath(new URL("./check-agent-guardrails.mjs", import.meta.url));
+    const env = { ...process.env };
+    delete env.GITHUB_BASE_REF;
+    const git = (args) => {
+      const result = spawnSync("git", args, { cwd: root, env, encoding: "utf8", windowsHide: true });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout;
+    };
+    const run = () => spawnSync(process.execPath, [script, "HEAD"], { cwd: root, env, encoding: "utf8", windowsHide: true });
+    try {
+      git(["init", "--quiet"]);
+      git(["config", "user.name", "Synthetic fixture"]);
+      git(["config", "user.email", "fixture@example.test"]);
+      git(["config", "commit.gpgsign", "false"]);
+      mkdirSync(join(root, "src-tauri"));
+      const original = '// Unchanged source preserved by a directory move.\n'.repeat(20)
+        + 'fn existing() { panic!("unchanged baseline"); }\n';
+      writeFileSync(join(root, "src-tauri/source.rs"), original);
+      git(["add", "src-tauri"]);
+      git(["commit", "--quiet", "-m", "synthetic baseline"]);
+      mkdirSync(join(root, "desktop"));
+      renameSync(join(root, "src-tauri"), join(root, "desktop/src-tauri"));
+      const before = git(["ls-files", "--stage"]);
+      const moved = run();
+      expect(moved.status, moved.stderr).toBe(0);
+      expect(git(["ls-files", "--stage"])).toBe(before);
+      writeFileSync(join(root, "desktop/src-tauri/source.rs"), original + 'fn added() { panic!("new violation"); }\n');
+      const changed = run();
+      expect(changed.status, changed.stderr).toBe(1);
+      expect(changed.stderr).toContain("new violation");
+      expect(changed.stderr).not.toContain("unchanged baseline");
+      expect(git(["ls-files", "--stage"])).toBe(before);
+      git(["add", "--all"]);
+      const stagedIndex = git(["ls-files", "--stage"]);
+      const staged = run();
+      expect(staged.status, staged.stderr).toBe(1);
+      expect(staged.stderr).toContain("new violation");
+      expect(staged.stderr).not.toContain("unchanged baseline");
+      expect(git(["ls-files", "--stage"])).toBe(stagedIndex);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("checks large patches and untracked sources without changing the index", () => {
     const root = mkdtempSync(join(tmpdir(), "zenith-guardrails-test-"));
     const script = fileURLToPath(new URL("./check-agent-guardrails.mjs", import.meta.url));

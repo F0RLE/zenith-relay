@@ -10,6 +10,7 @@ fn spending_candidate(id: &str, remaining: u64, expires_in_ms: Option<u64>) -> R
         expires_at_ms: 100 + remaining_ms,
         observed_at_ms: 100,
         valid_until_ms: 1_000,
+        reset_credits: None,
     });
     member
 }
@@ -34,7 +35,95 @@ fn complete(engine: &mut RotationEngine, id: u64) -> String {
 }
 
 #[test]
-fn expiring_allowance_receives_more_independent_work_without_starving_other_members() {
+fn subscription_expiry_orders_exact_deadlines_within_an_automatic_band() {
+    let day = 24 * 60 * 60 * 1_000;
+    let mut engine = engine_with([
+        spending_candidate("later", 10_000, Some(2 * day)),
+        spending_candidate("earlier", 6_000, Some(day)),
+    ]);
+    assert_eq!(
+        engine.expiry_priority_key("earlier", 100),
+        engine.expiry_priority_key("later", 100)
+    );
+    engine.set_mode(RotationMode::SubscriptionExpiry);
+    assert!(engine.expiry_priority_key("earlier", 100) < engine.expiry_priority_key("later", 100));
+    for id in 1..=40 {
+        assert_eq!(complete(&mut engine, id), "earlier");
+    }
+    assert_eq!(engine.active_leases(), 0);
+}
+
+#[test]
+fn subscription_expiry_requires_fresh_dates_and_available_quota() {
+    let mut stale = spending_candidate("stale", 900, Some(1_000));
+    stale.spend_deadline.as_mut().unwrap().valid_until_ms = 99;
+    let mut exhausted = spending_candidate("exhausted", 0, Some(500));
+    exhausted.quota = QuotaState::Exhausted { reset_at_ms: None };
+    let mut engine = engine_with([
+        stale,
+        exhausted,
+        spending_candidate("eligible", 7_000, Some(60_000)),
+        spending_candidate("undated", 10_000, None),
+    ]);
+    engine.set_mode(RotationMode::SubscriptionExpiry);
+    assert_eq!(complete(&mut engine, 1), "eligible");
+    assert_eq!(engine.expiry_priority_key("stale", 100), None);
+    assert_eq!(engine.expiry_priority_key("exhausted", 100), None);
+}
+
+#[test]
+fn subscription_expiry_preserves_warm_and_hard_owners() {
+    let mut engine = engine_with([
+        spending_candidate("expiring", 10_000, Some(60_000)),
+        spending_candidate("warm", 4_600, Some(600_000)),
+    ]);
+    engine.set_mode(RotationMode::SubscriptionExpiry);
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+    assert_eq!(
+        engine
+            .select(&request(2).with_owner("warm"), 100)
+            .unwrap()
+            .candidate_id,
+        "warm"
+    );
+    assert!(!engine.has_material_resource_lead("expiring", "warm", 100));
+    let diagnostics = engine
+        .cache_affinity_diagnostics(&preferred_request(3, "warm"), Some("warm"), "warm", 100)
+        .unwrap();
+    assert_eq!(diagnostics.quota_low_water_basis_points, Some(1_000));
+}
+
+#[test]
+fn subscription_expiry_keeps_low_quota_rebalancing_and_undated_fallback() {
+    let mut engine = engine_with([
+        spending_candidate("expiring", 1_000, Some(60_000)),
+        spending_candidate("alternative", 5_000, None),
+    ]);
+    engine.set_mode(RotationMode::SubscriptionExpiry);
+    assert_eq!(
+        engine
+            .select(&preferred_request(1, "expiring"), 100)
+            .unwrap()
+            .candidate_id,
+        "alternative"
+    );
+    assert!(engine.has_material_resource_lead("alternative", "expiring", 100));
+    let mut fallback = engine_with([
+        spending_candidate("lower", 2_000, None),
+        spending_candidate("higher", 8_000, None),
+    ]);
+    fallback.set_mode(RotationMode::SubscriptionExpiry);
+    assert_eq!(complete(&mut fallback, 2), "higher");
+}
+
+#[test]
+fn nearest_at_risk_group_receives_independent_work_until_unavailable() {
     let day = 24 * 60 * 60 * 1_000;
     let mut engine = engine_with([
         spending_candidate("expiring", 6_000, Some(day)),
@@ -42,14 +131,14 @@ fn expiring_allowance_receives_more_independent_work_without_starving_other_memb
     ]);
     assert_eq!(
         engine.select(&request(1), 100).unwrap().reason,
-        RotationSelectionReason::WeightedRotation
+        RotationSelectionReason::SubscriptionExpiry
     );
     let served = (1..=60)
         .filter(|id| complete(&mut engine, *id) == "expiring")
         .count();
     assert_eq!(
-        served, 50,
-        "bounded five-to-one weighting must use the ordinary rotation credits"
+        served, 60,
+        "independent work should use the nearer available subscription"
     );
     assert_eq!(engine.active_leases(), 0);
 }
@@ -81,8 +170,11 @@ fn expiry_bias_preserves_primary_warm_alternatives_and_hard_owners() {
 }
 
 #[test]
-fn expiry_bias_never_overrides_load_capacity_quota_auth_or_provider_waits() {
-    for blocked in 0..7 {
+fn expiry_priority_preserves_capacity_quota_auth_and_provider_waits() {
+    for (mode, blocked) in [RotationMode::Automatic, RotationMode::SubscriptionExpiry]
+        .into_iter()
+        .flat_map(|mode| (0..7).map(move |blocked| (mode, blocked)))
+    {
         let mut expiring = spending_candidate("expiring", 6_000, Some(60_000));
         match blocked {
             0 => expiring.enabled = false,
@@ -106,6 +198,7 @@ fn expiry_bias_never_overrides_load_capacity_quota_auth_or_provider_waits() {
             _ => expiring.max_concurrency = 1,
         }
         let mut engine = engine_with([expiring, spending_candidate("ordinary", 10_000, None)]);
+        engine.set_mode(mode);
         let busy = (blocked == 6).then(|| {
             engine
                 .reserve(&request(1).with_owner("expiring"), 100)
@@ -129,34 +222,33 @@ fn expiry_bias_never_overrides_load_capacity_quota_auth_or_provider_waits() {
         .unwrap();
     assert_eq!(
         engine.select(&request(2), 100).unwrap().candidate_id,
-        "ordinary"
+        "expiring",
+        "a non-full urgent member stays ahead of a later idle group"
     );
     assert!(engine.release_unstarted(busy.lease_id));
 }
 
 #[test]
-fn stale_missing_expired_and_distant_deadlines_keep_ordinary_quota_ranking() {
+fn stale_missing_future_observed_and_expired_deadlines_keep_ordinary_quota_ranking() {
     for deadline in [
         None,
         Some(QuotaSpendDeadline {
             expires_at_ms: 5_000,
             observed_at_ms: 101,
             valid_until_ms: 1_000,
+            reset_credits: None,
         }),
         Some(QuotaSpendDeadline {
             expires_at_ms: 5_000,
             observed_at_ms: 50,
             valid_until_ms: 99,
+            reset_credits: None,
         }),
         Some(QuotaSpendDeadline {
             expires_at_ms: 100,
             observed_at_ms: 50,
             valid_until_ms: 1_000,
-        }),
-        Some(QuotaSpendDeadline {
-            expires_at_ms: u64::MAX,
-            observed_at_ms: 50,
-            valid_until_ms: 1_000,
+            reset_credits: None,
         }),
     ] {
         let mut expiring = spending_candidate("expiring", 6_000, None);
@@ -167,6 +259,62 @@ fn stale_missing_expired_and_distant_deadlines_keep_ordinary_quota_ranking() {
             "ordinary"
         );
     }
+}
+
+#[test]
+fn earlier_nonurgent_subscription_precedes_later_full_quota_and_reset_budgets() {
+    use crate::quota::QuotaSpendResets;
+
+    for reset_count in [None, Some(1)] {
+        let mut earlier = spending_candidate("earlier", 1_100, Some(9 * 86_400_000));
+        earlier.spend_deadline.as_mut().unwrap().reset_credits =
+            reset_count.map(|count| QuotaSpendResets {
+                count,
+                observed_at_ms: 100,
+                valid_until_ms: 1_000,
+            });
+        assert_eq!(
+            earlier.spend_deadline.unwrap().rotation_weight(1_100, 100),
+            1
+        );
+        let mut later = spending_candidate("later", 10_000, Some(17 * 86_400_000));
+        later.spend_deadline.as_mut().unwrap().reset_credits = Some(QuotaSpendResets {
+            count: 3,
+            observed_at_ms: 100,
+            valid_until_ms: 1_000,
+        });
+        let engine = engine_with([earlier, later]);
+        assert_eq!(engine.expiry_priority_band("earlier", 100), Some(2));
+        assert_eq!(engine.expiry_priority_band("later", 100), Some(5));
+        let selected = engine.select(&request(1), 100).unwrap();
+        assert_eq!(selected.candidate_id, "earlier");
+        assert_eq!(selected.reason, RotationSelectionReason::SubscriptionExpiry);
+        for warm in [
+            preferred_request(2, "later"),
+            request(3).with_owner("later"),
+        ] {
+            assert_eq!(engine.select(&warm, 100).unwrap().candidate_id, "later");
+        }
+    }
+}
+
+#[test]
+fn far_future_deadline_stays_behind_a_nearer_nonurgent_group() {
+    let mut distant = spending_candidate("distant", 10_000, None);
+    distant.spend_deadline = Some(QuotaSpendDeadline {
+        expires_at_ms: u64::MAX,
+        observed_at_ms: 50,
+        valid_until_ms: 1_000,
+        reset_credits: None,
+    });
+    let engine = engine_with([
+        distant,
+        spending_candidate("nearer", 1_100, Some(17 * 86_400_000)),
+    ]);
+    assert_eq!(
+        engine.select(&request(1), 100).unwrap().candidate_id,
+        "nearer"
+    );
 }
 
 #[test]
@@ -214,5 +362,58 @@ fn replacing_or_removing_deadline_evidence_immediately_removes_the_soft_bias() {
     assert_eq!(
         engine.select(&request(2), 100).unwrap().candidate_id,
         "ordinary"
+    );
+}
+
+#[test]
+fn five_near_accounts_share_work_before_six_later_accounts() {
+    let day = 86_400_000;
+    let members = (0..11).map(|index| {
+        spending_candidate(
+            &format!("member-{index:02}"),
+            10_000,
+            Some(if index < 5 { 4 * day } else { 12 * day }),
+        )
+    });
+    let mut engine = engine_with(members);
+    let mut counts = std::collections::BTreeMap::new();
+    for id in 1..=100 {
+        *counts.entry(complete(&mut engine, id)).or_insert(0) += 1;
+    }
+    assert_eq!(counts.len(), 5);
+    assert!(counts.values().all(|count| *count == 20));
+    assert_eq!(engine.active_leases(), 0);
+}
+
+#[test]
+fn urgent_group_does_not_lose_its_last_positive_quota_before_reset() {
+    let engine = engine_with([
+        spending_candidate("urgent", 1, Some(2 * 86_400_000)),
+        spending_candidate("later", 10_000, Some(12 * 86_400_000)),
+    ]);
+    assert_eq!(
+        engine.select(&request(1), 100).unwrap().candidate_id,
+        "urgent"
+    );
+}
+
+#[test]
+fn enabled_fresh_reset_budget_weights_only_the_nearest_group() {
+    use crate::quota::QuotaSpendResets;
+    let mut first = spending_candidate("first", 5_000, Some(4 * 86_400_000));
+    let mut second = spending_candidate("second", 5_000, Some(4 * 86_400_000));
+    for (candidate, count) in [(&mut first, 2), (&mut second, 1)] {
+        candidate.spend_deadline.as_mut().unwrap().reset_credits = Some(QuotaSpendResets {
+            count,
+            observed_at_ms: 100,
+            valid_until_ms: 1_000,
+        });
+    }
+    let mut engine = engine_with([first, second]);
+    assert_eq!(
+        (1..=80)
+            .filter(|id| complete(&mut engine, *id) == "first")
+            .count(),
+        50
     );
 }

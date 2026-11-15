@@ -27,6 +27,8 @@ pub struct GatewaySummary {
     pub tool_policy: crate::ToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
+    #[serde(default)]
+    pub pool_rotation: super::PoolRotationView,
     pub running: bool,
     pub base_url: String,
     pub candidate_count: usize,
@@ -352,7 +354,7 @@ pub fn apply_pool_model_configuration_with_context(
             .filter(|account| {
                 account.in_pool
                     && account.oauth_client_kind
-                        == crate::providers::chatgpt::OAuthClientKind::Codex
+                        == Some(crate::providers::chatgpt::OAuthClientKind::Codex)
                     && account
                         .models
                         .iter()

@@ -1,10 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { readCheckedText } from "../lib/checked-file.mjs";
 
 process.chdir(git(["rev-parse", "--show-toplevel"]).trim());
 
-const paths = ["crates", "src-tauri"];
+const paths = ["crates", "desktop/src-tauri"];
+// Include the previous native path in history comparisons so Git can detect moves.
+const historyPaths = [...paths, "src-tauri"];
 const rules = [
   { name: "panic", pattern: /\bpanic!\s*\(/i },
   { name: "todo/unimplemented", pattern: /\b(todo|unimplemented)!\s*\(/i },
@@ -14,8 +18,8 @@ const rules = [
 const testPath =
   /(^|\/|\\)tests?(\/|\\)|(^|\/|\\)[^/\\]+_tests?\.rs$|(^|\/|\\)tests\.rs$/i;
 
-function git(args) {
-  const result = spawnSync("git", args, { encoding: "utf8" });
+function git(args, env = process.env) {
+  const result = spawnSync("git", args, { encoding: "utf8", env, windowsHide: true });
   if (result.error) {
     throw new Error(`git ${args.join(" ")} failed: ${result.error.message}`);
   }
@@ -43,16 +47,16 @@ if (requestedBase) {
   if (!hasCommit(requestedBase)) {
     throw new Error(`Guardrail check requires a valid base ref, got '${requestedBase}'.`);
   }
-  diffs.push(["diff", fullContext, `${requestedBase}...HEAD`, "--", ...paths]);
+  diffs.push(["diff", "--find-renames", fullContext, `${requestedBase}...HEAD`, "--", ...historyPaths]);
 } else if (process.env.GITHUB_BASE_REF) {
   git(["fetch", "--no-tags", "--quiet", "origin", process.env.GITHUB_BASE_REF]);
-  diffs.push(["diff", fullContext, `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...paths]);
+  diffs.push(["diff", "--find-renames", fullContext, `origin/${process.env.GITHUB_BASE_REF}...HEAD`, "--", ...historyPaths]);
 } else if (hasCommit("HEAD^")) {
-  diffs.push(["diff", fullContext, "HEAD^", "HEAD", "--", ...paths]);
+  diffs.push(["diff", "--find-renames", fullContext, "HEAD^", "HEAD", "--", ...historyPaths]);
 }
 
-diffs.push(["diff", fullContext, "--", ...paths]);
-diffs.push(["diff", "--cached", fullContext, "--", ...paths]);
+diffs.push(["diff", "--find-renames", fullContext, "--", ...historyPaths]);
+diffs.push(["diff", "--find-renames", "--cached", fullContext, "--", ...historyPaths]);
 
 const violations = [];
 
@@ -132,10 +136,10 @@ function checkAddedLine(path, line, code) {
   }
 }
 
-for (const args of diffs) {
+async function checkDiff(args, env = process.env) {
   // Release branches can have a large diff. Read every line without buffering
   // the whole patch in spawnSync or truncating the end of the check.
-  const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawn("git", args, { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-8_192); });
@@ -177,16 +181,22 @@ for (const args of diffs) {
   }
 }
 
-const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...paths]);
-for (const path of untracked.split("\0")) {
-  if (!path.endsWith(".rs") || testPath.test(path)) {
-    continue;
-  }
-  const text = readCheckedText(path);
-  if (text === null) continue;
-  const codeLine = rustCodeLines();
-  for (const line of text.split(/\r?\n/)) {
-    checkAddedLine(path, `+${line}`, codeLine(line));
+for (const args of diffs) await checkDiff(args);
+
+const untracked = git(["ls-files", "--others", "--exclude-standard", "-z", "--", ...paths])
+  .split("\0").filter(path => path.endsWith(".rs") && !testPath.test(path));
+if (untracked.length > 0) {
+  // An isolated index lets Git distinguish moved source from genuinely new code.
+  // Intent-to-add entries never change the user's index or stage their work.
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "relay-guardrail-index-"));
+  const env = { ...process.env, GIT_INDEX_FILE: join(temporaryRoot, "index") };
+  try {
+    git(["read-tree", hasCommit("HEAD") ? "HEAD" : "--empty"], env);
+    const untrackedRoots = paths.filter(root => untracked.some(path => path.startsWith(`${root}/`)));
+    git(["add", "--intent-to-add", "--", ...untrackedRoots], env);
+    await checkDiff(["diff", "--find-renames", "--diff-filter=AR", fullContext, "--", ...historyPaths], env);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
 }
 

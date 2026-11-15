@@ -194,11 +194,16 @@ fn prompt_affinity_orders_durable_mutations_without_holding_the_scheduler() {
 }
 
 #[test]
-fn prompt_affinity_orders_lazy_restoration_before_a_successful_rebalance() {
+fn prompt_affinity_orders_lazy_restoration_before_quota_based_owner_updates() {
+    assert_ordered_affinity_completion(1_000, "source-b", 200);
+    assert_ordered_affinity_completion(6_000, "source-a", 100);
+}
+
+fn assert_ordered_affinity_completion(owner_quota: u64, expected_owner: &str, bound_at_ms: u64) {
     let key = "cache:ordered-restore";
     let (store, entered, release) = blocking_store(key, BlockedOperation::Find);
     let runtime = prompt_runtime(store.clone());
-    for (candidate, quota) in [("source-a", 6_000), ("source-b", 9_000)] {
+    for (candidate, quota) in [("source-a", owner_quota), ("source-b", 9_000)] {
         assert!(runtime.update_candidate_availability_at(
             candidate,
             true,
@@ -282,14 +287,17 @@ fn prompt_affinity_orders_lazy_restoration_before_a_successful_rebalance() {
     );
     assert_eq!(
         runtime.lock_scheduler().prompt_affinity_snapshot(key, 200),
-        Some(("source-b".to_owned(), 200 + crate::PROMPT_AFFINITY_TTL_MS))
+        Some((
+            expected_owner.to_owned(),
+            bound_at_ms + crate::PROMPT_AFFINITY_TTL_MS
+        ))
     );
     assert_eq!(
         crate::poison::mutex(&store.bindings)
             .get(key)
             .unwrap()
             .candidate_id,
-        "source-b"
+        expected_owner
     );
 }
 

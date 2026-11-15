@@ -31,21 +31,21 @@ export function verificationSteps({ quick = false, base } = {}) {
   for (const name of ["agent-guardrails", "duplicate-code"]) {
     add(name, [`scripts/check/check-${name}.mjs`, ...(base ? [base] : [])]);
   }
-  add("Desktop UI tests", ["run", "test:unit"], "src", "desktop");
-  add("Desktop UI build and budgets", ["run", "build"], "src", "desktop");
-  add("Web preview tests", ["run", "test"], "web", "web");
-  add("Web preview build", ["run", "build"], "web", "web");
+  add("Desktop UI tests", ["run", "test:unit"], "desktop/frontend", "desktop");
+  add("Desktop UI build and budgets", ["run", "build"], "desktop/frontend", "desktop");
+  add("Web preview tests", ["run", "test"], "hosted/web", "web");
+  add("Web preview build", ["run", "build"], "hosted/web", "web");
   if (!quick) {
-    for (const manifest of ["crates/relay-core/Cargo.toml", "src-tauri/Cargo.toml"]) {
+    for (const manifest of ["crates/relay-core/Cargo.toml", "desktop/src-tauri/Cargo.toml"]) {
       cargo(`Rust formatting: ${manifest}`, ["fmt", "--manifest-path", manifest, "--all", "--", "--check"]);
       cargo(`Rust lint: ${manifest}`, ["clippy", "--manifest-path", manifest, "--all-targets", "--locked", "--", "-D", "warnings"]);
-      cargo(`Rust tests: ${manifest}`, ["test", "--manifest-path", manifest, "--locked", ...(manifest.startsWith("src-tauri/") ? ["--", "--test-threads=1"] : [])]);
+      cargo(`Rust tests: ${manifest}`, ["test", "--manifest-path", manifest, "--locked", ...(manifest.startsWith("desktop/src-tauri/") ? ["--", "--test-threads=1"] : [])]);
     }
-    add("Desktop browser tests", ["run", "test:e2e"], "src", "desktop");
-    add("Web browser tests", ["run", "test:e2e"], "web", "web");
-    add("Desktop dependency audit", ["audit"], "src", "desktop");
-    add("Web dependency audit", ["audit"], "web", "web");
-    for (const lockfile of ["crates/relay-core/Cargo.lock", "src-tauri/Cargo.lock"]) {
+    add("Desktop browser tests", ["run", "test:e2e"], "desktop/frontend", "desktop");
+    add("Web browser tests", ["run", "test:e2e"], "hosted/web", "web");
+    add("Desktop dependency audit", ["audit"], "desktop/frontend", "desktop");
+    add("Web dependency audit", ["audit"], "hosted/web", "web");
+    for (const lockfile of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock"]) {
       cargo(`Rust dependency audit: ${lockfile}`, ["audit", "--file", lockfile]);
     }
   }

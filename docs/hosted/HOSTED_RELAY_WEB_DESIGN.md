@@ -1,7 +1,7 @@
 # Hosted Relay Web Design
 
 **Design specification for future implementation.**
-Some screens already exist in the [web preview](../../web/README.md); its guide
+Some screens already exist in the [web preview](../../hosted/web/README.md); its guide
 describes what can run locally and which integrations are still pending.
 This document owns visuals, screen composition and interaction states.
 [Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns routes, permissions and data/money
@@ -60,7 +60,7 @@ Golos Text is served locally for the landing, customer/owner workspaces and entr
 screens with Cyrillic coverage and its SIL OFL license; no font-service requests
 are made. The shared mark, palette and type connect the surfaces; decorative
 traffic remains exclusive to the landing. Shared and surface-specific tokens live in
-`web/DESIGN.md` and the development-only Impeccable surface brief.
+`hosted/web/DESIGN.md` and the development-only Impeccable surface brief.
 The public landing omits demo/development labels; synthetic
 money and account data remain labelled inside the development cabinet. The frontend
 now exposes the customer `/app/*` shell and the separate owner `/admin/*` shell;

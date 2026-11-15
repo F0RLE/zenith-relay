@@ -3,7 +3,7 @@
 **Planned product contract.** Current Desktop contracts are in
 [PLANNING.md](../project/PLANNING.md); implementation order is in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.md#delivery-stages).
 
-The [web preview](../../web/README.md) implements the interface. Service,
+The [web preview](../../hosted/web/README.md) implements the interface. Service,
 authentication, accounting and operations are planned backend work.
 
 Navigation: [design gates](#specification-before-implementation) ·
@@ -90,13 +90,13 @@ and deployment unit with bounded workers. PostgreSQL owns durable hosted state;
 provider secrets use an encrypted vault with keys outside the database.
 
 Keep the source in the existing `zenith-relay` repository. The default landing page
-and customer cabinet are a separate `web/` application with their own build/tests
+and customer cabinet are a separate `hosted/web/` application with their own build/tests
 and optional deployment artifact; operators can instead connect their own site.
 See [application boundaries and deployment choice](#one-repository-and-deployment-choice).
 
 Reuse the existing protocol, routing, scheduler, and stream semantics. Do not
 fork the codec engine or scatter Hosted-mode conditions through Desktop.
-Use the planned `relay-hosted/` composition defined in the implementation map.
+Use the planned `hosted/server/` composition defined in the implementation map.
 The retired personal-server runtime is removed; Hosted is a separate implementation.
 
 ### First release and commercial model
@@ -355,7 +355,7 @@ reservation is not our durable financial admission contract.
 
 If an isolated non-visual source reuse is later proposed, identify its exact files/
 revision, dependencies and rights holders; review applicable licenses, retain
-notices, and handle it as third-party material under [CONTRIBUTING.md](../../CONTRIBUTING.md#license-and-contributor-agreement).
+notices, and handle it as third-party material under [CONTRIBUTING.md](../CONTRIBUTING.md#license-and-contributor-agreement).
 Do not describe it as newly authored/assigned Relay code. Upstream access and
 commercial permissions remain separate HD-01/HD-02/HD-09 launch decisions; an open
 source license or working connector does not close those decisions.
@@ -369,7 +369,7 @@ Implementation slices are tracked in the [Hosted roadmap](HOSTED_RELAY_ROADMAP.m
 
 ### Frontend application boundary
 
-Build the default Relay landing page and customer cabinet as the `web/` application
+Build the default Relay landing page and customer cabinet as the `hosted/web/` application
 inside the existing `zenith-relay` repository, against the Hosted API. Keep the
 Desktop `src/` application independent.
 Reuse transport-independent Relay formatting, i18n, accessible interaction and
@@ -405,7 +405,7 @@ Branding configuration customizes Relay's design.
 ### One repository and deployment choice
 
 Use one repository with independent applications: the existing Desktop/server/core
-areas and the planned `web/` customer frontend. Give `web/` its own package manifest,
+areas and the planned `hosted/web/` customer frontend. Give `hosted/web/` its own package manifest,
 development/build commands, tests and deployable static/container artifact. Separate
 builds and deployment do not require separate repositories. A normal backend build
 or installation must not require building or running the default website.
@@ -419,14 +419,14 @@ one change, without allowing frontend imports of backend business logic or secre
 | Owner | Responsibility | Must not own |
 | --- | --- | --- |
 | Backend/core modules in `zenith-relay` | Shared engine, Hosted backend, customer API/schema, identity, catalog, accounting and backend operations | Customer HTML/theme implementation or an obligation to run the default frontend |
-| Planned `zenith-relay/web/` application | Default landing page, customer cabinet, branding configuration, typed API client, web tests, separate build artifacts and frontend setup/contribution guides | Database access, wallet calculation, provider secrets, customer authentication verification or a second backend |
+| Planned `zenith-relay/hosted/web/` application | Default landing page, customer cabinet, branding configuration, typed API client, web tests, separate build artifacts and frontend setup/contribution guides | Database access, wallet calculation, provider secrets, customer authentication verification or a second backend |
 | Installation configuration | Chosen frontend, domains, branding, legal/support links, registered login/payment integrations and pinned compatible artifacts | Changes to shared authorization, money or request-execution rules |
 | Operator's custom website | Alternative customer presentation using the documented Hosted customer API | Direct access to the database, vault, operator management credentials or private engine interfaces |
 
 Offer two explicit deployment paths:
 
 1. **Default website:** install the backend and a pinned compatible web artifact
-   built from `web/`, configure the domain/branding and integrations, then use the
+   built from `hosted/web/`, configure the domain/branding and integrations, then use the
    included landing page and complete cabinet. A normal operator should not need to fork
    code, compile the frontend or customize server internals to get a usable site.
 2. **Custom website:** install the same backend without the default web artifact;
@@ -500,7 +500,7 @@ not an arbitrary API URL entered into an untrusted webpage.
 
 ### Community workflow and web acceptance
 
-Make `web/` a clear contribution area in the existing repository: app-specific
+Make `hosted/web/` a clear contribution area in the existing repository: app-specific
 README/quick start, local development with synthetic fixtures, configuration
 reference, compatibility information and tests. Reuse the repository's contribution,
 security-reporting and release policies.
@@ -524,7 +524,7 @@ the default website is accepted, demonstrate that:
 - Supported release pairs, incompatible-version errors, upgrades and frontend rollback
   are tested without rolling back database state or weakening backend policy.
 
-Add `web/` inside Relay with the [original Relay design](#original-relay-design).
+Develop `hosted/web/` inside Relay with the [original Relay design](#original-relay-design).
 Reuse only explicitly identified utilities/dependencies with their notices, not
 reference-project pages/assets. Review authored and reused source/assets, examples,
 build configuration and release artifacts for secrets, customer data and
@@ -585,7 +585,7 @@ The following are target browser routes, not currently implemented API endpoints
 | Connection and help | `/app/help` | Copyable base URL/model configuration with placeholder secrets, supported-client instructions, safe request-ID diagnostics and support. |
 
 This table owns the target browser route names used by H13/H14 in the roadmap.
-The current UI preview implements billing in `web/src/features/billing/`; API-key
+The current UI preview implements billing in `hosted/web/src/features/billing/`; API-key
 management and account settings remain future work, not unused placeholder pages.
 Browser route names do not rename the Hosted API's `/wallet` and `/account` resources.
 
@@ -1699,7 +1699,7 @@ Plan for single-host outages, maintenance windows and recovery.
 | Hosted application | Rust, Axum and Tokio; one modular backend with bounded workers | Own customer identity, management, admission, accounting and jobs. Keep Hosted composition separate from Desktop; do not make Desktop a required hop. |
 | Durable database | PostgreSQL | Authoritative identities, grants, tariffs, wallets, journal, reservations, payments, durable jobs and usage; never replace this authority with a cache. |
 | Rust database access | SQLx with PostgreSQL, Tokio and TLS support | Explicit SQL, bounded connection pools, transactions and append-only migrations. This is a new Hosted dependency, not an existing SQLite migration. |
-| Default customer website | React, TypeScript and Vite in `zenith-relay/web/` | Separately built/deployed, configurable landing page/cabinet in the same repository, using the public Hosted customer API; replaceable by an operator's own site. No Tauri or backend dependency in the browser. |
+| Default customer website | React, TypeScript and Vite in `zenith-relay/hosted/web/` | Separately built/deployed, configurable landing page/cabinet in the same repository, using the public Hosted customer API; replaceable by an operator's own site. No Tauri or backend dependency in the browser. |
 | Public edge | Caddy | HTTPS, compiled frontend assets and reverse proxy to registered API routes; qualify SSE, WebSocket, cancellation and reload behavior. |
 | Secrets | Relay's encrypted vault design | Protect upstream and identity-provider secrets; use versioned references and keep encryption/recovery keys outside PostgreSQL and images. No separate HashiCorp Vault service initially. |
 | Background processing | Bounded Tokio workers with PostgreSQL-backed job state | Renewal, payment reconciliation, settlement and retention; durable ownership and deduplication, not memory-only fire-and-forget jobs. |
@@ -2115,7 +2115,7 @@ executable DDL or a claim that all field-level decisions are already resolved.
 
 ### Target application and file ownership
 
-Choose `relay-hosted/` as a separate Rust crate in this repository, package/binary
+Choose `hosted/server/` as a separate Rust crate in this repository, package/binary
 `zenith-relay-hosted`. Desktop keeps its local SQLite/authentication contracts;
 it does not become a mode-switch container for customer money. Hosted calls
 `relay-core`, not Desktop, and does not copy the provider codec engine. This is one
@@ -2123,35 +2123,35 @@ modular backend, not a new service per module.
 
 | Planned path | Responsibility |
 | --- | --- |
-| `relay-hosted/Cargo.toml`, `src/lib.rs`, `src/main.rs` | Package, composition and CLI; independent existing crate builds |
-| `relay-hosted/src/app.rs`, `config.rs`, `http.rs`, `state.rs` | Startup/shutdown, validated config, registered routes and shared handles |
-| `relay-hosted/src/db.rs`, `db/`, `migrations/` | SQLx pool, transaction/context helpers, append-only migrations |
-| `relay-hosted/src/identity.rs`, `identity/` | Users/workspaces, identity linking, registration, recovery and suspension |
-| `relay-hosted/src/auth.rs`, `auth/` | Sessions, login attempts, WebAuthn, fresh verification, CSRF and Desktop pairing |
-| `relay-hosted/src/access.rs`, `access/` | Key verifiers, grants/limits and authenticated request context |
-| `relay-hosted/src/management.rs`, `management/` | Revisioned inventory/pool changes, safe projections, transfers and audit |
-| `relay-hosted/src/management/service.rs`, `management/readiness.rs` | Service-mode fencing, staged changes/closure and setup evidence; not a second admission or health authority |
-| `relay-hosted/src/catalog.rs`, `catalog/` | Customer projection over the core catalog and qualified routes |
-| `relay-hosted/src/accounting.rs`, `accounting/` | Exact money/tariffs, journal, wallet/hold projections and settlement |
-| `relay-hosted/src/payments.rs`, `payments/` | Merchant adapter, intents, events, refunds and reconciliation |
-| `relay-hosted/src/inference.rs`, `inference/` | Admission/reservation, core context, attempt observation and cancellation |
-| `relay-hosted/src/continuations.rs`, `continuations/` | Scoped checkpoints and optional encrypted payload lifecycle |
-| `relay-hosted/src/usage.rs`, `usage/` | Safe reports, aggregates, filters, details, diagnostic projections and bounded exports |
-| `relay-hosted/src/usage/diagnostics.rs`, `management/diagnostics.rs` | Shared diagnostic mapping/read projections and owner-only capture lifecycle; reuse domain evidence, no separate billing or inference engine |
-| `relay-hosted/src/notifications.rs`, `notifications/` | Domain outbox, own-user notices/preferences and optional qualified delivery; reuse durable jobs, never own money or identity verification |
-| `relay-hosted/src/vault.rs`, `jobs.rs`, `jobs/` | Versioned secret references, vault integration, durable bounded work and fencing |
-| `relay-hosted/openapi.yaml` | Dedicated Hosted schema |
-| `relay-hosted/tests/`, `tests/support/` | Real-PostgreSQL and synthetic integration/crash fixtures |
-| `relay-hosted/README.md`, `deploy/` | Future operator guide and pinned Compose/Caddy/monitoring/backup artifacts |
-| `web/package.json`, `web/src/`, `web/tests/`, `web/README.md` | Independent website build, typed client, UI/tests and frontend guide |
-| `web/src/api/`, `web/src/features/`, `web/src/locales/` | Transport boundary, feature UI and RU/EN copy; no database/vault access |
+| `hosted/server/Cargo.toml`, `src/lib.rs`, `src/main.rs` | Package, composition and CLI; independent existing crate builds |
+| `hosted/server/src/app.rs`, `config.rs`, `http.rs`, `state.rs` | Startup/shutdown, validated config, registered routes and shared handles |
+| `hosted/server/src/db.rs`, `db/`, `migrations/` | SQLx pool, transaction/context helpers, append-only migrations |
+| `hosted/server/src/identity.rs`, `identity/` | Users/workspaces, identity linking, registration, recovery and suspension |
+| `hosted/server/src/auth.rs`, `auth/` | Sessions, login attempts, WebAuthn, fresh verification, CSRF and Desktop pairing |
+| `hosted/server/src/access.rs`, `access/` | Key verifiers, grants/limits and authenticated request context |
+| `hosted/server/src/management.rs`, `management/` | Revisioned inventory/pool changes, safe projections, transfers and audit |
+| `hosted/server/src/management/service.rs`, `management/readiness.rs` | Service-mode fencing, staged changes/closure and setup evidence; not a second admission or health authority |
+| `hosted/server/src/catalog.rs`, `catalog/` | Customer projection over the core catalog and qualified routes |
+| `hosted/server/src/accounting.rs`, `accounting/` | Exact money/tariffs, journal, wallet/hold projections and settlement |
+| `hosted/server/src/payments.rs`, `payments/` | Merchant adapter, intents, events, refunds and reconciliation |
+| `hosted/server/src/inference.rs`, `inference/` | Admission/reservation, core context, attempt observation and cancellation |
+| `hosted/server/src/continuations.rs`, `continuations/` | Scoped checkpoints and optional encrypted payload lifecycle |
+| `hosted/server/src/usage.rs`, `usage/` | Safe reports, aggregates, filters, details, diagnostic projections and bounded exports |
+| `hosted/server/src/usage/diagnostics.rs`, `management/diagnostics.rs` | Shared diagnostic mapping/read projections and owner-only capture lifecycle; reuse domain evidence, no separate billing or inference engine |
+| `hosted/server/src/notifications.rs`, `notifications/` | Domain outbox, own-user notices/preferences and optional qualified delivery; reuse durable jobs, never own money or identity verification |
+| `hosted/server/src/vault.rs`, `jobs.rs`, `jobs/` | Versioned secret references, vault integration, durable bounded work and fencing |
+| `hosted/server/openapi.yaml` | Dedicated Hosted schema |
+| `hosted/server/tests/`, `tests/support/` | Real-PostgreSQL and synthetic integration/crash fixtures |
+| `hosted/server/README.md`, `hosted/deploy/` | Future operator guide and pinned Compose/Caddy/monitoring/backup artifacts |
+| `hosted/web/package.json`, `hosted/web/src/`, `hosted/web/tests/`, `hosted/web/README.md` | Independent website build, typed client, UI/tests and frontend guide |
+| `hosted/web/src/api/`, `hosted/web/src/features/`, `hosted/web/src/locales/` | Transport boundary, feature UI and RU/EN copy; no database/vault access |
 
 The customer cabinet and `/admin` may share a static artifact, never a session realm
 or authorization check. Rendering a hidden admin page is not access control.
 
 Existing reuse anchors: `crates/relay-core/src/gateway.rs`, `runtime.rs`, `protocol/`,
 `scheduler/`, `accounts/`, `sources/`, `pricing/`, `usage/`; Desktop reference flows:
-`src-tauri/src/local_pool/{state.rs,store/vault.rs,accounts/authority.rs,usage_writer.rs}`.
+`desktop/src-tauri/src/local_pool/{state.rs,store/vault.rs,accounts/authority.rs,usage_writer.rs}`.
 H01 identifies actual exported integration points and necessary narrow shared changes.
 These paths do not authorize copying local SQLite/auth assumptions into Hosted.
 Reuse/extract the vault primitive only after format/crash guarantees are checked;
@@ -2198,7 +2198,7 @@ pagination and pending-work scans. Default to `RESTRICT` for referenced financia
 or security evidence; explicit jobs own tombstone/anonymization. A user deletion
 must not cascade into journal/settlement deletion.
 
-Use ordered SQL files under `relay-hosted/migrations/`, beginning with
+Use ordered SQL files under `hosted/server/migrations/`, beginning with
 `0001_installation.sql`; H02 freezes the remaining descriptive names/order before
 the first migration is committed. Applied migrations are immutable. One controlled
 runner holds database-level migration exclusion. Separate runtime, migrator and
@@ -2459,7 +2459,7 @@ completion-rate denominators and filters use this mapping consistently.
 Reserve `/api/hosted/v1` for Hosted control/customer APIs. The existing supported
 inference protocol paths remain owned by `relay-core`; do not redirect them into a
 new control envelope or infer support for every `/v1/*` path. The Hosted schema is
-`relay-hosted/openapi.yaml`; it describes future Hosted interfaces, not Desktop routes.
+`hosted/server/openapi.yaml`; it describes future Hosted interfaces, not Desktop routes.
 
 The following are target route names. H02 fixes shared envelopes; each domain
 package must specify every request/response field, permission, limit, pagination,
@@ -2613,7 +2613,7 @@ the installation's normal diagnostics/storage ceiling or enable payload recordin
 PostgreSQL data lives in its private persistent volume, not under frontend assets.
 Application vault generations/manifests live in the protected data root; optional
 continuation payloads have a separate encrypted, bounded namespace. Secret material
-never lives in `web/`, images, backups of plaintext config or command-line arguments.
+never lives in `hosted/web/`, images, backups of plaintext config or command-line arguments.
 Rotating a secret creates a new reference/version before changing live consumers.
 Provider/login/payment secrets are delivered through the audited vault boundary,
 not copied into the public runtime configuration.

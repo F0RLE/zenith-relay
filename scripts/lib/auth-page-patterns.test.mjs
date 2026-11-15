@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import authSnapshot from "../../src-tauri/src/local_pool/client_auth_watchdog/auth_snapshot.cjs";
-import automaticLogin from "../../src-tauri/src/local_pool/commands/oauth/window/automatic_login.cjs";
+import authSnapshot from "../../desktop/src-tauri/src/local_pool/client_auth_watchdog/auth_snapshot.cjs";
+import automaticLogin from "../../desktop/src-tauri/src/local_pool/commands/oauth/window/automatic_login.cjs";
 
-const root = new URL("../../src-tauri/src/local_pool/", import.meta.url);
+const root = new URL("../../desktop/src-tauri/src/local_pool/", import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 const locales = ["en", "ru"].map((locale) => JSON.parse(read(`auth_page_patterns/${locale}.json`)));
 

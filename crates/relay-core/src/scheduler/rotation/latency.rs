@@ -44,6 +44,19 @@ pub(super) struct LatencyWindow {
 }
 
 impl LatencyWindow {
+    pub(super) fn has_sufficient_measurements(&self, now_ms: u64) -> bool {
+        self.samples
+            .iter()
+            .filter(|sample| {
+                sample.latency_ms.is_some()
+                    && sample.observed_at_ms <= now_ms
+                    && now_ms - sample.observed_at_ms <= WINDOW_MS
+            })
+            .take(MIN_MEASURED_SAMPLES)
+            .count()
+            == MIN_MEASURED_SAMPLES
+    }
+
     pub(super) fn observe(&mut self, latency_ms: Option<u64>, now_ms: u64) {
         // Bound storage by attempts, including successful sends with no TTFT.
         // Read-time filtering also handles clock rollback without fake freshness.

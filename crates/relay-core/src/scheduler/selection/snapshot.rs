@@ -283,11 +283,36 @@ impl PoolScheduler {
                 }
             })
             .collect::<Vec<_>>();
-        snapshots.sort_by_key(|snapshot| {
+        let automatic = self
+            .pool_routing
+            .as_ref()
+            .is_none_or(|policy| policy.mode.is_adaptive());
+        snapshots.sort_by_cached_key(|snapshot| {
+            let resources = snapshot.resource_headroom.as_ref();
+            let quota = resources
+                .and_then(|headroom| headroom.quota_remaining_basis_points)
+                .unwrap_or_default();
+            let credits = resources.map_or(0, |headroom| {
+                if headroom.provider_credits_unlimited {
+                    u64::MAX
+                } else {
+                    headroom.provider_credits_micro_units.unwrap_or_default()
+                }
+            });
             (
                 !snapshot.active_request_count.gt(&0),
                 !snapshot.available,
-                !snapshot.next_for_new_request,
+                snapshot.selection_rank.unwrap_or(usize::MAX),
+                if automatic {
+                    self.rotation
+                        .expiry_priority_key(&snapshot.candidate_id, now_ms)
+                        .unwrap_or(u64::MAX)
+                } else {
+                    0
+                },
+                if automatic { snapshot.in_flight } else { 0 },
+                std::cmp::Reverse(if automatic { quota } else { 0 }),
+                std::cmp::Reverse(if automatic && quota == 0 { credits } else { 0 }),
                 self.member_policy(&self.candidates[&snapshot.candidate_id])
                     .map_or(usize::MAX, |(rank, _)| rank),
                 snapshot.candidate_id.clone(),

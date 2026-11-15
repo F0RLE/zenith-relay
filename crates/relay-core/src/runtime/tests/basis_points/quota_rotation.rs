@@ -1,9 +1,11 @@
 use super::*;
 
 #[tokio::test]
-async fn bps_portable_tool_history_yields_to_fresh_quota_without_replaying_a_request() {
+async fn bps_portable_tool_history_preserves_quota_affinity_without_replay() {
     for stream in [false, true] {
-        for include_call in [true, false] {
+        for (include_call, owner_short) in
+            [(true, 2_000), (false, 2_000), (true, 1_000), (false, 1_000)]
+        {
             let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
             let runtime = Arc::new(super::retry_admission::pool_runtime(&server, 5, false).await);
             let now = crate::unix_time_ms();
@@ -12,7 +14,7 @@ async fn bps_portable_tool_history_yields_to_fresh_quota_without_replaying_a_req
                 (1, 4_200, 6_200),
                 (2, 3_000, 6_000),
                 (3, 2_700, 7_300),
-                (4, 2_000, 7_200),
+                (4, owner_short, 7_200),
             ] {
                 let window = |kind, remaining, minutes| crate::quota::QuotaWindow {
                     kind,
@@ -74,12 +76,12 @@ async fn bps_portable_tool_history_yields_to_fresh_quota_without_replaying_a_req
                 runtime
                     .response_affinity_candidate(&affinity, crate::unix_time_ms())
                     .as_deref(),
-                Some(if include_call {
+                Some(if include_call && owner_short <= 1_000 {
                     "synthetic-account-0"
                 } else {
                     "synthetic-account-4"
                 }),
-                "stream={stream}, paired={include_call}"
+                "stream={stream}, paired={include_call}, owner_short={owner_short}"
             );
             assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 1);
             task.abort();

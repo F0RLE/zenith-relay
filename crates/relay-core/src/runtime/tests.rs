@@ -21,6 +21,7 @@ mod listing;
 mod member_quota;
 mod native_protocol;
 mod policy;
+mod rotation_debug;
 mod usage_observations;
 
 fn usage_revision(runtime: &GatewayRuntime) -> crate::accounts::TokenDispatchRevision {

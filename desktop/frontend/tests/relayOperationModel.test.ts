@@ -1,0 +1,328 @@
+import { describe, expect, test } from "bun:test";
+import type { FeedbackError } from "../src/features/relay/state/feedback";
+import { captureOperationResult, OPERATION_CANCELLED, runRelayOperation } from "../src/features/relay/state/relayOperationModel";
+
+const resolvedError = (cause: unknown) => ({
+  key: "errors.general",
+  error: { code: "general", message: String(cause) } satisfies FeedbackError,
+});
+
+describe("relay operation policy", () => {
+  test("a cancelled action settles without success, errors, follow-up work or reads", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("cancelled"); return OPERATION_CANCELLED; },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.accountExportDownloaded",
+      options: { afterWork: async () => { events.push("follow-up"); }, backgroundRefresh: true },
+      resolveError: (cause) => { events.push("error"); return resolvedError(cause); },
+      setFeedback: () => { events.push("feedback"); },
+      settle: () => { events.push("settled"); },
+    });
+    await Promise.resolve();
+    expect(result).toBeFalse();
+    expect(events).toEqual(["cancelled", "settled"]);
+  });
+
+  test("capturing a result preserves cancellation instead of reporting success", async () => {
+    const events: string[] = [];
+    const result = await captureOperationResult((work) => runRelayOperation({
+      work,
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      resolveError: resolvedError,
+      setFeedback: () => { events.push("feedback"); },
+      settle: () => { events.push("settled"); },
+    }), async () => OPERATION_CANCELLED);
+    expect(result).toEqual({ ok: false, value: OPERATION_CANCELLED });
+    expect(events).toEqual(["settled"]);
+  });
+
+  test("ordinary empty and false results are not treated as cancellation", async () => {
+    for (const value of [undefined, null, false, 0, ""]) {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => value,
+        refresh: async () => { events.push("refresh"); },
+        isCurrent: () => true,
+        resolveError: resolvedError,
+        setFeedback: () => { events.push("feedback"); },
+        settle: () => { events.push("settled"); },
+      });
+      expect(result).toBeTrue();
+      expect(events).toEqual(["refresh", "settled"]);
+    }
+  });
+
+  for (const fails of [false, true]) {
+    test(`standalone launch ${fails ? "failure" : "success"} never depends on a runtime refresh`, async () => {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => {
+          events.push("launch");
+          if (fails) throw new Error("application not found");
+        },
+        refresh: async () => {
+          events.push("refresh");
+          throw new Error("profile changed outside Relay");
+        },
+        isCurrent: () => true,
+        successKey: "feedback.launched",
+        options: { skipRefresh: true, backgroundRefresh: true },
+        resolveError: resolvedError,
+        setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+        settle: () => events.push("settled"),
+      });
+      await Promise.resolve();
+      expect(result).toBe(!fails);
+      expect(events).toEqual(["launch", fails ? "error:errors.general" : "success:feedback.launched", "settled"]);
+    });
+  }
+
+  test("runs work, refreshes current state, and publishes success in order", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("work"); },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.saved",
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    expect(events).toEqual(["work", "refresh", "success:feedback.saved", "settled"]);
+  });
+
+  test("does not refresh or settle an operation superseded while work is running", async () => {
+    let current = true;
+    let refreshes = 0;
+    let settlements = 0;
+    let launches = 0;
+    const result = await runRelayOperation({
+      work: async () => { current = false; },
+      refresh: async () => { refreshes += 1; },
+      isCurrent: () => current,
+      options: { afterWork: async () => { launches += 1; } },
+      resolveError: resolvedError,
+      setFeedback: () => { throw new Error("stale feedback"); },
+      settle: () => { settlements += 1; },
+    });
+    expect(result).toBeFalse();
+    expect(refreshes).toBe(0);
+    expect(settlements).toBe(0);
+    expect(launches).toBe(0);
+  });
+
+  test("launches an attached client before refreshing and settles the workflow once", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("attach"); },
+      options: { afterWork: async () => { events.push("launch"); } },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.launched",
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    expect(events).toEqual(["attach", "launch", "refresh", "success:feedback.launched", "settled"]);
+  });
+
+  test("reports a failed launch without publishing connection success or refreshing", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("attach"); },
+      options: { afterWork: async () => { throw new Error("launch failed"); } },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      successKey: "feedback.launched",
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeFalse();
+    expect(events).toEqual(["attach", "error:errors.general", "settled"]);
+  });
+
+  test("keeps a handled error local when global reporting is disabled", async () => {
+    const local: Array<{ code: string; key: string }> = [];
+    let globalFeedback = 0;
+    let settlements = 0;
+    const result = await runRelayOperation({
+      work: async () => { throw new Error("upstream failed"); },
+      refresh: async () => { throw new Error("refresh should not run"); },
+      isCurrent: () => true,
+      options: {
+        reportError: false,
+        onError: (error, key) => local.push({ code: error.code, key }),
+      },
+      resolveError: resolvedError,
+      setFeedback: () => { globalFeedback += 1; },
+      settle: () => { settlements += 1; },
+    });
+    expect(result).toBeFalse();
+    expect(local).toEqual([{ code: "general", key: "errors.general" }]);
+    expect(globalFeedback).toBe(0);
+    expect(settlements).toBe(1);
+  });
+
+  test("reports refresh failures through the same sanitized error path", async () => {
+    const feedback: Array<{ kind: string; key: string; message?: string }> = [];
+    const result = await runRelayOperation({
+      work: async () => undefined,
+      refresh: async () => { throw new Error("refresh failed"); },
+      isCurrent: () => true,
+      resolveError: resolvedError,
+      setFeedback: (item) => feedback.push({ kind: item.kind, key: item.key, message: item.error?.message }),
+      settle: () => undefined,
+    });
+    expect(result).toBeFalse();
+    expect(feedback).toEqual([{ kind: "error", key: "errors.general", message: "Error: refresh failed" }]);
+  });
+
+  for (const refreshFails of [false, true]) {
+    test(`a partial failure refreshes committed state and retains the operation error when refreshFails=${refreshFails}`, async () => {
+      const events: string[] = [];
+      const result = await runRelayOperation({
+        work: async () => { throw new Error("source refresh failed"); },
+        refresh: async () => {
+          events.push("refresh");
+          if (refreshFails) throw new Error("snapshot failed");
+        },
+        isCurrent: () => true,
+        options: { backgroundRefresh: true, refreshOnError: true },
+        resolveError: resolvedError,
+        setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.error?.message}`),
+        settle: () => events.push("settled"),
+      });
+      expect(result).toBeFalse();
+      expect(events).toEqual(["refresh", "error:Error: source refresh failed", "settled"]);
+    });
+  }
+
+  test("a superseded partial failure cannot refresh or publish feedback", async () => {
+    let current = true;
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { current = false; throw new Error("source refresh failed"); },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => current,
+      options: { refreshOnError: true },
+      resolveError: resolvedError,
+      setFeedback: () => events.push("feedback"),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeFalse();
+    expect(events).toEqual([]);
+  });
+
+  test("skipRefresh overrides a requested failure refresh", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { throw new Error("source refresh failed"); },
+      refresh: async () => { events.push("refresh"); },
+      isCurrent: () => true,
+      options: { refreshOnError: true, skipRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: () => events.push("feedback"),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeFalse();
+    expect(events).toEqual(["feedback", "settled"]);
+  });
+
+  test("keeps a returned value when the operation fails after work", async () => {
+    const saved = await captureOperationResult(async (work) => {
+      await work();
+      return true;
+    }, async () => "saved");
+    expect(saved).toEqual({ ok: true, value: "saved" });
+
+    const empty = await captureOperationResult(async (work) => {
+      await work();
+      return true;
+    }, async () => null);
+    expect(empty).toEqual({ ok: true, value: null });
+
+    const kept = await captureOperationResult(async (work) => {
+      await work();
+      return false;
+    }, async () => "saved");
+    expect(kept).toEqual({ ok: false, value: "saved" });
+
+    const missed = await captureOperationResult(async (work) => {
+      try {
+        await work();
+      } catch {
+        return false;
+      }
+      return true;
+    }, async () => {
+      throw new Error("parse");
+    });
+    expect(missed).toEqual({ ok: false, value: undefined });
+  });
+
+  test("unlocks a background refresh before the snapshot returns", async () => {
+    const events: string[] = [];
+    let releaseRefresh = () => undefined;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const result = await runRelayOperation({
+      work: async () => { events.push("work"); },
+      refresh: async () => {
+        events.push("refresh-start");
+        await refreshGate;
+        events.push("refresh-end");
+      },
+      isCurrent: () => true,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start"]);
+    releaseRefresh();
+    await refreshGate;
+    await Promise.resolve();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "refresh-start", "refresh-end"]);
+  });
+
+  test("does not start a queued background refresh after ownership changes", async () => {
+    let current = true;
+    let refreshes = 0;
+    const result = await runRelayOperation({
+      work: async () => undefined,
+      refresh: async () => { refreshes += 1; },
+      isCurrent: () => current,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: () => { queueMicrotask(() => { current = false; }); },
+      settle: () => undefined,
+    });
+    expect(result).toBeTrue();
+    expect(refreshes).toBe(0);
+  });
+
+  test("reports a background refresh failure without treating the command as unsent", async () => {
+    const events: string[] = [];
+    const result = await runRelayOperation({
+      work: async () => { events.push("work"); },
+      refresh: async () => { throw new Error("refresh failed"); },
+      isCurrent: () => true,
+      successKey: "feedback.saved",
+      options: { backgroundRefresh: true },
+      resolveError: resolvedError,
+      setFeedback: (feedback) => events.push(`${feedback.kind}:${feedback.key}`),
+      settle: () => events.push("settled"),
+    });
+    expect(result).toBeTrue();
+    for (let step = 0; step < 4; step += 1) await Promise.resolve();
+    expect(events).toEqual(["work", "success:feedback.saved", "settled", "error:errors.general"]);
+  });
+});

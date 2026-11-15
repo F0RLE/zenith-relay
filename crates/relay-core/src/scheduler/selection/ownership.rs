@@ -243,7 +243,7 @@ impl PoolScheduler {
         tried: &HashSet<String>,
         now_ms: u64,
     ) -> bool {
-        if self.rotation.mode() != RotationMode::Automatic {
+        if !self.rotation.mode().is_adaptive() {
             return false;
         }
         let Some(owner_id) = self

@@ -90,6 +90,7 @@ impl QuotaSnapshot {
     }
 
     fn copy_provider_credits(&mut self, incoming: &Self) {
+        self.reset_credits_available = incoming.reset_credits_available;
         self.available_credits_micro_units = incoming.available_credits_micro_units;
         self.provider_credits_available = incoming.provider_credits_available;
         self.provider_credits_unlimited = incoming.provider_credits_unlimited;

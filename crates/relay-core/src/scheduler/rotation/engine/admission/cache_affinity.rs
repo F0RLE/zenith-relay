@@ -26,6 +26,9 @@ impl RotationEngine {
             best_quota_remaining_basis_points: None,
             best_provider_credits_micro_units: None,
             best_provider_credits_unlimited: false,
+            quota_low_water_basis_points: preferred
+                .filter(|id| self.is_primary_soft_preference(request, id))
+                .map(|_| CACHE_AFFINITY_QUOTA_LOW_WATER_BASIS_POINTS),
             quota_switch_margin_basis_points: preferred
                 .map_or(QUOTA_SWITCH_MARGIN_BASIS_POINTS, |id| {
                     self.quota_switch_margin(request, id)
@@ -40,7 +43,7 @@ impl RotationEngine {
             CacheAffinityReason::Retained
         } else if request.owner.is_some() {
             CacheAffinityReason::ResponseOwner
-        } else if self.mode != RotationMode::Automatic {
+        } else if !self.mode.is_adaptive() {
             CacheAffinityReason::RoutingPolicy
         } else {
             match self.candidate_availability(request, preferred, now_ms) {
@@ -86,12 +89,7 @@ impl RotationEngine {
         if !load_group.iter().any(|candidate| candidate.id == preferred) {
             return CacheAffinityReason::ParallelLoad;
         }
-        let resources = self.resource_group(
-            load_group,
-            request,
-            now_ms,
-            Self::independent_request(&ready, request),
-        );
+        let resources = self.resource_group(load_group, request, now_ms);
         if !resources.iter().any(|candidate| candidate.id == preferred) {
             return if diagnostics.best_quota_remaining_basis_points.is_some() {
                 CacheAffinityReason::QuotaHeadroom

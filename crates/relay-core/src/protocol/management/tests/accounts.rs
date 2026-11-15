@@ -9,7 +9,7 @@ fn context_windows_keep_native_account_evidence_separate_from_bps_and_api() {
         crate::providers::chatgpt::OAuthClientKind::Codex,
         crate::providers::chatgpt::OAuthClientKind::ExcelBps,
     ] {
-        account.oauth_client_kind = kind;
+        account.oauth_client_kind = Some(kind);
         apply_pool_model_configuration(
             &mut models,
             &[],

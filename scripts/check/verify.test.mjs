@@ -13,29 +13,29 @@ function completedChild(result = { status: 0 }) {
 describe("repository verification command", () => {
   test("root and frontend commands use the same repository runner", () => {
     const root = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
-    const frontend = JSON.parse(readFileSync(new URL("../../src/package.json", import.meta.url), "utf8"));
+    const frontend = JSON.parse(readFileSync(new URL("../../desktop/frontend/package.json", import.meta.url), "utf8"));
     expect(root.scripts.verify).toBe("bun scripts/check/verify.mjs");
-    expect(frontend.scripts.verify).toBe("bun ../scripts/check/verify.mjs");
+    expect(frontend.scripts.verify).toBe("bun ../../scripts/check/verify.mjs");
     const workflow = readFileSync(new URL("../../.github/workflows/build.yml", import.meta.url), "utf8");
     // CI owns separate browser/native/audit jobs; it must not recurse into all of them.
     expect(workflow).not.toMatch(/bun run verify/);
     expect(workflow).toContain("bun run test:unit");
-    expect(workflow).toContain("bun ../scripts/build/cargo.mjs test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1");
+    expect(workflow).toContain("bun ../../scripts/build/cargo.mjs test --manifest-path desktop/src-tauri/Cargo.toml --locked -- --test-threads=1");
   });
 
   test("full checks include both Rust packages, browsers and all dependency audits", () => {
     const steps = verificationSteps();
-    for (const manifest of ["crates/relay-core/Cargo.toml", "src-tauri/Cargo.toml"]) {
+    for (const manifest of ["crates/relay-core/Cargo.toml", "desktop/src-tauri/Cargo.toml"]) {
       for (const command of ["fmt", "clippy", "test"]) {
         expect(steps.some(({ args }) => args[1] === command && args.includes(manifest))).toBe(true);
       }
       expect(steps.some(({ args }) => args[1] === "audit" && args.includes(manifest.replace("Cargo.toml", "Cargo.lock")))).toBe(true);
     }
-    for (const directory of ["src", "web"]) {
+    for (const directory of ["desktop/frontend", "hosted/web"]) {
       expect(steps.some((step) => step.directory === directory && step.args.includes("test:e2e"))).toBe(true);
       expect(steps.some((step) => step.directory === directory && step.args[0] === "audit")).toBe(true);
     }
-    const desktop = steps.find(({ args }) => args[1] === "test" && args.includes("src-tauri/Cargo.toml"));
+    const desktop = steps.find(({ args }) => args[1] === "test" && args.includes("desktop/src-tauri/Cargo.toml"));
     expect(desktop.args).toContain("--test-threads=1");
   });
 
@@ -66,7 +66,7 @@ describe("repository verification command", () => {
     expect(code).toBe(0);
     expect(calls).toHaveLength(8);
     expect(calls[0].options.cwd).toBe(root);
-    expect(calls.at(-1).options.cwd).toBe(join(root, "web"));
+    expect(calls.at(-1).options.cwd).toBe(join(root, "hosted/web"));
     expect(calls.every(({ command, options }) => command === process.execPath && options.shell === false && options.windowsHide)).toBe(true);
   });
 
@@ -134,7 +134,7 @@ describe("repository verification command", () => {
   test("native commands stay in one lane and each frontend builds before its browser suite", () => {
     const steps = verificationSteps();
     expect(steps.filter(({ args }) => args.includes("scripts/build/cargo.mjs")).every(({ lane }) => lane === "rust")).toBe(true);
-    for (const [directory, lane] of [["src", "desktop"], ["web", "web"]]) {
+    for (const [directory, lane] of [["desktop/frontend", "desktop"], ["hosted/web", "web"]]) {
       const frontend = steps.filter((step) => step.directory === directory);
       expect(frontend.every((step) => step.lane === lane)).toBe(true);
       expect(frontend.findIndex(({ args }) => args.includes("build"))).toBeLessThan(frontend.findIndex(({ args }) => args.includes("test:e2e")));

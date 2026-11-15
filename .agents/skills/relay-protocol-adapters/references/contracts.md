@@ -266,7 +266,7 @@ and conversion to Responses, Chat and Gemini. It retains model/effort and one us
 generation. The observer buffers the synthetic SSE reply
 and stubs token-count calls, so it establishes neither timing nor token-count
 endpoint behavior. Run them with the intended installed executable as
-described in [CONTRIBUTING.md](../../../../CONTRIBUTING.md#verification).
+described in [CONTRIBUTING.md](../../../../docs/CONTRIBUTING.md#verification).
 The complete synthetic MCP cycle has also passed with installed 2.1.308 and
 2.1.309 through all four upstream protocols. Messages, Responses and Chat use
 those supported Max/XHigh cases; Gemini uses an independently declared High

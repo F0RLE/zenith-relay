@@ -195,10 +195,14 @@ fn version_two_migration_keeps_effective_manual_behavior_and_saved_controls() {
     for mode in [
         PoolRoutingMode::Failover,
         PoolRoutingMode::WeightedRoundRobin,
+        PoolRoutingMode::SubscriptionExpiry,
     ] {
         let mut current = policy();
         current.mode = mode;
         assert!(current.validate_activation().is_ok());
+        let serialized = serde_json::to_string(&current).unwrap();
+        let decoded: PoolRoutingPolicy = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded, current);
         current.version = 2;
         assert!(current.validate().is_err());
         current.upgrade_legacy_format();

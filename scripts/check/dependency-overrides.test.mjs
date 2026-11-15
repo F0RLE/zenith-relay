@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const readToml = (path) => Bun.TOML.parse(readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"));
-const desktop = readToml("src-tauri/Cargo.toml");
-const packages = readToml("src-tauri/Cargo.lock").package;
+const desktop = readToml("desktop/src-tauri/Cargo.toml");
+const packages = readToml("desktop/src-tauri/Cargo.lock").package;
 
 test("Git dependencies use immutable, credential-free revisions matched by the lockfile", () => {
   for (const pkg of packages.filter((pkg) => pkg.source?.startsWith("git+"))) {

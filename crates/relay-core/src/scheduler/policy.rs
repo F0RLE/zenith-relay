@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod edits;
+pub use edits::{PoolRoutingEdit, RotationPreset};
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolRoutingMode {
@@ -9,11 +12,18 @@ pub enum PoolRoutingMode {
     Smart,
     #[default]
     Automatic,
+    SubscriptionExpiry,
     #[serde(alias = "in_order")]
     RoundRobin,
     /// Opt into saved request shares without changing equal-cycling imports.
     WeightedRoundRobin,
     Failover,
+}
+
+impl PoolRoutingMode {
+    pub fn is_adaptive(self) -> bool {
+        matches!(self, Self::Automatic | Self::SubscriptionExpiry)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -111,7 +121,9 @@ impl PoolRoutingPolicy {
             || (self.version < 3
                 && matches!(
                     self.mode,
-                    PoolRoutingMode::WeightedRoundRobin | PoolRoutingMode::Failover
+                    PoolRoutingMode::WeightedRoundRobin
+                        | PoolRoutingMode::Failover
+                        | PoolRoutingMode::SubscriptionExpiry
                 ))
         {
             return Err("unsupported pool routing policy version");

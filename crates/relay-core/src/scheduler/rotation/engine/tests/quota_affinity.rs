@@ -9,10 +9,47 @@ fn quota_candidate(id: &str, remaining: u64) -> RotationCandidate {
 }
 
 #[test]
-fn warm_quota_owner_survives_five_points_but_yields_at_ten() {
-    for (remaining, expected) in [(3_500, "owner"), (3_999, "owner"), (4_000, "other")] {
+fn healthy_warm_owner_keeps_cache_despite_a_larger_quota_gap() {
+    for (owner_remaining, other_remaining) in [
+        (5_600, 7_000),
+        (4_600, 8_000),
+        (4_600, 6_400),
+        (1_001, 10_000),
+    ] {
         let engine = engine_with([
-            quota_candidate("owner", 3_000),
+            quota_candidate("owner", owner_remaining),
+            quota_candidate("other", other_remaining),
+        ]);
+        let warm = preferred_request(1, "owner");
+        let selected = engine.select(&warm, 100).unwrap();
+        assert_eq!(selected.candidate_id, "owner");
+        assert!(!engine.has_material_resource_lead("other", "owner", 100));
+        assert_eq!(
+            engine
+                .cache_affinity_diagnostics(&warm, Some("owner"), &selected.candidate_id, 100)
+                .unwrap()
+                .reason,
+            CacheAffinityReason::Retained
+        );
+        assert_eq!(
+            engine.select(&request(2), 100).unwrap().candidate_id,
+            "other",
+            "independent work still uses the larger available quota"
+        );
+    }
+}
+
+#[test]
+fn low_quota_warm_owner_yields_only_at_a_ten_point_lead() {
+    for (owner_remaining, remaining, expected) in [
+        (1_000, 1_500, "owner"),
+        (1_000, 1_999, "owner"),
+        (1_000, 2_000, "other"),
+        (1, 1_000, "owner"),
+        (1, 1_001, "other"),
+    ] {
+        let engine = engine_with([
+            quota_candidate("owner", owner_remaining),
             quota_candidate("other", remaining),
         ]);
         let request = preferred_request(1, "owner");
@@ -64,6 +101,7 @@ fn wider_quota_band_applies_only_to_the_primary_preference() {
             .cache_affinity_diagnostics(&independent, None, &selected.candidate_id, 100)
             .unwrap();
         assert_eq!(diagnostics.quota_switch_margin_basis_points, 500);
+        assert_eq!(diagnostics.quota_low_water_basis_points, None);
     }
 }
 

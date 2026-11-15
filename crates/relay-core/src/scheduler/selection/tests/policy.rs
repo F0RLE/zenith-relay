@@ -303,19 +303,25 @@ fn smart_does_not_keep_preferring_quota_that_aged_without_a_refresh() {
 }
 
 #[test]
-fn automatic_quota_outranks_prompt_cache_affinity() {
-    let mut scheduler = mixed(PoolRoutingMode::Automatic);
-    for (id, remaining) in [("account", 10_000), ("api-a", 8_000), ("api-b", 6_000)] {
-        let member = scheduler.candidates.get_mut(id).unwrap();
-        member.quota = CandidateQuota::Available(remaining);
-        member.quota_updated_at_ms = Some(100);
-    }
-    scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
-    for _ in 0..12 {
-        assert_eq!(
-            rotation::dispatch(&mut scheduler, 100, Some("cache:prompt")),
-            "account"
-        );
+fn automatic_quota_rebalances_prompt_cache_only_at_low_water() {
+    for (warm_remaining, expected) in [(6_000, "api-b"), (1_001, "api-b"), (1_000, "account")] {
+        let mut scheduler = mixed(PoolRoutingMode::Automatic);
+        for (id, remaining) in [
+            ("account", 10_000),
+            ("api-a", 8_000),
+            ("api-b", warm_remaining),
+        ] {
+            let member = scheduler.candidates.get_mut(id).unwrap();
+            member.quota = CandidateQuota::Available(remaining);
+            member.quota_updated_at_ms = Some(100);
+        }
+        scheduler.bind_prompt_affinity("cache:prompt", "api-b", 100);
+        for _ in 0..12 {
+            assert_eq!(
+                rotation::dispatch(&mut scheduler, 100, Some("cache:prompt")),
+                expected
+            );
+        }
     }
 }
 

@@ -4,6 +4,7 @@ mod affinity;
 mod automatic;
 mod cache_owner;
 mod capacity;
+mod display_order;
 mod live_order;
 mod policy;
 mod preview;
@@ -11,6 +12,7 @@ mod provider_backoff;
 mod rate_limits;
 mod recovery;
 mod rotation;
+mod rotation_debug;
 mod warm_fallback;
 
 #[test]
@@ -19,6 +21,7 @@ fn spending_evidence_is_account_scoped_and_cannot_survive_removal() {
     scheduler.upsert(oauth_candidate("account"));
     scheduler.upsert(candidate("source"));
     let deadline = crate::quota::QuotaSpendDeadline {
+        reset_credits: None,
         expires_at_ms: 5_000,
         observed_at_ms: 100,
         valid_until_ms: 1_000,

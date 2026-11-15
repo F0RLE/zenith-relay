@@ -10,7 +10,7 @@ Qualify the complete cycle: text, tool call, tool result, then the next
 assistant response.
 
 Follow the official provider contract workflow in
-[CONTRIBUTING.md](../../../CONTRIBUTING.md#api-and-protocol-references).
+[CONTRIBUTING.md](../../../docs/CONTRIBUTING.md#api-and-protocol-references).
 Use the affected [PLANNING.md](../../../docs/project/PLANNING.md) contract;
 consult [ROADMAP.md](../../../docs/project/ROADMAP.md) when the task concerns
 unfinished capability or acceptance, not as a prerequisite for every fix.

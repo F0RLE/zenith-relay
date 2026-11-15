@@ -18,7 +18,7 @@ separates unfinished acceptance from implemented behavior.
 
 - For registration, callback, import, or reauthentication, combine this skill
   with [account connectors](../relay-account-connectors/SKILL.md). Start under
-  `src-tauri/src/local_pool/accounts/oauth/` and `commands/oauth/`.
+  `desktop/src-tauri/src/local_pool/accounts/oauth/` and `commands/oauth/`.
 - For renewal, admission, quota, or removal, use
   [pool lifecycle](../relay-account-pool-lifecycle/SKILL.md) and the existing
   credential authority, rotation checkpoints, and account fences.
@@ -93,7 +93,7 @@ permission grant. Keep findings in chat unless an existing contract needs updati
 ## Establish the result
 
 Use the affected owner's synthetic acceptance cases and
-[repository checks](../../../CONTRIBUTING.md#verification). Select cases for the
+[repository checks](../../../docs/CONTRIBUTING.md#verification). Select cases for the
 changed boundary: returning login and declined permission; rotation interruption
 and stale completion; or tool call/result/next-turn and failed-stream semantics.
 Do not run generation, change account state, or restart the installed Relay

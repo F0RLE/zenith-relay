@@ -23,6 +23,18 @@ behavior only after evaluating the affected Relay contract.
 
 ## Additional inspected revisions
 
+The **2026-11-15 Sub2API comparison** checked releases through `v2.21.2` and
+the later `production` revision `e90811e27bc442763a496027f935a7bb1fb4396b`
+(LGPL-3.0), including `backend/internal/service/openai_disable_scheduling_429.go`,
+`backend/internal/service/openai_stream_read_error.go` and
+`backend/internal/pkg/httputil/body_budget.go`. Relay independently isolates
+malformed quota windows, retains typed HTTP/2 diagnostic reasons, and admits
+large HTTP reads before full buffering through its existing CPU-bounded jobs.
+It preserves its no-context-cap policy rather than importing the byte-budget
+configuration. Retry/rotation policy is unchanged. BPS account search, lossy
+history recovery and unsupported service tiers are not adopted. No Go code was
+copied; these local changes do not establish live-provider acceptance.
+
 The **2026-11-11 SIWC continuation review** inspected OpenAI Codex revision
 `340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac`,
 `codex-rs/protocol/src/models.rs::ResponseItem::Reasoning` (Apache-2.0).

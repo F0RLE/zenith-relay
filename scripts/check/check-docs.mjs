@@ -5,19 +5,19 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Resolve the Markdown parser from the frontend's locked dependencies.
-const requireFrontend = createRequire(new URL("../../src/package.json", import.meta.url));
+const requireFrontend = createRequire(new URL("../../desktop/frontend/package.json", import.meta.url));
 const { unified } = await import(pathToFileURL(requireFrontend.resolve("unified")).href);
 const { default: remarkParse } = await import(pathToFileURL(requireFrontend.resolve("remark-parse")).href);
 const parser = unified().use(remarkParse);
 const markdownFile = /\.(?:md|markdown)$/i;
 const requiredDocuments = [
-  "README.md", "AGENTS.md", "CONTRIBUTING.md", "LICENSE",
-  "CONTRIBUTOR_LICENSE_AGREEMENT.md", ".github/PULL_REQUEST_TEMPLATE.md", ".github/SECURITY.md",
+  "README.md", "AGENTS.md", "docs/CONTRIBUTING.md", "LICENSE",
+  "docs/CONTRIBUTOR_LICENSE_AGREEMENT.md", ".github/PULL_REQUEST_TEMPLATE.md", ".github/SECURITY.md",
   "docs/README.md", "docs/project/PLANNING.md", "docs/project/ROADMAP.md", "docs/project/BASIS_POINTS.md",
   "docs/hosted/HOSTED_RELAY_ARCHITECTURE.md", "docs/hosted/HOSTED_RELAY_ROADMAP.md",
   "docs/hosted/HOSTED_RELAY_WEB_DESIGN.md", "docs/help/en/README.md",
   "docs/help/ru/README.md", "docs/releases/CHANGELOG.md", "docs/releases/CHANGELOG.ru.md",
-  "catalog/README.md", "web/README.md",
+  "crates/relay-core/catalog/README.md", "hosted/web/README.md",
 ];
 
 function plainText(node) {

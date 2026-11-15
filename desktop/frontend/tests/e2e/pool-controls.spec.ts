@@ -1,0 +1,194 @@
+import { expect, test, type Page } from "../bun-playwright";
+import type { RuntimeSnapshot } from "../../src/features/relay/api/types";
+import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+
+async function expectPanelFits(page: Page) {
+  const panel = page.locator(".pool-controls");
+  expect(await panel.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const selectors = ".pool-priority-label, .pool-speed-control, .pool-control-group, .pool-current-route, .pool-active-models, .pool-summary > div";
+    return Array.from(element.querySelectorAll<HTMLElement>(selectors)).flatMap((item) => {
+      const rect = item.getBoundingClientRect();
+      const fits = rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
+        && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1
+        && (item.scrollWidth <= item.clientWidth + 1
+          || (getComputedStyle(item).textOverflow === "ellipsis" && getComputedStyle(item).overflowX === "hidden"));
+      return fits ? [] : [{ selector: item.className, text: item.textContent, width: item.clientWidth, scrollWidth: item.scrollWidth, left: rect.left, right: rect.right }];
+    }).concat(bounds.left >= 0 && bounds.right <= innerWidth ? [] : [{ selector: "panel", text: null, width: element.clientWidth, scrollWidth: element.scrollWidth, left: bounds.left, right: bounds.right }]);
+  })).toEqual([]);
+  expect(await panel.locator(".pool-runtime-strip, .pool-summary").evaluateAll((rows) => rows.every((row) => {
+    const children = Array.from(row.children).map((child) => child.getBoundingClientRect());
+    return children.every((a, index) => children.slice(index + 1).every((b) =>
+      a.right <= b.left + 1 || b.right <= a.left + 1 || a.bottom <= b.top + 1 || b.bottom <= a.top + 1,
+    ));
+  }))).toBe(true);
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [1160, 840, 390, 360]) {
+    test(`pool controls stay readable in ${theme} at ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 844 });
+      await installTauriMock(page, { mode: "local", locale: "ru", theme, populated: true, accountCount: 3, providerCredits: 125.5, basisPointsAvailable: true });
+      await page.goto("/");
+      await page.getByRole("button", { name: "Пул", exact: true }).click();
+      const panel = page.getByRole("group", { name: "Распределение запросов" });
+      await expect(panel.getByRole("heading", { name: "Распределение запросов" })).toBeVisible();
+      await expect(panel.locator(".pool-current-route")).toContainText("Работает сейчас: Personal Plus");
+      await expect(panel).not.toContainText("Следующий кандидат");
+      await expect(page.locator(".pool-next-route, .pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
+      await expect(panel.locator("[data-active-models]")).toHaveAttribute("data-active-request-count", "1");
+      await expect(panel.locator(".pool-summary > div")).toHaveCount(5);
+      await expect(panel.locator('[data-tone="error"] strong')).toHaveText("1");
+      await expect(panel.getByRole("checkbox", { name: "Выбрать всех участников пула", exact: true })).toHaveCount(1);
+      await expect(panel).not.toContainText("Excel");
+      await expectPanelFits(page);
+      if (width === 1160) {
+        expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(168);
+      }
+      await panel.screenshot({ path: testInfo.outputPath("panel-standard.png"), animations: "disabled" });
+      await panel.getByRole("radio", { name: "Сверхбыстрая", exact: true }).click();
+      await expect(panel.getByRole("radio", { name: "Сверхбыстрая", exact: true })).toBeEnabled();
+      await page.mouse.click(1, 1);
+      await panel.screenshot({ path: testInfo.outputPath("panel.png"), animations: "disabled" });
+      await page.screenshot({ path: testInfo.outputPath("pool.png"), animations: "disabled" });
+    });
+  }
+}
+
+for (const mode of ["local"] as const) {
+  test(`pool controls truncate long active model names with full tooltips in ${mode} mode`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const model = `synthetic-model-${"extended".repeat(12)}`;
+    await installTauriMock(page, {
+      mode, locale: "en", populated: true, accountCount: 3,
+      activeModelCounts: [{ model, requestCount: 12 }, { model: "gpt-5.4", requestCount: 2 }],
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.locator(".pool-active-models")).toContainText(model);
+    await expect(page.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "14");
+    await expect(page.locator(".pool-active-models")).toHaveAttribute("data-relay-tooltip", new RegExp(model));
+    await expect(page.locator(".pool-active-models > span")).toHaveCSS("white-space", "nowrap");
+    await expectPanelFits(page);
+    await page.locator(".pool-controls").screenshot({ path: testInfo.outputPath("long-model.png") });
+  });
+}
+
+test("pool controls keep icon commands labelled and show quota refresh progress", async ({ page }, testInfo) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const panel = page.getByRole("group", { name: "Request distribution" });
+  await panel.getByRole("button", { name: "Hide account calculation" }).click();
+  await expect(panel.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
+  await panel.getByRole("button", { name: "Pool rotation settings" }).click();
+  await expect(page.getByRole("dialog", { name: "Pool rotation", exact: true })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.evaluate(() => {
+    const scope = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      __COMPLETE_POOL_REFRESH__: () => void;
+    };
+    const invoke = scope.__TAURI_INTERNALS__.invoke.bind(scope.__TAURI_INTERNALS__);
+    scope.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      if (command === "refresh_all_local_account_quotas") await new Promise<void>((resolve) => { scope.__COMPLETE_POOL_REFRESH__ = resolve; });
+      return invoke(command, args, options);
+    };
+  });
+  const refresh = panel.getByRole("button", { name: "Refresh", exact: true });
+  const listTop = (await page.locator(".pool-member-list").boundingBox())!.y;
+  await refresh.hover();
+  await expect(page.getByRole("tooltip", { name: "Refresh", exact: true })).toBeVisible();
+  await refresh.click();
+  await expect(refresh).toBeDisabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "true");
+  await panel.screenshot({ path: testInfo.outputPath("refreshing.png"), animations: "disabled" });
+  await page.evaluate(() => (window as unknown as { __COMPLETE_POOL_REFRESH__: () => void }).__COMPLETE_POOL_REFRESH__());
+  await expect(refresh).toBeEnabled();
+  await expect(refresh).toHaveAttribute("aria-busy", "false");
+  await expect(page.locator(".pool-routing-alert, .account-quota-report")).toHaveCount(0);
+  expect((await page.locator(".pool-member-list").boundingBox())!.y).toBeCloseTo(listTop, 0);
+});
+
+test("pool controls keep idle routes distinct from active requests", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const panel = page.getByRole("group", { name: "Request distribution" });
+  await expect(panel.locator(".pool-current-route")).toHaveAttribute("data-active", "false");
+  await expect(panel.locator(".pool-current-route")).toContainText("Last request: Personal Plus");
+  await expect(panel).not.toContainText("Next candidate");
+  await expect(page.locator(".pool-next-route, .pool-member-card[data-next], .pool-member-card.next")).toHaveCount(0);
+  await expect(panel.locator(".pool-active-models")).toBeHidden();
+});
+
+for (const width of [1160, 840, 390]) {
+  test(`pool activity does not move the toolbar or cards at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    await installTauriMock(page, { mode: "local", locale: "ru", theme: "dark", populated: true, accountCount: 3, usageActive: false });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    const panel = page.locator(".pool-controls");
+    const list = page.locator(".pool-member-list");
+    const baselinePanel = (await panel.boundingBox())!;
+    const baselineList = (await list.boundingBox())!;
+    const baselineActions = (await panel.locator(".pool-quota-actions").boundingBox())!;
+    let revision = 0;
+    const activity = (candidateId: string, count: number, model: string) => emitTauriEvent(page, "zenith-runtime-activity", {
+      revision: ++revision, candidateId, inFlight: count, activeRequestCount: count,
+      activeModels: count ? [{ model, requestCount: count }] : [],
+    });
+    const stableLayout = async () => {
+      expect((await panel.boundingBox())!.height).toBeCloseTo(baselinePanel.height, 0);
+      expect((await list.boundingBox())!.y).toBeCloseTo(baselineList.y, 0);
+      expect((await panel.locator(".pool-quota-actions").boundingBox())!.y).toBeCloseTo(baselineActions.y, 0);
+      await expectPanelFits(page);
+    };
+    await expect(panel.locator(".pool-active-models")).toBeHidden();
+    await activity("account_synthetic", 1, "gpt-6.1-sol");
+    await expect(panel.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "1");
+    await stableLayout();
+    await activity("account_synthetic_2", 2, `synthetic-${"long-model".repeat(20)}`);
+    await expect(panel.locator(".pool-active-models")).toHaveAttribute("data-active-request-count", "3");
+    await stableLayout();
+    await page.screenshot({ path: testInfo.outputPath("active-pool.png"), animations: "disabled" });
+    await activity("account_synthetic", 0, "gpt-6.1-sol");
+    await activity("account_synthetic_2", 0, "synthetic-model");
+    await expect(panel.locator(".pool-active-models")).toBeHidden();
+    await stableLayout();
+    await page.screenshot({ path: testInfo.outputPath("idle-pool.png"), animations: "disabled" });
+  });
+}
+
+for (const mode of ["local"] as const) {
+  test(`pool cards follow backend member order without inventing the next route (${mode})`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode, locale: "en", populated: true, accountCount: 2, quotaAvailable: true, nextCandidateId: null, usageActive: false,
+      routingHeadroom: {
+        account_synthetic: { quotaRemainingBasisPoints: 1_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+        account_synthetic_2: { quotaRemainingBasisPoints: 9_000, providerCreditsMicroUnits: null, providerCreditsUnlimited: false },
+      },
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    const cards = page.locator(".pool-member-card");
+    const expectedLabels = await page.evaluate(async () => {
+      const runtime = await (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<RuntimeSnapshot> } })
+        .__TAURI_INTERNALS__.invoke("get_local_runtime_state");
+      const labels = new Map([
+        ...runtime.accounts.map((account) => [`account:${account.id}`, account.label] as const),
+        ...runtime.sources.map((source) => [`source:${source.id}`, source.name] as const),
+      ]);
+      return runtime.gateway.poolRotation!.memberOrder.map((id) => labels.get(id));
+    });
+    await expect.poll(() => cards.evaluateAll((members) => members.map((member) => member.getAttribute("data-member-label"))))
+      .toEqual(expectedLabels);
+    await expect(page.locator('.pool-member-card[data-next="true"]')).toHaveCount(0);
+    await expect(page.locator(".pool-next-route")).toHaveCount(0);
+    await page.getByRole("button", { name: "Pool rotation settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Pool rotation", exact: true });
+    await dialog.getByRole("radio", { name: "Round robin", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+    await expect(page.getByRole("group", { name: "Usage order", exact: true })).toBeVisible();
+  });
+}

@@ -13,14 +13,14 @@ command = "bun run app:dev"
 [[actions]]
 name = "Relay · TypeScript"
 icon = "debug"
-command = "bun run --cwd src check"
+command = "bun run --cwd desktop/frontend check"
 
 [[actions]]
 name = "Relay · UI tests"
 icon = "test"
-command = "bun run --cwd src test:unit"
+command = "bun run --cwd desktop/frontend test:unit"
 
 [[actions]]
 name = "Relay · Rust check"
 icon = "debug"
-command = "bun scripts/build/cargo.mjs check --manifest-path src-tauri/Cargo.toml --locked"
+command = "bun scripts/build/cargo.mjs check --manifest-path desktop/src-tauri/Cargo.toml --locked"

@@ -29,8 +29,10 @@ pub(crate) const PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS: u64 = 15_000_000;
 
 /// Ordinary candidates remain in the same band below a five-point quota lead.
 pub(crate) const QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 500;
-/// A warm preferred member yields at ten points; other candidates keep the
-/// ordinary band. This does not relax freshness, load, health or admission.
+/// A primary warm member considers quota-only rebalancing at or below 10%.
+/// Freshness, load, health and admission remain independent gates.
+pub(crate) const CACHE_AFFINITY_QUOTA_LOW_WATER_BASIS_POINTS: u64 = 1_000;
+/// A low-quota warm member yields only to a lead of at least ten points.
 pub(crate) const CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 1_000;
 pub(crate) const CACHE_AFFINITY_EXTRA_REQUESTS: u32 = 1;
 
@@ -56,14 +58,23 @@ pub struct RotationRoute {
     pub operation: RotationOperation,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationMode {
     #[default]
     Automatic,
+    /// Prefer the earliest fresh subscription deadline for independent work.
+    SubscriptionExpiry,
     /// Cycle through ready members in the user-configured order.
     RoundRobin,
     WeightedRoundRobin,
     Failover,
+}
+
+impl RotationMode {
+    pub fn is_adaptive(self) -> bool {
+        matches!(self, Self::Automatic | Self::SubscriptionExpiry)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,7 +123,7 @@ pub struct RotationCandidate {
     pub quota_remaining_basis_points: Option<u64>,
     pub quota_observed_at_ms: Option<u64>,
     pub quota_reference: Option<crate::CandidateQuotaReference>,
-    /// Soft expiry spending applies only to independent Automatic selections.
+    /// Fresh subscription deadlines guide independent adaptive selections.
     pub spend_deadline: Option<crate::quota::QuotaSpendDeadline>,
     /// Provider-reported balance in millionths of one credit. This is a
     /// separate fallback signal and never changes percentage-quota state.
@@ -365,6 +376,8 @@ pub enum RotationSelectionReason {
     QuotaHeadroom,
     /// Automatic mode used provider credits because no fresh quota ranked.
     ProviderCredits,
+    /// Independent work uses the nearest at-risk subscription expiry group.
+    SubscriptionExpiry,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

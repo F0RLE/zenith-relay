@@ -12,7 +12,7 @@ regression-tested behavior; public Responses documentation covers a separate API
 Relay sends uncompressed BPS Responses JSON, including for WebSocket ingress.
 Request compression requires endpoint-specific decoder support. An encoding
 failure retains the existing execution-certainty and retry rules. The local
-[compression probe](../../CONTRIBUTING.md#request-compression-probe) measures
+[compression probe](../CONTRIBUTING.md#request-compression-probe) measures
 transfer costs; BPS compatibility requires a separate endpoint check.
 
 ## Access and request context

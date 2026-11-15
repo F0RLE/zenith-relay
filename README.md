@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="src-tauri/icons/zenith-relay.svg" width="128" alt="Zenith Relay">
+  <img src="desktop/src-tauri/icons/zenith-relay.svg" width="128" alt="Zenith Relay">
   <h1>Zenith Relay</h1>
   <p>Personal desktop relay for ChatGPT, Claude Desktop, OpenCode, and API clients.</p>
   <p>
@@ -111,28 +111,28 @@ Use **Recovery** to restore saved client settings.
 Use the [documentation index and repository tree](docs/README.md) to find the
 owning guide or source directory.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the project.
+Read [CONTRIBUTING.md](docs/CONTRIBUTING.md) before changing the project.
 Implemented contracts are mapped in [PLANNING.md](docs/project/PLANNING.md);
 open Desktop work is in the [roadmap](docs/project/ROADMAP.md), and future Hosted
 delivery has a [separate plan](docs/hosted/HOSTED_RELAY_ROADMAP.md). The project uses
 [AGPL-3.0-only](LICENSE). Before submitting a pull request, read the
-[Contributor Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md).
+[Contributor Agreement](docs/CONTRIBUTOR_LICENSE_AGREEMENT.md).
 
-The [model catalog](catalog/README.md) documents the shared display-order
+The [model catalog](crates/relay-core/catalog/README.md) documents the shared display-order
 policy and the JSON export for other applications.
 
 ```sh
 bun scripts/setup/start-dev.mjs
 ```
 
-The same command is available as `bun run start` from `src`. It prepares locked
+The same command is available as `bun run start` from `desktop/frontend`. It prepares locked
 frontend and Rust dependencies, then starts the desktop app. Install Bun,
 rustup, and the platform's native desktop libraries first. Use
 `bun run setup:browsers` only when Playwright browsers are needed.
 
 Run `bun run verify --quick` from the repository root for scripts, documentation,
 and both frontend packages. `bun run verify` adds native Rust checks, browser
-tests, and dependency audits. See the [verification guide](CONTRIBUTING.md#verification)
+tests, and dependency audits. See the [verification guide](docs/CONTRIBUTING.md#verification)
 for prerequisites and targeted checks.
 
 Report suspected vulnerabilities through the

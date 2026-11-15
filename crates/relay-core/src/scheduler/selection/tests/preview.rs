@@ -92,6 +92,7 @@ fn eager_preview(mut scheduler: PoolScheduler, now_ms: u64) -> Vec<String> {
 fn lazy_preview_matches_eager_admission_across_modes_and_live_state_changes() {
     for mode in [
         PoolRoutingMode::Automatic,
+        PoolRoutingMode::SubscriptionExpiry,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,
@@ -247,6 +248,7 @@ fn one_sync_preview_matches_per_route_sync_after_member_changes() {
 fn preview_matches_dispatch_in_every_mode_without_advancing_rotation() {
     for mode in [
         PoolRoutingMode::Automatic,
+        PoolRoutingMode::SubscriptionExpiry,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,
@@ -269,6 +271,7 @@ fn preview_matches_dispatch_in_every_mode_without_advancing_rotation() {
 fn display_preference_matches_fallback_selection_in_every_mode() {
     for mode in [
         PoolRoutingMode::Automatic,
+        PoolRoutingMode::SubscriptionExpiry,
         PoolRoutingMode::RoundRobin,
         PoolRoutingMode::WeightedRoundRobin,
         PoolRoutingMode::Failover,

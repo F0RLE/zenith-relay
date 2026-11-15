@@ -27,6 +27,6 @@ existing hook and event owners instead of adding another subscription manager.
 - Do not interpolate untrusted text into `eval`. If evaluation is genuinely
   necessary, use a fixed script and safe serialization, not string concatenation.
 
-Use [the affected checks](../../../CONTRIBUTING.md#verification) for changed
+Use [the affected checks](../../../docs/CONTRIBUTING.md#verification) for changed
 serialization, delivery, remount, or cancellation behavior. Add regression
 coverage only where existing checks leave a meaningful gap.

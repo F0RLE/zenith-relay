@@ -318,6 +318,7 @@ pub trait ResponseAffinityStore: Send + Sync {
 pub struct GatewayRuntimeOptions {
     /// Host-owned opt-in for detailed request telemetry; never changes execution.
     pub diagnostics_enabled: fn() -> bool,
+    pub rotation_debug: Option<Arc<dyn crate::RotationDebugSink>>,
     pub tool_policy: crate::ToolPolicy,
     pub max_retry_candidates: usize,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
@@ -370,6 +371,7 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             diagnostics_enabled: || false,
+            rotation_debug: None,
             tool_policy: crate::ToolPolicy::default(),
             max_retry_candidates: 3,
             pool_routing: None,

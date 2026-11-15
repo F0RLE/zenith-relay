@@ -9,14 +9,14 @@ import { runLoggedTauriBuild } from "./tauri-build-output.mjs";
 const { args: cliArgs, compact } = tauriBuildOptions(process.argv.slice(2));
 const buildArgs = tauriBuildArgs(cliArgs, { signingKeyPresent: Boolean(process.env.TAURI_SIGNING_PRIVATE_KEY) });
 const isLocalWindowsRelease = usesDefaultWindowsReleaseOutput(cliArgs);
-const releaseExecutablePath = join(repoRoot(), "src-tauri", "target", "release", "zenith-relay.exe");
+const releaseExecutablePath = join(repoRoot(), "desktop", "src-tauri", "target", "release", "zenith-relay.exe");
 const productionMarkerPath = `${releaseExecutablePath}.production.sha256`;
 
 if (isLocalWindowsRelease) rmSync(productionMarkerPath, { force: true });
 
 const invocation = tauriInvocation(buildArgs);
 const buildOptions = {
-  cwd: repoRoot(),
+  cwd: join(repoRoot(), "desktop"),
   env: withZenithRustEnv(),
   shell: invocation.shell,
   stdio: "inherit",
@@ -26,7 +26,7 @@ let buildResult;
 try {
   buildResult = compact
     ? await runLoggedTauriBuild(invocation, buildOptions, {
-      logPath: join(repoRoot(), "target", "desktop-build.log"),
+      logPath: join(repoRoot(), ".build", "desktop", "desktop-build.log"),
     })
     : spawnSync(invocation.command, invocation.args, buildOptions);
 } catch (error) {

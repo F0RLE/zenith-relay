@@ -138,12 +138,25 @@ impl GatewayRuntime {
             prompt_affinity_key,
             now_ms,
         };
-        let selection = match (lane, operation) {
-            (CandidateLeaseLane::Text, RotationOperation::Compaction) => {
-                scheduler.select_compaction(selection_request())
+        let debug_sink = self
+            .rotation_debug
+            .as_ref()
+            .and_then(|sink| sink.epoch().map(|epoch| (sink, epoch)));
+        let mut capture = None;
+        let selection = if debug_sink.is_some() || self.diagnostics_enabled() {
+            scheduler.select_with_rotation_capture(
+                selection_request(),
+                operation,
+                debug_sink.as_ref().map(|_| &mut capture),
+            )
+        } else {
+            match (lane, operation) {
+                (CandidateLeaseLane::Text, RotationOperation::Compaction) => {
+                    scheduler.select_compaction(selection_request())
+                }
+                (CandidateLeaseLane::Text, _) => scheduler.select(selection_request()),
+                (CandidateLeaseLane::Image, _) => scheduler.select_image(selection_request()),
             }
-            (CandidateLeaseLane::Text, _) => scheduler.select(selection_request()),
-            (CandidateLeaseLane::Image, _) => scheduler.select_image(selection_request()),
         };
         let reserved = selection.and_then(|selection| {
             let reservation = scheduler.reserve_request_with_operation(
@@ -215,6 +228,15 @@ impl GatewayRuntime {
         });
         let capacity_blocked =
             reserved.is_none() && scheduler.capacity_blocked_for(selection_request(), operation);
+        drop(hidden);
+        drop(scheduler);
+        drop(retry_authorization);
+        drop(scope);
+        if let (Some((sink, epoch)), Some(mut capture)) = (debug_sink, capture) {
+            capture.set_request_id(request_id);
+            capture.reserved = reserved.is_some();
+            sink.submit(epoch, capture);
+        }
         (reserved, capacity_blocked)
     }
 

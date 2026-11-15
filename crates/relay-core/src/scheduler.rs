@@ -3,7 +3,8 @@ mod policy;
 pub mod refresh;
 pub mod rotation;
 pub use policy::{
-    PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, resolve_pool_routing,
+    PoolMemberKind, PoolRoutingEdit, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+    RotationPreset, resolve_pool_routing,
 };
 mod affinity;
 mod candidate;
@@ -24,6 +25,6 @@ pub(crate) use selection::ReservationId;
 pub use selection::{
     ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
     ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS, PoolScheduler, RESPONSE_AFFINITY_TTL_MS,
-    RequestTiming, RoutingDiagnostics, Selection, SelectionReason, SelectionRequest,
-    account_member_key, source_member_key,
+    RequestTiming, RotationDebugCapture, RotationDebugSink, RoutingDiagnostics, Selection,
+    SelectionReason, SelectionRequest, account_member_key, source_member_key,
 };

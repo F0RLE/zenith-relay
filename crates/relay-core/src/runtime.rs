@@ -120,6 +120,7 @@ static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayRuntime {
     diagnostics_enabled: fn() -> bool,
+    rotation_debug: Option<Arc<dyn crate::RotationDebugSink>>,
     tool_policy: RwLock<crate::ToolPolicy>,
     clients: RuntimeHttpClients,
     http3: http3::Http3Transport,

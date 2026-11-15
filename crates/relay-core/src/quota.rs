@@ -2,7 +2,7 @@ mod refresh;
 mod spending;
 mod windows;
 
-pub use spending::QuotaSpendDeadline;
+pub use spending::{QuotaSpendDeadline, QuotaSpendResets};
 
 pub(crate) use refresh::QuotaTransportFailure;
 

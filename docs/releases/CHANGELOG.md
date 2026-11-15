@@ -10,6 +10,55 @@ release entries summarize user-visible behavior and link to the relevant changes
 
 ### Changed
 
+- SIWC socket continuation tolerates clients omitting output-only `created_by`
+  provenance without resending unchanged history. Content, tool identity and
+  unknown extensions remain exact. Socket reset diagnostics distinguish changed
+  credentials from a new authorization incarnation using the same credential.
+- Weekly-capacity charts show measurement points without calibration markers or
+  range bands. Tooltips retain the estimate range and show the observation time.
+- The source editor refreshes committed details when a later API-key replacement
+  fails, while preserving the key draft and original error for retry.
+- Setting switches wait for their own save before accepting another change.
+  Failed saves restore the acknowledged value; unrelated controls remain usable.
+- Retrying a ChatGPT memory-model read waits for the current saved value before
+  allowing edits, preventing a delayed read from overwriting a newer selection.
+- Account cards show combined retained usage and payback across linked Codex,
+  Excel/BPS and SIWC connections in a single summary. Pool totals count each
+  account's shared history and purchase cost once, including inactive connections.
+- Automatic rotation preserves a warm chat's primary connection above 10% fresh
+  remaining quota. At or below that threshold, quota-only switching requires a
+  ten-percentage-point lead. Successful load spillovers follow the same ownership
+  rule; new-chat expiry priorities, capacity and availability checks stay intact.
+- Automatic rotation uses speed preferences after 20 measured successful requests
+  per member and route within ten minutes, preserving normal rotation and warm
+  chats while the latency history is insufficient.
+- Pool rotation presets, edits and card ordering are now owned by the backend.
+  The interface displays acknowledged settings and backend priority, including
+  fresh subscription-expiry groups, while preserving all rotation modes and
+  chat affinity. Lightweight activity refreshes also update the displayed order.
+  The rotation editor places strategies in a left sidebar, with an Expiring first
+  option for exact subscription deadlines. Member icons show status in the row's
+  leading segment; inputs and reorder buttons share the row surface. Preset
+  shortcuts remain removed and saved member settings are preserved.
+- Optional snapshot/command timings, route explanations and BPS catalog details
+  now follow the existing Debug switch before collection or persistence. Disabling
+  Debug cancels queued performance samples; recovery breadcrumbs and errors remain
+  available. Client-auth observation backs off stable/idle checks, and unchanged
+  usage storage waits for retention deadlines instead of running minute-by-minute
+  maintenance transactions. The frontend and request accounting are unchanged.
+- Debug mode explains pool rotation in the existing Operations logs under
+  `pool-rotation`: candidate eligibility, fixed-snapshot fallback order, expiry,
+  resets, load and weights. Debug-off requests collect no rotation snapshots;
+  bounded background logging redacts identities and preserves live scheduling.
+- Automatic rotation prioritizes the nearest three-day subscription group for
+  independent requests, including low-quota members with neutral spending
+  pressure, and balances load within the group.
+  Fresh reset inventory affects request shares only while its weekly automation
+  is enabled. Generation-route degradation alone no longer hides reset budgets
+  or blocks automatic quota reset checks; authentication and redemption guards
+  remain enforced. Linked native readers supply verified deadlines and reset
+  actions for the selected pool connection; cache ownership and availability
+  gates stay intact.
 - SIWC continuation diagnostics distinguish the completed item kind, known
   execution/action fields and bounded unknown-field changes without recording
   private names, content or hashes. JSON key order and truncated field proofs

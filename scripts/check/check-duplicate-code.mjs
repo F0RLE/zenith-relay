@@ -77,6 +77,6 @@ function check(paths, format) {
   ]);
 }
 
-check(["crates", "src-tauri"], "rust");
-check(["src/src"], "typescript");
-check(["src/src"], "tsx");
+check(["crates", "desktop/src-tauri"], "rust");
+check(["desktop/frontend/src"], "typescript");
+check(["desktop/frontend/src"], "tsx");

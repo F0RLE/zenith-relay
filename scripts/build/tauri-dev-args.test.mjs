@@ -49,7 +49,7 @@ test.each(["--help", "-h"])("development %s does not start the toolchain", (flag
 });
 
 test("root and frontend packages expose the explicit watch command", () => {
-  for (const path of ["../../package.json", "../../src/package.json"]) {
+  for (const path of ["../../package.json", "../../desktop/frontend/package.json"]) {
     const pkg = JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
     expect(pkg.scripts["app:dev"]).toEndWith("tauri-dev.mjs");
     expect(pkg.scripts["app:dev:watch"]).toEndWith("tauri-dev.mjs --watch");

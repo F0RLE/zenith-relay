@@ -4,18 +4,18 @@ Use the [official Tauri v2 command guide](https://v2.tauri.app/develop/calling-r
 for framework behavior and the current source for Relay's command contract.
 
 Check the installed `@tauri-apps/api` and resolved Rust `tauri` version in
-[Cargo.lock](../../../../src-tauri/Cargo.lock) before changing the IPC contract.
+[Cargo.lock](../../../../desktop/src-tauri/Cargo.lock) before changing the IPC contract.
 Use resolved versions when consulting framework documentation.
 
 ## Trace an existing read and mutation
 
 The network settings path shows the complete ownership chain:
 
-1. [Native command owner](../../../../src-tauri/src/local_pool/commands/gateway/network.rs):
+1. [Native command owner](../../../../desktop/src-tauri/src/local_pool/commands/gateway/network.rs):
    `get_local_network_access` and `update_local_network_access`.
-2. [Desktop command registration](../../../../src-tauri/src/desktop.rs):
+2. [Desktop command registration](../../../../desktop/src-tauri/src/desktop.rs):
    `desktop_commands()` and its `tauri::generate_handler!` list.
-3. [Typed frontend surface](../../../../src/src/features/relay/api/commands.ts):
+3. [Typed frontend surface](../../../../desktop/frontend/src/features/relay/api/commands.ts):
    `LocalNetworkAccess`, `relayCommands.localNetworkAccess`, and
    `relayCommands.setLocalNetworkAccess`.
 

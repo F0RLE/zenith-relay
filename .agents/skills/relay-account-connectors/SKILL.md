@@ -11,7 +11,7 @@ operations.
 
 Use [PLANNING.md](../../../docs/project/PLANNING.md#connections-discovery-and-metadata)
 for the current contract and
-[CONTRIBUTING.md](../../../CONTRIBUTING.md#account-connector-references) for
+[CONTRIBUTING.md](../../../docs/CONTRIBUTING.md#account-connector-references) for
 development guidance. For provider API work, also follow its official contract
 workflow.
 
@@ -27,10 +27,10 @@ workflow.
   Record its inspected commit and paths and compare against the official
   contract. Use local source for callback/state fixes. New API's product-user OAuth is unrelated
   to provider account credentials.
-- Trace the affected owner under `src-tauri/src/local_pool/accounts/oauth/` or
-  `src-tauri/src/local_pool/accounts/oauth_flow/`, then
-  `src-tauri/src/local_pool/commands/oauth/{flow,checkpoint,completion,account}.rs`.
-  Imports belong to `src-tauri/src/local_pool/accounts/import_orchestrator/`
+- Trace the affected owner under `desktop/src-tauri/src/local_pool/accounts/oauth/` or
+  `desktop/src-tauri/src/local_pool/accounts/oauth_flow/`, then
+  `desktop/src-tauri/src/local_pool/commands/oauth/{flow,checkpoint,completion,account}.rs`.
+  Imports belong to `desktop/src-tauri/src/local_pool/accounts/import_orchestrator/`
   and the shared `crates/relay-core/src/accounts/import/`.
   These paths are currently ChatGPT-specific: reuse lifecycle primitives, but
   introduce a typed provider credential when needed instead of pretending a

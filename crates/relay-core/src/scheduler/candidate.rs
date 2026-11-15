@@ -245,14 +245,42 @@ impl RuntimeCandidate {
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
     ) -> bool {
-        self.enabled
-            && !self.draining
-            && self.secret_available
-            && self.supports_protocol(model, allowed_protocols)
-            && self.supports_model(model)
-            && self.model_rules.allows(model)
-            && scope.includes(self)
-            && scope.model_rules.allows(model)
+        self.configuration_block(model, allowed_protocols, scope)
+            .is_none()
+    }
+
+    pub(crate) fn configuration_block(
+        &self,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+    ) -> Option<super::rotation::RotationConfigurationBlock> {
+        use super::rotation::RotationConfigurationBlock as Block;
+        if !self.enabled {
+            return Some(Block::Disabled);
+        }
+        if self.draining {
+            return Some(Block::Draining);
+        }
+        if !self.secret_available {
+            return Some(Block::SecretMissing);
+        }
+        if !self.supports_protocol(model, allowed_protocols) {
+            return Some(Block::ProtocolUnsupported);
+        }
+        if !self.supports_model(model) {
+            return Some(Block::ModelUnsupported);
+        }
+        if !self.model_rules.allows(model) {
+            return Some(Block::ModelRule);
+        }
+        if !scope.includes(self) {
+            return Some(Block::Scope);
+        }
+        if !scope.model_rules.allows(model) {
+            return Some(Block::ScopeModelRule);
+        }
+        None
     }
 
     pub(crate) fn supports_model(&self, model: &str) -> bool {

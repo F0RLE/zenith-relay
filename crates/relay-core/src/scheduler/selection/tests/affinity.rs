@@ -137,7 +137,7 @@ fn prompt_cache_affinity_breaks_an_equal_quota_tie() {
 #[test]
 fn successful_quota_rebalance_moves_prompt_affinity_to_the_warmed_member() {
     let mut scheduler = PoolScheduler::new();
-    for (id, remaining) in [("owner", 4_000), ("next-a", 9_000), ("next-b", 9_000)] {
+    for (id, remaining) in [("owner", 1_000), ("next-a", 9_000), ("next-b", 9_000)] {
         let mut member = oauth_candidate(id);
         member.quota = CandidateQuota::Available(remaining);
         member.quota_updated_at_ms = Some(100);
@@ -209,9 +209,9 @@ fn slight_parallel_load_keeps_prompt_affinity_and_its_diagnostics() {
 }
 
 #[test]
-fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
+fn successful_load_spillover_keeps_healthy_prompt_owner_despite_quota_gap() {
     let mut scheduler = PoolScheduler::new();
-    for (id, remaining) in [("owner", 8_000), ("spillover", 8_500)] {
+    for (id, remaining) in [("owner", 4_600), ("spillover", 8_000)] {
         let mut member = oauth_candidate(id);
         member.quota = CandidateQuota::Available(remaining);
         member.quota_updated_at_ms = Some(100);
@@ -245,6 +245,18 @@ fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
         scheduler.prompt_affinity.get("cache:thread", 103),
         Some("owner")
     );
+    let continued = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 103,
+        })
+        .unwrap();
+    assert_eq!(continued.candidate_id, "owner");
 }
 
 #[test]

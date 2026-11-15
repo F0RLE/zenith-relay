@@ -2,6 +2,7 @@ mod availability;
 mod lifecycle;
 mod members;
 pub use members::{account_member_key, source_member_key};
+mod inspection;
 mod ownership;
 mod projection;
 mod rate_limits;
@@ -9,6 +10,7 @@ mod recovery;
 mod registry;
 mod reservations;
 mod snapshot;
+pub use inspection::{RotationDebugCapture, RotationDebugSink};
 
 pub(crate) use reservations::ReservationId;
 use reservations::Reservations;
@@ -152,15 +154,47 @@ impl PoolScheduler {
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Text, RotationOperation::Text)
+        self.select_for_operation(
+            request,
+            InFlightLane::Text,
+            RotationOperation::Text,
+            None,
+            false,
+        )
     }
 
     pub(crate) fn select_image(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Image, RotationOperation::Image)
+        self.select_for_operation(
+            request,
+            InFlightLane::Image,
+            RotationOperation::Image,
+            None,
+            false,
+        )
     }
 
     pub(crate) fn select_compaction(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Text, RotationOperation::Compaction)
+        self.select_for_operation(
+            request,
+            InFlightLane::Text,
+            RotationOperation::Compaction,
+            None,
+            false,
+        )
+    }
+
+    pub(crate) fn select_with_rotation_capture(
+        &mut self,
+        request: SelectionRequest<'_>,
+        operation: RotationOperation,
+        capture: Option<&mut Option<RotationDebugCapture>>,
+    ) -> Option<Selection> {
+        let lane = if operation == RotationOperation::Image {
+            InFlightLane::Image
+        } else {
+            InFlightLane::Text
+        };
+        self.select_for_operation(request, lane, operation, capture, true)
     }
 
     fn select_for_operation(
@@ -168,16 +202,25 @@ impl PoolScheduler {
         request: SelectionRequest<'_>,
         lane: InFlightLane,
         operation: RotationOperation,
+        capture: Option<&mut Option<RotationDebugCapture>>,
+        diagnostics_enabled: bool,
     ) -> Option<Selection> {
-        let mut rotation_request = self.prepare_rotation_request(&request, operation)?;
-        if let Some(allowed) = &mut rotation_request.allowed_candidates {
+        let mut prepared = self.prepare_rotation_request(&request, operation);
+        if let Some(allowed) = prepared
+            .as_mut()
+            .and_then(|rotation| rotation.allowed_candidates.as_mut())
+        {
             allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
         }
+        if let Some(capture) = capture {
+            *capture = Some(self.capture_rotation(&request, prepared.as_ref(), lane, operation));
+        }
+        let rotation_request = prepared?;
         let owner = rotation_request.owner.clone();
         let selected = self.rotation.select(&rotation_request, request.now_ms)?;
         let reason = if owner.is_none()
             && !selected.recovery
-            && self.rotation.mode() == RotationMode::Automatic
+            && self.rotation.mode().is_adaptive()
             && !matches!(
                 selected.reason,
                 super::rotation::RotationSelectionReason::QuotaHeadroom
@@ -203,6 +246,9 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::ProviderCredits => {
                     SelectionReason::ProviderCredits
                 }
+                super::rotation::RotationSelectionReason::SubscriptionExpiry => {
+                    SelectionReason::SubscriptionExpiry
+                }
                 super::rotation::RotationSelectionReason::ManualPriority => {
                     SelectionReason::ManualPriority
                 }
@@ -224,12 +270,14 @@ impl PoolScheduler {
             usize::try_from(selected.eligible_candidates).unwrap_or(usize::MAX),
             lane,
         )?;
-        diagnostics.route_latency = Some(self.rotation.latency_diagnostics(
-            &selected.candidate_id,
-            &rotation_request.route_key,
-            request.now_ms,
-        ));
-        if let Some(key) = request.prompt_affinity_key {
+        if diagnostics_enabled {
+            diagnostics.route_latency = Some(self.rotation.latency_diagnostics(
+                &selected.candidate_id,
+                &rotation_request.route_key,
+                request.now_ms,
+            ));
+        }
+        if let Some(key) = request.prompt_affinity_key.filter(|_| diagnostics_enabled) {
             let preferred = rotation_request
                 .preferred
                 .as_deref()

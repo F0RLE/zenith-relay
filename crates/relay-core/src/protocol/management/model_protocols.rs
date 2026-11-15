@@ -113,7 +113,7 @@ impl ModelProtocolIndex {
                     &crate::model_id_key(model),
                     WireApi::Responses,
                     account.oauth_client_kind
-                        == crate::providers::chatgpt::OAuthClientKind::ExcelBps,
+                        == Some(crate::providers::chatgpt::OAuthClientKind::ExcelBps),
                     None,
                 );
                 for client in WireApi::ALL_NATIVE {

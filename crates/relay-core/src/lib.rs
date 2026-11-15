@@ -135,18 +135,19 @@ pub use scheduler::rotation::{
     RateState as RotationRateState, RecoveryPolicy as RotationRecoveryPolicy,
     RequestBudget as RotationRequestBudget, RequestId as RotationRequestId,
     RetryDecision as RotationRetryDecision, RetryEvidence as RotationRetryEvidence,
-    RetryStopReason as RotationRetryStopReason, RotationCandidate, RotationEngine, RotationLease,
-    RotationMode, RotationOperation, RotationRequest, RotationRoute, RotationSelection,
-    RotationSelectionReason, RotationSettlement, SettlementError as RotationSettlementError,
+    RetryStopReason as RotationRetryStopReason, RotationCandidate, RotationDecisionTrace,
+    RotationEngine, RotationLease, RotationMode, RotationOperation, RotationRequest, RotationRoute,
+    RotationSelection, RotationSelectionReason, RotationSettlement,
+    SettlementError as RotationSettlementError,
 };
 pub use scheduler::{
     ActiveModelRuntime, AttemptOutcome, CandidateHealth, CandidateKind, CandidateQuota,
     CandidateQuotaReference, CandidateQuotaState, CandidateResourceHeadroom,
     CandidateRuntimeSnapshot, CandidateScope, ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS,
-    PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy, PoolScheduler,
-    ProviderBackoff, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS, RoutingDiagnostics,
-    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, account_candidate_health,
-    resolve_pool_routing,
+    PoolMemberKind, PoolRoutingEdit, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
+    PoolScheduler, ProviderBackoff, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    RotationDebugCapture, RotationDebugSink, RotationPreset, RoutingDiagnostics, RuntimeCandidate,
+    Selection, SelectionReason, SelectionRequest, account_candidate_health, resolve_pool_routing,
 };
 pub use sources::{
     CacheWriteTtl, CapabilityOrigin, CapabilityStatus, ConnectionProbeObservation,

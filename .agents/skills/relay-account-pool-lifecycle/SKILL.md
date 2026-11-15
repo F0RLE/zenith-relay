@@ -17,7 +17,7 @@ For additional implementations read the relevant
 
 ## Trace the account through its owners
 
-- Admission: `src-tauri/src/local_pool/commands/pool/membership.rs`,
+- Admission: `desktop/src-tauri/src/local_pool/commands/pool/membership.rs`,
   `accounts/records.rs`, and `crates/relay-core/src/runtime/build/accounts.rs`.
 - Renewal: `crates/relay-core/src/accounts/token_authority/`
   and desktop `accounts/authority/`.

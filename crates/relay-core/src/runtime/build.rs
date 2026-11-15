@@ -353,6 +353,7 @@ impl GatewayRuntime {
 
         Ok(Self {
             diagnostics_enabled: options.diagnostics_enabled,
+            rotation_debug: options.rotation_debug.clone(),
             tool_policy: RwLock::new(options.tool_policy.clone()),
             clients,
             http3: super::http3::Http3Transport::new(),

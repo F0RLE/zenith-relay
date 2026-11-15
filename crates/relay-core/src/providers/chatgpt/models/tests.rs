@@ -434,6 +434,7 @@ async fn bps_discovery_returns_catalog_decisions_from_the_same_access_response()
             reqwest::header::HeaderValue::from_static("Bearer synthetic-access"),
             "synthetic-account",
             "ignored",
+            true,
         )
         .await
         .unwrap();
