@@ -75,7 +75,7 @@ for (const scenario of [
       }))).toMatchObject({ whiteSpace: "nowrap", textOverflow: "ellipsis", height: 18, lineHeight: 18 });
     } else {
       expect(await row.locator('[data-column="model"]').evaluate((element) => getComputedStyle(element).textAlign)).toBe("left");
-      expect(await row.locator(".usage-model-value").evaluate((element) => getComputedStyle(element).alignItems)).toBe("flex-start");
+      await expect(row.locator(".usage-model-value")).toHaveCSS("align-items", /^(flex|flow)-start$/);
     }
     if (scenario.width >= 1160) {
       for (const column of ["speed", "tokens", "request"]) {

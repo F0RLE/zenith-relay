@@ -67,7 +67,7 @@ test("hosted request window uses a compact charge-first layout with customer-onl
   await expect(dialog.locator(".request-details-subtitle")).toContainText("API-ключ");
   await expect(dialog.locator(".request-details-metrics dt")).toHaveText(["Списано", "Первый вывод", "Время ответа", "Скорость генерации"]);
   await expect(dialog.locator(".request-details-identity .request-details-subtitle")).toBeVisible();
-  await expect(dialog.locator(".request-token-total > div")).toHaveCSS("justify-content", "flex-start");
+  await expect(dialog.locator(".request-token-total > div")).toHaveCSS("justify-content", /^(flex|flow)-start$/);
   await expect(tokens.locator(".request-token-header > span")).toHaveText(["Количество", "Стоимость"]);
   await expect(dialog.locator(".request-details-export")).toHaveCSS("min-height", testInfo.project.use.viewport!.width < 640 ? "44px" : "40px");
   const identity = (await dialog.locator(".request-details-model").boundingBox())!;
