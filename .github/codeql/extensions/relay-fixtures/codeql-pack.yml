@@ -8,6 +8,6 @@ name: f0rle/zenith-relay-fixtures
 version: 0.0.1
 library: true
 extensionTargets:
-  codeql/rust-all: ^0.2.24
+  codeql/rust-all: ^0.2.25
 dataExtensions:
   - models/*.json

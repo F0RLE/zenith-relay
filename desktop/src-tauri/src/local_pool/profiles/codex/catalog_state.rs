@@ -77,10 +77,7 @@ fn valid_managed_model_catalog_metadata(
             && !backup.managed_model_catalog_pending_remove
             && catalog_bytes.is_none();
     };
-    if portable_path_value(recorded_catalog_path) != portable_path_string(expected_catalog_path) {
-        return false;
-    }
-    true
+    portable_path_value(recorded_catalog_path) == portable_path_string(expected_catalog_path)
 }
 
 /// A known Relay catalog path contains bytes not written by the current or

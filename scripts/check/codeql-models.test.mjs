@@ -14,7 +14,7 @@ const targets = [
 test("CodeQL models only exact test-only trusted-path return values", () => {
   const pack = Bun.YAML.parse(readFileSync(new URL("codeql-pack.yml", modelsRoot), "utf8"));
   expect(pack.library).toBe(true);
-  expect(pack.extensionTargets).toEqual({ "codeql/rust-all": "^0.2.24" });
+  expect(pack.extensionTargets).toEqual({ "codeql/rust-all": "^0.2.25" });
   expect(pack.dataExtensions).toEqual(["models/*.json"]);
   expect(pack.dependencies).toBeUndefined();
 

@@ -12,6 +12,13 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
 
 ### Changed
 
+- Refresh Desktop, Hosted preview and shared-core dependencies, including the
+  Rust toolchain, CI tooling and CodeQL library target. Remove the redundant
+  Nano ID override. Keep `age` on its parallel security release while the newer
+  stable branch pulls in RUSTSEC-2026-0387. WebSocket
+  frame conversion preserves control payloads and close codes across the
+  updated transport libraries; Codex authorization keeps its existing format.
+
 - Route recovery continues waiting for a compatible quota-blocked owner even
   when other pool members cannot accept its conversation history. Switching
   recovery off releases the wait without another provider request.

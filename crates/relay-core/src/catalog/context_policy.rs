@@ -217,10 +217,7 @@ pub fn model_supports_text_context(
     let has_text_output = outputs
         .iter()
         .any(|modality| modality == "text" || modality.contains("text"));
-    if !outputs.is_empty() && !has_text_output {
-        return false;
-    }
-    true
+    outputs.is_empty() || has_text_output
 }
 
 /// Read modality metadata from a projected catalog entry before applying a

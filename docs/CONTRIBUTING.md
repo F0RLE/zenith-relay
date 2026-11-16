@@ -151,7 +151,7 @@ Linux. Install Bun, Rust, and the native tools listed below before running
 
 - [Bun](https://bun.sh) 1.4.2 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
-  Rust 1.99.1 toolchain; both Rust packages use Edition 2024.
+  Rust 1.100.0 toolchain; both Rust packages use Edition 2024.
 - Native libraries for the desktop shell:
   - Windows: MSVC, Windows SDK, CMake, Ninja, and the WebView2 runtime.
     Relay supports a portable bundle and a regular Visual Studio Build Tools
@@ -458,9 +458,14 @@ Desktop pins two reviewed upstream changes pending published releases:
   `basic-toml` with `toml` for localization build configuration.
 
 Script checks enforce immutable, credential-free Git sources, matching manifest
-and lockfile revisions, and the maintained parser. `age` and the Codex authorization
-encryption format stay unchanged. Replace each pin when a reviewed published
-release includes its fix; keep dependency audits and compiler checks enabled.
+and lockfile revisions, and the maintained parser. `age` stays on the parallel
+security release 0.11.5: published 0.12.1 unconditionally adds HPKE/P-256 and
+`crypto-bigint` 0.5, which fails the unfiltered audit with
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html).
+Remove that hold only after a fixed stable parent is available and the synthetic
+Codex encrypted-authorization fixture still passes. Do not change its format or
+master key. Replace each Git pin when a reviewed published release includes its
+fix; keep dependency audits and compiler checks enabled.
 
 The current Linux dependency families retain these upstream constraints:
 
