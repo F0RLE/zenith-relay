@@ -279,7 +279,8 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
   JSONC comments no longer join tokens or conceal unfinished comments and empty
   comma entries. Unmergeable provider settings and inconsistent recovery records
   remain untouched. Observed concurrent config/snapshot edits return a conflict;
-  failed writes preserve the recovery record for retry.
+  failed writes preserve the recovery record for retry. Oversized files and
+  symbolic links are rejected before recovery; new snapshots are written atomically.
 - Client-catalog refreshes retain independent Claude Desktop, OpenCode and Codex
   outcomes. A failed client cannot hide Codex's restart requirement, and a Codex
   success leaves other client errors intact. Client/code/time warnings survive

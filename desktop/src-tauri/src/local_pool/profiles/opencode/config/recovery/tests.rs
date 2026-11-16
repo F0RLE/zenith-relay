@@ -10,6 +10,157 @@ use crate::local_pool::{
 use serde_json::{Value, json};
 use std::fs;
 
+#[test]
+fn oversized_opencode_files_do_not_replace_or_consume_recovery() {
+    use super::super::{MAX_CONFIG_BYTES, MAX_SNAPSHOT_NAME_BYTES, MISSING_CONFIG_MARKER};
+
+    for target in ["config", "backup", "missing", "name"] {
+        with_config("opencode-restore-oversized", |state, path| {
+            write_value(path, json!({"model": "foreign/original"}));
+            backup_original_config(state, path, Some("Before connection")).unwrap();
+            write_value(path, json!({"model": "zenith-relay/test"}));
+            let (replaced, limit) = match target {
+                "config" => (path.to_path_buf(), MAX_CONFIG_BYTES),
+                "backup" => (backup_path(state), MAX_CONFIG_BYTES),
+                "missing" => (
+                    missing_marker_path(state),
+                    MISSING_CONFIG_MARKER.len() as u64,
+                ),
+                "name" => (backup_name_path(state), MAX_SNAPSHOT_NAME_BYTES),
+                _ => unreachable!(),
+            };
+            fs::File::create(&replaced)
+                .unwrap()
+                .set_len(limit + 1)
+                .unwrap();
+            assert!(restore_saved_config(state, path).is_err(), "{target}");
+            assert!(backup_path(state).is_file());
+            assert!(backup_name_path(state).is_file());
+            assert_eq!(fs::metadata(replaced).unwrap().len(), limit + 1);
+            if target != "config" {
+                assert_eq!(read_config(path).unwrap()["model"], "zenith-relay/test");
+            }
+        });
+    }
+}
+
+#[test]
+fn oversized_original_is_not_snapshotted_or_treated_as_missing() {
+    with_config("opencode-backup-oversized", |state, path| {
+        fs::File::create(path)
+            .unwrap()
+            .set_len(super::super::MAX_CONFIG_BYTES + 1)
+            .unwrap();
+        assert!(read_config(path).is_err());
+        assert!(backup_original_config(state, path, Some("Before connection")).is_err());
+        assert!(!backup_path(state).exists());
+        assert!(!missing_marker_path(state).exists());
+        assert!(!backup_name_path(state).exists());
+    });
+}
+
+#[test]
+fn a_file_that_grows_after_preparation_keeps_the_current_config_and_recovery() {
+    with_config("opencode-restore-grown-record", |state, path| {
+        write_value(path, json!({"model": "foreign/original"}));
+        backup_original_config(state, path, Some("Before connection")).unwrap();
+        write_value(path, json!({"model": "zenith-relay/test"}));
+        let prepared = plan::prepare(state, path).unwrap().unwrap();
+        let current = fs::read(path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(backup_path(state))
+            .unwrap()
+            .set_len(super::super::MAX_CONFIG_BYTES + 1)
+            .unwrap();
+        assert!(prepared.apply().is_err());
+        assert_eq!(fs::read(path).unwrap(), current);
+        assert!(backup_path(state).is_file());
+        assert!(backup_name_path(state).is_file());
+    });
+}
+
+#[test]
+fn the_maximum_multibyte_snapshot_name_remains_readable() {
+    with_config("opencode-unicode-snapshot-name", |state, path| {
+        let name = "\u{1f600}".repeat(super::super::MAX_SNAPSHOT_NAME_CHARS);
+        write_value(path, json!({"model": "foreign/original"}));
+        backup_original_config(state, path, Some(&name)).unwrap();
+        assert_eq!(super::super::backup_name(state), Some(name));
+        assert!(restore_saved_config(state, path).unwrap());
+    });
+}
+
+#[test]
+fn directories_instead_of_opencode_files_are_rejected_before_mutation() {
+    for target in ["config", "backup", "name"] {
+        with_config("opencode-restore-directory", |state, path| {
+            write_value(path, json!({"model": "foreign/original"}));
+            backup_original_config(state, path, Some("Before connection")).unwrap();
+            write_value(path, json!({"model": "zenith-relay/test"}));
+            let replaced = match target {
+                "config" => path.to_path_buf(),
+                "backup" => backup_path(state),
+                "name" => backup_name_path(state),
+                _ => unreachable!(),
+            };
+            fs::remove_file(&replaced).unwrap();
+            fs::create_dir(&replaced).unwrap();
+            assert!(restore_saved_config(state, path).is_err(), "{target}");
+            assert!(replaced.is_dir());
+            assert!(backup_path(state).exists());
+            assert!(backup_name_path(state).exists());
+        });
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn opencode_links_are_not_read_or_treated_as_missing_recovery() {
+    use std::os::unix::fs::symlink;
+
+    for dangling in [false, true] {
+        for target in ["config", "backup", "missing", "name"] {
+            with_config("opencode-restore-symlink", |state, path| {
+                write_value(path, json!({"model": "foreign/original"}));
+                backup_original_config(state, path, Some("Before connection")).unwrap();
+                write_value(path, json!({"model": "zenith-relay/test"}));
+                let replaced = match target {
+                    "config" => path.to_path_buf(),
+                    "backup" => backup_path(state),
+                    "missing" => missing_marker_path(state),
+                    "name" => backup_name_path(state),
+                    _ => unreachable!(),
+                };
+                let outside = path.parent().unwrap().join("outside.json");
+                if !dangling {
+                    fs::write(&outside, b"{}").unwrap();
+                }
+                if replaced.exists() {
+                    fs::remove_file(&replaced).unwrap();
+                }
+                symlink(&outside, &replaced).unwrap();
+                assert!(restore_saved_config(state, path).is_err());
+                assert!(
+                    fs::symlink_metadata(&replaced)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                assert!(fs::symlink_metadata(backup_path(state)).is_ok());
+                assert_eq!(
+                    fs::read(&outside).ok().as_deref(),
+                    if dangling {
+                        None
+                    } else {
+                        Some(b"{}".as_slice())
+                    }
+                );
+            });
+        }
+    }
+}
+
 fn with_config(name: &str, check: impl FnOnce(&DesktopState, &Path)) {
     let root = crate::files::test_temp_root(name);
     let state = DesktopState::open(root.clone()).unwrap();

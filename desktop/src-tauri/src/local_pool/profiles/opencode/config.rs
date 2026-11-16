@@ -1,5 +1,5 @@
 use crate::{
-    files::atomic_write,
+    files::{atomic_write, atomic_write_bytes, read_regular_file_bounded},
     local_pool::{
         error::{ErrorCode, LocalPoolError},
         state::DesktopState,
@@ -19,6 +19,9 @@ use std::{
 };
 
 const MAX_SNAPSHOT_NAME_CHARS: usize = 80;
+const MAX_SNAPSHOT_NAME_BYTES: u64 = MAX_SNAPSHOT_NAME_CHARS as u64 * 4;
+const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
+const MISSING_CONFIG_MARKER: &[u8] = b"original config did not exist\n";
 
 pub(super) fn backup_root(state: &DesktopState) -> PathBuf {
     state.opencode_backup_root()
@@ -51,8 +54,10 @@ pub(super) fn normalize_snapshot_name(snapshot_name: &str) -> Result<String, Loc
 }
 
 pub(super) fn backup_name(state: &DesktopState) -> Option<String> {
-    fs::read_to_string(backup_name_path(state))
+    read_optional_bytes(&backup_name_path(state), MAX_SNAPSHOT_NAME_BYTES)
         .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .and_then(|stored_name| normalize_snapshot_name(&stored_name).ok())
 }
 
@@ -74,13 +79,16 @@ pub(super) fn backup_created_at_ms(state: &DesktopState) -> Option<u64> {
 }
 
 pub(super) fn read_config(path: &Path) -> Result<Map<String, Value>, LocalPoolError> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) if !content.trim().is_empty() => content,
-        Ok(_) => return Ok(Map::new()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-        Err(error) => return Err(LocalPoolError::new(ErrorCode::Io, error.to_string())),
+    let Some(bytes) = read_optional_bytes(path, MAX_CONFIG_BYTES)? else {
+        return Ok(Map::new());
     };
-    let parsed_config: Value = parse_jsonc(&content).map_err(|error| {
+    let content = std::str::from_utf8(&bytes).map_err(|_| {
+        LocalPoolError::new(ErrorCode::Io, "OpenCode configuration is not valid UTF-8")
+    })?;
+    if content.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    let parsed_config: Value = parse_jsonc(content).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             format!("OpenCode config is not valid JSON: {error}"),
@@ -106,6 +114,12 @@ pub(super) fn write_config_with_model_order(
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
     let content = serialize_config_with_model_order(config, models)
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
+    if content.len().saturating_add(1) as u64 > MAX_CONFIG_BYTES {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "OpenCode configuration exceeds the supported file size",
+        ));
+    }
     atomic_write(path, &format!("{content}\n"))
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error))
 }
@@ -250,21 +264,36 @@ pub(super) fn backup_original_config(
 ) -> Result<bool, LocalPoolError> {
     let backup = backup_path(state);
     let missing = missing_marker_path(state);
-    if backup.exists() || missing.exists() {
+    if read_optional_bytes(&backup, MAX_CONFIG_BYTES)?.is_some()
+        || read_optional_bytes(&missing, MISSING_CONFIG_MARKER.len() as u64)?.is_some()
+    {
         return Ok(false);
     }
+    let original = read_optional_bytes(path, MAX_CONFIG_BYTES)?;
+    let snapshot_name = snapshot_name.map(normalize_snapshot_name).transpose()?;
     fs::create_dir_all(backup_root(state))
         .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
     if let Some(snapshot_name) = snapshot_name {
-        atomic_write(&backup_name_path(state), snapshot_name)
+        atomic_write(&backup_name_path(state), &snapshot_name)
             .map_err(|error| LocalPoolError::new(ErrorCode::Io, error))?;
     }
-    if path.exists() {
-        fs::copy(path, backup)
+    if let Some(original) = original {
+        atomic_write_bytes(&backup, &original)
             .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
     } else {
-        fs::write(missing, b"original config did not exist\n")
+        atomic_write_bytes(&missing, MISSING_CONFIG_MARKER)
             .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?;
     }
     Ok(true)
+}
+
+fn read_optional_bytes(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, LocalPoolError> {
+    match read_regular_file_bounded(path, limit) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(LocalPoolError::new(
+            ErrorCode::Io,
+            "OpenCode configuration or recovery data is not a readable regular file within its size limit",
+        )),
+    }
 }

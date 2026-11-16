@@ -3911,6 +3911,10 @@ marker require recovery. Config, snapshot and name bytes are rechecked before
 applying the prepared restore and before consuming its record. Observed changes
 return a conflict with recovery data retained; write failures permit a retry.
 These are optimistic byte checks across independent application writers.
+OpenCode config and snapshot reads use bounded, no-follow regular-file handles,
+with a 16 MiB limit for config documents and separate bounds for snapshot labels
+and missing-file markers. Unsafe nodes and oversized data retain the recovery
+record. New snapshots use private atomic writes instead of copying through links.
 Source edits do not upgrade an already running binary.
 
 The retired personal-server runtime, management client, deployment templates and

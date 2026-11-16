@@ -1,6 +1,7 @@
 use super::super::{
-    DesktopState, ErrorCode, LocalPoolError, Path, Value, backup_name_path, backup_path,
-    missing_marker_path, parse_jsonc, remove_managed_configuration,
+    DesktopState, ErrorCode, LocalPoolError, MAX_CONFIG_BYTES, MAX_SNAPSHOT_NAME_BYTES,
+    MISSING_CONFIG_MARKER, Path, Value, backup_name_path, backup_path, missing_marker_path,
+    parse_jsonc, read_optional_bytes, remove_managed_configuration,
     serialize_config_with_model_order,
 };
 use crate::{files::atomic_write_bytes, local_pool::profiles::opencode::protocols};
@@ -12,16 +13,21 @@ type Config = Map<String, Value>;
 struct CapturedFile {
     path: PathBuf,
     bytes: Option<Vec<u8>>,
+    max_bytes: u64,
 }
 
 impl CapturedFile {
-    fn read(path: PathBuf) -> Result<Self, LocalPoolError> {
-        let bytes = read_optional(&path)?;
-        Ok(Self { path, bytes })
+    fn read(path: PathBuf, max_bytes: u64) -> Result<Self, LocalPoolError> {
+        let bytes = read_optional_bytes(&path, max_bytes)?;
+        Ok(Self {
+            path,
+            bytes,
+            max_bytes,
+        })
     }
 
     fn check(&self) -> Result<(), LocalPoolError> {
-        check_bytes(&self.path, &self.bytes)
+        check_bytes(&self.path, &self.bytes, self.max_bytes)
     }
 }
 
@@ -46,7 +52,7 @@ impl PreparedRestore {
                     .map_err(|_| io_error("OpenCode configuration could not be removed"))?,
             }
         }
-        check_bytes(&self.config.path, &self.restored)?;
+        check_bytes(&self.config.path, &self.restored, MAX_CONFIG_BYTES)?;
         for file in &self.recovery {
             file.check()?;
         }
@@ -63,14 +69,17 @@ pub(super) fn prepare(
     state: &DesktopState,
     path: &Path,
 ) -> Result<Option<PreparedRestore>, LocalPoolError> {
-    let backup = CapturedFile::read(backup_path(state))?;
-    let missing = CapturedFile::read(missing_marker_path(state))?;
+    let backup = CapturedFile::read(backup_path(state), MAX_CONFIG_BYTES)?;
+    let missing = CapturedFile::read(
+        missing_marker_path(state),
+        MISSING_CONFIG_MARKER.len() as u64,
+    )?;
     let (record_index, original) = match (&backup.bytes, &missing.bytes) {
         (Some(bytes), None) => (
             0,
             Some(parse_config(bytes, ErrorCode::RecoveryRequired, false)?),
         ),
-        (None, Some(bytes)) if bytes == b"original config did not exist\n" => (1, None),
+        (None, Some(bytes)) if bytes == MISSING_CONFIG_MARKER => (1, None),
         (None, None) => return Ok(None),
         _ => {
             return Err(LocalPoolError::new(
@@ -79,8 +88,8 @@ pub(super) fn prepare(
             ));
         }
     };
-    let name = CapturedFile::read(backup_name_path(state))?;
-    let config = CapturedFile::read(path.to_path_buf())?;
+    let name = CapturedFile::read(backup_name_path(state), MAX_SNAPSHOT_NAME_BYTES)?;
+    let config = CapturedFile::read(path.to_path_buf(), MAX_CONFIG_BYTES)?;
     let current = config
         .bytes
         .as_deref()
@@ -107,6 +116,15 @@ pub(super) fn prepare(
             .map_err(|_| io_error("OpenCode configuration could not be serialized"))?;
         Some(format!("{content}\n").into_bytes())
     };
+    if restored
+        .as_ref()
+        .is_some_and(|bytes| bytes.len() as u64 > MAX_CONFIG_BYTES)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "OpenCode restored configuration exceeds the supported file size",
+        ));
+    }
     Ok(Some(PreparedRestore {
         config,
         restored,
@@ -178,18 +196,8 @@ fn merge_connection(original: Config, current: &Config) -> Config {
     restored
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, LocalPoolError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(io_error(
-            "OpenCode configuration or recovery data could not be read",
-        )),
-    }
-}
-
-fn check_bytes(path: &Path, expected: &Option<Vec<u8>>) -> Result<(), LocalPoolError> {
-    if read_optional(path)?.as_deref() != expected.as_deref() {
+fn check_bytes(path: &Path, expected: &Option<Vec<u8>>, limit: u64) -> Result<(), LocalPoolError> {
+    if read_optional_bytes(path, limit)?.as_deref() != expected.as_deref() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "OpenCode configuration or recovery data changed during restoration; retry",
