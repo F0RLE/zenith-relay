@@ -12,7 +12,6 @@ use crate::local_pool::{
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tauri::{AppHandle, State};
-use tauri_plugin_opener::OpenerExt;
 use zenith_relay_core::{DefaultServiceTier, ErrorOrigin, ObservedServiceTier};
 
 #[tauri::command]
@@ -122,7 +121,6 @@ pub fn get_relay_storage_info(state: State<'_, DesktopState>) -> RelayStorageInf
 #[tauri::command]
 pub async fn open_relay_folder(
     folder: RelayFolder,
-    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let state = state.inner().clone();
@@ -141,9 +139,7 @@ pub async fn open_relay_folder(
             RelayFolder::OpenCodeBackups => state.opencode_backup_root(),
         };
         fs::create_dir_all(&folder_path).map_err(io_error)?;
-        app.opener()
-            .open_path(folder_path.to_string_lossy(), None::<&str>)
-            .map_err(|error| io_error(error.to_string()))
+        open::that_detached(folder_path).map_err(|error| io_error(error.to_string()))
     })
     .await
     .map_err(|_| io_error("Opening the folder was interrupted"))?

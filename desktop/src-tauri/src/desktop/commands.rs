@@ -1,6 +1,5 @@
 use crate::platform::{platform_name, system_locale};
 use tauri::AppHandle;
-use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
 pub(super) fn get_platform() -> &'static str {
@@ -31,11 +30,9 @@ pub(super) async fn set_ui_language(
 }
 
 #[tauri::command]
-pub(super) fn open_api_key_page(provider: String, app: AppHandle) -> Result<(), String> {
+pub(super) fn open_api_key_page(provider: String) -> Result<(), String> {
     let url = api_key_page_url(&provider).ok_or_else(|| "Unsupported API provider.".to_string())?;
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|error| error.to_string())
+    open::that_detached(url).map_err(|error| error.to_string())
 }
 
 fn api_key_page_url(provider: &str) -> Option<&'static str> {

@@ -1,4 +1,8 @@
 mod chunks;
+pub(crate) mod native;
+
+#[cfg(not(test))]
+use native as keyring;
 
 use chunks::{
     CHUNK_UTF16_UNITS, MANIFEST_PREFIX, MANIFEST_VERSION, MAX_CHUNKS, SecretManifest, chunk_user,
@@ -76,7 +80,7 @@ fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
 
 #[cfg(not(test))]
 fn keyring_entry_for_service(service: &str, user: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(service, user)
+    keyring::entry(service, user)
         .map_err(|error| format!("Could not open OS secret storage: {error}"))
 }
 

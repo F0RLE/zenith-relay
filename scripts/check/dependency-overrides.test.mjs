@@ -32,6 +32,17 @@ test("localization build configuration uses the maintained TOML parser", () => {
   expect(config.dependencies.some((name) => name.split(" ")[0] === "toml")).toBe(true);
 });
 
+test("native credential storage and instance IPC do not retain retired zbus 5 crates", () => {
+  for (const name of ["keyring", "zbus-secret-service-keyring-store", "tauri-plugin-opener", "zvariant", "zvariant_derive", "zbus_names"]) {
+    expect(packages.some((pkg) => pkg.name === name), name).toBe(false);
+  }
+  const buses = packages.filter((pkg) => pkg.name === "zbus");
+  expect(buses).toHaveLength(1);
+  expect(Number(buses[0].version.split(".")[0])).toBeGreaterThanOrEqual(6);
+  expect(desktop.target['cfg(target_os = "linux")'].dependencies["dbus-secret-service-keyring-store"].features).toContain("crypto-rust");
+  expect(desktop.target['cfg(target_os = "linux")'].dependencies.zbus.features).toContain("tokio");
+});
+
 test("the compiler compatibility override keeps its attribute macro on the same source", () => {
   if (!desktop.patch?.["crates-io"]?.["proc-macro-error2"]) return;
   const implementation = packages.find((pkg) => pkg.name === "proc-macro-error2");

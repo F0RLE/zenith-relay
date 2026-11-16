@@ -448,7 +448,7 @@ uses that same snapshot for both Cargo audits. Both frontend packages run
 `bun audit`. A new advisory can fail CI without a source change; investigate
 and remediate it rather than pinning an old database to obtain a passing check.
 
-Desktop pins two reviewed upstream changes pending published releases:
+Desktop pins three reviewed upstream changes pending published releases:
 
 - `proc-macro-error2`: [PR #14](https://github.com/GnomedDev/proc-macro-error-2/pull/14),
   commit `53ff94b61c678593158db1a3d50269c6f0de0db7`, fixes the private `proc_macro`
@@ -456,6 +456,11 @@ Desktop pins two reviewed upstream changes pending published releases:
 - `i18n-config`: merged [PR #176](https://github.com/kellpossible/cargo-i18n/pull/176),
   commit `2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4`, replaces unmaintained
   `basic-toml` with `toml` for localization build configuration.
+- `tauri-plugin-single-instance`: [PR #3759](https://github.com/tauri-apps/plugins-workspace/pull/3759),
+  commit `1dba01713786ffbfd960745e73486541ffe93f33`, migrates Linux instance IPC
+  to zbus 6 without changing the Windows or macOS backends. Relay explicitly
+  enables zbus's Tokio runtime so instance callbacks and shutdown stay on
+  Tauri's driven runtime rather than a private D-Bus executor.
 
 Script checks enforce immutable, credential-free Git sources, matching manifest
 and lockfile revisions, and the maintained parser. `age` stays on the parallel
@@ -467,13 +472,22 @@ Codex encrypted-authorization fixture still passes. Do not change its format or
 master key. Replace each Git pin when a reviewed published release includes its
 fix; keep dependency audits and compiler checks enabled.
 
-The current Linux dependency families retain these upstream constraints:
+Native credentials use `keyring-core` with an application-owned store: Windows
+Credential Manager and macOS Keychain keep their existing providers; Linux uses
+`dbus-secret-service-keyring-store` with encrypted Secret Service sessions.
+The `service`/`username` attributes, collection defaults and Codex key names stay
+unchanged. No credential is rewritten merely to select a provider, and Relay
+does not replace keyring-core's process-global default store. The explicit native
+store test writes and deletes only its unique synthetic entry; CI runs it with
+an unlocked Secret Service on Linux and with Credential Manager on Windows.
+The retired zbus 5 crates are absent from the lockfile, not ignored by the audit.
+
+The remaining GTK3 dependency families retain these upstream constraints:
 
 | Advisory | Dependency owner and required migration |
 | --- | --- |
 | [RUSTSEC-2024-0370](https://rustsec.org/advisories/RUSTSEC-2024-0370.html) | Tauri's GTK 0.18 family uses `proc-macro-error` 1 through `glib-macros` and `gtk3-macros`. The separate `proc-macro-error2` override does not replace it. |
 | [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html) | GTK 0.18 retains `glib` 0.18. The published fix requires `glib` 0.20 or newer, so qualify a coordinated Tauri/GTK migration rather than mixing incompatible GTK types. |
-| [RUSTSEC-2026-0370](https://rustsec.org/advisories/RUSTSEC-2026-0370.html), [0371](https://rustsec.org/advisories/RUSTSEC-2026-0371.html), [0372](https://rustsec.org/advisories/RUSTSEC-2026-0372.html) | Linux keyring/Secret Service and Tauri plugins require zbus 5. Its standalone `zvariant`, `zbus_names` and derive crates moved into zbus 6; migrate their parent integrations together and verify credential-store compatibility. |
 
 These paths are absent from the Windows dependency graph but remain relevant to
 Linux delivery. They are unresolved upstream constraints, not false positives or

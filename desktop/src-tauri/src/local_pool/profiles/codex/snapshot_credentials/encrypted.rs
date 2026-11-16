@@ -7,6 +7,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use rand::Rng;
 use std::collections::BTreeMap;
 
+#[cfg(not(test))]
+use crate::key_storage::native as keyring;
+
 const AUTH_KEY: &str = "global/CODEX_AUTH";
 const FILE_NAME: &str = "codex_auth.age";
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -31,7 +34,7 @@ pub(super) struct NativeMasterKey;
 fn key_entry(home: &Path) -> Result<keyring::Entry> {
     let home = canonical_profile_dir(home)?;
     let hash = key_hash(home.to_string_lossy().as_ref());
-    keyring::Entry::new("codex", &format!("secrets|{}", &hash[..16])).map_err(|_| storage_error())
+    keyring::entry("codex", &format!("secrets|{}", &hash[..16])).map_err(|_| storage_error())
 }
 
 #[cfg(not(test))]

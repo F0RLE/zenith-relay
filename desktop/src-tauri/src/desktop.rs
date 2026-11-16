@@ -1,6 +1,10 @@
 use std::{env, time::Instant};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
+// Drive instance IPC on Tauri's runtime, including shutdown from its callback.
+#[cfg(target_os = "linux")]
+use zbus as _;
+
 use crate::{
     local_pool, platform,
     tray::{AppState, build_tray, close_main_window},
@@ -37,7 +41,6 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())

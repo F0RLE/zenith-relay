@@ -3,6 +3,9 @@
 //! Verified against openai/codex 4b4a5cf, login/src/auth/storage.rs.
 use super::*;
 
+#[cfg(not(test))]
+use crate::key_storage::native as keyring;
+
 mod encrypted;
 
 pub(super) const NATIVE_AUTH_REF: &str = "profile:codex:snapshot:native-auth";
@@ -115,7 +118,7 @@ pub(super) fn lock(home: &Path) -> Result<fs::File> {
 fn entry(home: &Path) -> Result<keyring::Entry> {
     let home = canonical_profile_dir(home)?;
     let hash = key_hash(home.to_string_lossy().as_ref());
-    keyring::Entry::new("Codex Auth", &format!("cli|{}", &hash[..16])).map_err(|_| keyring_error())
+    keyring::entry("Codex Auth", &format!("cli|{}", &hash[..16])).map_err(|_| keyring_error())
 }
 
 #[cfg(not(test))]

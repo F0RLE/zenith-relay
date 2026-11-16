@@ -12,6 +12,11 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
 
 ### Changed
 
+- Remove retired zbus 5 dependencies from Linux credential storage and instance
+  IPC. Secret Service retains its existing account identifiers; Windows and macOS
+  retain their native providers. Opening approved links and Relay folders uses
+  the existing OS launcher directly instead of the broader opener plugin.
+
 - Refresh Desktop, Hosted preview and shared-core dependencies, including the
   Rust toolchain, CI tooling and CodeQL library target. Remove the redundant
   Nano ID override. Keep `age` on its parallel security release while the newer
