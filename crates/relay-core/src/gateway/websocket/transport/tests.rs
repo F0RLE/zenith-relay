@@ -1,6 +1,39 @@
 use super::*;
 use futures_util::SinkExt;
 
+#[test]
+fn frame_conversion_preserves_payloads_and_private_close_codes() {
+    use tungstenite::Message as Frame;
+    for message in [
+        Frame::Text("synthetic 😀 message".into()),
+        Frame::Binary(vec![0, 255, 128].into()),
+        Frame::Ping(vec![0, 1].into()),
+        Frame::Pong(vec![2, 3].into()),
+        Frame::Close(Some(tungstenite::protocol::CloseFrame {
+            code: 4001.into(),
+            reason: "synthetic close 😀".into(),
+        })),
+    ] {
+        assert_eq!(
+            send_message(receive_message(message.clone()).unwrap()),
+            message
+        );
+    }
+    assert!(matches!(
+        receive_message(tungstenite::Message::Close(None)).unwrap(),
+        Message::Close {
+            code,
+            reason,
+        } if code == reqwest_websocket::CloseCode::default() && reason.is_empty()
+    ));
+    assert!(
+        receive_message(tungstenite::Message::Frame(
+            tungstenite::protocol::frame::Frame::ping(Vec::new())
+        ))
+        .is_err()
+    );
+}
+
 fn response() -> axum::http::response::Builder {
     axum::http::Response::builder()
         .version(Version::HTTP_11)

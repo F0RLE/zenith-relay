@@ -114,13 +114,9 @@ impl Stream for UpstreamWebSocket {
     type Item = Result<Message, ()>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.poll_next_unpin(cx).map(|item| {
-            item.map(|result| {
-                result
-                    .map_err(|_| ())
-                    .and_then(|message| message.try_into().map_err(|_| ()))
-            })
-        })
+        self.inner
+            .poll_next_unpin(cx)
+            .map(|item| item.map(|result| result.map_err(|_| ()).and_then(receive_message)))
     }
 }
 
@@ -132,7 +128,7 @@ impl Sink<Message> for UpstreamWebSocket {
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-        Pin::new(&mut self.inner).start_send(item.into())
+        Pin::new(&mut self.inner).start_send(send_message(item))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -141,6 +137,37 @@ impl Sink<Message> for UpstreamWebSocket {
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.inner).poll_close(cx)
+    }
+}
+
+fn receive_message(message: tungstenite::Message) -> Result<Message, ()> {
+    Ok(match message {
+        tungstenite::Message::Text(text) => Message::Text(text.to_string()),
+        tungstenite::Message::Binary(bytes) => Message::Binary(bytes),
+        tungstenite::Message::Ping(bytes) => Message::Ping(bytes),
+        tungstenite::Message::Pong(bytes) => Message::Pong(bytes),
+        tungstenite::Message::Close(frame) => Message::Close {
+            code: frame
+                .as_ref()
+                .map_or_else(Default::default, |frame| u16::from(frame.code).into()),
+            reason: frame.map_or_else(String::new, |frame| frame.reason.to_string()),
+        },
+        tungstenite::Message::Frame(_) => return Err(()),
+    })
+}
+
+fn send_message(message: Message) -> tungstenite::Message {
+    match message {
+        Message::Text(text) => tungstenite::Message::Text(text.into()),
+        Message::Binary(bytes) => tungstenite::Message::Binary(bytes),
+        Message::Ping(bytes) => tungstenite::Message::Ping(bytes),
+        Message::Pong(bytes) => tungstenite::Message::Pong(bytes),
+        Message::Close { code, reason } => {
+            tungstenite::Message::Close(Some(tungstenite::protocol::CloseFrame {
+                code: u16::from(code).into(),
+                reason: reason.into(),
+            }))
+        }
     }
 }
 
