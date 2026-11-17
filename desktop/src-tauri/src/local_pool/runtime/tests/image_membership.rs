@@ -36,10 +36,16 @@ fn excel_pool_catalog_obeys_the_bps_image_gate_without_affecting_text() {
         .collect::<Vec<_>>();
     assert!(models.contains(&"gpt-test"));
     for model in zenith_relay_core::account_image_models(OAuthClientKind::ExcelBps) {
-        assert!(models.contains(&model), "missing {model}");
+        assert!(
+            models.contains(&model),
+            "pool catalog must contain each enabled image model"
+        );
     }
     if !zenith_relay_core::BPS_IMAGES_ENABLED {
-        assert_eq!(models, ["gpt-test"]);
+        assert!(
+            models == ["gpt-test"],
+            "disabled BPS images must leave only the synthetic text model"
+        );
     }
     assert!(!account.account.in_pool);
     assert!(!account.image_pool_enabled);

@@ -109,8 +109,7 @@ async fn bps_native_images_forward_all_ids_without_responses_access_or_model_sub
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "{model}: {}",
-            response.text().await.unwrap()
+            "synthetic image request must succeed"
         );
     }
     task.abort();
@@ -124,7 +123,10 @@ async fn bps_native_images_forward_all_ids_without_responses_access_or_model_sub
         );
         assert!(request.headers.get("x-codex-image-turn-id").is_none());
         let body: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(body["model"], *model);
+        assert!(
+            body["model"] == *model,
+            "image request must preserve the selected model"
+        );
         assert_eq!(body["prompt"], "  synthetic portrait\n");
         assert_eq!(body["future_option"]["keep"], true);
         assert!(body.get("stream").is_none());
