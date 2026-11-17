@@ -12,6 +12,27 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
 
 ### Changed
 
+- Manual account refresh keeps model discovery on the selected sign-in, including
+  SIWC with linked Codex/BPS quota metadata. Rust resolves the quota source;
+  refreshing from Connections or Pool does not change the selected route.
+
+- Add per-application upstream protocol selection under Access → Applications.
+  Auto retains native-first routing; manual choices use existing compatible pool
+  routes. Dedicated application keys isolate settings, catalogs follow the choice,
+  and retained continuations keep their route without restarting clients. New
+  requests on open WebSockets pick up saved changes; in-flight retries keep their
+  snapshot. Existing continuations survive protocol-filtered catalog changes
+  with route recovery disabled, without bypassing scope or model revocations.
+
+- Hide and block native Codex Images for known Free plans, with an OpenAI provider
+  restriction explanation. Backend model availability controls pool admission;
+  accounts with no available models have no Add to pool action. Text and removal
+  of existing members remain available, and plan changes update routes in place.
+
+- Disable Excel/BPS Images by default because upstream availability is unreliable.
+  Reject requests locally with a provider-unavailability explanation, preserve BPS
+  text and Codex Images, and retain the adapter behind `experimental-bps-images`.
+
 - Remove retired zbus 5 dependencies from Linux credential storage and instance
   IPC. Secret Service retains its existing account identifiers; Windows and macOS
   retain their native providers. Opening approved links and Relay folders uses

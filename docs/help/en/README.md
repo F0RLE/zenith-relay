@@ -39,6 +39,12 @@ Install your client and have your account or provider API key ready.
    Open **Usage → Requests** in Relay to see its result and selected member.
 
 Use **SIWC** or **Excel / BPS** for text and **Add to pool for images** for Codex.
+Codex connections reported as Free do not expose Images. API requests return the
+OpenAI provider restriction; cards show no extra notice. If no other models are
+enabled, Add to pool is hidden.
+Existing members can still be removed, and unknown plans are not treated as Free.
+Images through Excel / BPS are disabled because upstream availability is not
+reliable. Use Codex or a configured image API source; Excel / BPS text is unchanged.
 Experimental Codex text access requires **Settings → Pool data → Text models
 through Codex sign-in**. Read the warning and wait 10 seconds to confirm.
 Cancellation leaves settings intact; reopening restarts the countdown.
@@ -569,6 +575,16 @@ unsupported conversions fail. Realtime and audio/video conversion are unavailabl
 
 ### Applications
 
+**Request format** sets the format Relay uses to send requests to the model provider.
+Each application has its own setting.
+**Automatic** keeps native-first routing. A manual choice uses only compatible
+pool routes; unavailable formats are not offered, and requests do not silently
+fall back to another format. Rotation still distributes work among eligible members.
+Saving does not restart the client. Retained continuations keep their route;
+new requests without retained ownership use the new setting. If prompted,
+reconnect the application to the pool to replace its old shared connection.
+Direct provider connections, image generation, and HTTP/WebSocket are separate.
+
 In **Access → Applications**, select a client, choose its **Application path**
 with the folder button or enter an absolute path, then **Save**. Use the desktop
 `.app` on macOS or `.exe` on Windows; shortcuts, CLI commands, arguments and
@@ -722,6 +738,11 @@ image model from `/v1/models`. Native ChatGPT/Codex uses no extra text-model
 call; Excel/BPS and subscription-sharing connections are unsupported. Provider
 access and limits, not plan names, decide availability.
 
+A full main Codex quota does not prove unlimited images. Image-only connections
+show no weekly remaining-value forecast from other accounts' text usage. Actual
+image usage, API-equivalent cost and payback remain visible; enabling Codex text
+access restores a text forecast, not an image allowance.
+
 Edits accept JSON image URLs/data URLs or multipart files and masks; limit:
 128 MiB. `stream: true` returns partial/completed base64 images; nonstreaming
 `response_format: "url"` returns inline data URLs. Relay does not host/save files.
@@ -862,6 +883,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_region_unsupported`, `unsupported_country_region_territory` | The provider does not serve the connection's region. | Check the provider's supported regions and permitted network configuration. Use a connection available in your region. |
 | `upstream_edge_challenge`, `edge_security_challenge` | Edge security, including Cloudflare 1010, blocked API access. | Check the API address, proxy and provider access. Signing in again does not resolve this block. |
 | `upstream_model_not_found` · provider `model_not_found` | This provider does not expose the requested model ID. | Refresh this source's models and verify key access. Remove an obsolete permission or select an actual available ID. |
+| `upstream_protocol_unavailable` | No compatible route uses this application's selected upstream protocol. | Choose Automatic in Access → Applications or enable a compatible route. Relay does not silently change the selected format. |
 | `upstream_route_degraded`, `route_degraded` | The ChatGPT response reports a different model or an internal downgrade id such as `degrade2`. | With Reject model substitution enabled under Access → Accounts, Relay rejects it in JSON, SSE (including response.created) and WebSocket. A pre-generation refusal can rotate; generated or delivered output is never replayed. Dated snapshots of the same model are allowed. The account pauses briefly. This checks reported identity, not quality. |
 | `upstream_model_unavailable`, `model_not_available` · 403/503 | The model is temporarily unavailable, including Basis Points `Model access has changed`. | The route pauses this model on the member. BPS `basispoints_model_access_changed` and `model_not_allowed` pause its canonical model and aliases for 30 minutes. The failed request ends without another account or a transport change. This is not exhausted quota. |
 | `upstream_model_unsupported`, `model_not_supported` | The selected provider path does not support this model. | Refresh the source catalog and verify the model ID, API address, key permissions, and provider support. Relay will use another compatible member when one is available. |

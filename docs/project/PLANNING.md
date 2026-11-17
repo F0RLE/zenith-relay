@@ -367,7 +367,9 @@ it does not stall the asynchronous command executor. Inputs are read before the
 runtime handle, after admission and worker dispatch. Routing previews use the
 current inventory/catalog, reuse admission only within that snapshot and never advance
 live rotation; ambiguous ranks stop the preview. Presentation indexes and saved
-model ordering provide no route, quota or authorization evidence.
+model ordering provide no route, quota or authorization evidence. Preview eligibility
+intersects global hidden-model visibility with key model rules; hiding a model
+cannot open a key's closed allow list.
 
 ### Metadata and query caches
 
@@ -446,7 +448,9 @@ and one redacted proxy summary. Only the selected Usage preview is restored;
 other pages remain on disk. Overview separately retains eight scoped previews.
 Writes coalesce and flush on hiding/leaving; storage failure is non-fatal and
 independent of native durability. Credentials, revealed identities and provider
-error messages are excluded; activity and leases are not restored.
+error messages are excluded; activity and leases are not restored. Returning to
+Local mode also restores only display inventory, without cached routing activity
+or rotation revisions; the next native snapshot establishes live state.
 
 Usage restores only the current exact query key; retired pre-`includeReport`
 preview keys are not reused. Native history remains authoritative.
@@ -1573,9 +1577,39 @@ Native account requests carry a Relay-owned `x-codex-image-turn-id`, stable
 through authorization recovery; API sources do not receive this account header.
 Hosted Responses `image_generation` and native Images access are separate
 capabilities. A native Images 403 is not retried as a text-model tool request.
-Excel/BPS and SIWC are not image executors. Published native image routes do
-not prove account entitlement or available image quota, and plan names alone
-neither grant capability nor exclude Free accounts.
+Excel/BPS standalone Images are disabled by default: upstream availability is
+not reliable. Shared-core catalog and final dispatch gates exclude even saved
+image IDs; requests fail locally with HTTP 503 `image_generation_not_enabled`
+and an upstream-unavailability explanation. Codex, API sources and BPS text are
+unaffected. The implemented adapter can be restored by rebuilding with the
+explicit `experimental-bps-images` Cargo feature (also forwarded by Desktop).
+With that feature, Excel/BPS executes Images through its own Office endpoint,
+using the selected Excel account, proxy and credential authority. Its Images
+access is independent of the Responses model catalog. The advertised Excel
+inventory includes `gpt-image-2` and the existing Sunburst/Flare IDs. Both Codex
+and Excel accept explicitly requested, syntactically valid image IDs outside
+that advertised inventory without rewriting the model. They retain key scope,
+account model rules, hidden-model controls and authorization fences; API-key
+sources remain restricted to their configured model routes. Catalog entries and
+forwarding capability are not account entitlement evidence.
+Excel generation uses JSON; uploaded and inline edits use multipart. Remote
+image locators remain JSON and are never fetched by Relay. False/null `stream`
+is omitted for Office; meaningful options, including an explicit streaming
+request, retain their values and the provider decides whether to accept them.
+Images do not inherit the BPS text first-progress timeout. Excel provider
+refusals are returned without switching to Codex or another model. Usage flows
+through the shared image accounting; missing quota or tariff evidence is not
+invented. SIWC remains outside the native image executor paths. Published native image routes do
+not prove account entitlement or available image quota. Relay excludes native
+Codex Images when the reported plan is Free (including normalized aliases),
+following provider access refusals on this route. The API rejects these requests
+locally with HTTP 403 `image_generation_not_enabled`; this is not an account-auth
+failure and does not disable text. Unknown plans are not treated as Free. Plan
+updates reconcile the catalog and dispatch fence without restarting or enrolling
+accounts. This route policy is not a claim about Free image availability in other
+OpenAI products. Desktop receives `poolEligible` and `imageGenerationRestriction`
+from the backend: zero permitted models hides Add to pool, rejects membership
+before mutation, and still allows removal of existing members.
 
 JSON and multipart edits preserve image ordering, masks and markup overlays.
 Prompts retain their exact whitespace in both formats; whitespace-only prompts
@@ -1770,8 +1804,9 @@ the load group, including the explicit linked-connection ranking reference for
 SIWC with unknown quota; candidates less than five percentage points below the
 best fresh quota remain in the same selection band. The primary warm preferred
 member stays eligible regardless of that gap while its fresh remaining quota is
-above 10%. At or below 10%, quota-only rebalancing requires an alternative with
-at least ten percentage points more remaining quota. Successful spillovers use
+above 10%. At or below 10%, every eligible quota-only replacement must have
+at least ten percentage points more remaining quota, not merely share the
+five-point band of a stronger contender. Successful spillovers use
 the same rule before moving durable prompt affinity. Independent work without
 a fresh dated group and warm alternatives retain the five-point band. This
 low-water heuristic does not predict the next request's consumption or bypass
@@ -1798,7 +1833,14 @@ freshness; persisted entitlement metadata is unchanged. This heuristic does not
 forecast demand or guarantee consumption of every saved reset. Primary affinity,
 ready warm alternatives, opaque owners, manual modes, capacity, provider waits
 and unknown/stale evidence
-keep their existing behavior. Subscription updates replace this soft evidence
+keep their existing behavior. If all warm routes fail the load, resource or health
+policy, their cold replacement uses expiry priority as independent work would.
+Resource-only exclusions are rechecked against the actual nearest expiry group:
+a distant quota leader does not justify switching to a weaker nearby member.
+A warm route is retained when that group offers no required resource improvement,
+without applying expiry weights or reporting an expiry-driven switch. Availability,
+load and health exclusions cannot be undone by an earlier deadline; diagnostics
+retain the effective rejection gate. Subscription updates replace this soft evidence
 without a restart; removal clears it. Deadline freshness uses the existing
 subscription refresh interval, independently of OAuth expiry and quota headers.
 Routing diagnostics also capture the selected candidate/model/operation's
@@ -1809,7 +1851,12 @@ attempts. Unknown, insufficient and expired samples stay distinct, and freshness
 is relative to the saved selection time. Selection uses the same measurement
 readiness threshold with its existing EWMA, not the diagnostic quantiles. The
 bounded readiness check allocates no snapshot or sorted sample vector. Evidence
-resets with route replacement/removal.
+resets with route replacement/removal, including selection EWMA and failure
+scores; priority-only edits retain it. Model replacement drops only that route's
+old rate-limit observation, preserving global and unchanged-route limits.
+A measured latency observation starts a
+new EWMA when its predecessor is stale or future-dated, rather than carrying an
+old penalty into a fresh measurement window.
 HTTP SSE diagnostics additionally record the first nonempty decoded body read,
 first complete parsed SSE JSON and first meaningful upstream output during
 bootstrap, before conversion or tool buffering. These are dispatch-relative
@@ -1895,7 +1942,10 @@ Runtime snapshots publish `resourceHeadroom` from the same quota and credit
 freshness checks used by admission, including protected quota reserves. Desktop
 cards use this admission evidence for routing capacity. A provider ledger must
 explicitly be usable; its reported
-balance alone is not spendable capacity. Snapshots also publish `selectionRank`:
+balance alone is not spendable capacity. Credit fallback requires a fresh
+positive balance or confirmed unlimited credits. A balance update that removes
+that evidence blocks new admission and any reserved but not yet sent fallback
+request. Snapshots also publish `selectionRank`:
 a read-only fallback preference, excluding all aliases of each preceding physical
 member through the same selector. Ranking stops where text model/protocol routes
 disagree or lack a candidate; it never reserves work or advances rotation.
@@ -1916,14 +1966,35 @@ waits, even when its retry time is earlier or runtime timing is absent. Stale or
 unknown counters do not establish that category. Retry time orders members within
 the category; this presentation does not change saved routing or admission.
 Quota waits, retry cooldowns and occupied capacity keep
-distinct labels. Bare unavailable telemetry alone does not override a healthy
+distinct labels, including saved API-source cards. A quota wait does not require
+a known retry deadline; occupied capacity alone is not an unavailable source.
+Pool error counts include unavailable members even without a recorded error code,
+but do not count capacity waits as errors. Bare unavailable telemetry alone does not override a healthy
 inventory status. New activity invalidates ranks and queues a coalesced lightweight
 scheduler refresh; periodic polling remains the fallback. This lightweight response
+includes permitted image routes in availability, while selection ranks remain a
+text-route preview. An image-only member is not unavailable merely because it has
+no text route. An occupied image lane remains operationally in rotation with
+`capacityWait`, not unavailable; it still cannot admit another image until release.
+Configuration, authentication and quota blocks keep precedence over activity.
+Activity revisions are captured under the scheduler lock with the
+projected counts, before preview work, so an older snapshot cannot acknowledge
+and discard a newer admission or release event. The response
 contains both runtime candidates and the backend card projection, reusing compact
 inventory metadata from the last full snapshot instead of rereading credentials,
 catalogs or usage ledgers. Inventory revisions prevent an older response from
 replacing a newer projection. Active highlighting is
 independent of readiness, so draining requests remain visible until released.
+The same lightweight projection publishes kind-qualified `memberStatuses` for
+cards and ordering. Live admission can recover a transient runtime block, but
+never a saved auth, credential, proxy, recovery, quota or operator block. The
+frontend applies those statuses rather than inferring readiness from activity.
+Display previews never persist live routing projections or their process-local
+revisions. The first native snapshot replaces legacy cached revisions regardless
+of their magnitude; only live responses participate in freshness comparisons.
+Routing previews exclude globally disabled models without hiding their in-flight
+work. Visible runtime pages also force a full snapshot once per minute as a
+bounded fallback for missed state notifications; hidden or unrelated pages do not.
 Recovery and retry details stay in status-icon hints, not duplicate lines in
 account cards on Pool or Connections.
 Actual selection depends on the request's model, affinity and current load.
@@ -1937,13 +2008,17 @@ readers. Partial failures refresh persisted state and retain selection for retry
 removed or replaced routes are pruned from selection.
 
 Round-robin mode follows saved member order, skips unavailable/full members,
-and wraps. Equal cycling ignores saved weights and soft affinity. Optional
+and wraps. Its cursor and equal-priority tie-break use physical member identity,
+so changing protocol aliases cannot repeat or skip that member's turn.
+Equal cycling ignores saved weights and soft affinity. Optional
 weighted cycling uses physical-member request shares; shares are not token or
 spending targets. Equal-credit ties use saved order, not protocol-alias IDs.
 Weighted credit/debt is bounded to 32 current eligible physical-pool rounds,
 both when choosing and when advancing a reservation. Soft sticky work still
 contributes to ordinary weighted accounting without accumulating unbounded debt
-for later independent work. Pool/weight changes use the current bound; equal
+for later independent work. Weight, model-route and removal edits reset only
+affected scheduling routes; edits to another model cannot erase accrued shares
+for an unchanged route. Pool/weight changes use the current bound; equal
 round-robin, hard ownership and recovery admission retain their own rules.
 Failover selects the first ready member in saved priority order, without cycling.
 A due lower-priority recovery route does not displace a healthy primary; a due
@@ -1977,6 +2052,17 @@ preserving relative order inside each group; its API reserve may spend balance.
 Presets rebase onto current membership and never restore a removed member.
 Policy-only updates retain active leases, continuation owners, resource evidence,
 and cooldowns. No application or gateway restart is required.
+Late outcomes also validate the original physical member before updating health,
+latency or recovery credits. After reassignment, an old outcome releases only its
+own lease without crediting or penalizing the new member.
+Concurrent successful attempts each contribute latency observations and ordinary
+recovery-credit progress while only other successes have intervened. They do not
+reopen an already closed incident. An intervening failure or recovery abort fences
+old successes even after recovery; late failures cannot join a newer incident.
+Each accepted wire dispatch captures the current circuit epoch and incident,
+including dispatches on retained transport leases. A peer success between
+reservation and sending cannot cause that new attempt's failure or cooldown
+to be discarded as an older incident. Rejected dispatches retain their fences.
 
 The renderer and IPC use only version-three policies; the native store owns
 old-policy migration. Unsupported runtime versions remain non-editable.
@@ -3374,7 +3460,11 @@ Reasoning cost is included in output. Missing breakdowns or
 rates remain unavailable; a measured zero is distinct from an unknown cost.
 
 Desktop remaining-quota cards share the persisted weekly-capacity calibration
-below. Each current proven subscription ledger contributes at most its latest
+below for text work. Image-only pool connections receive no text-based weekly
+value forecast; enabling Codex text access restores the text estimate, not an
+image allowance. Provider-reported quota windows and actual image usage/pricing
+remain unchanged. A full main quota window does not prove unlimited images.
+Each current proven subscription ledger contributes at most its latest
 valid paired measurement (at least 5% consumption and 80% priced tokens). Only
 the priced component is used; missing prices are not extrapolated. Coverage is
 persisted and shown. Older records default to full coverage because their
@@ -3439,6 +3529,12 @@ Unknown ledger identity/plan, incomplete prices or missing observations produce
 gaps. Subscription price does not determine a quota multiplier.
 
 Capacity = interval API-equivalent microUSD × 10,000 / consumed basis points.
+Intervals containing image usage are excluded from this text calibration even
+when all generic token counters are present. Removing only their image cost
+would still misattribute an unproven quota delta to the remaining text work.
+The next text-only interval can establish new evidence. Image usage, API-equivalent
+cost and payback continue through the separate image accounting path; no image
+allowance is inferred from ChatGPT web or the Codex main window without evidence.
 Comparisons separate plan, pricing revision and joint model/tier/context/reasoning
 mix (10% token-weight bands), with cache-input bands of 25% and output-share bands
 of 10%. Each ledger contributes one latest vote per bucket; charts plot the median.
@@ -3809,6 +3905,27 @@ Missing-recovery reclamation requires the complete current generated settings;
 it does not infer defaults for an older profile. Non-UUID profiles are unmanaged:
 Relay preserves their files, entries and previous selection rather than adopting
 or deleting them. Recovery records for retired profile IDs are rejected unchanged.
+
+Application upstream preferences live in GatewaySettings and are applied by the
+core to distinct managed application request keys, never inferred from a User-Agent.
+The shared local API and LAN keys keep automatic routing. Auto preserves existing
+native-first selection; Responses, Chat Completions, Messages and Gemini restrict
+new text requests to an evidenced compatible upstream before rotation admission.
+An unavailable selected protocol produces `upstream_protocol_unavailable`, not a
+silent fallback. Provider/account transports and credentials are unchanged.
+Each HTTP request and WebSocket `response.create` snapshots the current preference;
+retries and internal HTTP handoffs retain that snapshot. A saved edit applies to
+new requests on an already-open socket without interrupting in-flight work.
+Retained response, tool and adapter history ownership keeps its original route,
+even when the new preference hides its model from the application catalog and
+route recovery is disabled. Scope revocations and explicit model disabling still
+apply. Unrecognized stateless history cannot establish old route ownership.
+Image endpoints and HTTP/WebSocket settings remain
+separate. App catalogs project only matching text routes and capabilities.
+OpenCode can select the matching SDK; Codex and Claude keep their native client APIs.
+Older shared-key profiles keep Auto until explicit reconnection. Refresh preserves
+their existing credential and never adopts a newer external login. Settings saves
+are revision-checked and do not restart applications or replace the running gateway.
 
 OpenCode profiles explicitly disable standard SDK reasoning variants that the
 model route does not advertise; omission would let OpenCode restore its built-in

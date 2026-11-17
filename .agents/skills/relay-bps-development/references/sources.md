@@ -75,18 +75,21 @@ Keep minimal attributable observations rather than entire bundles or prompts.
 
 ### Image executor snapshot
 
-Inspected on 2026-11-15 through the manifest's entrypoint and
-`legacy-office-warning-BHYrQ12A.js` imports:
-[public client asset](https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/assets/x-square-B7-OWktk.js),
-SHA-256 `6cbf86156b31c7aaa6864d6ca6583b4557bb3e8006f50b7dd8b7431da234f31b`.
-`sOt` builds generation JSON; `lOt`/`cOt` build edit fields/multipart.
+Inspected on 2026-11-17 through the manifest's entrypoint and
+`legacy-office-warning-DH9VdqP_.js` imports:
+[public client asset](https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/assets/x-square-CfaiJB_v.js),
+SHA-256 `b62b6bb2d75940d3fcdad0766c65b14e74e2cfbaab0792bd3a5120bb0f27baf1`.
+`pOt` builds generation JSON; `mOt`/`gOt` build edit fields/multipart.
 They send model, prompt, background, quality, size, PNG output format and
-optional `n`, not `stream`. `fOt` accepts `auto`, `1024x1024`, `1536x1024`,
-`1024x1536` and `1280x720`; `Dse` accepts `gpt-image-2`. This is the observed
+optional `n`, not `stream`. `vOt` accepts `auto`, `1024x1024`, `1536x1024`,
+`1024x1536` and `1280x720`; `Fse` accepts `gpt-image-2`. This is the observed
 client allowlist, not proof that other server values are supported or forbidden.
-`eOt`/`pMr` separate direct API mode from the BPS proxy; an SDK Images class alone
+`_Mr` separates direct API mode from the BPS proxy; an SDK Images class alone
 does not prove which authenticated endpoint executes a request. Pool support
 and account-specific live acceptance remain separate from this source evidence.
+Relay currently disables the pool adapter by default after live upstream
+refusals and a timeout. Its implementation remains behind the explicit
+`experimental-bps-images` Cargo feature; public client artifacts do not enable it.
 
 ## Research on the Office client
 

@@ -587,6 +587,14 @@ individual statuses rather than interpreting completion as authorization success
 
 ### Experimental BPS image probe
 
+Normal builds disable BPS Images in the pool because upstream availability is
+unreliable. The adapter and its tests remain available behind an explicit build
+feature. To build a research-enabled Desktop executable, use
+`bun run app:build --no-bundle --features experimental-bps-images`; omit the
+feature for normal builds. This is not a saved setting and does not affect
+Codex Images or BPS text. The separate probe below is always explicit and never
+enables pool Images.
+
 With explicit permission to consume the selected subscription's image quota:
 
 ~~~powershell
@@ -609,6 +617,16 @@ requested metadata. Results include bounded metadata, reported token counters
 and sanitized errors; image bytes are not retained. These direct research sends
 are not added to the working pool's usage history (`poolUsageRecorded=false`).
 The CLI does not enable BPS image participants or establish 2K/4K support.
+
+For an explicitly requested preview, append `--save-image ABSOLUTE_PROMPT_FILE
+ABSOLUTE_OUTPUT_PNG` after the optional account reference. The UTF-8 prompt file
+must be nonempty and at most 16 KiB; the output must be a new PNG file in an
+existing directory. Directory write access is checked before consuming quota.
+Only a single completed PNG result is saved, never a provider
+error or unverified response. Prompt text and image bytes are not printed. A save
+failure does not authorize another generation; inspect `outputFile` or
+`outputError` alongside the generation status. Omit this option to retain the
+synthetic, metadata-only probe behavior.
 
 ### Focused checks
 

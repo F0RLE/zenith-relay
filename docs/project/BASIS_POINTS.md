@@ -619,9 +619,21 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   a conversation. Non-Standard tiers, native strict output, native web search/image
   generation and Agent Identity remain unsupported.
   This Responses-tool restriction is separate from Office's standalone Images
-  endpoints. The opt-in [BPS image probe](../CONTRIBUTING.md#experimental-bps-image-probe)
-  can test those endpoints with existing Excel credentials without enabling a
-  pool route. It preserves one account and proxy, omits unsupported `stream`,
+  endpoints. Their pool adapter is retained but disabled by default because
+  upstream availability is not reliable. Disabled BPS Images are absent from the
+  catalog, including saved image IDs, and requests fail locally with HTTP 503
+  `image_generation_not_enabled` explaining upstream unavailability. Codex, API
+  sources and BPS text remain unchanged. Rebuild with the explicit Cargo feature
+  `experimental-bps-images` to re-enable the adapter after live verification;
+  the Desktop feature forwards to the shared core. When enabled, these
+  requests preserve the selected model ID and Excel credential/proxy owner,
+  independently of the text catalog. JSON generation and multipart edits use
+  the shared image usage accounting. The native image model list is not an
+  allowlist: explicit image IDs pass through subject to operator/key permissions.
+  Provider refusals do not trigger a Codex fallback or model substitution.
+  The opt-in [BPS image probe](../CONTRIBUTING.md#experimental-bps-image-probe)
+  separately tests existing Excel credentials without changing pool membership.
+  It preserves one account and proxy, omits unsupported `stream`,
   and measures returned PNG headers. Probe sizes and requested model names are
   not evidence of server capability, serving-model identity or 2K/4K support.
 - JSON-object mode and a JSON schema with non-strict output buffer the final
