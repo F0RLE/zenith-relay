@@ -31,7 +31,8 @@ fn fallback_root() -> PathBuf {
             .unwrap_or_else(env::temp_dir)
             .join("Zenith Relay")
     } else if cfg!(target_os = "macos") {
-        absolute_environment_path(env::home_dir().map(PathBuf::into_os_string))
+        env::home_dir()
+            .and_then(checked_absolute_path)
             .unwrap_or_else(env::temp_dir)
             .join("Library")
             .join("Application Support")
@@ -39,7 +40,8 @@ fn fallback_root() -> PathBuf {
     } else {
         absolute_environment_path(env::var_os("XDG_DATA_HOME"))
             .or_else(|| {
-                absolute_environment_path(env::home_dir().map(PathBuf::into_os_string))
+                env::home_dir()
+                    .and_then(checked_absolute_path)
                     .map(|home| home.join(".local/share"))
             })
             .unwrap_or_else(env::temp_dir)
@@ -48,7 +50,16 @@ fn fallback_root() -> PathBuf {
 }
 
 fn absolute_environment_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    let path = PathBuf::from(value?);
+    // These optional text overrides apply only to early-startup diagnostics.
+    // System home directories and the initialized app root remain native paths.
+    let value = value?.into_string().ok()?;
+    if value.contains("../") || value.contains("..\\") {
+        return None;
+    }
+    checked_absolute_path(PathBuf::from(value))
+}
+
+fn checked_absolute_path(path: PathBuf) -> Option<PathBuf> {
     if !path.is_absolute()
         || path
             .components()
@@ -188,10 +199,22 @@ mod tests {
         assert!(
             absolute_environment_path(Some(root.clone().into_os_string())) == Some(root.clone())
         );
+        let dotted = root.join("valid..directory");
+        assert!(absolute_environment_path(Some(dotted.clone().into_os_string())) == Some(dotted));
         assert!(
             absolute_environment_path(Some(root.join("..").join("outside").into_os_string()))
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_system_roots_preserve_non_unicode_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = crate::diagnostics::tests::test_root("native-environment-root")
+            .join(OsString::from_vec(vec![b'n', 0xff]));
+        assert!(checked_absolute_path(root.clone()) == Some(root.clone()));
+        assert!(absolute_environment_path(Some(root.into_os_string())).is_none());
     }
 
     #[test]
