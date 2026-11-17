@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use super::super::*;
 
@@ -22,32 +22,41 @@ pub(in crate::diagnostics) fn root_path() -> PathBuf {
 
 fn fallback_root() -> PathBuf {
     #[cfg(debug_assertions)]
-    if let Some(value) = env::var_os("ZENITH_RELAY_DEV_DATA_DIR") {
-        let path = PathBuf::from(value);
-        if path.is_absolute() {
-            return path;
-        }
+    if let Some(path) = absolute_environment_path(env::var_os("ZENITH_RELAY_DEV_DATA_DIR")) {
+        return path;
     }
 
     if cfg!(target_os = "windows") {
-        env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
+        absolute_environment_path(env::var_os("LOCALAPPDATA"))
             .unwrap_or_else(env::temp_dir)
             .join("Zenith Relay")
     } else if cfg!(target_os = "macos") {
-        env::var_os("HOME")
-            .map(PathBuf::from)
+        absolute_environment_path(env::home_dir().map(PathBuf::into_os_string))
             .unwrap_or_else(env::temp_dir)
             .join("Library")
             .join("Application Support")
             .join("Zenith Relay")
     } else {
-        env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        absolute_environment_path(env::var_os("XDG_DATA_HOME"))
+            .or_else(|| {
+                absolute_environment_path(env::home_dir().map(PathBuf::into_os_string))
+                    .map(|home| home.join(".local/share"))
+            })
             .unwrap_or_else(env::temp_dir)
             .join("Zenith Relay")
     }
+}
+
+fn absolute_environment_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return None;
+    }
+    Some(path)
 }
 
 pub(in crate::diagnostics) fn read_debug_marker(root: &Path) -> Result<bool, String> {
@@ -107,6 +116,13 @@ pub(in crate::diagnostics) fn ensure_layout(root: &Path) -> bool {
 }
 
 pub(in crate::diagnostics::persist) fn ensure_real_directory(path: &Path) -> bool {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return false;
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) => metadata.is_dir() && !metadata.file_type().is_symlink(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -151,5 +167,41 @@ pub(in crate::diagnostics::persist) fn prune_files(directory: &Path, prefix: &st
     let remove_count = files.len().saturating_sub(keep);
     for (_, path) in files.into_iter().take(remove_count) {
         let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn diagnostic_environment_roots_reject_relative_and_parent_paths() {
+        for value in [
+            None,
+            Some(OsString::new()),
+            Some(OsString::from("relative")),
+        ] {
+            assert!(absolute_environment_path(value).is_none());
+        }
+        let root = crate::diagnostics::tests::test_root("environment-root");
+        assert!(
+            absolute_environment_path(Some(root.clone().into_os_string())) == Some(root.clone())
+        );
+        assert!(
+            absolute_environment_path(Some(root.join("..").join("outside").into_os_string()))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn diagnostic_directory_creation_rejects_relative_and_parent_paths() {
+        assert!(!ensure_real_directory(Path::new(
+            "relative-diagnostic-root"
+        )));
+        let root =
+            crate::diagnostics::tests::test_root("invalid-environment-root").join("uncreated");
+        assert!(!ensure_real_directory(&root.join("..").join("outside")));
+        assert!(!root.exists());
     }
 }
