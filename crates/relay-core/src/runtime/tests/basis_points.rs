@@ -12,6 +12,11 @@ use tokio::sync::{Notify, Semaphore};
 
 mod cache_context;
 mod catalog_discovery;
+mod free_images;
+#[cfg(feature = "experimental-bps-images")]
+mod native_images;
+#[cfg(not(feature = "experimental-bps-images"))]
+mod native_images_disabled;
 mod quota_rotation;
 mod rate_limits;
 mod recovery;
@@ -412,8 +417,7 @@ async fn runtime(server: &AccessServer) -> GatewayRuntime {
         )
         .await
         .unwrap();
-    // The fixture starts as Codex; reconcile its inventory after changing the
-    // transport so it does not retain the native-only Images route.
+    // Reconcile the catalog and image transport after changing the login kind.
     assert!(runtime.update_account_models("account-1", &["gpt-test".to_string()]));
     runtime
 }
@@ -800,7 +804,7 @@ async fn concurrent_access_reads_share_one_discovery_and_publish_inventory() {
         runtime
             .visible_models(&key, &[WireApi::Responses], crate::unix_time_ms())
             .len(),
-        2
+        2 + crate::account_image_models(OAuthClientKind::ExcelBps).count()
     );
     assert!(runtime.basis_points_reasoning_available("account-1", "gpt-new", "max"));
     assert!(!runtime.basis_points_reasoning_available("account-1", "gpt-new", "medium"));
@@ -876,7 +880,11 @@ async fn delayed_old_credential_response_cannot_publish_access_or_inventory() {
             .candidate("account-1")
             .unwrap()
             .models,
-        BTreeSet::from(["gpt-test".to_string()])
+        ["gpt-test"]
+            .into_iter()
+            .chain(crate::account_image_models(OAuthClientKind::ExcelBps))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
     );
 }
 
@@ -910,7 +918,11 @@ async fn failed_refresh_hides_stale_access_preserves_inventory_and_respects_retr
             .candidate("account-1")
             .unwrap()
             .models,
-        BTreeSet::from(["gpt-test".to_string()])
+        ["gpt-test"]
+            .into_iter()
+            .chain(crate::account_image_models(OAuthClientKind::ExcelBps))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
     );
 }
 

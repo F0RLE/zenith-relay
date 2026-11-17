@@ -104,7 +104,11 @@ use crate::{
     CandidateKind, UsageEvent, normalize_source_protocol_bindings, unix_time_ms as current_time_ms,
 };
 pub use images::is_image_model_id;
-pub use images::{CODEX_IMAGE_MODELS, IMAGE_API_MODEL, normalize_image_base_model};
+pub use images::{
+    BPS_IMAGES_ENABLED, CODEX_IMAGE_MODELS, IMAGE_API_MODEL, ImageGenerationRestriction,
+    account_image_models, account_image_restriction, account_images_available,
+    account_model_enabled, normalize_image_base_model,
+};
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 pub(crate) const WEBSOCKET_FAST_PATH_BACKOFF_MS: u64 = 30 * 1_000;

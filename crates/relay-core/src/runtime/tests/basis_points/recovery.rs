@@ -78,7 +78,9 @@ async fn codex_catalog_keeps_its_shape_and_recovers_after_bps_access_failure() {
         assert_eq!(generic.status(), StatusCode::OK);
         assert_eq!(
             generic.json::<Value>().await.unwrap(),
-            json!({"object":"list","data":[]})
+            json!({"object":"list","data":crate::account_image_models(OAuthClientKind::ExcelBps)
+                .map(|id| json!({"id":id,"object":"model","owned_by":"zenith-relay"}))
+                .collect::<Vec<_>>()})
         );
         assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -87,11 +89,12 @@ async fn codex_catalog_keeps_its_shape_and_recovers_after_bps_access_failure() {
                 .candidate("account-1")
                 .unwrap()
                 .models,
-            if empty_access {
-                BTreeSet::new()
-            } else {
-                BTreeSet::from(["gpt-test".to_string()])
-            }
+            (!empty_access)
+                .then_some("gpt-test")
+                .into_iter()
+                .chain(crate::account_image_models(OAuthClientKind::ExcelBps))
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
         );
         server.reply_with(
             StatusCode::OK,

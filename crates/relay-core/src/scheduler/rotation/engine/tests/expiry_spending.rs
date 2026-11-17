@@ -123,6 +123,191 @@ fn subscription_expiry_keeps_low_quota_rebalancing_and_undated_fallback() {
 }
 
 #[test]
+fn expiry_replacement_without_a_material_quota_lead_keeps_the_warm_owner() {
+    let day = 86_400_000;
+    for mode in [RotationMode::Automatic, RotationMode::SubscriptionExpiry] {
+        let mut engine = engine_with([
+            spending_candidate("warm", 1_000, Some(day / 2)),
+            spending_candidate("lower", 900, Some(day)),
+            spending_candidate("slightly-higher", 1_300, Some(day)),
+            spending_candidate("distant-best", 5_300, Some(12 * day)),
+        ]);
+        engine.set_mode(mode);
+        for id in 1..=40 {
+            let request = preferred_request(id, "warm");
+            let selected = engine.select(&request, 100).unwrap();
+            assert_eq!(selected.candidate_id, "warm", "mode {mode:?}");
+            assert_ne!(selected.reason, RotationSelectionReason::SubscriptionExpiry);
+            let trace = engine.decision_trace(&request, 100);
+            assert_eq!(trace.selected_candidate_id.as_deref(), Some("warm"));
+            assert_eq!(
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.candidate_id == "warm")
+                    .unwrap()
+                    .eliminated_at,
+                None
+            );
+            assert_eq!(
+                engine
+                    .cache_affinity_diagnostics(&request, Some("warm"), "warm", 100)
+                    .unwrap()
+                    .reason,
+                CacheAffinityReason::Retained
+            );
+            let lease = engine.reserve(&request, 100).unwrap();
+            assert_eq!(lease.candidate_id, "warm");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn expiry_replacement_requires_each_selected_member_to_offer_the_quota_margin() {
+    let day = 86_400_000;
+    for mode in [RotationMode::Automatic, RotationMode::SubscriptionExpiry] {
+        let mut weak = spending_candidate("weak", 1_600, Some(day));
+        weak.weight = 100;
+        let mut engine = engine_with([
+            spending_candidate("warm", 1_000, Some(day / 2)),
+            spending_candidate("lower", 900, Some(day)),
+            spending_candidate("better", 2_000, Some(day)),
+            weak,
+            spending_candidate("distant-best", 5_300, Some(12 * day)),
+        ]);
+        engine.set_mode(mode);
+        for id in 1..=40 {
+            let request = preferred_request(id, "warm");
+            let selected = engine.select(&request, 100).unwrap();
+            assert_eq!(selected.candidate_id, "better", "mode {mode:?}");
+            assert_eq!(selected.reason, RotationSelectionReason::SubscriptionExpiry);
+            assert!(engine.has_material_resource_lead(&selected.candidate_id, "warm", 100));
+            let diagnostics = engine
+                .cache_affinity_diagnostics(&request, Some("warm"), "better", 100)
+                .unwrap();
+            assert_eq!(diagnostics.reason, CacheAffinityReason::QuotaHeadroom);
+            assert_eq!(diagnostics.best_quota_remaining_basis_points, Some(2_000));
+            let trace = engine.decision_trace(&request, 100);
+            assert_eq!(
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.candidate_id == "warm")
+                    .unwrap()
+                    .eliminated_at,
+                Some(RotationDecisionStageKind::ResourceHeadroom)
+            );
+            let lease = engine.reserve(&request, 100).unwrap();
+            assert_eq!(lease.candidate_id, "better");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn filtered_warm_routes_do_not_suppress_expiry_priority_for_their_replacement() {
+    let day = 24 * 60 * 60 * 1_000;
+    for mode in [RotationMode::Automatic, RotationMode::SubscriptionExpiry] {
+        let mut engine = engine_with([
+            spending_candidate("warm", 500, Some(day / 2)),
+            spending_candidate("expiring", 3_000, Some(day)),
+            spending_candidate("later", 9_000, Some(12 * day)),
+        ]);
+        engine.set_mode(mode);
+        for alternative in [false, true] {
+            let mut request = request(1);
+            if alternative {
+                request.warm_fallbacks = vec!["warm".into()];
+            } else {
+                request.preferred = Some("warm".into());
+            }
+            let selected = engine.select(&request, 100).unwrap();
+            assert_eq!(selected.candidate_id, "expiring");
+            assert_eq!(selected.reason, RotationSelectionReason::SubscriptionExpiry);
+            let trace = engine.decision_trace(&request, 100);
+            assert_eq!(trace.selected_candidate_id.as_deref(), Some("expiring"));
+            assert_eq!(
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.candidate_id == "warm")
+                    .unwrap()
+                    .eliminated_at,
+                Some(RotationDecisionStageKind::ResourceHeadroom)
+            );
+            let lease = engine.reserve(&request, 100).unwrap();
+            assert_eq!(lease.candidate_id, "expiring");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
+#[test]
+fn expiry_replacement_preserves_load_and_health_exclusions_for_warm_routes() {
+    let day = 24 * 60 * 60 * 1_000;
+    for (mode, remaining) in [RotationMode::Automatic, RotationMode::SubscriptionExpiry]
+        .into_iter()
+        .flat_map(|mode| [1_000, 9_000].map(|remaining| (mode, remaining)))
+    {
+        for unhealthy in [false, true] {
+            let mut engine = engine_with([
+                spending_candidate("warm", remaining, Some(day / 2)),
+                spending_candidate("expiring", 900, Some(day)),
+                spending_candidate("later", 9_000, Some(12 * day)),
+            ]);
+            engine.set_mode(mode);
+            let mut leases = Vec::new();
+            if unhealthy {
+                record_ready_latency(&mut engine, "warm", 5_000, 100);
+                record_ready_latency(&mut engine, "expiring", 100, 100);
+                record_ready_latency(&mut engine, "later", 100, 100);
+            } else {
+                for id in 10..12 {
+                    leases.push(
+                        engine
+                            .reserve(&request(id).with_owner("warm"), 100)
+                            .unwrap(),
+                    );
+                }
+            }
+            let request = preferred_request(1, "warm");
+            let selected = engine.select(&request, 100).unwrap();
+            assert_eq!(selected.candidate_id, "expiring");
+            assert_eq!(
+                engine
+                    .cache_affinity_diagnostics(&request, Some("warm"), "expiring", 100)
+                    .unwrap()
+                    .reason,
+                if unhealthy {
+                    CacheAffinityReason::Health
+                } else {
+                    CacheAffinityReason::ParallelLoad
+                }
+            );
+            let trace = engine.decision_trace(&request, 100);
+            assert_eq!(trace.selected_candidate_id.as_deref(), Some("expiring"));
+            assert_eq!(
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.candidate_id == "warm")
+                    .unwrap()
+                    .eliminated_at,
+                Some(if unhealthy {
+                    RotationDecisionStageKind::Health
+                } else {
+                    RotationDecisionStageKind::ParallelLoad
+                })
+            );
+            for lease in leases {
+                assert!(engine.release_unstarted(lease.lease_id));
+            }
+        }
+    }
+}
+
+#[test]
 fn nearest_at_risk_group_receives_independent_work_until_unavailable() {
     let day = 24 * 60 * 60 * 1_000;
     let mut engine = engine_with([

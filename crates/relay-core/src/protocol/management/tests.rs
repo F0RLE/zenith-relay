@@ -83,6 +83,8 @@ fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
         auth_state: AccountAuthState::Active,
         health: "healthy".into(),
         models: models.iter().map(ToString::to_string).collect(),
+        pool_eligible: !models.is_empty(),
+        image_generation_restriction: None,
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         priority: 0,

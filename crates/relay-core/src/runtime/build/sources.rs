@@ -98,6 +98,7 @@ pub(super) fn build_sources(
                 account_id: None,
                 protocol: source.source.wire_api,
                 models: executable_models,
+                native_images: false,
                 model_protocols,
                 enabled: source.enabled,
                 draining: source.draining,

@@ -80,4 +80,17 @@ describe("source list model", () => {
     expect(sourceStatus(source("api"), candidate, 200)).toEqual({ key: "ready", tone: "ready" });
     expect(sourceStatus(source("api"), { ...candidate, halfOpen: true }, 100)).toEqual({ key: "recovering", tone: "info" });
   });
+
+  test("source status distinguishes occupied capacity and quota waits without retry dates", () => {
+    const candidate: CandidateRuntimeSnapshot = {
+      candidateId: "api", kind: "api_source", available: false, capacityWait: true, inFlight: 1,
+      lastUsedAtMs: null, nextRetryAtMs: null, halfOpen: false, dispatches: 1,
+    };
+    expect(sourceStatus(source("api", { operationalStatus: "unavailable" }), candidate, 100))
+      .toEqual({ key: "busy", tone: "warning" });
+    expect(sourceStatus(source("api"), { ...candidate, capacityWait: false, quotaWait: true }, 100))
+      .toEqual({ key: "retryWait", tone: "warning" });
+    expect(sourceStatus(source("api", { secretAvailable: false }), candidate, 100).key).toBe("keyMissing");
+    expect(sourceStatus(source("api"), { ...candidate, available: true }, 100).key).toBe("ready");
+  });
 });

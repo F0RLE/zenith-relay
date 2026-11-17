@@ -82,7 +82,9 @@ impl GatewayRuntime {
         let prepared = if let Some(binding) = binding {
             self.prepare_source_authorization(candidate_id, binding)
                 .map_err(AuthorizedRequestError::Prepare)?
-        } else if budget.is_some() && self.is_basis_points_account(candidate_id) {
+        } else if budget.is_some_and(|budget| !budget.is_image_generation())
+            && self.is_basis_points_account(candidate_id)
+        {
             self.prepare_basis_points_authorization(candidate_id)
                 .await?
         } else {
@@ -578,8 +580,9 @@ impl GatewayRuntime {
         } else {
             match self
                 .is_basis_points_account(candidate_id)
-                .then(crate::transport::basis_points_progress_timeout)
-                .flatten()
+                .then_some(())
+                .filter(|_| !budget.is_some_and(|budget| budget.is_image_generation()))
+                .and_then(|_| crate::transport::basis_points_progress_timeout())
             {
                 Some(timeout) => tokio::time::timeout(timeout, send)
                     .await

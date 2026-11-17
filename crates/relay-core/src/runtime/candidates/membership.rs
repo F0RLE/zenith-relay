@@ -3,6 +3,51 @@ use crate::{CandidateHealth, CandidateKind, CandidateScope};
 use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 
+struct RuntimeOrderProjection {
+    scheduler: crate::PoolScheduler,
+    hidden_models: BTreeSet<String>,
+    runtime_id: u64,
+    activity_revision: u64,
+}
+
+impl RuntimeOrderProjection {
+    fn capture(runtime: &GatewayRuntime) -> Self {
+        let scheduler = runtime.lock_scheduler();
+        Self {
+            scheduler: scheduler.clone(),
+            hidden_models: crate::poison::read(&runtime.model_state.hidden_models).clone(),
+            runtime_id: runtime.activity_runtime_id,
+            // Admission and release advance this revision under the same lock.
+            // Preview must not acknowledge events newer than its cloned state.
+            activity_revision: runtime.activity_revision.load(Ordering::Acquire),
+        }
+    }
+
+    fn into_order(
+        self,
+        scope: &CandidateScope,
+        models: &crate::ModelRules,
+        protocols: &[crate::WireApi],
+        now_ms: u64,
+    ) -> Vec<crate::CandidateRuntimeSnapshot> {
+        // Global exact visibility intersects key rules; merging deny lists can
+        // turn a closed allow list into a legacy partial checkbox snapshot.
+        let mut order = self.scheduler.into_runtime_order(
+            scope,
+            |model| {
+                models.allows(model) && !self.hidden_models.contains(&crate::model_id_key(model))
+            },
+            protocols,
+            now_ms,
+        );
+        for candidate in &mut order {
+            candidate.runtime_id = self.runtime_id;
+            candidate.activity_revision = self.activity_revision;
+        }
+        order
+    }
+}
+
 impl GatewayRuntime {
     /// Builds a scope from all healthy pool protocols without reopening secrets
     /// or replacing a runtime that owns active streams. Request admission still
@@ -112,19 +157,12 @@ impl GatewayRuntime {
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
-        let projection = self.lock_scheduler().clone();
-        let mut order = projection.into_runtime_order(
+        RuntimeOrderProjection::capture(self).into_order(
             &CandidateScope::default(),
             &crate::ModelRules::default(),
             &crate::WireApi::ALL_NATIVE,
             runtime_now_ms(),
-        );
-        let revision = self.activity_revision.load(Ordering::Acquire);
-        for candidate in &mut order {
-            candidate.runtime_id = self.activity_runtime_id;
-            candidate.activity_revision = revision;
-        }
-        order
+        )
     }
 
     /// Read-only reserve policy: positive ordinary quota on a compatible pool
@@ -179,8 +217,12 @@ impl GatewayRuntime {
                 .map(|(id, _)| id.clone())
                 .collect::<BTreeSet<_>>()
         };
-        let order =
-            projection.into_runtime_order(&CandidateScope::default(), &models, &[protocol], now_ms);
+        let order = projection.into_runtime_order(
+            &CandidateScope::default(),
+            |model| models.allows(model),
+            &[protocol],
+            now_ms,
+        );
         let mut unknown = false;
         for candidate in order {
             if candidate.kind != CandidateKind::OAuthAccount
@@ -224,26 +266,12 @@ impl GatewayRuntime {
             super::super::all_native_wire_apis,
             super::super::client_wire_apis_to_native,
         );
-        let (models, projection) = {
-            let scheduler = self.lock_scheduler();
-            let mut models = key.model_rules.clone();
-            models.excluded.extend(
-                scheduler
-                    .candidates()
-                    .flat_map(|candidate| &candidate.models)
-                    .filter(|model| super::super::is_image_model_id(model))
-                    .cloned(),
-            );
-            (models, scheduler.clone())
-        };
-        let mut order =
-            projection.into_runtime_order(&scope, &models, &protocols, runtime_now_ms());
-        let revision = self.activity_revision.load(Ordering::Acquire);
-        for candidate in &mut order {
-            candidate.runtime_id = self.activity_runtime_id;
-            candidate.activity_revision = revision;
-        }
-        order
+        RuntimeOrderProjection::capture(self).into_order(
+            &scope,
+            &key.model_rules,
+            &protocols,
+            runtime_now_ms(),
+        )
     }
 
     pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
@@ -288,5 +316,85 @@ impl GatewayRuntime {
             self.candidate_availability.notify_waiters();
         }
         updated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{GatewayRuntimeOptions, RuntimeLocalKey, RuntimeSource};
+    use crate::{LocalGatewayKey, ModelRules, ProviderSource, WireApi};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn delayed_preview_never_acknowledges_newer_admission_or_release() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "synthetic-source".into(),
+                name: "Synthetic source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "synthetic-upstream".into(),
+                proxy_url: None,
+                wire_api: WireApi::Responses,
+                models: vec!["gpt-test".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "synthetic-key".into(),
+                secret: "synthetic-local".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = events.clone();
+        runtime.set_activity_callback(move |event| captured_events.lock().unwrap().push(event));
+        let key = runtime.authenticated_key(&runtime.keys[0]);
+        let now = runtime_now_ms();
+        let idle = RuntimeOrderProjection::capture(&runtime);
+        let (_, lease) = runtime
+            .select_and_reserve(
+                &key,
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                now,
+            )
+            .await
+            .unwrap();
+        let active = RuntimeOrderProjection::capture(&runtime);
+        drop(lease);
+
+        let idle = idle.into_order(
+            &CandidateScope::default(),
+            &ModelRules::default(),
+            &WireApi::ALL_NATIVE,
+            now,
+        );
+        let active = active.into_order(
+            &CandidateScope::default(),
+            &ModelRules::default(),
+            &WireApi::ALL_NATIVE,
+            now,
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].active_request_count, 1);
+        assert_eq!(events[1].active_request_count, 0);
+        assert_eq!(idle[0].active_request_count, 0);
+        assert!(idle[0].activity_revision < events[0].revision);
+        assert_eq!(active[0].active_request_count, 1);
+        assert_eq!(active[0].activity_revision, events[0].revision);
+        assert!(active[0].activity_revision < events[1].revision);
+        for order in [
+            runtime.candidate_runtime_order(),
+            runtime.candidate_runtime_order_for_key("synthetic-key"),
+        ] {
+            assert_eq!(order[0].runtime_id, events[1].runtime_id);
+            assert_eq!(order[0].activity_revision, events[1].revision);
+            assert_eq!(order[0].active_request_count, 0);
+        }
     }
 }

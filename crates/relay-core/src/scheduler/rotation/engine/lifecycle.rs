@@ -210,6 +210,13 @@ impl RotationEngine {
                     && !runtime.candidate.draining
                     && runtime.candidate.auth == AuthState::Ready
                     && runtime.candidate.quota == pending.quota
+                    && (!matches!(runtime.candidate.quota, QuotaState::CreditFallback { .. })
+                        || (runtime.candidate.provider_credits_observed_at_ms.is_some()
+                            && (runtime.candidate.provider_credits_unlimited
+                                || runtime
+                                    .candidate
+                                    .provider_credits_micro_units
+                                    .is_some_and(|balance| balance > 0))))
                     && runtime.candidate.rate == pending.rate
                     && runtime
                         .candidate
@@ -243,9 +250,18 @@ impl RotationEngine {
         if pending.recovery_credit_required {
             self.recovery_credits = self.recovery_credits.saturating_sub(1);
         }
+        let circuit_incident = self
+            .circuits
+            .get(&(pending.candidate_id.clone(), pending.route_key.clone()))
+            .map_or(0, |circuit| circuit.incident);
         let Some(lease) = self.leases.get_mut(&lease_id) else {
             return Err(DispatchStartError::UnknownLease);
         };
+        // A peer may have closed the reservation's incident before this wire
+        // send. Bind the actual attempt, including a retained transport lease,
+        // to the current incident only after every dispatch gate has passed.
+        lease.circuit_epoch = circuit.epoch;
+        lease.circuit_incident = circuit_incident;
         lease.recovery_credit_required = false;
         lease.attempt_id = Some(attempt_id);
         Ok(attempt_id)
@@ -294,8 +310,10 @@ impl RotationEngine {
             && self
                 .candidates
                 .get(&lease.candidate_id)
-                .and_then(|runtime| runtime.candidate.routes.get(&lease.route_key))
-                == Some(&lease.route);
+                .is_some_and(|runtime| {
+                    runtime.candidate.capacity_key == lease.capacity_key
+                        && runtime.candidate.routes.get(&lease.route_key) == Some(&lease.route)
+                });
         self.release_capacity(&lease);
         let health = observation.health;
         let (circuit, health_counted) = if observation_current {

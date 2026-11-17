@@ -65,9 +65,19 @@ impl RotationEngine {
 
     pub fn select(&self, request: &RotationRequest, now_ms: u64) -> Option<RotationSelection> {
         let (ready_candidates, _) = self.selection_candidates(request, now_ms);
-        let selection_group = self.selection_group(&ready_candidates, request, now_ms);
+        let mut expiry_priority = false;
+        let selection_group =
+            self.selection_group_observed(&ready_candidates, request, now_ms, |stage, _| {
+                expiry_priority |= stage == RotationDecisionStageKind::SubscriptionExpiry
+            });
         let selected_candidate = self.choose_for_request(request, &selection_group)?;
-        let reason = self.selection_reason(request, &ready_candidates, &selected_candidate, now_ms);
+        let reason = self.selection_reason(
+            request,
+            &ready_candidates,
+            &selected_candidate,
+            expiry_priority,
+            now_ms,
+        );
         Some(RotationSelection {
             candidate_id: selected_candidate.id.clone(),
             priority: selected_candidate.priority,
@@ -82,6 +92,7 @@ impl RotationEngine {
         request: &RotationRequest,
         ready_candidates: &[ReadyCandidate],
         selected: &ReadyCandidate,
+        expiry_priority: bool,
         now_ms: u64,
     ) -> RotationSelectionReason {
         if request.owner.is_some() {
@@ -103,12 +114,12 @@ impl RotationEngine {
         // Only adaptive selection compares resource headroom. Resolve its
         // explanation after selection, without scanning balances for owners,
         // recovery requests or manual/round-robin routing.
-        if Self::independent_request(ready_candidates, request)
-            && self
-                .expiry_priority_group(&self.soft_health_group(ready_candidates.to_vec()), now_ms)
-                .is_some()
-        {
-            return RotationSelectionReason::SubscriptionExpiry;
+        if expiry_priority {
+            return if Self::warm_candidate(selected, request) {
+                RotationSelectionReason::WeightedRotation
+            } else {
+                RotationSelectionReason::SubscriptionExpiry
+            };
         }
         let least_loaded = self.cache_aware_load_group(ready_candidates, request);
         if least_loaded.len() < ready_candidates.len() {
@@ -191,25 +202,32 @@ impl RotationEngine {
             right
                 .priority
                 .cmp(&left.priority)
-                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.capacity_key.cmp(&right.capacity_key))
         });
         if ordered_candidates.is_empty() {
             return None;
         }
 
         let previous_cursor = self.round_robin_cursor.get(route_key).map(|cursor| {
-            let priority = self
-                .candidates
-                .values()
-                .find(|runtime| runtime.candidate.capacity_key == cursor.capacity_key)
-                .map_or(cursor.priority, |runtime| runtime.candidate.priority);
-            (priority, cursor.candidate_id.as_str())
+            let priority = ordered_candidates
+                .iter()
+                .find(|candidate| candidate.capacity_key == cursor.capacity_key)
+                .map(|candidate| candidate.priority)
+                .or_else(|| {
+                    self.candidates
+                        .values()
+                        .find(|runtime| runtime.candidate.capacity_key == cursor.capacity_key)
+                        .map(|runtime| runtime.candidate.priority)
+                })
+                .unwrap_or(cursor.priority);
+            (priority, cursor.capacity_key.as_str())
         });
         let next_index = previous_cursor
-            .and_then(|(priority, candidate_id)| {
+            .and_then(|(priority, capacity_key)| {
                 ordered_candidates.iter().position(|candidate| {
                     candidate.priority < priority
-                        || (candidate.priority == priority && candidate.id.as_str() > candidate_id)
+                        || (candidate.priority == priority
+                            && candidate.capacity_key.as_str() > capacity_key)
                 })
             })
             .unwrap_or(0);
@@ -439,30 +457,78 @@ impl RotationEngine {
             }
             RotationMode::RoundRobin | RotationMode::WeightedRoundRobin => ready.to_vec(),
             RotationMode::Automatic | RotationMode::SubscriptionExpiry => {
-                // Independent work uses the least-loaded physical members.
-                // A warm owner may stay within the bounded load margin;
-                // resource and health checks apply equally to that owner.
-                let independent = Self::independent_request(ready, request);
-                let healthy = independent.then(|| self.soft_health_group(ready.to_vec()));
-                if let Some(healthy) = healthy
-                    && let Some(group) = self.expiry_priority_group(&healthy, now_ms)
+                let load_group = self.cache_aware_load_group(ready, request);
+                let resource_group = self.resource_group(load_group.clone(), request, now_ms);
+                let candidates = self.soft_health_group(resource_group.clone());
+                // If ordinary ranking removes all warm routes, compare resource
+                // headroom against the actual expiry replacements. An unrelated
+                // distant quota leader cannot justify a weaker cold replacement.
+                let expiry_ready = Self::independent_request(&candidates, request).then(|| {
+                    self.soft_health_group(
+                        ready
+                            .iter()
+                            .filter(|candidate| !Self::warm_candidate(candidate, request))
+                            .cloned()
+                            .collect(),
+                    )
+                });
+                if let Some(mut healthy) = expiry_ready
+                    && let Some(mut group) = self.expiry_priority_group(&healthy, now_ms)
                 {
+                    let reconsidered = self
+                        .soft_health_group(load_group.clone())
+                        .into_iter()
+                        .filter(|candidate| {
+                            Self::warm_candidate(candidate, request)
+                                && !resource_group
+                                    .iter()
+                                    .any(|member| member.id == candidate.id)
+                        })
+                        .collect::<Vec<_>>();
+                    // Only resource-rejected warm routes can be reconsidered;
+                    // availability, global load and health exclusions still hold.
+                    healthy.extend(reconsidered.iter().cloned());
+                    group.extend(reconsidered.iter().cloned());
+                    if !Self::independent_request(ready, request) {
+                        for (stage, retained) in [
+                            (RotationDecisionStageKind::ParallelLoad, &load_group),
+                            (RotationDecisionStageKind::Health, &reconsidered),
+                        ] {
+                            // Keep provisional resource exclusions out of the
+                            // trace: the actual expiry comparison happens below.
+                            // Cold replacements still use expiry before load.
+                            let remaining = ready
+                                .iter()
+                                .filter(|candidate| {
+                                    !Self::warm_candidate(candidate, request)
+                                        || retained.iter().any(|member| member.id == candidate.id)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            observe(stage, &remaining);
+                        }
+                    }
                     observe(RotationDecisionStageKind::Health, &healthy);
                     observe(RotationDecisionStageKind::SubscriptionExpiry, &group);
-                    let mut candidates = self.least_loaded_group(&group);
+                    let mut candidates = self.cache_aware_load_group(&group, request);
                     observe(RotationDecisionStageKind::ParallelLoad, &candidates);
-                    for candidate in &mut candidates {
-                        candidate.weight = candidate
-                            .weight
-                            .saturating_mul(self.expiry_weight(&candidate.id, now_ms));
+                    if !reconsidered.is_empty() {
+                        candidates = self.resource_group(candidates, request, now_ms);
+                        observe(RotationDecisionStageKind::ResourceHeadroom, &candidates);
+                        candidates = self.soft_health_group(candidates);
+                        observe(RotationDecisionStageKind::Health, &candidates);
+                    }
+                    if Self::independent_request(&candidates, request) {
+                        for candidate in &mut candidates {
+                            candidate.weight = candidate
+                                .weight
+                                .saturating_mul(self.expiry_weight(&candidate.id, now_ms));
+                        }
                     }
                     return candidates;
                 }
-                let candidates = self.cache_aware_load_group(ready, request);
-                observe(RotationDecisionStageKind::ParallelLoad, &candidates);
-                let candidates = self.resource_group(candidates, request, now_ms);
-                observe(RotationDecisionStageKind::ResourceHeadroom, &candidates);
-                let candidates = self.soft_health_group(candidates);
+                observe(RotationDecisionStageKind::ParallelLoad, &load_group);
+                observe(RotationDecisionStageKind::ResourceHeadroom, &resource_group);
                 observe(RotationDecisionStageKind::Health, &candidates);
                 candidates
             }
@@ -471,10 +537,14 @@ impl RotationEngine {
 
     fn independent_request(ready: &[ReadyCandidate], request: &RotationRequest) -> bool {
         request.owner.is_none()
-            && !ready.iter().any(|candidate| {
-                request.preferred.as_deref() == Some(candidate.id.as_str())
-                    || request.warm_fallbacks.contains(&candidate.id)
-            })
+            && !ready
+                .iter()
+                .any(|candidate| Self::warm_candidate(candidate, request))
+    }
+
+    fn warm_candidate(candidate: &ReadyCandidate, request: &RotationRequest) -> bool {
+        request.preferred.as_deref() == Some(candidate.id.as_str())
+            || request.warm_fallbacks.contains(&candidate.id)
     }
 
     fn resource_group(
@@ -488,8 +558,18 @@ impl RotationEngine {
             .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
             .max();
         if let Some(best_quota) = best_quota {
+            let rebalance_owner = candidates
+                .iter()
+                .find(|candidate| {
+                    self.is_primary_soft_preference(request, &candidate.id)
+                        && !self.within_quota_band(request, &candidate.id, best_quota, now_ms)
+                })
+                .map(|candidate| candidate.id.clone());
             candidates.retain(|candidate| {
                 self.within_quota_band(request, &candidate.id, best_quota, now_ms)
+                    && rebalance_owner.as_deref().is_none_or(|owner| {
+                        self.has_material_resource_lead(&candidate.id, owner, now_ms)
+                    })
             });
         } else if let Some(best_credits) = candidates
             .iter()
@@ -616,11 +696,9 @@ impl RotationEngine {
         let mut earliest_wait = None;
         match runtime.candidate.quota {
             QuotaState::CreditFallback { .. }
-                if crate::quota::observation_is_fresh(
-                    runtime.candidate.provider_credits_observed_at_ms,
-                    now_ms,
-                    self.quota_stale_after_ms,
-                ) => {}
+                if self
+                    .fresh_provider_credits(&runtime.candidate.id, now_ms)
+                    .is_some() => {}
             QuotaState::Exhausted {
                 reset_at_ms: Some(reset_at_ms),
             }
@@ -837,7 +915,6 @@ impl RotationEngine {
                     route_key.to_owned(),
                     RoundRobinCursor {
                         capacity_key: candidate.capacity_key.clone(),
-                        candidate_id: candidate.id.clone(),
                         priority: candidate.priority,
                     },
                 );

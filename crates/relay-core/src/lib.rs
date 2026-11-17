@@ -105,13 +105,15 @@ pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{ProxyConfig, normalize_proxy_url, proxy_reference_id};
 pub use request_timezone::{is_valid_timezone, normalize_timezone};
 pub use runtime::{
-    CODEX_IMAGE_MODELS, DefaultServiceTier, ExecutionFence, GatewayRuntime, GatewayRuntimeOptions,
-    Http2DispatchObservation, Http2RetryDiagnostic, IMAGE_API_MODEL, PoolAccess, PoolParticipant,
+    BPS_IMAGES_ENABLED, CODEX_IMAGE_MODELS, DefaultServiceTier, ExecutionFence, GatewayRuntime,
+    GatewayRuntimeOptions, Http2DispatchObservation, Http2RetryDiagnostic, IMAGE_API_MODEL,
+    ImageGenerationRestriction, PoolAccess, PoolParticipant,
     RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
     RESPONSE_AFFINITY_DELETE_SQL, RESPONSE_AFFINITY_FIND_SQL, RESPONSE_AFFINITY_UPSERT_SQL,
     ResponseAffinityBinding, ResponseAffinityStore, RuntimeActivitySnapshot,
     RuntimeCandidatePolicy, RuntimeContinuationStores, RuntimeLocalKey, RuntimeMixedLocalKey,
-    RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate,
+    RuntimeSource, RuntimeSourcePolicyRecord, RuntimeSourcePolicyUpdate, account_image_models,
+    account_image_restriction, account_images_available, account_model_enabled,
     changed_runtime_source_policy_updates, diagnose_http2_retries, normalize_image_base_model,
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
     pool_dispatch_permission_changed,

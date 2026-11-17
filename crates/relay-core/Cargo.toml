@@ -22,6 +22,9 @@ perf = "deny"
 style = "deny"
 pedantic = { level = "allow", priority = -1 }
 
+[features]
+experimental-bps-images = []
+
 [dependencies]
 async-tungstenite = { version = "0.35.0", default-features = false, features = ["futures-03-sink"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }

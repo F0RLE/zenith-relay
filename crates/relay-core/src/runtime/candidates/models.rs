@@ -1,4 +1,4 @@
-use super::super::{AccountModelInventory, CODEX_IMAGE_MODELS, GatewayRuntime, normalized_set};
+use super::super::{AccountModelInventory, GatewayRuntime, normalized_set};
 use crate::CandidateKind;
 use crate::error_codes;
 use std::sync::atomic::Ordering;
@@ -10,24 +10,18 @@ impl GatewayRuntime {
     /// The scheduler lock also serializes this edit with final dispatch and
     /// model-list projection; old unstarted leases are rechecked there.
     pub fn update_account_models(&self, account_id: &str, models: &[String]) -> bool {
+        self.reconcile_account_models(account_id, Some(models))
+    }
+
+    pub(in crate::runtime) fn refresh_account_image_models(&self, account_id: &str) -> bool {
+        self.reconcile_account_models(account_id, None)
+    }
+
+    fn reconcile_account_models(&self, account_id: &str, models: Option<&[String]>) -> bool {
         let Some(account) = self.account_state.executors.get(account_id) else {
             return false;
         };
-        let configured_models = normalized_set(models.iter());
-        let mut candidate_models = if account.images_only {
-            Default::default()
-        } else {
-            configured_models.clone()
-        };
-        let mut published_models = if account.images_only {
-            Vec::new()
-        } else {
-            models.to_vec()
-        };
-        if account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex {
-            candidate_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
-            published_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
-        }
+        let plan = crate::poison::read(&account.subscription_plan_type);
         let mut scheduler = self.lock_scheduler();
         if scheduler.is_retired() {
             return false;
@@ -40,10 +34,49 @@ impl GatewayRuntime {
         {
             return false;
         }
+        let mut inventory = crate::poison::write(&account.model_inventory);
+        let configured_models = models
+            .map(|models| normalized_set(models.iter()))
+            .unwrap_or_else(|| inventory.configured_models.clone());
+        let images_available = super::super::images::account_images_available(
+            account.oauth_client_kind,
+            plan.as_deref(),
+        );
+        let models = configured_models
+            .iter()
+            .filter(|model| {
+                super::super::images::account_model_enabled(
+                    account.oauth_client_kind,
+                    model,
+                    plan.as_deref(),
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut candidate_models = if account.images_only {
+            Default::default()
+        } else {
+            normalized_set(models.iter())
+        };
+        let mut published_models = if account.images_only {
+            Vec::new()
+        } else {
+            models.clone()
+        };
+        candidate_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
+        published_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
         candidate.models = candidate_models;
+        candidate.native_images = images_available;
         // Never publish a model that the executor cannot resolve. Hold the
         // scheduler lock until all three views name the same inventory.
-        let mut inventory = crate::poison::write(&account.model_inventory);
         let changed = inventory.configured_models != configured_models;
         *inventory = AccountModelInventory { configured_models };
         drop(inventory);

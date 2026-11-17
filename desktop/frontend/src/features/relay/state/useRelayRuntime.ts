@@ -3,7 +3,7 @@ import { recordPerformance } from "../../../platform/desktop";
 import { revealStartupShell, setStartupPhase } from "../../../platform/startup";
 import { relayCommands } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeActivityState, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
+import { applyPoolRotation, applyRuntimeActivities, preferNewerPoolRotation, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay } from "../routingOrder";
 import {
   RELAY_STORAGE_KEYS,
   readRelayMode,
@@ -20,7 +20,7 @@ import {
 import { useRuntimeEvents } from "./useRuntimeEvents";
 import { useRuntimeRouting } from "./useRuntimeRouting";
 import { loadRuntimeSnapshot } from "./snapshotLoader";
-import { rememberRuntimePreview, runtimePreview } from "./runtimePreview";
+import { rememberRuntimePreview, runtimeDisplayPreview, runtimePreview } from "./runtimePreview";
 
 type RelayRuntimeDependencies = {
   cancelOperations: () => void;
@@ -92,7 +92,8 @@ export function useRelayRuntime({
   const setMode = useCallback((targetMode: RelayMode) => {
     if (modeRef.current === targetMode) return;
     if (visibleRuntimeRef.current) snapshotsByMode.current[modeRef.current] = visibleRuntimeRef.current;
-    const cached = snapshotsByMode.current[targetMode] ?? null;
+    const previous = snapshotsByMode.current[targetMode];
+    const cached = previous ? runtimeDisplayPreview(previous) : null;
     invalidateRefreshes();
     modeSwitchStartedAt.current = { mode: targetMode, startedAt: performance.now() };
     modeRef.current = targetMode;
@@ -131,13 +132,17 @@ export function useRelayRuntime({
           reconcileRuntimeActivityOverlay(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current);
         }
         const snapshot = loaded && requestedMode === "local"
-          ? {
-            ...loaded,
-            gateway: {
-              ...loaded.gateway,
-              routingOrder: applyRuntimeActivities(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current.values()),
-            },
-          }
+          ? applyPoolRotation(
+            loaded,
+            preferNewerPoolRotation(
+              // A restored preview can contain another process's revisions.
+              // Only live snapshots participate in native freshness ordering.
+              runtimeSnapshotRef.current ? visibleRuntimeRef.current?.gateway.poolRotation : undefined,
+              loaded.gateway.poolRotation,
+              runtimeRoutingOrderBase.current === loaded.gateway.routingOrder,
+            ),
+            applyRuntimeActivities(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current.values()),
+          )
           : loaded;
         runtimeSnapshotRef.current = snapshot;
         if (snapshot) snapshotsByMode.current[requestedMode] = snapshot;
@@ -157,7 +162,7 @@ export function useRelayRuntime({
       // Never overwrite a newer native snapshot or leak local data into Hosted.
       if (!active || modeRef.current !== "local" || runtimeSnapshotRef.current) return;
       const preview = runtimePreview.peek("local");
-      if (preview) setRuntime((current) => current ?? preview);
+      if (preview) setRuntime((current) => current ?? runtimeDisplayPreview(preview));
     });
     return () => { active = false; };
   }, [mode]);
@@ -290,8 +295,8 @@ export function useRelayRuntime({
     };
     if (enteredRuntimeRefreshPage) refreshVisibleRuntime();
     const interval = window.setInterval(() => {
-      // Revisions coalesce unchanged local snapshots.
-      if (document.visibilityState === "visible") runBackgroundRefresh(false);
+      // Events are an optimization, not proof that the backend is unchanged.
+      if (document.visibilityState === "visible") runBackgroundRefresh(true);
     }, RUNTIME_REFRESH_INTERVAL_MS);
     window.addEventListener("focus", refreshVisibleRuntime);
     document.addEventListener("visibilitychange", refreshVisibleRuntime);

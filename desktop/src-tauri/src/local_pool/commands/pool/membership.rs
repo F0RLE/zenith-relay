@@ -65,6 +65,25 @@ pub(in crate::local_pool) async fn apply_local_pool_membership(
         LocalPoolError::new(code, message)
     })?;
 
+    if input.in_pool {
+        let settings = state.store()?.gateway().clone();
+        if let Some(account) = old_accounts.iter().find(|account| {
+            account_ids.contains(&account.account.id) && !account.has_pool_models(&settings)
+        }) {
+            let message = if zenith_relay_core::account_image_restriction(
+                account.oauth_client_kind.unwrap_or_default(),
+                account.account.subscription.plan_type.as_deref(),
+            ) == Some(
+                zenith_relay_core::ImageGenerationRestriction::ProviderFreePlan,
+            ) {
+                "OpenAI provider restriction: Images are unavailable for this Free account and no text models are enabled for the pool"
+            } else {
+                "Account has no models available for the pool"
+            };
+            return Err(LocalPoolError::new(ErrorCode::Conflict, message).into());
+        }
+    }
+
     let mut sources = old_sources.clone();
     let mut accounts = old_accounts.clone();
     let model_refresh_account_ids = if input.in_pool {

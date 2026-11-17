@@ -84,7 +84,11 @@ impl RotationEngine {
                 .candidate
                 .route_rates
                 .iter()
-                .filter(|(route_key, _)| candidate.routes.contains_key(*route_key))
+                .filter(|(route_key, _)| {
+                    candidate.routes.contains_key(*route_key)
+                        && candidate.routes.get(*route_key)
+                            == runtime.candidate.routes.get(*route_key)
+                })
                 .map(|(route_key, rate)| (route_key.clone(), *rate))
                 .collect();
             for route_key in candidate.routes.keys() {
@@ -93,24 +97,26 @@ impl RotationEngine {
                     .entry(route_key.clone())
                     .or_insert(RateState::Ready);
             }
-            if candidate.weight != runtime.candidate.weight
-                || candidate.capacity_key != runtime.candidate.capacity_key
-                || routes_changed
-            {
-                self.rotation_credit.clear();
+            let shares_changed = candidate.weight != runtime.candidate.weight
+                || candidate.capacity_key != runtime.candidate.capacity_key;
+            if shares_changed || routes_changed {
+                self.rotation_credit.retain(|(route_key, _), _| {
+                    if shares_changed {
+                        !candidate.routes.contains_key(route_key)
+                            && !runtime.candidate.routes.contains_key(route_key)
+                    } else {
+                        candidate.routes.get(route_key) == runtime.candidate.routes.get(route_key)
+                    }
+                });
             }
             self.circuits.retain(|(id, key), _| {
                 id != &candidate_id
                     || candidate.routes.get(key) == runtime.candidate.routes.get(key)
             });
-            self.health.retain(|(id, key), health| {
-                if id != &candidate_id {
-                    return true;
-                }
-                if candidate.routes.get(key) != runtime.candidate.routes.get(key) {
-                    health.latency_window = LatencyWindow::default();
-                }
-                candidate.routes.contains_key(key)
+            self.health.retain(|(id, key), _| {
+                id != &candidate_id
+                    || (candidate.routes.contains_key(key)
+                        && candidate.routes.get(key) == runtime.candidate.routes.get(key))
             });
             runtime.candidate = candidate;
         } else {
@@ -225,7 +231,8 @@ impl RotationEngine {
             .retain(|(candidate, _), _| candidate != candidate_id);
         let capacity_key = runtime.candidate.capacity_key.clone();
         self.recompute_capacity_limit(&capacity_key);
-        self.rotation_credit.clear();
+        self.rotation_credit
+            .retain(|(route_key, _), _| !runtime.candidate.routes.contains_key(route_key));
         self.prune_round_robin_cursors();
         Some(runtime.candidate)
     }

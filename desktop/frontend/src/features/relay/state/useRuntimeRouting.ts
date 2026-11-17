@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { relayCommands } from "../api/commands";
 import type { PageId, RelayMode, RuntimeActivitySnapshot, RuntimeSnapshot } from "../api/types";
-import { applyRuntimeActivities, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../routingOrder";
+import { applyPoolRotation, applyRuntimeActivities, preferNewerPoolRotation, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../routingOrder";
 import { ROUTING_REFRESH_INTERVAL_MS, RUNTIME_EVENT_REFRESH_DEBOUNCE_MS } from "./refreshPolicy";
 
 type RuntimeRoutingOrder = NonNullable<RuntimeSnapshot["gateway"]["routingOrder"]>;
@@ -67,16 +67,10 @@ export function useRuntimeRouting({
         const visibleRoutingOrder = applyRuntimeActivities(runtimeRoutingOrderBase.current, runtimeActivityOverlay.current.values());
         setRuntime((snapshot) => {
           if (!snapshot) return snapshot;
-          const currentRotation = snapshot.gateway.poolRotation;
-          const rotation = accepted && poolRotation
-            && (poolRotation.inventoryRevision ?? 0) >= (currentRotation?.inventoryRevision ?? 0)
-            ? poolRotation : currentRotation;
+          const rotation = preferNewerPoolRotation(snapshot.gateway.poolRotation, poolRotation, accepted);
           if (sameRuntimeOrder(snapshot.gateway.routingOrder ?? [], visibleRoutingOrder)
             && JSON.stringify(rotation) === JSON.stringify(snapshot.gateway.poolRotation)) return snapshot;
-          return {
-            ...snapshot,
-            gateway: { ...snapshot.gateway, routingOrder: visibleRoutingOrder, ...(rotation ? { poolRotation: rotation } : {}) },
-          };
+          return applyPoolRotation(snapshot, rotation, visibleRoutingOrder);
         });
       } catch {
         // The full refresh keeps the last known order if the lightweight probe fails.

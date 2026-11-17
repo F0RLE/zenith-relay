@@ -83,6 +83,11 @@ pub struct AccountSummary {
     pub auth_state: AccountAuthState,
     pub health: String,
     pub models: Vec<String>,
+    /// Host-projected availability; clients do not infer this from plan names.
+    #[serde(default)]
+    pub pool_eligible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_restriction: Option<crate::ImageGenerationRestriction>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub priority: i32,

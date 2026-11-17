@@ -1,5 +1,172 @@
 use super::*;
 
+#[tokio::test]
+async fn active_image_only_account_reports_capacity_wait_for_the_system_pool_key() {
+    use crate::scheduler::rotation::SharedRequestBudget;
+
+    let runtime = GatewayRuntime::from_mixed_pool(
+        Vec::new(),
+        vec![quota_account(QuotaSnapshot::default())],
+        vec![RuntimeMixedLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: Some(Vec::new()),
+            account_ids: Some(vec!["account-1".into()]),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: Some(crate::protocol::local_gateway_client_wire_apis()),
+        }],
+        RuntimeChatGptAuth {
+            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+            refresh_adapter: Arc::new(NeverRefresh),
+            persistence_adapter: Arc::new(NoopPersistence),
+            refresh_skew_ms: 60_000,
+            agent_identities: Default::default(),
+        },
+        GatewayRuntimeOptions {
+            native_codex_images_only: true,
+            hidden_models: vec![
+                "gpt-image-2".into(),
+                "gpt-image-2-chain".into(),
+                "gpt-image-2.5".into(),
+                "gpt-5.4".into(),
+            ],
+            ..Default::default()
+        },
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let (_, image) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &[WireApi::Responses],
+            &HashSet::new(),
+            current_time_ms(),
+            &SharedRequestBudget::for_incoming_request(1),
+        )
+        .await
+        .unwrap();
+    assert!(image.begin_rotation_http_dispatch().is_ok());
+    let active = runtime.candidate_runtime_order_for_key("key-1");
+    assert_eq!(active.len(), 1);
+    assert!(!active[0].available);
+    assert!(active[0].capacity_wait);
+    assert!(!active[0].quota_wait);
+    assert_eq!(active[0].active_request_count, 1);
+    assert_eq!(active[0].in_flight, 0);
+    assert_eq!(active[0].active_models[0].model, IMAGE_API_MODEL);
+    assert!(!active[0].next_for_new_request);
+
+    assert!(runtime.set_candidate_health("account-1", CandidateHealth::Unhealthy));
+    let blocked = runtime.candidate_runtime_order_for_key("key-1");
+    assert!(!blocked[0].available);
+    assert!(!blocked[0].capacity_wait);
+    assert_eq!(blocked[0].active_request_count, 1);
+    assert!(runtime.set_candidate_health("account-1", CandidateHealth::Healthy));
+    drop(image);
+    assert!(runtime.candidate_runtime_order_for_key("key-1")[0].available);
+}
+
+#[test]
+fn image_only_account_availability_respects_key_permissions_without_text_ranking() {
+    let mut runtime = quota_runtime(QuotaSnapshot::default());
+    assert!(runtime.update_account_models("account-1", &[]));
+    let order = runtime.candidate_runtime_order_for_key("key-1");
+    assert_eq!(order.len(), 1);
+    assert!(order[0].available);
+    assert!(!order[0].quota_wait);
+    assert!(!order[0].capacity_wait);
+    assert!(!order[0].next_for_new_request);
+    assert_eq!(order[0].selection_rank, None);
+
+    runtime.set_hidden_models(
+        CODEX_IMAGE_MODELS
+            .iter()
+            .map(|model| (*model).into())
+            .collect(),
+    );
+    assert!(!runtime.candidate_runtime_order_for_key("key-1")[0].available);
+    assert!(!runtime.candidate_runtime_order()[0].available);
+    runtime.set_hidden_models(Vec::new());
+    assert!(runtime.candidate_runtime_order_for_key("key-1")[0].available);
+    runtime.keys[0].model_rules.allowed = BTreeSet::from(["gpt-test".into()]);
+    assert!(!runtime.candidate_runtime_order_for_key("key-1")[0].available);
+    runtime.keys[0].model_rules.allowed.clear();
+    runtime.update_key_scope(
+        "key-1",
+        CandidateScope {
+            account_ids: Some(BTreeSet::new()),
+            ..Default::default()
+        },
+    );
+    assert!(!runtime.candidate_runtime_order_for_key("key-1")[0].available);
+}
+
+#[tokio::test]
+async fn mixed_text_and_image_activity_keeps_counts_until_each_lease_is_released() {
+    use crate::scheduler::rotation::SharedRequestBudget;
+
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured_events = events.clone();
+    runtime.set_activity_callback(move |event| captured_events.lock().unwrap().push(event));
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let now = current_time_ms();
+    let (_, text) = runtime
+        .select_and_reserve(
+            &key,
+            "gpt-test",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            now,
+        )
+        .await
+        .unwrap();
+    let (_, image) = runtime
+        .select_and_reserve_image_with_budget(
+            &key,
+            IMAGE_API_MODEL,
+            &[WireApi::Responses],
+            &HashSet::new(),
+            now,
+            &SharedRequestBudget::for_incoming_request(1),
+        )
+        .await
+        .unwrap();
+    let active = runtime.candidate_runtime_order_for_key("key-1");
+    assert_eq!(active[0].in_flight, 1);
+    assert_eq!(active[0].active_request_count, 2);
+    assert_eq!(active[0].active_models.len(), 2);
+    drop(text);
+    let image_only = runtime.candidate_runtime_order_for_key("key-1");
+    assert_eq!(image_only[0].in_flight, 0);
+    assert_eq!(image_only[0].active_request_count, 1);
+    assert_eq!(image_only[0].active_models[0].model, IMAGE_API_MODEL);
+
+    assert!(runtime.set_candidate_health("account-1", CandidateHealth::Unhealthy));
+    let blocked = runtime.candidate_runtime_order_for_key("key-1");
+    assert!(!blocked[0].available);
+    assert_eq!(blocked[0].active_request_count, 1);
+    drop(image);
+    let released = runtime.candidate_runtime_order_for_key("key-1");
+    assert!(!released[0].available);
+    assert_eq!(released[0].active_request_count, 0);
+    assert!(released[0].active_models.is_empty());
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.active_request_count)
+            .collect::<Vec<_>>(),
+        [1, 2, 1, 0]
+    );
+}
+
 #[test]
 fn cooldowns_share_one_upstream_across_client_bindings() {
     use crate::scheduler::CooldownReason;

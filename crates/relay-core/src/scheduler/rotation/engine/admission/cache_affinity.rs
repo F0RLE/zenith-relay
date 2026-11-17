@@ -75,38 +75,44 @@ impl RotationEngine {
         if ready.iter().any(|candidate| candidate.recovery) {
             return CacheAffinityReason::RecoveryProbe;
         }
-        let load_group = self.cache_aware_load_group(&ready, request);
-        diagnostics.best_quota_remaining_basis_points = load_group
-            .iter()
-            .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
-            .max();
-        let credits = load_group
-            .iter()
-            .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
-            .max();
-        diagnostics.best_provider_credits_unlimited = credits == Some(u64::MAX);
-        diagnostics.best_provider_credits_micro_units = credits.filter(|value| *value != u64::MAX);
-        if !load_group.iter().any(|candidate| candidate.id == preferred) {
-            return CacheAffinityReason::ParallelLoad;
-        }
-        let resources = self.resource_group(load_group, request, now_ms);
-        if !resources.iter().any(|candidate| candidate.id == preferred) {
-            return if diagnostics.best_quota_remaining_basis_points.is_some() {
-                CacheAffinityReason::QuotaHeadroom
-            } else {
-                CacheAffinityReason::ProviderCredits
-            };
-        }
-        if !self
-            .soft_health_group(resources)
-            .iter()
-            .any(|candidate| candidate.id == preferred)
-        {
-            return CacheAffinityReason::Health;
-        }
+        let mut rejection = None;
+        // Follow dispatch's effective gates, including a resource comparison
+        // narrowed to expiry replacements, rather than its provisional ranking.
+        self.selection_group_observed(&ready, request, now_ms, |stage, remaining| {
+            if rejection.is_some() {
+                return;
+            }
+            if stage == RotationDecisionStageKind::ParallelLoad {
+                diagnostics.best_quota_remaining_basis_points = remaining
+                    .iter()
+                    .filter_map(|candidate| self.fresh_quota_remaining(&candidate.id, now_ms))
+                    .max();
+                let credits = remaining
+                    .iter()
+                    .filter_map(|candidate| self.fresh_provider_credits(&candidate.id, now_ms))
+                    .max();
+                diagnostics.best_provider_credits_unlimited = credits == Some(u64::MAX);
+                diagnostics.best_provider_credits_micro_units =
+                    credits.filter(|value| *value != u64::MAX);
+            }
+            if !remaining.iter().any(|candidate| candidate.id == preferred) {
+                rejection = Some(match stage {
+                    RotationDecisionStageKind::ParallelLoad => CacheAffinityReason::ParallelLoad,
+                    RotationDecisionStageKind::ResourceHeadroom => {
+                        if diagnostics.best_quota_remaining_basis_points.is_some() {
+                            CacheAffinityReason::QuotaHeadroom
+                        } else {
+                            CacheAffinityReason::ProviderCredits
+                        }
+                    }
+                    RotationDecisionStageKind::Health => CacheAffinityReason::Health,
+                    _ => CacheAffinityReason::RoutingPolicy,
+                });
+            }
+        });
         // A structurally projected alias may differ from the recorded owner.
         // Never invent a resource or provider cache-miss reason in that case.
-        CacheAffinityReason::RoutingPolicy
+        rejection.unwrap_or(CacheAffinityReason::RoutingPolicy)
     }
 
     fn cache_affinity_member(&self, id: &str, now_ms: u64) -> Option<CacheAffinityMember> {

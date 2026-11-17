@@ -137,18 +137,61 @@ impl LocalAccountRecord {
                 .map(|model| (*model).to_owned())
                 .collect()
         });
-        let text_enabled = !self.image_pool_enabled || codex_text_models_enabled;
+        static BPS_IMAGE_MODELS: std::sync::LazyLock<Vec<String>> =
+            std::sync::LazyLock::new(|| {
+                zenith_relay_core::account_image_models(
+                    zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps,
+                )
+                .map(str::to_owned)
+                .collect()
+            });
+        let bps = self.oauth_client_kind
+            == Some(zenith_relay_core::providers::chatgpt::OAuthClientKind::ExcelBps);
+        let kind = self.oauth_client_kind.unwrap_or_default();
+        let images_available = zenith_relay_core::account_images_available(
+            kind,
+            self.account.subscription.plan_type.as_deref(),
+        );
+        let image_models = if bps {
+            &*BPS_IMAGE_MODELS
+        } else {
+            &*IMAGE_MODELS
+        };
+        let text_enabled = kind != zenith_relay_core::providers::chatgpt::OAuthClientKind::Codex
+            || codex_text_models_enabled;
         let models = self.effective_models();
         models
             .iter()
-            .filter(move |_| text_enabled)
-            .chain(IMAGE_MODELS.iter().filter(move |image_model| {
-                self.image_pool_enabled
+            .filter(move |model| {
+                text_enabled
+                    && zenith_relay_core::account_model_enabled(
+                        self.oauth_client_kind.unwrap_or_default(),
+                        model,
+                        self.account.subscription.plan_type.as_deref(),
+                    )
+            })
+            .chain(image_models.iter().filter(move |image_model| {
+                images_available
                     && (!text_enabled
                         || !models
                             .iter()
                             .any(|model| model.eq_ignore_ascii_case(image_model)))
             }))
+    }
+
+    pub fn has_pool_models(&self, settings: &super::GatewaySettings) -> bool {
+        let rules = zenith_relay_core::ModelRules::from_allow_deny(
+            &self.allowed_models,
+            &self.excluded_models,
+        );
+        self.pool_models(settings.codex_text_models_enabled)
+            .any(|model| {
+                rules.allows(model)
+                    && !settings
+                        .hidden_models
+                        .iter()
+                        .any(|hidden| hidden.eq_ignore_ascii_case(model))
+            })
     }
 
     /// Compares the operational record while ignoring Codex client-login

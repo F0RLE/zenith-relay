@@ -50,11 +50,15 @@ pub(super) fn handle_collected_image(
         }
         super::super::super::errors::apply_degraded_route_policy(runtime, &mut failure);
         let capability_failure = image_capability_unavailable(&bytes);
-        let retry = failure.execution.certainty
-            == crate::scheduler::rotation::ExecutionCertainty::NotSent
+        let capability_rejection = capability_failure
+            && failure.execution.certainty
+                == crate::scheduler::rotation::ExecutionCertainty::NotSent;
+        let retry = route.account_transport != crate::runtime::AccountTransport::ExcelBasisPoints
+            && failure.execution.certainty
+                == crate::scheduler::rotation::ExecutionCertainty::NotSent
             && (retryable_route_failure(route, status, &failure, false) || capability_failure)
             && !route_forbids_fallback(route, status, &failure);
-        let failure_state = if retry && capability_failure {
+        let failure_state = if capability_rejection {
             settle_image_capability_failure(
                 runtime,
                 lease,
@@ -73,7 +77,7 @@ pub(super) fn handle_collected_image(
         let mut event = observed.event(
             false,
             status,
-            Some(if retry && capability_failure {
+            Some(if capability_rejection {
                 error_codes::IMAGE_GENERATION_NOT_ENABLED.to_string()
             } else {
                 failure.category.to_string()

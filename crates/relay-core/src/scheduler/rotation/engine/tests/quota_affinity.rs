@@ -1,5 +1,55 @@
 use super::*;
 
+#[test]
+fn revoked_credit_fallback_blocks_an_already_reserved_dispatch() {
+    for (balance, observed_at_ms) in [(Some(0), Some(200)), (None, Some(200)), (Some(100), None)] {
+        let mut member = candidate("credit-only", 0, 1);
+        member.quota = QuotaState::CreditFallback { reset_at_ms: None };
+        member.provider_credits_micro_units = Some(100);
+        member.provider_credits_observed_at_ms = Some(100);
+        let mut engine = engine_with([member]);
+        let request = request(1);
+        let lease = engine.reserve(&request, 100).unwrap();
+        engine.set_provider_credits("credit-only", balance, false, observed_at_ms);
+        let mut budget = RequestBudget::default_for(request.request_id);
+        assert_eq!(
+            engine.begin_dispatch(lease.lease_id, &mut budget),
+            Err(DispatchStartError::CandidateChanged)
+        );
+        assert_eq!(budget.dispatches(), 0);
+        assert!(engine.release_unstarted(lease.lease_id));
+        assert_eq!(engine.active_leases(), 0);
+    }
+}
+
+#[test]
+fn credit_fallback_requires_fresh_positive_or_unlimited_balance() {
+    for (balance, unlimited, expected_available) in [
+        (Some(0), false, false),
+        (None, false, false),
+        (Some(10), false, true),
+        (None, true, true),
+    ] {
+        let mut member = candidate("credit-only", 0, 1);
+        member.quota = QuotaState::CreditFallback { reset_at_ms: None };
+        member.provider_credits_micro_units = Some(100);
+        member.provider_credits_observed_at_ms = Some(100);
+        let mut engine = engine_with([member]);
+        assert!(engine.select(&request(1), 100).is_some());
+        engine.set_provider_credits("credit-only", balance, unlimited, Some(200));
+        assert_eq!(
+            engine.select(&request(2), 200).is_some(),
+            expected_available,
+            "a fresh timestamp alone is not spendable credit evidence"
+        );
+        let reserved = engine.reserve(&request(3), 200);
+        assert_eq!(reserved.is_ok(), expected_available);
+        if let Ok(lease) = reserved {
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
+    }
+}
+
 fn quota_candidate(id: &str, remaining: u64) -> RotationCandidate {
     let mut member = candidate(id, 0, 1);
     member.quota = QuotaState::Available;
@@ -67,6 +117,30 @@ fn low_quota_warm_owner_yields_only_at_a_ten_point_lead() {
             engine.has_material_resource_lead("other", "owner", 100),
             expected == "other"
         );
+    }
+}
+
+#[test]
+fn quota_rebalance_margin_applies_to_every_replacement_not_just_the_best() {
+    for mode in [RotationMode::Automatic, RotationMode::SubscriptionExpiry] {
+        let mut weak = quota_candidate("weak", 1_600);
+        weak.weight = 100;
+        let mut engine = engine_with([
+            quota_candidate("owner", 1_000),
+            quota_candidate("best", 2_000),
+            weak,
+        ]);
+        engine.set_mode(mode);
+        for id in 1..=40 {
+            let request = preferred_request(id, "owner");
+            let (ready, _) = engine.selection_candidates(&request, 100);
+            let admitted = engine.selection_group(&ready, &request, 100);
+            assert_eq!(admitted.len(), 1);
+            assert_eq!(admitted[0].id, "best");
+            let lease = engine.reserve(&request, 100).unwrap();
+            assert_eq!(lease.candidate_id, "best");
+            assert!(engine.release_unstarted(lease.lease_id));
+        }
     }
 }
 

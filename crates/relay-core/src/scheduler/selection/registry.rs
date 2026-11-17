@@ -70,6 +70,7 @@ impl PoolScheduler {
                     || previous_candidate.account_id != candidate.account_id
                     || previous_candidate.protocol != candidate.protocol
                     || previous_candidate.model_protocols != candidate.model_protocols
+                    || previous_candidate.native_images != candidate.native_images
                     || previous_candidate.model_rules != candidate.model_rules
                     || previous_candidate
                         .models

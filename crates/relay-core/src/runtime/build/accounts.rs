@@ -1,7 +1,6 @@
 use super::super::{
-    AccountModelInventory, CODEX_IMAGE_MODELS, ChatGptAccountExecutor, PassiveQuotaState,
-    RuntimeHttpClients, model_rules, normalized_responses_url, normalized_set,
-    require_runtime_value,
+    AccountModelInventory, ChatGptAccountExecutor, PassiveQuotaState, RuntimeHttpClients,
+    model_rules, normalized_responses_url, normalized_set, require_runtime_value,
 };
 use super::{AccountRuntimeParts, SourceRuntimeParts};
 use crate::providers::chatgpt::{
@@ -31,7 +30,18 @@ pub(super) fn build_accounts(
     let mut executors = BTreeMap::new();
     let mut passive_quotas = BTreeMap::new();
     let mut team_members = BTreeMap::<String, BTreeSet<String>>::new();
-    for account in accounts {
+    for mut account in accounts {
+        account.models.retain(|model| {
+            super::super::images::account_model_enabled(
+                account.oauth_client_kind,
+                model,
+                account.subscription_plan_type.as_deref(),
+            )
+        });
+        let images_available = super::super::images::account_images_available(
+            account.oauth_client_kind,
+            account.subscription_plan_type.as_deref(),
+        );
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
         require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
@@ -92,10 +102,16 @@ pub(super) fn build_accounts(
         } else {
             models.clone()
         };
-        if account.oauth_client_kind == OAuthClientKind::Codex {
-            candidate_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
-            published_models.extend(CODEX_IMAGE_MODELS.iter().map(|model| (*model).to_owned()));
-        }
+        candidate_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
+        published_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
         let candidate = RuntimeCandidate {
             id: account.id.clone(),
             kind: CandidateKind::OAuthAccount,
@@ -108,6 +124,7 @@ pub(super) fn build_accounts(
             priority: account.priority,
             weight: account.weight,
             models: candidate_models,
+            native_images: images_available,
             model_rules: model_rules(&account.allowed_models, &account.excluded_models),
             health: account.health,
             quota: account.quota,

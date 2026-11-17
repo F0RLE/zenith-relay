@@ -62,6 +62,44 @@ use crate::ModelRules;
 use crate::scheduler::{CandidateKind, CandidateQuota};
 use std::collections::{BTreeSet, HashSet};
 
+#[test]
+fn explicit_image_routes_survive_other_requests_without_polluting_inventory() {
+    let mut scheduler = PoolScheduler::new();
+    for id in ["first", "second"] {
+        let mut candidate = oauth_candidate(id);
+        candidate.native_images = true;
+        scheduler.upsert(candidate);
+    }
+    let model = "gpt-image-future-synthetic";
+    let first = scheduler
+        .reserve_request("first", model, 100, true)
+        .unwrap();
+    let second = scheduler
+        .reserve_request("second", "gpt-image-another-synthetic", 100, true)
+        .unwrap();
+    scheduler.sync_all_rotation_candidates();
+    let key = PoolScheduler::rotation_route_key(model, RotationOperation::Image);
+    let candidate = scheduler.candidate("first").unwrap();
+    assert!(
+        scheduler
+            .rotation_candidate(candidate)
+            .unwrap()
+            .routes
+            .contains_key(&key)
+    );
+    assert_eq!(candidate.models, BTreeSet::from(["gpt-5".into()]));
+    assert!(scheduler.release_reservation(first));
+    assert!(scheduler.release_reservation(second));
+    let candidate = scheduler.candidate("first").unwrap();
+    assert!(
+        !scheduler
+            .rotation_candidate(candidate)
+            .unwrap()
+            .routes
+            .contains_key(&key)
+    );
+}
+
 fn candidate(id: &str) -> RuntimeCandidate {
     RuntimeCandidate {
         id: id.to_string(),
@@ -75,6 +113,7 @@ fn candidate(id: &str) -> RuntimeCandidate {
         priority: 0,
         weight: 1,
         models: ["gpt-5".to_string()].into(),
+        native_images: false,
         model_rules: ModelRules::default(),
         health: CandidateHealth::Healthy,
         quota: CandidateQuota::Unknown,
@@ -87,6 +126,31 @@ fn candidate(id: &str) -> RuntimeCandidate {
         last_used_at: None,
 
         secret_available: true,
+    }
+}
+
+#[test]
+fn explicit_image_ids_keep_model_scoped_provider_backoff() {
+    let mut scheduler = PoolScheduler::new();
+    let model = "gpt-image-future-synthetic";
+    let mut candidate = oauth_candidate("account");
+    candidate.native_images = true;
+    candidate.cooldowns.insert(model.into(), 500);
+    scheduler.upsert(candidate);
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    for (now_ms, ready) in [(100, false), (499, false), (500, true)] {
+        scheduler.sync_all_rotation_candidates();
+        let selected = scheduler.select_image(SelectionRequest {
+            model,
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms,
+        });
+        assert_eq!(selected.is_some(), ready, "time={now_ms}");
     }
 }
 

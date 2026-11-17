@@ -173,6 +173,19 @@ mod parity_tests {
             oauth_account_runtime_available(std::slice::from_ref(&candidate), "account_plus"),
             Some(true)
         );
+        let mut busy_image = candidate.clone();
+        busy_image.available = false;
+        busy_image.capacity_wait = true;
+        busy_image.active_request_count = 1;
+        assert_eq!(
+            oauth_account_runtime_available(std::slice::from_ref(&busy_image), "account_plus"),
+            Some(true)
+        );
+        busy_image.capacity_wait = false;
+        assert_eq!(
+            oauth_account_runtime_available(&[busy_image], "account_plus"),
+            Some(false)
+        );
         let unavailable = CandidateRuntimeSnapshot {
             candidate_id: "account_unavailable".into(),
             kind: CandidateKind::OAuthAccount,

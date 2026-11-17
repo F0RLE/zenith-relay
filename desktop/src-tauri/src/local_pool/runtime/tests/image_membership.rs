@@ -1,11 +1,104 @@
 use super::*;
+use crate::local_pool::models::GatewaySettings;
 use zenith_relay_core::{CODEX_IMAGE_MODELS, protocol::PoolMembershipInput};
+
+#[test]
+fn excel_pool_catalog_obeys_the_bps_image_gate_without_affecting_text() {
+    use zenith_relay_core::providers::chatgpt::OAuthClientKind;
+    let credentials = StoredCodexCredentials::new(
+        "synthetic-excel",
+        "synthetic-access".into(),
+        None,
+        None,
+        None,
+        1,
+        1,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap()
+    .with_oauth_client_kind(OAuthClientKind::ExcelBps);
+    let account = records::new_account_record(
+        &credentials,
+        zenith_relay_core::accounts::AccountAuthMode::OAuth,
+        vec!["gpt-test".into(), "gpt-image-2".into()],
+        0,
+        1,
+    )
+    .unwrap();
+    let models = account
+        .pool_models(false)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert!(models.contains(&"gpt-test"));
+    for model in zenith_relay_core::account_image_models(OAuthClientKind::ExcelBps) {
+        assert!(models.contains(&model), "missing {model}");
+    }
+    if !zenith_relay_core::BPS_IMAGES_ENABLED {
+        assert_eq!(models, ["gpt-test"]);
+    }
+    assert!(!account.account.in_pool);
+    assert!(!account.image_pool_enabled);
+}
 
 fn assert_native_images_only(models: &[String]) {
     assert_eq!(models.len(), CODEX_IMAGE_MODELS.len());
     for model in CODEX_IMAGE_MODELS {
         assert!(models.iter().any(|value| value == model), "missing {model}");
     }
+}
+
+#[test]
+fn free_codex_without_text_has_no_pool_models_but_paid_and_unknown_plans_keep_images() {
+    let credentials = StoredCodexCredentials::new(
+        "synthetic-free",
+        "synthetic-access".into(),
+        None,
+        None,
+        None,
+        1,
+        1,
+        None,
+        Some("synthetic-provider".into()),
+        None,
+        None,
+        Some("free".into()),
+        false,
+    )
+    .unwrap();
+    let mut account = records::new_account_record(
+        &credentials,
+        zenith_relay_core::accounts::AccountAuthMode::OAuth,
+        vec!["gpt-test".into(), "gpt-image-synthetic".into()],
+        0,
+        1,
+    )
+    .unwrap();
+    let mut settings = GatewaySettings::default();
+    assert!(account.pool_models(false).next().is_none());
+    assert!(!account.has_pool_models(&settings));
+    settings.codex_text_models_enabled = true;
+    assert_eq!(
+        account
+            .pool_models(true)
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["gpt-test"]
+    );
+    assert!(account.has_pool_models(&settings));
+    settings.codex_text_models_enabled = false;
+    for plan in [Some("plus".into()), None] {
+        account.account.subscription.plan_type = plan;
+        let models = account.pool_models(false).cloned().collect::<Vec<_>>();
+        assert_native_images_only(&models);
+        assert!(account.has_pool_models(&settings));
+    }
+    account.excluded_models = vec!["*".into()];
+    assert!(!account.has_pool_models(&settings));
 }
 
 async fn close_fixture(state: DesktopState, runtime: std::sync::Arc<GatewayRuntime>) {
@@ -245,6 +338,17 @@ async fn explicit_codex_image_membership_survives_restart_and_revokes_live_acces
         let summary = view.accounts.iter().find(|a| a.id == account_id).unwrap();
         assert!(summary.in_pool);
         assert_native_images_only(&summary.models);
+        assert_eq!(
+            summary.operational_status,
+            zenith_relay_core::protocol::OperationalStatus::Rotation
+        );
+        let candidate = view
+            .gateway
+            .routing_order
+            .iter()
+            .find(|candidate| candidate.candidate_id == account_id)
+            .unwrap();
+        assert!(candidate.available, "{candidate:?}");
     }
     assert_native_images_only(&visible(&runtime));
     // Refreshes and editable model rules cannot turn an image member into a text member.

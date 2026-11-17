@@ -4,6 +4,107 @@ use super::*;
 mod source_updates;
 
 #[test]
+fn hidden_models_do_not_expand_a_keys_closed_model_allow_list() {
+    let mut runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("hidden", "synthetic-a", &["model-a"])),
+            RuntimeSource::unrestricted(source("allowed", "synthetic-b", &["model-b"])),
+            RuntimeSource::unrestricted(source("denied", "synthetic-c", &["model-c"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    runtime.keys[0].model_rules.allowed = BTreeSet::from(["model-b".into()]);
+    runtime.set_hidden_models(vec!["model-a".into()]);
+    let order = runtime.candidate_runtime_order_for_key("key-1");
+    for candidate in &order {
+        assert_eq!(candidate.available, candidate.candidate_id == "allowed");
+        assert_eq!(
+            candidate.next_for_new_request,
+            candidate.candidate_id == "allowed"
+        );
+    }
+    assert_eq!(
+        runtime.visible_models_for_secret(
+            "synthetic-local",
+            &[WireApi::Responses],
+            current_time_ms()
+        ),
+        vec!["model-b"]
+    );
+    runtime.set_hidden_models(vec!["model-b".into()]);
+    assert!(
+        runtime
+            .candidate_runtime_order_for_key("key-1")
+            .iter()
+            .all(|candidate| !candidate.available)
+    );
+}
+
+#[tokio::test]
+async fn runtime_preview_excludes_hidden_routes_without_hiding_active_work() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("visible", "synthetic-a", &["model-a"])),
+            RuntimeSource::unrestricted(source("hidden", "synthetic-b", &["model-b"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let (_, lease) = runtime
+        .select_and_reserve(
+            &key,
+            "model-b",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            current_time_ms(),
+        )
+        .await
+        .unwrap();
+    runtime.set_hidden_models(vec!["MODEL-B".into()]);
+    for order in [
+        runtime.candidate_runtime_order(),
+        runtime.candidate_runtime_order_for_key("key-1"),
+    ] {
+        let hidden = order
+            .iter()
+            .find(|candidate| candidate.candidate_id == "hidden")
+            .unwrap();
+        let visible = order
+            .iter()
+            .find(|candidate| candidate.candidate_id == "visible")
+            .unwrap();
+        assert!(!hidden.available);
+        assert_eq!(hidden.active_request_count, 1);
+        assert!(!hidden.next_for_new_request);
+        assert_eq!(hidden.selection_rank, None);
+        assert!(visible.available);
+        assert!(visible.next_for_new_request);
+        assert_eq!(visible.selection_rank, Some(0));
+    }
+    drop(lease);
+    runtime.set_hidden_models(Vec::new());
+    assert!(
+        runtime
+            .candidate_runtime_order_for_key("key-1")
+            .iter()
+            .all(|candidate| candidate.available)
+    );
+}
+
+#[test]
 fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
     use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
 

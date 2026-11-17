@@ -73,6 +73,50 @@ fn report(database: &TelemetryDb, now: u64) -> serde_json::Value {
 }
 
 #[test]
+fn weekly_capacity_does_not_treat_image_usage_as_text_quota_evidence() {
+    for (flag, payload) in [
+        (1, None),
+        (0, Some(r#"{"generatedImages":1,"outputImageTokens":20}"#)),
+    ] {
+        let (root, database) = database();
+        observe(&database, NOW, 10_000, "plus", "v1");
+        usage(&database, "text", "a", NOW + 20_000, Some(80));
+        usage(&database, "image", "b", NOW + 30_000, Some(0));
+        {
+            let connection = database.lock_connection().unwrap();
+            for table in ["request_logs", "request_attempts"] {
+                connection
+                    .execute(
+                        &format!("UPDATE {table} SET is_image_usage = ?1, image_usage_json = ?2 WHERE request_id = 'image'"),
+                        params![flag, payload],
+                    )
+                    .unwrap();
+            }
+        }
+        observe(&database, NOW + 60_000, 9_500, "plus", "v1");
+        assert!(
+            report(&database, NOW + 60_000)["groups"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "complete token counters do not prove images consumed the text quota window"
+        );
+        usage(&database, "later-text", "a", NOW + 90_000, Some(80));
+        observe(&database, NOW + 120_000, 9_000, "plus", "v1");
+        assert_eq!(
+            report(&database, NOW + 120_000)["groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "the next text-only interval can establish fresh evidence"
+        );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn weekly_projection_reads_committed_capacity_without_waiting_for_the_writer() {
     use std::{
         sync::{Arc, mpsc},

@@ -36,9 +36,12 @@ pub(super) struct BasisPointsModelSnapshot {
 
 impl BasisPointsModelSnapshot {
     pub(super) fn model_available(&self, candidate_id: &str, source_model: &str) -> bool {
-        self.models_by_account
-            .get(candidate_id)
-            .is_none_or(|models| models.contains(&crate::model_id_key(source_model)))
+        // Office Images is a standalone endpoint, not a Responses model/tool.
+        super::is_image_model_id(source_model)
+            || self
+                .models_by_account
+                .get(candidate_id)
+                .is_none_or(|models| models.contains(&crate::model_id_key(source_model)))
     }
 }
 
@@ -304,7 +307,9 @@ impl GatewayRuntime {
         }
         let _fence = self.fence_candidate_dispatch(account_id);
         *current = plan_type.map(str::to_owned);
+        drop(current);
         *crate::poison::write(&account.basis_points_access) = None;
+        self.refresh_account_image_models(account_id);
         self.candidate_availability.notify_waiters();
         true
     }
@@ -395,6 +400,21 @@ impl GatewayRuntime {
         request: &reqwest::Request,
     ) -> Result<(), super::AuthorizedRequestError> {
         if !self.is_basis_points_account(candidate_id) {
+            return Ok(());
+        }
+        // Only the exact standalone Images endpoints bypass Responses catalog
+        // access. Credential, account, key, and dispatch ownership remain checked.
+        if request.method() == reqwest::Method::POST
+            && self
+                .account_state
+                .executors
+                .get(candidate_id)
+                .is_some_and(|account| {
+                    ["images/generations", "images/edits"].iter().any(|path| {
+                        account.basis_points_url.join(path).ok().as_ref() == Some(request.url())
+                    })
+                })
+        {
             return Ok(());
         }
         let access = self

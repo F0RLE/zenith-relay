@@ -276,9 +276,9 @@ export function poolMemberStatusCounts(
     rotation: statuses.filter((status) => status === "rotation").length,
     quotaWait: statuses.filter((status) => status === "quotaWait").length,
     waiting: statuses.filter((status) => status === "quotaWait" || status === "busy" || status === "cooldown").length,
-    errors: members.filter((member, index) => member.kind === "account"
+    errors: members.filter((member, index) => statuses[index] === "unavailable" || (member.kind === "account"
       ? Boolean(currentAccountErrorCode(member))
-      : statuses[index] === "unavailable" || Boolean(member.lastErrorCode?.trim())).length,
+      : Boolean(member.lastErrorCode?.trim()))).length,
     disabled: statuses.filter((status) => status === "disabled" || status === "draining").length,
   };
 }

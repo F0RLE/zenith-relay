@@ -18,11 +18,14 @@ function validRuntime(value: unknown): value is RuntimeSnapshot {
 
 export const runtimePreview = createDisplaySnapshotCache("runtime", 1, validRuntime);
 
+export function runtimeDisplayPreview(snapshot: RuntimeSnapshot): RuntimeSnapshot {
+  // Activity and routing revisions belong to one native process, not this cache.
+  const gateway = { ...snapshot.gateway, routingOrder: [] };
+  delete gateway.poolRotation;
+  return { ...snapshot, gateway };
+}
+
 export function rememberRuntimePreview(snapshot: RuntimeSnapshot) {
   // Persist the original redacted DTO, before identity reveal and event overlays.
-  // A previous process's activity/leases are never restored as live requests.
-  runtimePreview.remember("local", {
-    ...snapshot,
-    gateway: { ...snapshot.gateway, routingOrder: [] },
-  });
+  runtimePreview.remember("local", runtimeDisplayPreview(snapshot));
 }

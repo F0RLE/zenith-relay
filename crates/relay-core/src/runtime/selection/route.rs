@@ -140,7 +140,10 @@ impl GatewayRuntime {
                 });
         }
         let account = self.account_state.executors.get(candidate_id)?;
-        if account.oauth_client_kind != crate::providers::chatgpt::OAuthClientKind::Codex {
+        if !super::super::images::account_images_available(
+            account.oauth_client_kind,
+            crate::poison::read(&account.subscription_plan_type).as_deref(),
+        ) {
             return None;
         }
         if !super::super::is_image_model_id(model) {

@@ -304,6 +304,7 @@ export const en = {
       error: "Source error",
       recovering: "Checking recovery",
       retryWait: "Waiting to retry",
+      busy: "Busy",
       unavailable: "Unavailable",
     },
     priceTierFor: "{{model}} price tier",

@@ -244,7 +244,7 @@ async fn images_only_host_blocks_text_endpoints_and_executes_native_generation()
 #[tokio::test]
 async fn native_image_routes_respect_transport_and_key_scope() {
     for (kind, deny_accounts) in [
-        (OAuthClientKind::ExcelBps, false),
+        (OAuthClientKind::ExcelBps, true),
         (OAuthClientKind::Siwc, false),
         (OAuthClientKind::Codex, true),
     ] {

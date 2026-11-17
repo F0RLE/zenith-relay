@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
+import type { RuntimeSnapshot } from "../../src/features/relay/api/types";
 
 test("Proxies retain their last snapshot on re-entry and a failed refresh", async ({ page }) => {
   await installTauriMock(page, { locale: "en", populated: true, proxyCount: 1 });
@@ -98,6 +99,64 @@ async function holdSnapshotReads(page: Page, commands: string[]) {
 async function releaseSnapshotReads(page: Page, fail = false) {
   await page.evaluate((fail) => (window as unknown as { __RELEASE_VIEWS__: (fail: boolean) => void }).__RELEASE_VIEWS__(fail), fail);
 }
+
+test("a previous process's pool status revision cannot override fresh native readiness", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", populated: true, accountCount: 1, quotaAvailable: true, usageActive: false });
+  await page.goto("/");
+  await expect.poll(async () => (await savedSnapshots(page, "runtime")).length).toBe(1);
+  const label = await page.evaluate(async () => {
+    const open = indexedDB.open("relay.displaySnapshots.v1");
+    return new Promise<string>((resolve, reject) => {
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        const transaction = db.transaction("runtime", "readwrite");
+        const store = transaction.objectStore("runtime");
+        const read = store.get("local");
+        let label = "";
+        read.onsuccess = () => {
+          const record = read.result as { key: string; savedAt: number; value: RuntimeSnapshot };
+          const account = record.value.accounts.find((item) => item.inPool && !item.routeInactive)!;
+          label = account.label;
+          account.operationalStatus = "unavailable";
+          record.value.gateway.poolRotation = { inventoryRevision: 9_000, preset: null,
+            memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "unavailable" } };
+          store.put(record);
+        };
+        transaction.oncomplete = () => { db.close(); resolve(label); };
+        transaction.onerror = () => { db.close(); reject(transaction.error); };
+      };
+    });
+  });
+  await holdSnapshotReads(page, ["get_local_runtime_state"]);
+  await page.addInitScript(() => {
+    const native = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = native.invoke.bind(native);
+    native.invoke = async (command, args, options) => {
+      const result = await invoke(command, args, options);
+      if (command === "get_local_runtime_state") {
+        const snapshot = result as RuntimeSnapshot;
+        const account = snapshot.accounts.find((item) => item.inPool && !item.routeInactive)!;
+        snapshot.gateway.poolRotation = { inventoryRevision: 1, preset: null,
+          memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "rotation" } };
+      }
+      return result;
+    };
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const status = page.locator(".pool-member-card").filter({ hasText: label }).locator(".relay-status-icon").first();
+  await expect(status).toHaveAttribute("data-status", "error");
+  await releaseSnapshotReads(page);
+  await expect(status).toHaveAttribute("data-status", "ready");
+  await expect(status).toHaveAttribute("aria-label", "In rotation");
+  await expect.poll(async () => {
+    const records = await savedSnapshots(page, "runtime");
+    return (records[0]?.value as RuntimeSnapshot | undefined)?.gateway.poolRotation;
+  }).toBeUndefined();
+});
 
 test("Usage reload hydrates only its selected saved page, not all eight previews", async ({ page }) => {
   await installTauriMock(page, { locale: "en", populated: true });

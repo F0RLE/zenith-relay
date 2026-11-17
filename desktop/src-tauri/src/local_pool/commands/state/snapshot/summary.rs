@@ -128,13 +128,20 @@ pub(super) fn local_account_summary(
             .pool_models(settings.codex_text_models_enabled)
             .cloned()
             .collect(),
+        pool_eligible: account_record.has_pool_models(settings),
+        image_generation_restriction: zenith_relay_core::account_image_restriction(
+            account_record.oauth_client_kind.unwrap_or_default(),
+            account_record.account.subscription.plan_type.as_deref(),
+        ),
         allowed_models: account_record.allowed_models.clone(),
         excluded_models: account_record.excluded_models.clone(),
         priority: account_record.priority,
         weight: account_record.weight,
         api_equivalent,
         economics: None,
-        quota_window_usage,
+        // A subscription text forecast is not an image allowance.
+        quota_window_usage: quota_window_usage
+            .filter(|_| !account_record.image_pool_enabled || settings.codex_text_models_enabled),
         purchase_cost_micro_usd: account_record.purchase_cost_micro_usd,
         subscription: account_record.account.subscription.clone(),
         quota: account_record.account.quota.clone(),
@@ -169,7 +176,9 @@ pub(in crate::local_pool::commands::state) fn oauth_account_runtime_available(
         .find(|candidate| {
             candidate.kind == CandidateKind::OAuthAccount && candidate.candidate_id == account_id
         })
-        .map(|candidate| candidate.available)
+        // This projects operational status, not permission to admit another
+        // request. A full image lane remains a valid, temporarily busy route.
+        .map(|candidate| candidate.available || candidate.capacity_wait)
 }
 
 pub(super) fn account_runtime_warning(
@@ -235,6 +244,68 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn image_only_accounts_do_not_receive_a_text_weekly_value_forecast() {
+        use zenith_relay_core::accounts::AccountAuthMode;
+
+        let grant = credentials();
+        let facts = AccountCredentialFacts::from_stored(&grant);
+        let mut record = crate::local_pool::accounts::records::new_account_record(
+            &grant,
+            AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            1,
+        )
+        .unwrap();
+        let forecast: QuotaWindowUsage = serde_json::from_value(serde_json::json!({
+            "ledgerKey":"synthetic-ledger", "kind":"secondary", "windowStartMs":0,
+            "observedAtMs":1, "windowMinutes":10080, "resetAtMs":604800000,
+            "availableBasisPoints":10000,
+            "calibration":{
+                "profileId":"synthetic-text", "workload":"gpt-test", "cacheBand":0,
+                "outputBand":10, "medianMicroUsd":1000, "lowMicroUsd":1000,
+                "highMicroUsd":1000, "accountCount":1, "profileCount":1,
+                "pricingCoverageBasisPoints":10000, "observedAtMs":1, "validUntilMs":1000
+            }
+        }))
+        .unwrap();
+        for (image_pool_enabled, text_enabled, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            record.image_pool_enabled = image_pool_enabled;
+            let settings = GatewaySettings {
+                codex_text_models_enabled: text_enabled,
+                ..GatewaySettings::default()
+            };
+            let summary = local_account_summary(
+                &record,
+                LocalAccountSummaryContext {
+                    settings: &settings,
+                    proxy_id: None,
+                    credentials: Some(facts),
+                    common_proxy_available: true,
+                    api_equivalent: ApiEquivalentSummary {
+                        micro_usd: 100,
+                        priced_tokens: 10,
+                        unpriced_tokens: 0,
+                    },
+                    quota_window_usage: Some(forecast.clone()),
+                    now_ms: 1,
+                    refreshing: false,
+                    runtime_available: Some(true),
+                    runtime_quota_wait: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.quota_window_usage.is_some(), expected);
+            assert_eq!(summary.api_equivalent.micro_usd, 100);
+            assert_eq!(summary.quota, record.account.quota);
+        }
     }
 
     #[test]

@@ -236,7 +236,7 @@ export function AccountCard({
         actions={<>
           {recoveryRequired ? (
             <IconButton label={t("accounts.recoveryRequiredHint")} icon={<ShieldAlert aria-hidden />} disabled />
-          ) : canAccountJoinPool(account) ? (
+          ) : participates || canAccountJoinPool(account) ? (
             <IconButton
               className={participates ? "danger" : ""}
               label={poolActionLabel}

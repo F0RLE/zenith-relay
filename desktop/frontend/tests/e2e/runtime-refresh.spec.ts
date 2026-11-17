@@ -1,12 +1,113 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 import { openGatewayApi } from "./operations/helpers";
+import type { CandidateRuntimeSnapshot, RuntimeSnapshot } from "../../src/features/relay/api/types";
 
 type HeldSnapshotWindow = {
   __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
   __HELD_SNAPSHOT_READY__?: boolean;
   __RELEASE_SNAPSHOT__?: () => void;
 };
+
+for (const surface of ["Pool", "Connections"] as const) {
+  test(`${surface} shows an occupied image lane as busy, not unavailable`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", populated: true, accountCount: 1, quotaAvailable: true, usageActive: false });
+    await page.goto("/");
+    const account = await page.evaluate(async () => {
+      const testWindow = window as unknown as HeldSnapshotWindow & { __FINISH_IMAGE__?: () => void };
+      const native = testWindow.__TAURI_INTERNALS__;
+      const invoke = native.invoke;
+      const snapshot = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+      const account = snapshot.accounts.find((item) => item.inPool && !item.routeInactive)!;
+      Object.assign(account, { operationalStatus: "rotation", lastErrorCode: null, routingBlockReason: null, quotaRefreshStatus: "updated" });
+      const candidate: CandidateRuntimeSnapshot = {
+        candidateId: account.id, kind: "oauth_account", runtimeId: 1, activityRevision: 1,
+        available: false, capacityWait: true, quotaWait: false, inFlight: 0,
+        activeRequestCount: 1, activeModels: [{ model: "gpt-image-2.6-sunburst", requestCount: 1 }],
+        dispatches: 0, halfOpen: false, lastUsedAtMs: null, nextRetryAtMs: null,
+      };
+      snapshot.gateway.routingOrder = [candidate];
+      snapshot.gateway.poolRotation = { inventoryRevision: 1, preset: null,
+        memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "rotation" } };
+      testWindow.__FINISH_IMAGE__ = () => Object.assign(candidate, {
+        available: true, capacityWait: false, activityRevision: 2, activeRequestCount: 0, activeModels: [],
+      });
+      native.invoke = async (command, args, options) => {
+        if (command === "get_local_runtime_state") return structuredClone(snapshot);
+        if (command === "get_local_runtime_order") return structuredClone({
+          routingOrder: snapshot.gateway.routingOrder, poolRotation: snapshot.gateway.poolRotation,
+        });
+        return invoke(command, args, options);
+      };
+      return { id: account.id, label: account.label };
+    });
+    await emitTauriEvent(page, "zenith-state-changed", null);
+    await page.getByRole("button", { name: surface, exact: true }).click();
+    const card = page.locator(surface === "Pool" ? ".pool-member-card" : ".account-card").filter({ hasText: account.label });
+    const status = card.locator(".relay-status-icon").first();
+    await expect(status).toHaveAttribute("data-status", "warning");
+    await expect(status).not.toHaveAttribute("aria-label", "Unavailable");
+    await page.evaluate(() => (window as unknown as { __FINISH_IMAGE__: () => void }).__FINISH_IMAGE__());
+    await emitTauriEvent(page, "zenith-runtime-activity", { candidateId: account.id, runtimeId: 1, revision: 2,
+      inFlight: 0, activeRequestCount: 0, activeModels: [] });
+    await expect(status).toHaveAttribute("data-status", "ready");
+  });
+
+  test(`${surface} recovers an unavailable card from a lightweight backend status`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", populated: true, accountCount: 1, quotaAvailable: true, usageActive: false });
+    await page.goto("/");
+    const account = await page.evaluate(async () => {
+      const testWindow = window as unknown as HeldSnapshotWindow & { __RECOVER_RUNTIME__?: () => void };
+      const native = testWindow.__TAURI_INTERNALS__;
+      const invoke = native.invoke.bind(native);
+      const snapshot = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+      const account = snapshot.accounts.find((item) => item.inPool && !item.routeInactive)!;
+      Object.assign(account, { operationalStatus: "unavailable", lastErrorCode: null, routingBlockReason: null, quotaRefreshStatus: "updated" });
+      const candidate: CandidateRuntimeSnapshot = {
+        candidateId: account.id, kind: "oauth_account", runtimeId: 1, activityRevision: 0,
+        available: false, inFlight: 0, activeRequestCount: 0, activeModels: [],
+        dispatches: 0, halfOpen: false, lastUsedAtMs: null, nextRetryAtMs: null,
+      };
+      snapshot.gateway.routingOrder = [candidate];
+      snapshot.gateway.poolRotation = { inventoryRevision: 1, preset: null,
+        memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "unavailable" } };
+      let recovered = false;
+      testWindow.__RECOVER_RUNTIME__ = () => { recovered = true; };
+      native.invoke = async (command, args, options) => {
+        if (command === "get_local_runtime_state") return structuredClone(snapshot);
+        if (command === "get_local_runtime_order") return {
+          routingOrder: [{ ...candidate, available: recovered, activityRevision: recovered ? 2 : 0 }],
+          poolRotation: { ...snapshot.gateway.poolRotation,
+            memberStatuses: { [`account:${account.id}`]: recovered ? "rotation" : "unavailable" } },
+        };
+        return invoke(command, args, options);
+      };
+      return { id: account.id, label: account.label };
+    });
+    await emitTauriEvent(page, "zenith-state-changed", null);
+    await page.getByRole("button", { name: surface, exact: true }).click();
+    const card = page.locator(surface === "Pool" ? ".pool-member-card" : ".account-card").filter({ hasText: account.label });
+    await expect(card.locator(".relay-status-icon").first()).toHaveAttribute("data-status", "error");
+    await page.evaluate(() => (window as unknown as { __RECOVER_RUNTIME__: () => void }).__RECOVER_RUNTIME__());
+    await emitTauriEvent(page, "zenith-runtime-activity", { candidateId: account.id, runtimeId: 1, revision: 1,
+      inFlight: 0, activeRequestCount: 0, activeModels: [] });
+    await expect(card.locator(".relay-status-icon").first()).toHaveAttribute("data-status", "ready");
+    await expect(card.locator(".relay-status-icon").first()).toHaveAttribute("aria-label", "In rotation");
+  });
+}
+
+test("periodic snapshots recover missed state notifications", async ({ page }) => {
+  await page.clock.install();
+  await installTauriMock(page, { locale: "en", populated: true });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Stop API", exact: true })).toBeVisible();
+  await page.evaluate(async () => {
+    await (window as unknown as HeldSnapshotWindow).__TAURI_INTERNALS__.invoke("stop_local_gateway");
+  });
+  // No state event: the bounded fallback must reread the backend anyway.
+  await page.clock.fastForward(60_000);
+  await expect(page.getByRole("button", { name: "Start API", exact: true })).toBeVisible();
+});
 
 for (const dirty of [false, true]) {
   test(`gateway snapshot changes refresh only a clean port field, dirty=${dirty}`, async ({ page }) => {
@@ -154,6 +255,54 @@ test("returning to a mode ignores its previous snapshot", async ({ page }) => {
   await releaseSnapshot(page);
   expect(await page.getByRole("button", { name: "Start API", exact: true }).count()).toBe(1);
   expect(await page.getByRole("button", { name: "Stop API", exact: true }).count()).toBe(0);
+});
+
+test("returning from Hosted does not restore completed activity or stale card status", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", populated: true, accountCount: 1, quotaAvailable: true, usageActive: false });
+  await page.goto("/");
+  const label = await page.evaluate(async () => {
+    const target = window as unknown as HeldSnapshotWindow & { __COMPLETE_HIDDEN_IMAGE__?: () => void };
+    const invoke = target.__TAURI_INTERNALS__.invoke.bind(target.__TAURI_INTERNALS__);
+    const snapshot = await invoke("get_local_runtime_state") as RuntimeSnapshot;
+    const account = snapshot.accounts.find((item) => item.inPool && !item.routeInactive)!;
+    account.operationalStatus = "unavailable";
+    const candidate: CandidateRuntimeSnapshot = {
+      candidateId: account.id, kind: "oauth_account", available: false, capacityWait: true,
+      runtimeId: 1, activityRevision: 1, inFlight: 0, activeRequestCount: 1,
+      activeModels: [{ model: "gpt-image-2.6-sunburst", requestCount: 1 }],
+      dispatches: 0, halfOpen: false, lastUsedAtMs: null, nextRetryAtMs: null,
+    };
+    snapshot.gateway.routingOrder = [candidate];
+    snapshot.gateway.poolRotation = { inventoryRevision: 90, preset: null,
+      memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "unavailable" } };
+    target.__COMPLETE_HIDDEN_IMAGE__ = () => {
+      Object.assign(candidate, { available: true, capacityWait: false, runtimeId: 2, activityRevision: 0,
+        activeRequestCount: 0, activeModels: [] });
+      account.operationalStatus = "rotation";
+      snapshot.gateway.poolRotation = { inventoryRevision: 1, preset: null,
+        memberOrder: [`account:${account.id}`], memberStatuses: { [`account:${account.id}`]: "rotation" } };
+    };
+    target.__TAURI_INTERNALS__.invoke = async (command, args, options) => {
+      if (command === "get_local_runtime_state") return structuredClone(snapshot);
+      if (command === "get_local_runtime_order") return structuredClone({ routingOrder: snapshot.gateway.routingOrder,
+        poolRotation: snapshot.gateway.poolRotation });
+      return invoke(command, args, options);
+    };
+    return account.label;
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const card = page.locator(".pool-member-card").filter({ hasText: label });
+  await expect(card).toHaveAttribute("data-current", "true");
+  await switchMode(page, "Relay Hosted");
+  await page.evaluate(() => (window as unknown as { __COMPLETE_HIDDEN_IMAGE__: () => void }).__COMPLETE_HIDDEN_IMAGE__());
+  await holdNextSnapshot(page);
+  await switchMode(page, "Computer");
+  await expect.poll(() => page.evaluate(() => (window as unknown as HeldSnapshotWindow).__HELD_SNAPSHOT_READY__)).toBe(true);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(card).toHaveAttribute("data-current", "false");
+  await releaseSnapshot(page);
+  await expect(card.locator(".relay-status-icon").first()).toHaveAttribute("data-status", "ready");
 });
 
 test("saving retires an old background read without blocking later updates", async ({ page }) => {

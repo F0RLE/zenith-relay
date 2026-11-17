@@ -304,6 +304,7 @@ export const ru = {
       error: "Ошибка источника",
       recovering: "Проверка восстановления",
       retryWait: "Ожидает повтора",
+      busy: "Занят",
       unavailable: "Недоступен",
     },
     priceTierFor: "Тариф {{model}}",

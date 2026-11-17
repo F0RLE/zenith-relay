@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "../src/features/relay/api/types";
-import { createRuntimeCandidateLookup, indexCandidatesByMember } from "../src/features/relay/runtimeCandidateIndex";
-import { runtimeCandidateForMember } from "../src/features/relay/routingOrder";
+import { createRuntimeCandidateLookup, indexCandidatesByMember, runtimeCandidateForMember } from "../src/features/relay/runtimeCandidateIndex";
 
 function candidate(candidateId: string, kind: CandidateRuntimeSnapshot["kind"], active = false): CandidateRuntimeSnapshot {
   return {

@@ -87,8 +87,27 @@ pub(super) async fn prepare_request(
             None => IMAGE_API_MODEL.to_string(),
         });
     let Some(resolved_model) =
-        runtime.resolve_visible_model(key, &requested_model, IMAGE_PROTOCOLS, now_ms())
+        runtime.resolve_image_model(key, &requested_model, IMAGE_PROTOCOLS, now_ms())
     else {
+        if let Some(restriction) =
+            runtime.unavailable_account_images(key, &requested_model, IMAGE_PROTOCOLS)
+        {
+            let (status, message) = match restriction {
+                crate::ImageGenerationRestriction::ProviderFreePlan => (
+                    StatusCode::FORBIDDEN,
+                    "Image generation is restricted by the OpenAI provider for this Free account",
+                ),
+                crate::ImageGenerationRestriction::ProviderUnavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Image generation through Excel/BPS is currently unavailable from the upstream provider",
+                ),
+            };
+            return Err(api_error(
+                status,
+                message,
+                error_codes::IMAGE_GENERATION_NOT_ENABLED,
+            ));
+        }
         return Err(api_error(
             StatusCode::NOT_FOUND,
             "model is not available in this managed pool",

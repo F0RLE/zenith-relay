@@ -45,11 +45,34 @@ pub(super) async fn run_selected_attempt(
     } = selected_image_route;
     budget.mark_image_generation();
     let account_route = route.account_id.is_some();
+    let basis_points =
+        account_route && route.account_transport == AccountTransport::ExcelBasisPoints;
     let upstream_url = image_endpoint_url(route.upstream_url.clone(), endpoint);
     let Some(upstream_url) = upstream_url else {
         return ImageAttemptStep::Retry(AttemptFailure::invalid_request());
     };
-    let request_body = if account_route {
+    let mut content_type = if account_route {
+        HeaderValue::from_static("application/json")
+    } else {
+        prepared.content_type.clone()
+    };
+    let request_body = if basis_points {
+        match super::super::basis_points::request_body(prepared, endpoint, &route.source_model)
+            .await
+        {
+            Ok((body, body_type)) => {
+                content_type = body_type;
+                body
+            }
+            Err(()) => {
+                return ImageAttemptStep::Respond(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "image input cannot be encoded for the selected account",
+                    crate::error_codes::INVALID_REQUEST,
+                ));
+            }
+        }
+    } else if account_route {
         direct_account_request_body(prepared, endpoint, &route.source_model)
     } else if prepared.content_type.to_str().is_ok_and(|value| {
         value
@@ -71,11 +94,6 @@ pub(super) async fn run_selected_attempt(
     };
 
     let request_body = axum::body::Bytes::from(request_body);
-    let content_type = if account_route {
-        HeaderValue::from_static("application/json")
-    } else {
-        prepared.content_type.clone()
-    };
     super::super::diagnostics::observe_request(
         runtime,
         &mut route,
@@ -98,7 +116,9 @@ pub(super) async fn run_selected_attempt(
             },
         )
         .body(request_body);
-    if account_route {
+    if basis_points {
+        upstream = upstream.headers(route.upstream_headers.clone());
+    } else if account_route {
         // Match the native Codex Images transport. Keep the same turn identity
         // across authorization recovery instead of generating one per send.
         upstream = upstream.header("x-codex-image-turn-id", request_id);

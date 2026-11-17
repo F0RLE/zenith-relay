@@ -7,9 +7,11 @@ export function canAccountJoinPool(account: {
   plan?: string | null;
   recoveryRequired?: boolean;
   lastErrorCode?: string | null;
+  poolEligible?: boolean;
 }) {
   if (account.oauthClientKind !== "codex" && account.oauthClientKind !== "excel_bps" && account.oauthClientKind !== "siwc") return false;
   if (account.recoveryRequired) return false;
+  if (account.poolEligible === false) return false;
   if (account.lastErrorCode === "siwc_plan_use_disabled") return false;
   return true;
 }

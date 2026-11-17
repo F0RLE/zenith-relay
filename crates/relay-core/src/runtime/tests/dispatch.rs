@@ -447,13 +447,23 @@ fn model_inventory_refresh_keeps_native_images_and_retires_old_transport_evidenc
                 .is_some()
         );
     }
-    for model in ["gpt-test", "gpt-image-unknown"] {
-        assert!(
-            runtime
-                .image_executor_route("account-1", model, &scope, &[WireApi::ChatCompletions])
-                .is_none()
-        );
-    }
+    assert_eq!(
+        runtime
+            .image_executor_route(
+                "account-1",
+                "gpt-image-unknown",
+                &scope,
+                &[WireApi::ChatCompletions]
+            )
+            .unwrap()
+            .source_model,
+        "gpt-image-unknown"
+    );
+    assert!(
+        runtime
+            .image_executor_route("account-1", "gpt-test", &scope, &[WireApi::ChatCompletions])
+            .is_none()
+    );
 }
 #[tokio::test]
 async fn removed_and_reintroduced_model_cannot_reuse_an_old_pending_lease() {

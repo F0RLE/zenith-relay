@@ -7,7 +7,8 @@ import {
   groupModelSummaries,
   modelSummaries,
 } from "../src/features/relay/modelSummaries";
-import { activeModelCounts, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, runtimeCandidateForMember, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { activeModelCounts, applyRuntimeActivities, reconcileRuntimeActivityOverlay, routingOrderPositions, sameRuntimeOrder, upcomingModelRetries } from "../src/features/relay/routingOrder";
+import { runtimeCandidateForMember } from "../src/features/relay/runtimeCandidateIndex";
 
 function source(overrides: Partial<SourceSummary>): SourceSummary {
   return {

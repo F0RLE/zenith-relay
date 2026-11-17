@@ -1,5 +1,41 @@
-import type { CandidateRuntimeSnapshot, RuntimeActivitySnapshot } from "./api/types";
+import type { CandidateRuntimeSnapshot, PoolRotationView, RuntimeActivitySnapshot, RuntimeSnapshot } from "./api/types";
 import { modelIdKey } from "./modelGroups";
+
+export function preferNewerPoolRotation(
+  current: PoolRotationView | undefined,
+  incoming: PoolRotationView | null | undefined,
+  runtimeAccepted: boolean,
+) {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  const revision = (incoming.inventoryRevision ?? 0) - (current.inventoryRevision ?? 0);
+  return revision > 0 || (revision === 0 && runtimeAccepted) ? incoming : current;
+}
+
+/** Render the backend's member projection; activity alone never grants readiness. */
+export function applyPoolRotation(
+  snapshot: RuntimeSnapshot,
+  rotation: PoolRotationView | undefined,
+  order = snapshot.gateway.routingOrder ?? [],
+): RuntimeSnapshot {
+  const statuses = rotation?.memberStatuses;
+  const project = <T extends { id: string; operationalStatus: string }>(members: T[], kind: "account" | "source") => {
+    let changed = false;
+    const projected = members.map((member) => {
+      const status = statuses?.[`${kind}:${member.id}`];
+      if (status == null || status === member.operationalStatus) return member;
+      changed = true;
+      return { ...member, operationalStatus: status };
+    });
+    return changed ? projected : members;
+  };
+  return {
+    ...snapshot,
+    accounts: project(snapshot.accounts, "account"),
+    sources: project(snapshot.sources, "source"),
+    gateway: { ...snapshot.gateway, routingOrder: order, ...(rotation ? { poolRotation: rotation } : {}) },
+  };
+}
 
 export function sameRuntimeOrder(
   left: readonly CandidateRuntimeSnapshot[],
@@ -76,72 +112,6 @@ export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
   }
   for (const [sourceId, { index }] of sourcePositions) positions.set(sourceId, index);
   return positions;
-}
-
-/** Resolve the runtime state shown for a pool member. Sources may have one
- * runtime candidate per protocol binding (`sourceId::responses`), while the
- * UI card is keyed only by the source id. */
-export function runtimeCandidateForMember(
-  memberId: string,
-  memberKind: "api_source" | "oauth_account",
-  runtimeCandidates: CandidateRuntimeSnapshot[],
-  protocolFilter: "responses" | "all" = "all",
-  sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions",
-): CandidateRuntimeSnapshot | undefined {
-  const memberCandidates = runtimeCandidates.filter((candidate) => candidate.kind === memberKind && (
-    memberKind === "oauth_account"
-      ? candidate.candidateId === memberId
-      : (candidate.candidateId === memberId || candidate.candidateId.startsWith(`${memberId}::`))
-        && (protocolFilter === "all" || isResponsesCandidate(candidate.candidateId, sourceWireApi))
-  ));
-  if (!memberCandidates.length) return undefined;
-  const firstCandidate = memberCandidates[0];
-  if (memberCandidates.length === 1 && firstCandidate?.candidateId === memberId) return firstCandidate;
-  const memberActiveRequestCount = memberCandidates.reduce((total, candidate) => total + activeRequestCount(candidate), 0);
-  const selectionRanks = memberCandidates.flatMap((candidate) => candidate.selectionRank == null ? [] : [candidate.selectionRank]);
-  return {
-    candidateId: memberId,
-    kind: memberKind,
-    available: memberCandidates.some((candidate) => candidate.available),
-    quotaWait: memberCandidates.every((candidate) => !candidate.available) && memberCandidates.some((candidate) => candidate.quotaWait),
-    capacityWait: memberCandidates.every((candidate) => !candidate.available) && memberCandidates.some((candidate) => candidate.capacityWait),
-    nextForNewRequest: memberCandidates.some((candidate) => candidate.nextForNewRequest),
-    selectionRank: selectionRanks.length ? Math.min(...selectionRanks) : null,
-    ...(firstCandidate?.activityRevision == null ? {} : { activityRevision: firstCandidate.activityRevision }),
-    ...(firstCandidate?.runtimeId == null ? {} : { runtimeId: firstCandidate.runtimeId }),
-    inFlight: memberActiveRequestCount,
-    activeRequestCount: memberActiveRequestCount,
-    activeModels: activeModelCounts(memberCandidates),
-    modelRetries: aggregateModelRetries(memberCandidates),
-    lastUsedAtMs: memberCandidates.reduce<number | null>((latestUsageAtMs, candidate) =>
-      candidate.lastUsedAtMs != null && (latestUsageAtMs == null || candidate.lastUsedAtMs > latestUsageAtMs) ? candidate.lastUsedAtMs : latestUsageAtMs, null),
-    nextRetryAtMs: memberCandidates.reduce<number | null>((earliestRetryAtMs, candidate) =>
-      candidate.nextRetryAtMs != null && (earliestRetryAtMs == null || candidate.nextRetryAtMs < earliestRetryAtMs) ? candidate.nextRetryAtMs : earliestRetryAtMs, null),
-    halfOpen: memberCandidates.some((candidate) => candidate.halfOpen),
-    dispatches: memberCandidates.reduce((total, candidate) => total + candidate.dispatches, 0),
-  };
-}
-
-function isResponsesCandidate(candidateId: string, sourceWireApi?: "responses" | "chat_completions" | "messages" | "gemini" | "gemini_interactions") {
-  const separator = candidateId.indexOf("::");
-  if (separator < 0) return sourceWireApi == null || sourceWireApi === "responses";
-  const suffix = candidateId.slice(separator + 2);
-  return suffix === "responses" || suffix.startsWith("responses_");
-}
-
-function aggregateModelRetries(candidates: CandidateRuntimeSnapshot[]) {
-  const earliestRetryByModel = new Map<string, { model: string; retryAtMs: number }>();
-  for (const candidate of candidates) {
-    for (const retry of candidate.modelRetries ?? []) {
-      if (!retry.model || !Number.isFinite(retry.retryAtMs)) continue;
-      const key = modelIdKey(retry.model);
-      const earliestRetry = earliestRetryByModel.get(key);
-      if (!earliestRetry || retry.retryAtMs < earliestRetry.retryAtMs) {
-        earliestRetryByModel.set(key, { model: retry.model, retryAtMs: retry.retryAtMs });
-      }
-    }
-  }
-  return [...earliestRetryByModel.values()].sort((left, right) => left.retryAtMs - right.retryAtMs || left.model.localeCompare(right.model));
 }
 
 export function compareRoutingOrder(leftId: string, rightId: string, order: ReadonlyMap<string, number>, fallback?: ReadonlyMap<string, number>) {

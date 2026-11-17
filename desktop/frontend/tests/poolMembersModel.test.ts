@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AccountSummary, CandidateRuntimeSnapshot, RuntimeSnapshot } from "../src/features/relay/api/types";
 import type { PoolMember } from "../src/features/relay/poolHelpers";
-import { applyRuntimeActivities, compareRuntimeActivity, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../src/features/relay/routingOrder";
+import { applyPoolRotation, applyRuntimeActivities, compareRuntimeActivity, preferNewerPoolRotation, preferNewerRuntimeOrder, reconcileRuntimeActivityOverlay, sameRuntimeOrder } from "../src/features/relay/routingOrder";
 import {
   orderedPoolMembers,
   poolActivityState,
@@ -55,6 +55,35 @@ function linkedQuotaPool(donorKind: "codex" | "excel_bps" = "excel_bps") {
 }
 
 describe("pool members model", () => {
+  test("member projection revisions preserve newer statuses across full and lightweight reads", () => {
+    const current = { inventoryRevision: 3, preset: null, memberOrder: [], memberStatuses: { "account:one": "rotation" } } as const;
+    const projection = { ...current, memberOrder: [] };
+    const stale = { ...projection, inventoryRevision: 2 };
+    const newer = { ...projection, inventoryRevision: 4 };
+    expect(preferNewerPoolRotation(projection, stale, true)).toBe(projection);
+    expect(preferNewerPoolRotation(projection, { ...projection }, false)).toBe(projection);
+    expect(preferNewerPoolRotation(projection, newer, false)).toBe(newer);
+    expect(preferNewerPoolRotation(projection, null, true)).toBe(projection);
+    expect(preferNewerPoolRotation(undefined, newer, true)).toBe(newer);
+  });
+
+  test("applies backend status recovery without inferring readiness from activity", () => {
+    const account = member("account", "shared", { operationalStatus: "unavailable" });
+    const source = member("source", "shared", { operationalStatus: "unavailable" });
+    const snapshot = { accounts: [account], sources: [source], gateway: {} } as unknown as RuntimeSnapshot;
+    const rotation = { inventoryRevision: 2, preset: null, memberOrder: ["account:shared", "source:shared"],
+      memberStatuses: { "account:shared": "rotation", "source:shared": "unavailable" } } as const;
+    const updated = applyPoolRotation(snapshot, { ...rotation, memberOrder: [...rotation.memberOrder] });
+    expect(updated.accounts[0]?.operationalStatus).toBe("rotation");
+    expect(updated.sources).toBe(snapshot.sources);
+    expect(updated.accounts[0]?.authState).toBe(snapshot.accounts[0]?.authState);
+    expect(snapshot.accounts[0]?.operationalStatus).toBe("unavailable");
+    expect(applyPoolRotation(updated, updated.gateway.poolRotation!).accounts).toBe(updated.accounts);
+    const legacy = applyPoolRotation(snapshot, { preset: null, memberOrder: [] });
+    expect(legacy.accounts).toBe(snapshot.accounts);
+    expect(legacy.sources).toBe(snapshot.sources);
+  });
+
   test("uses the backend preview even when the selected member is busy or not first", () => {
     const members = [member("account", "account"), member("source", "source-a")];
     const order = [
@@ -130,6 +159,49 @@ describe("pool members model", () => {
     reconcileRuntimeActivityOverlay(fresh, overlay);
     expect(overlay.size).toBe(0);
     expect(applyRuntimeActivities(fresh, [completed])[0]?.activeRequestCount).toBe(1);
+  });
+
+  test("image activity survives delayed polls without replacing backend readiness", () => {
+    const model = "gpt-image-test";
+    for (const [overrides, status] of [
+      [{}, "rotation"],
+      [{ operationalStatus: "unavailable", secretAvailable: false }, "unavailable"],
+      [{ draining: true }, "draining"],
+      [{ enabled: false, operationalStatus: "disabled" }, "disabled"],
+    ] as const) {
+      const account = member("account", "image-account", {
+        models: [model], authState: { state: "active" }, ...overrides,
+      });
+      const base = [candidate(account.id, {
+        runtimeId: 1, activityRevision: 0, available: status === "rotation",
+        nextForNewRequest: false,
+      })];
+      const admitted = {
+        runtimeId: 1, revision: 1, candidateId: account.id, inFlight: 0,
+        activeRequestCount: 1, activeModels: [{ model, requestCount: 1 }],
+      };
+      const overlay = new Map([[account.id, admitted]]);
+      const project = (order: CandidateRuntimeSnapshot[]) => {
+        reconcileRuntimeActivityOverlay(order, overlay);
+        const activity = { runtimeId: 1, revision: 1, candidates: Object.fromEntries(overlay) };
+        const byMember = poolMemberRuntimeStates([account], order, activity);
+        expect(poolMemberDisplayStatus(account, byMember.get(account.id))).toBe(status);
+        return poolActivityState([account], byMember, order, activity);
+      };
+      expect(project(base).activeModels).toEqual([{ model, requestCount: 1 }]);
+      expect(overlay.size).toBe(1);
+      const active = base.map((item) => ({ ...item, activityRevision: 1,
+        activeRequestCount: 1, activeModels: admitted.activeModels }));
+      expect(project(active).activeRequestTotal).toBe(1);
+      expect(overlay.size).toBe(0);
+
+      overlay.set(account.id, { ...admitted, revision: 2, activeRequestCount: 0, activeModels: [] });
+      expect(project(active).activeRequestTotal).toBe(0);
+      expect(overlay.size).toBe(1);
+      const idle = base.map((item) => ({ ...item, activityRevision: 2 }));
+      expect(project(idle).activeRequestTotal).toBe(0);
+      expect(overlay.size).toBe(0);
+    }
   });
 
   test("runtime replacement discards old activity without hiding its first new request", () => {
@@ -480,6 +552,18 @@ describe("pool members model", () => {
       member("account", "quota", { operationalStatus: "quotaWait" }),
     ];
     expect(poolMemberStatusCounts(members)).toEqual({ rotation: 2, quotaWait: 1, waiting: 1, errors: 2, disabled: 1 });
+  });
+
+  test("unavailable accounts without an error code are counted, but busy accounts are not", () => {
+    const accounts = [
+      member("account", "unavailable", { operationalStatus: "unavailable" }),
+      member("account", "busy", { operationalStatus: "unavailable" }),
+    ];
+    const states = new Map([
+      ["unavailable", candidate("unavailable", { available: false })],
+      ["busy", candidate("busy", { available: false, capacityWait: true, activeRequestCount: 1 })],
+    ]);
+    expect(poolMemberStatusCounts(accounts, states)).toEqual({ rotation: 0, quotaWait: 0, waiting: 1, errors: 1, disabled: 0 });
   });
 
   test("sums provider credits only for accounts currently in the pool", () => {

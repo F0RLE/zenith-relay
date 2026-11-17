@@ -46,6 +46,9 @@ export type AccountSummary = {
   health: string;
   operationalStatus: OperationalStatus;
   models: string[];
+  /** Availability comes from the backend, not a client-side plan check. */
+  poolEligible?: boolean;
+  imageGenerationRestriction?: "provider_free_plan" | "provider_unavailable" | null;
   allowedModels: string[];
   excludedModels: string[];
   priority: number;

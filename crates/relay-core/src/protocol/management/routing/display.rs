@@ -14,6 +14,8 @@ pub struct PoolRotationView {
     pub inventory_revision: u64,
     pub preset: Option<RotationPreset>,
     pub member_order: Vec<String>,
+    #[serde(default)]
+    pub member_statuses: BTreeMap<String, OperationalStatus>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -21,6 +23,7 @@ struct DisplayMember {
     kind: PoolMemberKind,
     id: String,
     status: OperationalStatus,
+    runtime_recoverable: bool,
     weekly_exhausted_until: Option<u64>,
 }
 
@@ -61,7 +64,7 @@ impl PoolRotationProjection {
             .members
             .iter()
             .filter_map(|member| {
-                let (status, weekly_exhausted_until) = match member.kind {
+                let (status, runtime_recoverable, weekly_exhausted_until) = match member.kind {
                     PoolMemberKind::Account => {
                         let account = accounts
                             .get(member.id.as_str())
@@ -91,19 +94,39 @@ impl PoolRotationProjection {
                                             .map_or(u64::MAX, |reset| reset.saturating_sub(1)),
                                     )
                             });
-                        (account.operational_status, exhausted_until)
+                        (
+                            account.operational_status,
+                            account.enabled
+                                && !account.draining
+                                && account.secret_available
+                                && account.proxy_available
+                                && !account.recovery_required
+                                && account.operational_status != OperationalStatus::Disabled
+                                && account.routing_block_reason.is_none()
+                                && account.last_error_code.as_deref()
+                                    != Some("siwc_plan_use_disabled"),
+                            exhausted_until,
+                        )
                     }
                     PoolMemberKind::Source => {
                         let source = sources
                             .get(member.id.as_str())
                             .filter(|source| source.in_pool)?;
-                        (source.operational_status, None)
+                        (
+                            source.operational_status,
+                            source.enabled
+                                && !source.draining
+                                && source.secret_available
+                                && source.operational_status != OperationalStatus::Disabled,
+                            None,
+                        )
                     }
                 };
                 Some(DisplayMember {
                     kind: member.kind,
                     id: member.id.clone(),
                     status,
+                    runtime_recoverable,
                     weekly_exhausted_until,
                 })
             })
@@ -144,6 +167,7 @@ impl PoolRotationProjection {
             runtime.entry(key).or_default().push((rank, candidate));
         }
         let mut rows = Vec::new();
+        let mut member_statuses = BTreeMap::new();
         for (saved_rank, member) in self.members.iter().enumerate() {
             let key = match member.kind {
                 PoolMemberKind::Account => crate::scheduler::account_member_key(&member.id),
@@ -154,13 +178,27 @@ impl PoolRotationProjection {
                 .iter()
                 .any(|(_, candidate)| candidate.active_request_count > 0);
             let available = candidates.iter().any(|(_, candidate)| candidate.available);
+            let capacity_wait = candidates
+                .iter()
+                .any(|(_, candidate)| candidate.capacity_wait);
             let waiting = !available
                 && candidates.iter().any(|(_, candidate)| {
                     candidate.quota_wait
                         || candidate.capacity_wait
                         || candidate.next_retry_at_ms.is_some()
                 });
-            let status_rank = match member.status {
+            let status = if member.runtime_recoverable && !candidates.is_empty() {
+                OperationalStatus::Rotation.with_runtime_available(
+                    // A full lane prevents new admission, not membership in
+                    // rotation. The runtime snapshot retains the busy state.
+                    Some(available || capacity_wait),
+                    candidates.iter().any(|(_, candidate)| candidate.quota_wait),
+                )
+            } else {
+                member.status
+            };
+            member_statuses.insert(key.clone(), status);
+            let status_rank = match status {
                 OperationalStatus::Rotation if waiting => 1,
                 OperationalStatus::Rotation => 0,
                 OperationalStatus::QuotaWait if available => 0,
@@ -195,6 +233,7 @@ impl PoolRotationProjection {
             inventory_revision: 0,
             preset: self.policy.rotation_preset(),
             member_order: rows.into_iter().map(|(_, key)| key).collect(),
+            member_statuses,
         }
     }
 }

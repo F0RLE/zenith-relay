@@ -139,7 +139,6 @@ struct ReadyCandidate {
 #[derive(Clone, Debug)]
 struct RoundRobinCursor {
     capacity_key: String,
-    candidate_id: String,
     priority: i32,
 }
 

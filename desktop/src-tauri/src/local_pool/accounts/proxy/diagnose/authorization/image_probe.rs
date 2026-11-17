@@ -20,6 +20,8 @@ const FLAG: &str = "--probe-bps-images";
 const ENDPOINT: &str = "https://bps.openai.com/basispoints/api/images/generations";
 const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
+mod preview;
+
 pub(in crate::local_pool::accounts::proxy::diagnose) fn requested(args: &[OsString]) -> bool {
     args.iter().any(|arg| arg == FLAG)
 }
@@ -27,12 +29,13 @@ pub(in crate::local_pool::accounts::proxy::diagnose) fn requested(args: &[OsStri
 pub(in crate::local_pool::accounts::proxy::diagnose) fn run(
     args: &[OsString],
 ) -> Result<Value, &'static str> {
+    let (args, preview) = preview::arguments(args)?;
     let (root, size, expected) = arguments(args)?;
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| "runtime_unavailable")?
-        .block_on(probe(root, size, expected))
+        .block_on(probe(root, size, expected, preview.as_ref()))
 }
 
 fn arguments(args: &[OsString]) -> Result<(&Path, &str, Option<&str>), &'static str> {
@@ -130,7 +133,12 @@ fn payload(size: &str) -> Value {
         "size":size,"quality":"high","output_format":"png","background":"opaque","n":1})
 }
 
-async fn probe(root: &Path, size: &str, expected: Option<&str>) -> Result<Value, &'static str> {
+async fn probe(
+    root: &Path,
+    size: &str,
+    expected: Option<&str>,
+    preview: Option<&preview::Preview>,
+) -> Result<Value, &'static str> {
     let selected = select(root, expected)?;
     let tokens = selected
         .credentials
@@ -163,11 +171,15 @@ async fn probe(root: &Path, size: &str, expected: Option<&str>) -> Result<Value,
     let mut result = json!({"route":"excel_bps_images","accountRef":reference(&selected.record.account.id),
         "requestedModel":"gpt-image-2","requestedSize":size,"requestedQuality":"high",
         "requests":1,"retries":0,"poolUsageRecorded":false,"workingConfigurationChanged":false});
+    let mut request = payload(size);
+    if let Some(preview) = preview {
+        request["prompt"] = json!(preview.prompt);
+    }
     let response = client
         .post(ENDPOINT)
         .headers(headers)
         .bearer_auth(tokens.access_token())
-        .json(&payload(size))
+        .json(&request)
         .send()
         .await;
     let mut response = match response {
@@ -247,6 +259,18 @@ async fn probe(root: &Path, size: &str, expected: Option<&str>) -> Result<Value,
                 .and_then(|usage| usage.get(key))
                 .and_then(Value::as_u64)
         );
+    }
+    if let Some(preview) = preview
+        && result["status"] == "completed"
+    {
+        // Saving failure must not turn a completed generation into permission to retry.
+        match preview.save(&parsed) {
+            Ok(bytes) => {
+                result["outputFile"] = json!(preview.output);
+                result["outputBytes"] = json!(bytes);
+            }
+            Err(code) => result["outputError"] = json!(code),
+        }
     }
     Ok(result)
 }

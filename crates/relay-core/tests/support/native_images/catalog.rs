@@ -13,7 +13,7 @@ async fn native_image_catalog_preserves_every_model_and_default_through_http() {
         )
     };
     let (upstream, state) =
-        spawn_upstream((0..=CODEX_IMAGE_MODELS.len()).map(|_| reply()).collect()).await;
+        spawn_upstream((0..CODEX_IMAGE_MODELS.len() + 2).map(|_| reply()).collect()).await;
     let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![account(
@@ -35,19 +35,12 @@ async fn native_image_catalog_preserves_every_model_and_default_through_http() {
     let client = reqwest::Client::new();
     assert_eq!(models(&gateway).await, CODEX_IMAGE_MODELS);
 
-    let unsupported = client
-        .post(format!("{}/v1/images/generations", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model":"gpt-image-unknown", "prompt":"synthetic"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unsupported.status(), StatusCode::NOT_FOUND);
     assert!(state.requests.lock().unwrap().is_empty());
 
     for (index, selected) in CODEX_IMAGE_MODELS
         .iter()
         .copied()
+        .chain(["gpt-image-future-synthetic"])
         .map(Some)
         .chain([None])
         .enumerate()
@@ -94,7 +87,7 @@ async fn native_image_catalog_preserves_every_model_and_default_through_http() {
         assert!(sent.body.get("response_format").is_none());
     }
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), CODEX_IMAGE_MODELS.len() + 1);
+    assert_eq!(events.len(), CODEX_IMAGE_MODELS.len() + 2);
     assert!(
         events
             .iter()

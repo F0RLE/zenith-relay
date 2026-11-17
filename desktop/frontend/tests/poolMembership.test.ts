@@ -15,13 +15,18 @@ function recordingExecutor() {
 }
 
 describe("pool membership operation", () => {
+  test("honors backend model availability without deriving it from the plan", () => {
+    expect(canAccountJoinPool({ oauthClientKind: "codex", poolEligible: false, subscription: { planType: "free" } })).toBe(false);
+    expect(canAccountJoinPool({ oauthClientKind: "codex", poolEligible: true, subscription: { planType: "free" } })).toBe(true);
+    expect(canAccountJoinPool({ oauthClientKind: "excel_bps", poolEligible: false })).toBe(false);
+  });
   test("accounts awaiting local recovery cannot join the pool", () => {
     expect(canAccountJoinPool({ oauthClientKind: "codex", recoveryRequired: true })).toBe(false);
     expect(canAccountJoinPool({ oauthClientKind: "excel_bps", plan: "plus", recoveryRequired: true })).toBe(false);
   });
-  test("offers explicit image-only membership for known Codex connections, not unknown legacy clients", () => {
+  test("uses backend availability for known Codex connections, not a client-side plan gate", () => {
     for (const planType of ["free", "chatgpt_free_tier", "plus", null]) {
-      expect(canAccountJoinPool({ oauthClientKind: "codex", subscription: { planType } })).toBe(true);
+      expect(canAccountJoinPool({ oauthClientKind: "codex", poolEligible: true, subscription: { planType } })).toBe(true);
       expect(canAccountJoinPool({ subscription: { planType } })).toBe(false);
     }
   });

@@ -51,7 +51,8 @@ pub(super) fn measure(
 ) -> Result<Option<PricedWorkload>> {
     let sql = format!(
         "SELECT COALESCE(resolved_model, requested_model, ''), {class}, {context},
-         COALESCE(effective_reasoning_effort, ''), {columns}, COUNT(*)
+         COALESCE(effective_reasoning_effort, ''), {columns}, COUNT(*),
+         COUNT(CASE WHEN is_image_usage != 0 OR image_usage_json IS NOT NULL THEN 1 END)
          FROM usage_sends WHERE account_id = ?1
          AND created_at >= datetime(?2 / 1000, 'unixepoch') AND created_at <= datetime(?3 / 1000, 'unixepoch')
          GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4",
@@ -81,9 +82,13 @@ pub(super) fn measure(
                 )
                 .with_aggregate_rates(&class, &context);
                 let rows: i64 = row.get(17)?;
-                let complete = [12, 13, 15]
-                    .into_iter()
-                    .all(|index| row.get::<_, i64>(index).ok() == Some(rows));
+                // Image prices do not establish which provider quota was
+                // consumed. Reject the whole interval: excluding only image
+                // costs would still assign their possible quota use to text.
+                let complete = row.get::<_, i64>(18)? == 0
+                    && [12, 13, 15]
+                        .into_iter()
+                        .all(|index| row.get::<_, i64>(index).ok() == Some(rows));
                 Ok((model, class, context, effort, usage, complete, rows))
             })
             .map_err(db_error)?;

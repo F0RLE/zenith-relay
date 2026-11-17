@@ -301,6 +301,51 @@ fn begin_dispatch_rechecks_new_quota_rate_auth_and_circuit_blocks() {
 }
 
 #[test]
+fn model_replacement_clears_only_the_replaced_routes_rate_limit() {
+    let mut member = RotationCandidate::new("a", "changed-route", "old-model");
+    member.add_route("steady-route", "steady-model", RotationOperation::Text);
+    let mut engine = RotationEngine::default();
+    engine.upsert(member.clone()).unwrap();
+    for (route, deadline) in [("changed-route", 1_000), ("steady-route", 2_000)] {
+        engine.sync_candidate_route_rate(
+            "a",
+            route,
+            RateState::Limited {
+                not_before_ms: deadline,
+            },
+        );
+    }
+    member.add_route("changed-route", "new-model", RotationOperation::Text);
+    engine.upsert(member).unwrap();
+    let changed = RotationRequest::new(RequestId(1), "changed-route", "new-model");
+    let steady = RotationRequest::new(RequestId(2), "steady-route", "steady-model");
+    assert_eq!(
+        engine.candidate_availability(&changed, "a", 100),
+        CandidateAvailability::Ready { recovery: false }
+    );
+    assert_eq!(
+        engine.candidate_availability(&steady, "a", 100),
+        CandidateAvailability::WaitUntil {
+            at_ms: 2_000,
+            reason: CandidateBlockReason::RateLimited,
+        }
+    );
+    engine.set_rate(
+        "a",
+        RateState::Limited {
+            not_before_ms: 3_000,
+        },
+    );
+    assert_eq!(
+        engine.candidate_availability(&changed, "a", 100),
+        CandidateAvailability::WaitUntil {
+            at_ms: 3_000,
+            reason: CandidateBlockReason::RateLimited,
+        }
+    );
+}
+
+#[test]
 fn another_routes_rate_change_does_not_revoke_a_reserved_operation() {
     let mut engine = engine(&["a"]);
     let lease = engine.reserve(&request(1), 0).unwrap();

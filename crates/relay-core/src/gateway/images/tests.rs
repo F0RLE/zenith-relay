@@ -2,6 +2,47 @@ use super::account::{direct_account_request_body, direct_request_body, image_end
 use super::*;
 use serde_json::json;
 
+#[tokio::test]
+async fn bps_images_preserve_explicit_options_and_omit_only_false_stream() {
+    for stream in [Value::Null, json!(false), json!(true)] {
+        let mut request = request();
+        request.fields.insert("stream".into(), stream.clone());
+        request.fields.insert("size".into(), json!("3840x2160"));
+        let (bytes, content_type) = basis_points::request_body(
+            &request,
+            ImageEndpoint::Generations,
+            "gpt-image-future-synthetic",
+        )
+        .await
+        .unwrap();
+        assert_eq!(content_type, "application/json");
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["model"], "gpt-image-future-synthetic");
+        assert_eq!(body["size"], "3840x2160");
+        assert_eq!(body["future_option"], true);
+        assert!(!body.as_object().unwrap().contains_key("response_format"));
+        assert_eq!(body.get("stream"), (stream == true).then_some(&stream));
+    }
+}
+
+#[tokio::test]
+async fn bps_images_leave_remote_edit_locators_to_the_provider() {
+    let mut request = request();
+    let image = "https://example.invalid/synthetic.png";
+    request.input_images = vec![image.into()];
+    request.mask_image = None;
+    request
+        .fields
+        .insert("images".into(), json!([{"image_url":image}]));
+    let (bytes, content_type) =
+        basis_points::request_body(&request, ImageEndpoint::Edits, "gpt-image-future-synthetic")
+            .await
+            .unwrap();
+    assert_eq!(content_type, "application/json");
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["images"][0]["image_url"], image);
+}
+
 fn request() -> PreparedImageRequest {
     PreparedImageRequest {
         requested_model: "gpt-image-test".into(), resolved_model: "gpt-image-test".into(),

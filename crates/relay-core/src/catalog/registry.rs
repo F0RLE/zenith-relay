@@ -126,6 +126,7 @@ mod tests {
             priority: 0,
             weight: 1,
             models: ["gpt-5".to_string()].into(),
+            native_images: false,
             model_rules: ModelRules::default(),
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,

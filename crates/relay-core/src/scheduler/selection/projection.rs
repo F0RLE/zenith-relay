@@ -81,10 +81,32 @@ impl PoolScheduler {
                 );
             }
         }
+        // Explicit, uncatalogued image IDs are request-owned routes, not saved
+        // model inventory. Keep active leases across unrelated synchronization.
+        if candidate.native_images {
+            for lease in self
+                .rotation_leases
+                .values()
+                .filter(|lease| lease.candidate_id == candidate.id)
+            {
+                if let Some(model) = lease.route_key.strip_suffix(":Image")
+                    && candidate.supports_model(model)
+                {
+                    rotation_candidate.add_route(&lease.route_key, model, RotationOperation::Image);
+                }
+            }
+        }
         Some(rotation_candidate)
     }
 
     pub(super) fn sync_all_rotation_candidates(&mut self) {
+        self.sync_rotation_candidates_for(None);
+    }
+
+    pub(super) fn sync_rotation_candidates_for(
+        &mut self,
+        requested: Option<(&str, RotationOperation)>,
+    ) {
         self.rotation
             .set_quota_stale_after_ms(self.quota_stale_after_ms);
         let current_candidate_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
@@ -97,10 +119,25 @@ impl PoolScheduler {
             if self.retired_candidates.contains(&candidate.id) {
                 continue;
             }
-            let Some(rotation_candidate) = self.rotation_candidate(candidate) else {
+            let Some(mut rotation_candidate) = self.rotation_candidate(candidate) else {
                 continue;
             };
+            if let Some((model, RotationOperation::Image)) = requested
+                && candidate.native_images
+                && candidate.supports_model(model)
+            {
+                rotation_candidate.add_route(
+                    Self::rotation_route_key(model, RotationOperation::Image),
+                    model,
+                    RotationOperation::Image,
+                );
+            }
             let candidate_id = rotation_candidate.id.clone();
+            let projected_models = rotation_candidate
+                .routes
+                .values()
+                .map(|route| route.model.clone())
+                .collect::<BTreeSet<_>>();
             let _ = self.rotation.upsert(rotation_candidate);
             let auth_state = if candidate.health.is_eligible() {
                 RotationAuthState::Ready
@@ -162,7 +199,7 @@ impl PoolScheduler {
                 candidate.provider_credits_unlimited,
                 candidate.provider_credits_observed_at_ms,
             );
-            for model in &candidate.models {
+            for model in &projected_models {
                 let not_before_ms = candidate
                     .cooldowns
                     .iter()
@@ -234,7 +271,7 @@ impl PoolScheduler {
         if self.retired {
             return None;
         }
-        self.sync_all_rotation_candidates();
+        self.sync_rotation_candidates_for(Some((selection_request.model, operation)));
         self.rotation_request_from_synced_state(selection_request, operation)
     }
 

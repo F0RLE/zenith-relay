@@ -1,6 +1,11 @@
 export type PoolRoutingMode = "automatic" | "subscription_expiry" | "round_robin" | "weighted_round_robin" | "failover";
 export type RotationPreset = "recommended" | "even" | "accounts_first";
-export type PoolRotationView = { inventoryRevision?: number; preset: RotationPreset | null; memberOrder: string[] };
+export type PoolRotationView = {
+  inventoryRevision?: number;
+  preset: RotationPreset | null;
+  memberOrder: string[];
+  memberStatuses?: Record<string, import("./common").OperationalStatus>;
+};
 export type PoolRoutingEdit =
   | { type: "mode"; mode: PoolRoutingMode }
   | { type: "preset"; preset: RotationPreset }

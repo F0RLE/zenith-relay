@@ -171,6 +171,10 @@ pub struct RuntimeCandidate {
     pub priority: i32,
     pub weight: u32,
     pub models: BTreeSet<String>,
+    /// Direct account Images transport accepts explicit image IDs independently
+    /// of the advertised catalog. This is not model entitlement evidence.
+    #[serde(default)]
+    pub native_images: bool,
     pub model_rules: ModelRules,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
@@ -287,6 +291,10 @@ impl RuntimeCandidate {
         // Catalog/snapshot callers already have the exact saved spelling.
         // Use the set index before the compatibility case-insensitive scan.
         self.models.contains(model)
+            || (self.kind == CandidateKind::OAuthAccount
+                && self.native_images
+                && crate::is_valid_model_id(model)
+                && crate::runtime::is_image_model_id(model))
             || self
                 .models
                 .iter()

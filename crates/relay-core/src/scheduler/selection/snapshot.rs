@@ -165,7 +165,7 @@ impl PoolScheduler {
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
         self.clone()
-            .into_runtime_order(scope, models, protocols, now_ms)
+            .into_runtime_order(scope, |model| models.allows(model), protocols, now_ms)
     }
 
     /// Own a cloned scheduler so the live lock can be released before preview.
@@ -174,12 +174,12 @@ impl PoolScheduler {
     pub(crate) fn into_runtime_order(
         mut self,
         scope: &CandidateScope,
-        models: &crate::ModelRules,
+        allows_model: impl Fn(&str) -> bool,
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
         self.sync_all_rotation_candidates();
-        let selection_order = self.preview_selection_order(scope, models, protocols, now_ms);
+        let selection_order = self.preview_selection_order(scope, &allows_model, protocols, now_ms);
         let selection_ranks = selection_order
             .iter()
             .enumerate()
@@ -195,7 +195,7 @@ impl PoolScheduler {
                 let mut half_open = false;
                 let mut retries = BTreeMap::<String, u64>::new();
                 for model in &candidate.models {
-                    if !models.allows(model)
+                    if !allows_model(model)
                         || !self.rotation_visible(candidate, model, protocols, scope, now_ms)
                     {
                         continue;
@@ -326,7 +326,7 @@ impl PoolScheduler {
     fn preview_selection_order(
         &mut self,
         scope: &CandidateScope,
-        models: &crate::ModelRules,
+        allows_model: &impl Fn(&str) -> bool,
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<String> {
@@ -339,7 +339,7 @@ impl PoolScheduler {
                     .iter()
                     .filter(|model| {
                         !crate::runtime::is_image_model_id(model)
-                            && models.allows(model)
+                            && allows_model(model)
                             && candidate.is_configured(model, protocols, scope)
                     })
                     .flat_map(|model| {

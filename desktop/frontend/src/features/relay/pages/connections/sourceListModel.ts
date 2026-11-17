@@ -21,9 +21,12 @@ export function sourceStatus(
   if (source.draining) return { key: "draining", tone: "warning" };
   if (source.lastErrorCode?.trim()) return { key: "error", tone: "error" };
   if (candidate?.halfOpen) return { key: "recovering", tone: "info" };
-  if (source.operationalStatus === "quotaWait" || candidate?.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs) {
+  if (source.operationalStatus === "quotaWait"
+    || candidate?.available === false && candidate.quotaWait
+    || candidate?.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs) {
     return { key: "retryWait", tone: "warning" };
   }
+  if (candidate?.available === false && candidate.capacityWait) return { key: "busy", tone: "warning" };
   if (source.operationalStatus === "unavailable") return { key: "unavailable", tone: "error" };
   return { key: "ready", tone: "ready" };
 }

@@ -1,6 +1,128 @@
 use super::*;
 
 #[test]
+fn lightweight_rotation_recovers_transient_statuses_from_live_admission() {
+    let mut account = account_summary(true, &["model"]);
+    account.operational_status = OperationalStatus::Unavailable;
+    let mut source = source_summary("source", &["model"]);
+    source.operational_status = OperationalStatus::Unavailable;
+    let policy = pool_routing_summary(None, &[source.clone()], &[account.clone()]);
+    let projection = PoolRotationProjection::new(&policy, &[source], &[account], 100);
+    let mut runtime = [
+        runtime_candidate("account", CandidateKind::OAuthAccount, true),
+        runtime_candidate("source", CandidateKind::ApiSource, true),
+    ];
+    let ready = projection.view(&runtime, 100);
+    assert!(
+        ready
+            .member_statuses
+            .values()
+            .all(|status| *status == OperationalStatus::Rotation)
+    );
+    runtime[0].available = false;
+    runtime[0].quota_wait = true;
+    runtime[1].available = false;
+    runtime[1].capacity_wait = true;
+    let waiting = projection.view(&runtime, 100);
+    assert_eq!(
+        waiting.member_statuses["account:account"],
+        OperationalStatus::QuotaWait
+    );
+    assert_eq!(
+        waiting.member_statuses["source:source"],
+        OperationalStatus::Rotation
+    );
+    runtime
+        .iter_mut()
+        .for_each(|candidate| candidate.available = true);
+    assert!(
+        projection
+            .view(&runtime, 100)
+            .member_statuses
+            .values()
+            .all(|status| *status == OperationalStatus::Rotation)
+    );
+}
+
+#[test]
+fn image_capacity_wait_is_not_an_unavailable_member() {
+    let mut account = account_summary(true, &[crate::IMAGE_API_MODEL]);
+    account.operational_status = OperationalStatus::Unavailable;
+    let policy = pool_routing_summary(None, &[], &[account.clone()]);
+    let projection = PoolRotationProjection::new(&policy, &[], &[account], 100);
+    let mut runtime = runtime_candidate("account", CandidateKind::OAuthAccount, false);
+    runtime.capacity_wait = true;
+    runtime.active_request_count = 1;
+    runtime.active_models = vec![crate::ActiveModelRuntime {
+        model: crate::IMAGE_API_MODEL.into(),
+        request_count: 1,
+    }];
+    let busy = projection.view(std::slice::from_ref(&runtime), 100);
+    assert_eq!(
+        busy.member_statuses["account:account"],
+        OperationalStatus::Rotation
+    );
+
+    runtime.capacity_wait = false;
+    let blocked = projection.view(&[runtime], 100);
+    assert_eq!(
+        blocked.member_statuses["account:account"],
+        OperationalStatus::Unavailable
+    );
+}
+
+#[test]
+fn lightweight_rotation_never_recovers_inventory_blocks_from_activity() {
+    for reason in [
+        AccountRoutingBlockReason::SecretUnavailable,
+        AccountRoutingBlockReason::ReauthRequired,
+        AccountRoutingBlockReason::ProxyUnavailable,
+        AccountRoutingBlockReason::QuotaExhausted,
+        AccountRoutingBlockReason::AccountUnhealthy,
+    ] {
+        let mut account = account_summary(true, &["model"]);
+        account.routing_block_reason = Some(reason);
+        account.operational_status = if reason == AccountRoutingBlockReason::QuotaExhausted {
+            OperationalStatus::QuotaWait
+        } else {
+            OperationalStatus::Unavailable
+        };
+        let policy = pool_routing_summary(None, &[], &[account.clone()]);
+        let mut runtime = runtime_candidate("account", CandidateKind::OAuthAccount, true);
+        runtime.active_request_count = 1;
+        let view = pool_rotation_view(&policy, &[], &[account.clone()], &[runtime], 100);
+        assert_eq!(
+            view.member_statuses["account:account"],
+            account.operational_status
+        );
+    }
+    for (disabled, draining, recovery, plan_disabled) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+    ] {
+        let mut account = account_summary(true, &["model"]);
+        account.enabled = !disabled;
+        account.draining = draining;
+        account.recovery_required = recovery;
+        account.last_error_code = plan_disabled.then(|| "siwc_plan_use_disabled".into());
+        account.operational_status = if disabled {
+            OperationalStatus::Disabled
+        } else {
+            OperationalStatus::Unavailable
+        };
+        let policy = pool_routing_summary(None, &[], &[account.clone()]);
+        let runtime = runtime_candidate("account", CandidateKind::OAuthAccount, true);
+        let view = pool_rotation_view(&policy, &[], &[account.clone()], &[runtime], 100);
+        assert_eq!(
+            view.member_statuses["account:account"],
+            account.operational_status
+        );
+    }
+}
+
+#[test]
 fn rotation_view_keeps_inventory_and_deduplicates_source_bindings() {
     let source = source_summary("source", &["model"]);
     let mut account = account_summary(true, &["model"]);
