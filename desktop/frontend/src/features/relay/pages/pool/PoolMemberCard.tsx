@@ -231,7 +231,7 @@ export function PoolMemberCard({
               disabled={!canRefreshQuota || !member.secretAvailable || busy === `pool-account-quota-${member.id}`}
               onClick={() => void perform(
                 `pool-account-quota-${member.id}`,
-                () => refreshOneAccountQuota(mode, metadata!.quota.id),
+                () => refreshOneAccountQuota(mode, member.id),
                 "feedback.refreshed",
                 { backgroundRefresh: true },
               )}

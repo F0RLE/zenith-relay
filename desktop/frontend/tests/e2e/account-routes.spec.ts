@@ -11,6 +11,21 @@ async function calls(page: Page) {
   return page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
 }
 
+test("refreshing SIWC keeps its model discovery identity when quota comes from a linked route", async ({ page }) => {
+  await installTauriMock(page, {
+    populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"],
+    accountRouteGroups: [{ members: [0, 1], selected: 1 }],
+  });
+  await openAccounts(page);
+  const card = page.locator(".account-card");
+  await expect(card).toHaveCount(1);
+  await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
+  await card.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect.poll(async () => (await calls(page))
+    .filter((call) => call.command === "refresh_local_account_quota")
+    .map((call) => call.args)).toEqual([{ accountId: "account_synthetic_2" }]);
+});
+
 test("a linked healthy route can replace a connection with missing credentials", async ({ page }) => {
   await installTauriMock(page, { populated: true, usageActive: false, accountRouteKinds: ["excel_bps", "siwc"], accountRoutesGrouped: true });
   await page.addInitScript(() => {
@@ -255,7 +270,7 @@ for (const donor of ["codex", "excel_bps"] as const) {
     expect((await calls(page)).filter((call) => call.command === "refresh_local_account_quota")).toHaveLength(0);
     await card.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect.poll(async () => (await calls(page)).filter((call) => call.command === "refresh_local_account_quota").length).toBe(1);
-    expect((await calls(page)).find((call) => call.command === "refresh_local_account_quota")?.args).toEqual({ accountId: "account_synthetic_1" });
+    expect((await calls(page)).find((call) => call.command === "refresh_local_account_quota")?.args).toEqual({ accountId: "account_synthetic_2" });
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     const member = page.locator('.pool-member-card[data-member-kind="account"]');
     await expect(member).toHaveCount(1);
@@ -277,7 +292,7 @@ for (const donor of ["codex", "excel_bps"] as const) {
     await member.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect.poll(async () => (await calls(page)).filter((call) => call.command === "refresh_local_account_quota").length).toBe(2);
     expect((await calls(page)).filter((call) => call.command === "refresh_local_account_quota").map((call) => call.args)).toEqual([
-      { accountId: "account_synthetic_1" }, { accountId: "account_synthetic_1" },
+      { accountId: "account_synthetic_2" }, { accountId: "account_synthetic_2" },
     ]);
     await expect(member.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
     await page.mouse.move(1, 1);

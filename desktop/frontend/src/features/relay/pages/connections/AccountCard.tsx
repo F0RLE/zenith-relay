@@ -253,7 +253,7 @@ export function AccountCard({
             disabled={!canRefreshQuota || !account.secretAvailable || busy === `connection-account-quota-${account.id}`}
             onClick={() => void perform(
               `connection-account-quota-${account.id}`,
-              () => refreshOneAccountQuota(mode, metadata.quota.id),
+              () => refreshOneAccountQuota(mode, account.id),
               "feedback.refreshed",
               { backgroundRefresh: true },
             )}
