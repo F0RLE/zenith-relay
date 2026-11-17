@@ -4,11 +4,13 @@ use super::*;
 fn siwc_reauthorization_keeps_an_empty_catalog_through_both_settings_merges() {
     for cached_models in [Vec::new(), vec!["gpt-cached".to_string()]] {
         let mut current = account("account_siwc", "synthetic-account", "old-refresh");
+        current.oauth_client_kind = Some(OAuthClientKind::Siwc);
         current.discovered_models = Some(vec!["gpt-old".into()]);
         current.account.in_pool = true;
         current.account.enabled = false;
         current.allowed_models = vec!["gpt-old".into()];
         let mut updated = account("account_siwc", "synthetic-account", "new-refresh");
+        updated.oauth_client_kind = Some(OAuthClientKind::Siwc);
         updated.models = cached_models;
         updated.discovered_models = Some(Vec::new());
 

@@ -13,6 +13,7 @@ fn current_scope(store: &LocalPoolStore) -> AccountRefreshScope {
 fn empty_siwc_catalog_withdraws_models_and_recovers_only_discovery_state() {
     with_store(|store, scope| {
         let mut account = scope.initial_account.clone();
+        account.oauth_client_kind = Some(OAuthClientKind::Siwc);
         account.discovered_models = Some(vec!["gpt-old".into()]);
         account.account.in_pool = true;
         account.account.health = AccountHealthState::Degraded;

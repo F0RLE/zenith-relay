@@ -312,6 +312,7 @@ fn model_edits_keep_unavailable_members_and_prefer_discovered_account_inventory(
         1,
     )
     .unwrap();
+    account.oauth_client_kind = Some(zenith_relay_core::providers::chatgpt::OAuthClientKind::Siwc);
     account.account.in_pool = true;
     account.account.enabled = false;
     account.discovered_models = Some(vec!["SHARED".into(), "account-model".into()]);
