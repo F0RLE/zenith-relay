@@ -382,6 +382,49 @@ impl GatewayRuntime {
         }
         Ok(())
     }
+
+    /// A preference edit cannot move a retained continuation to another wire
+    /// protocol. This uses the existing bounded ownership store, never a model
+    /// name, user-agent, or an unverified client-supplied protocol hint.
+    pub(crate) fn has_retained_continuation_route(
+        &self,
+        route: &ExecutorRoute,
+        local_key_id: &str,
+        request: &Value,
+        now_ms: u64,
+    ) -> bool {
+        let Some(fingerprint) = self.continuation_route_fingerprint(route) else {
+            return false;
+        };
+        let owns = |reference: &str| {
+            self.response_affinity_key(Some(reference))
+                .and_then(|key| self.route_affinity(&key, now_ms))
+                .is_some_and(|owner| owner == fingerprint)
+        };
+        if route.client_wire_api == WireApi::Responses
+            && request
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .is_some_and(owns)
+        {
+            return true;
+        }
+        if let Ok(Some(history)) = crate::protocol::portable_history_key(
+            route.client_wire_api,
+            request,
+            &route.source_model,
+        ) && owns(&history)
+        {
+            return true;
+        }
+        tool_result_ids(request, route.client_wire_api)
+            .into_iter()
+            .any(|call_id| {
+                self.tool_call_affinity_key(local_key_id, call_id)
+                    .and_then(|key| self.route_affinity(&key, now_ms))
+                    .is_some_and(|owner| owner == fingerprint)
+            })
+    }
 }
 
 fn response_tool_ownership_scope(

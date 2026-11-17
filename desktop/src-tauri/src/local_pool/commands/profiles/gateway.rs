@@ -44,7 +44,10 @@ pub async fn attach_codex_to_local_gateway(
     state: State<'_, DesktopState>,
 ) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    let key = super::super::pool::ensure_system_gateway_key(&state)?;
+    let key = crate::local_pool::store::gateway_keys::ensure_application_gateway_key(
+        &state,
+        crate::launcher::settings::Application::Chatgpt,
+    )?;
     let key_id = key.id.clone();
     let (port, reserve_basis_points, supports_websockets) = {
         let store = state.store()?;

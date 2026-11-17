@@ -19,6 +19,9 @@ pub enum BindScope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewaySettings {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) application_protocols:
+        BTreeMap<crate::launcher::settings::Application, zenith_relay_core::UpstreamProtocolPolicy>,
     /// Explicit UI associations; each connection retains its own credential authority.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub account_routes: Vec<AccountRouteGroup>,
@@ -89,6 +92,7 @@ pub struct GatewaySettings {
 impl Default for GatewaySettings {
     fn default() -> Self {
         Self {
+            application_protocols: BTreeMap::new(),
             account_routes: Vec::new(),
             tool_policy: Default::default(),
             enabled: false,

@@ -95,6 +95,12 @@ pub(super) fn prepare_account_attempt(
     if route.account_id.is_none() {
         return AccountPrepare::Continue;
     }
+    if let Err(error) =
+        runtime.validate_key_upstream_protocol(key, &route, request, crate::unix_time_ms())
+    {
+        *last_adapter_error = Some(error);
+        return AccountPrepare::Continue;
+    }
     let selected_service_tier = service_tier_policy.selected_tier();
     if !GatewayRuntime::route_supports_service_tier(&route, selected_service_tier) {
         *last_adapter_error = Some(AdapterError::parameter_unsupported_for("service_tier"));

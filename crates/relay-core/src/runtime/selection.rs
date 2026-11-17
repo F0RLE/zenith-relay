@@ -15,6 +15,26 @@ impl GatewayRuntime {
         protocols: &[WireApi],
         stream: bool,
     ) -> Vec<ExecutorRoute> {
+        self.configured_executor_routes_unfiltered(key, model, protocols, stream)
+            .into_iter()
+            .filter(|route| {
+                key.upstream_protocol.allows(
+                    route
+                        .adapter
+                        .upstream_protocol(route.client_wire_api)
+                        .wire_api(),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn configured_executor_routes_unfiltered(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        protocols: &[WireApi],
+        stream: bool,
+    ) -> Vec<ExecutorRoute> {
         let scope = key.scope_snapshot();
         let candidate_ids = self
             .lock_scheduler()

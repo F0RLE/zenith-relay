@@ -209,6 +209,9 @@ async fn serve_http_fallback_request(
     let mut http_request = http_request;
     http_request
         .extensions_mut()
+        .insert(client_request.upstream_protocol);
+    http_request
+        .extensions_mut()
         .insert(client_request.tool_policy.clone());
     http_request
         .extensions_mut()

@@ -42,6 +42,7 @@ impl GatewayRuntime {
         self.account_state.executors.get(account_id)?;
         Some(AuthenticatedKey {
             id: local_key_id.to_string(),
+            upstream_protocol: UpstreamProtocolPolicy::Auto,
             scope: Arc::new(RwLock::new(CandidateScope {
                 // An explicit empty source set prevents a synthetic internal
                 // key from selecting an API source while the account set below
@@ -60,6 +61,7 @@ impl GatewayRuntime {
     pub(super) fn authenticated_key(&self, key: &RuntimeKey) -> AuthenticatedKey {
         AuthenticatedKey {
             id: key.id.clone(),
+            upstream_protocol: *crate::poison::read(&key.upstream_protocol),
             scope: key.scope.clone(),
             scope_revision: key.scope_revision.clone(),
             model_rules: key.model_rules.clone(),

@@ -20,6 +20,24 @@ pub(crate) enum Application {
 }
 
 impl Application {
+    pub(crate) const ALL: [Self; 3] = [Self::Chatgpt, Self::ClaudeDesktop, Self::Opencode];
+
+    pub(crate) fn pool_key_id(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "key_app_chatgpt",
+            Self::ClaudeDesktop => "key_app_claude_desktop",
+            Self::Opencode => "key_app_opencode",
+        }
+    }
+
+    pub(crate) fn pool_key_label(self) -> &'static str {
+        match self {
+            Self::Chatgpt => "ChatGPT application",
+            Self::ClaudeDesktop => "Claude Desktop application",
+            Self::Opencode => "OpenCode application",
+        }
+    }
+
     fn is_desktop_path(self, path: &Path) -> bool {
         match self {
             Self::Chatgpt => path.file_name().is_some_and(|name| {

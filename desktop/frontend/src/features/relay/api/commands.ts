@@ -24,6 +24,8 @@ import type {
   ClaudeDesktopStatus,
   ClaudeDesktopConnection,
   LaunchApplication,
+  UpstreamProtocolPolicy,
+  ApplicationProtocolSetting,
   LaunchPathSetting,
   OpenCodeConfigStatus,
   ProfileSnapshot,
@@ -103,6 +105,9 @@ export const relayCommands = {
   launchApplication: (application: LaunchApplication) => invoke<void>("launch_application", { application }),
   openHostedPreview: () => invoke<void>("open_hosted_preview"),
   getApplicationLaunchPath: (application: LaunchApplication) => invoke<LaunchPathSetting>("get_application_launch_path", { application }),
+  getApplicationUpstreamProtocol: (application: LaunchApplication) => invoke<ApplicationProtocolSetting>("get_application_upstream_protocol", { application }),
+  setApplicationUpstreamProtocol: (application: LaunchApplication, policy: UpstreamProtocolPolicy, expected: UpstreamProtocolPolicy) =>
+    invoke<ApplicationProtocolSetting>("set_application_upstream_protocol", { application, policy, expected }),
   setApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<LaunchPathSetting>("set_application_launch_path", { application, path }),
   pickApplicationLaunchPath: (application: LaunchApplication, path: string | null) => invoke<string | null>("pick_application_launch_path", { application, path }),
   onStateChanged: (callback: () => void) => listen("zenith-state-changed", callback),

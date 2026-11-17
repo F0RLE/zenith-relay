@@ -43,6 +43,13 @@ pub(in crate::local_pool) async fn runtime_from_store(
 ) -> Result<Arc<GatewayRuntime>> {
     crate::diagnostics::breadcrumb("gateway-runtime", "build_started", &[]);
     let system_key = gateway_keys::ensure_system_gateway_key(state)?;
+    let application_keys = crate::launcher::settings::Application::ALL
+        .into_iter()
+        .map(|application| {
+            gateway_keys::ensure_application_gateway_key(state, application)
+                .map(|key| (application, key))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let codex_home = crate::platform::default_codex_home();
     let protected_account_id =
         managed_chatgpt_account_id_for_reserve(&codex_home, &state.profile_backup_root());
@@ -151,6 +158,15 @@ pub(in crate::local_pool) async fn runtime_from_store(
         network_key.enabled = lan.enabled;
         keys.push(network_key);
     }
+    for (_, key) in &application_keys {
+        let mut application_key = keys[0].clone();
+        application_key.key = LocalGatewayKey {
+            id: key.id.clone(),
+            secret: gateway_keys::ensure_local_gateway_key_secret(key)?,
+        };
+        application_key.enabled = key.enabled;
+        keys.push(application_key);
+    }
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
         default_refresh_adapter(
@@ -226,6 +242,16 @@ pub(in crate::local_pool) async fn runtime_from_store(
     runtime.set_codex_memory_extraction_enabled(settings.codex_memory_extraction_enabled);
     runtime.set_codex_memory_consolidation_enabled(settings.codex_memory_consolidation_enabled);
     runtime.set_codex_websockets_enabled(settings.codex_websockets_enabled);
+    for (application, key) in &application_keys {
+        runtime.set_key_upstream_protocol(
+            &key.id,
+            settings
+                .application_protocols
+                .get(application)
+                .copied()
+                .unwrap_or_default(),
+        );
+    }
     runtime.set_route_recovery_enabled(settings.chatgpt_retry_until_available);
     runtime.set_block_degraded_routes_enabled(settings.block_degraded_routes_enabled);
     runtime

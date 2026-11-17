@@ -173,6 +173,29 @@ impl GatewayRuntime {
         self.resolve_from_visible(key, model, &visible)
     }
 
+    /// Catalog filtering applies to new conversations, not to a continuation
+    /// whose exact route is still retained. Scope and model permissions remain
+    /// authoritative, and admission still validates availability and features.
+    pub(crate) fn resolve_retained_continuation_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request: &Value,
+        now_ms: u64,
+    ) -> Option<String> {
+        let resolved = self.resolve_configured_model(key, model, allowed_protocols)?;
+        self.configured_executor_routes_unfiltered(key, &resolved, allowed_protocols, false)
+            .iter()
+            .any(|route| {
+                self.has_retained_continuation_route(route, &key.id, request, now_ms)
+                    && self
+                        .validate_continuation_route(route, &key.id, request, now_ms)
+                        .is_ok()
+            })
+            .then_some(resolved)
+    }
+
     /// Resolves a model that belongs to at least one configured route even
     /// when every such route is temporarily hidden by runtime health. This is
     /// deliberately narrower than `resolve_model`: unknown model ids must
@@ -266,6 +289,15 @@ impl GatewayRuntime {
                     })
             })
             .collect::<Vec<_>>();
+        drop(scheduler);
+        if key.upstream_protocol != UpstreamProtocolPolicy::Auto {
+            models.retain(|model| {
+                is_image_model_id(model)
+                    || !self
+                        .configured_executor_routes(key, model, allowed_protocols, false)
+                        .is_empty()
+            });
+        }
         let order = crate::poison::mutex(&self.model_state.display_order);
         let catalog = self
             .provider_metadata
@@ -290,6 +322,9 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         now_ms: u64,
     ) -> Vec<(String, Url)> {
+        if !key.upstream_protocol.allows(WireApi::Responses) {
+            return Vec::new();
+        }
         let scope = key.scope_snapshot();
         let routes = {
             let scheduler = self.lock_scheduler();

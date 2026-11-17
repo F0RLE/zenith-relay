@@ -119,11 +119,22 @@ pub(in crate::local_pool) fn apply_local_gateway_key_scope(
         account_ids: Some(account_ids),
         model_rules: Default::default(),
     };
+    let mut key_scopes = vec![(system_key.id, scope.clone())];
+    for key in state.store()?.keys() {
+        if crate::launcher::settings::Application::ALL
+            .iter()
+            .any(|app| app.pool_key_id() == key.id)
+            || (settings.bind_scope == crate::local_pool::models::BindScope::Lan
+                && key.id == gateway_keys::LAN_GATEWAY_KEY_ID)
+        {
+            key_scopes.push((key.id.clone(), scope.clone()));
+        }
+    }
     runtime
         .set_pool_routing_policy_with_key_scopes(
             settings.pool_routing_for(&sources, &accounts),
             settings.max_retry_candidates,
-            &[(system_key.id, scope)],
+            &key_scopes,
         )
         .map_err(core_error)
 }

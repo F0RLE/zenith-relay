@@ -58,14 +58,254 @@ fn runtime_with_source(source: RuntimeSource) -> GatewayRuntime {
     )
 }
 
+#[test]
+fn application_protocol_selects_the_exact_upstream_before_rotation() {
+    let runtime = runtime_with_source(dual_protocol_source());
+    let request = json!({"input":"Synthetic"});
+    assert!(runtime.set_key_upstream_protocol(
+        "synthetic-key",
+        crate::UpstreamProtocolPolicy::ChatCompletions
+    ));
+    let routes = admitted(&runtime, &request, false);
+    assert_eq!(routes.len(), 1);
+    assert!(routes.iter().all(|route| {
+        route
+            .adapter
+            .upstream_protocol(route.client_wire_api)
+            .wire_api()
+            == WireApi::ChatCompletions
+    }));
+    assert!(
+        runtime.set_key_upstream_protocol("synthetic-key", crate::UpstreamProtocolPolicy::Messages)
+    );
+    let key = runtime.authenticate_secret("synthetic-secret").unwrap();
+    let policy = ServiceTierPolicy::pool_owned(&request);
+    let (excluded, routes, error) = incompatible_routes(RouteCompatibility {
+        runtime: &runtime,
+        key: &key,
+        model: "glm-test",
+        client: WireApi::Responses,
+        request: &request,
+        stream: false,
+        tier_policy: &policy,
+        now_ms: 2,
+    });
+    assert!(routes.is_empty());
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(
+        error.unwrap().code(),
+        crate::error_codes::UPSTREAM_PROTOCOL_UNAVAILABLE
+    );
+    assert!(
+        runtime
+            .visible_models_for_secret("synthetic-secret", &[WireApi::Responses], 2)
+            .is_empty()
+    );
+    assert!(
+        runtime.set_key_upstream_protocol("synthetic-key", crate::UpstreamProtocolPolicy::Auto)
+    );
+    assert_eq!(admitted(&runtime, &request, false).len(), 1);
+}
+
+#[test]
+fn application_protocol_updates_do_not_rewrite_an_authenticated_request() {
+    let runtime = runtime_with_source(dual_protocol_source());
+    let active = runtime.authenticate_secret("synthetic-secret").unwrap();
+    assert!(
+        runtime.set_key_upstream_protocol("synthetic-key", crate::UpstreamProtocolPolicy::Messages)
+    );
+    assert_eq!(
+        active.upstream_protocol,
+        crate::UpstreamProtocolPolicy::Auto
+    );
+    let next = runtime.authenticate_secret("synthetic-secret").unwrap();
+    assert_eq!(
+        next.upstream_protocol,
+        crate::UpstreamProtocolPolicy::Messages
+    );
+    assert!(
+        !runtime.set_key_upstream_protocol("missing-key", crate::UpstreamProtocolPolicy::Messages)
+    );
+}
+
+#[test]
+fn application_protocol_preserves_retained_continuations_but_not_new_requests() {
+    let runtime = runtime_with_source(dual_protocol_source());
+    let first = admitted(&runtime, &json!({"input":"Synthetic"}), false).remove(0);
+    runtime.bind_response_route_affinity(Some("resp_synthetic_owned"), &first, 1);
+    runtime.set_key_upstream_protocol(
+        "synthetic-key",
+        crate::UpstreamProtocolPolicy::ChatCompletions,
+    );
+    let continued = admitted(
+        &runtime,
+        &json!({
+            "previous_response_id":"resp_synthetic_owned", "input":"Continue synthetic conversation"
+        }),
+        false,
+    );
+    assert_eq!(continued.len(), 1);
+    assert_eq!(continued[0].adapter, first.adapter);
+    assert_eq!(continued[0].candidate_id, first.candidate_id);
+    let fresh = admitted(
+        &runtime,
+        &json!({"input":"New synthetic conversation"}),
+        false,
+    );
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(
+        fresh[0]
+            .adapter
+            .upstream_protocol(WireApi::Responses)
+            .wire_api(),
+        WireApi::ChatCompletions
+    );
+}
+
+#[test]
+fn application_protocol_is_scoped_to_the_authenticated_key() {
+    let runtime = runtime_with_sources_and_keys(
+        vec![dual_protocol_source()],
+        r#"{"zhipuai/glm-test":{"name":"Synthetic model","family":"glm","reasoning":false}}"#,
+        ["first-app", "second-app"]
+            .into_iter()
+            .map(|id| {
+                RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                    id: id.into(),
+                    secret: format!("synthetic-{id}"),
+                })
+            })
+            .collect(),
+    );
+    runtime.set_key_upstream_protocol("first-app", crate::UpstreamProtocolPolicy::Messages);
+    assert!(
+        runtime
+            .visible_models_for_secret("synthetic-first-app", &[WireApi::Responses], 2)
+            .is_empty()
+    );
+    assert_eq!(
+        runtime.visible_models_for_secret("synthetic-second-app", &[WireApi::Responses], 2),
+        vec!["glm-test"]
+    );
+    let other = runtime.authenticate_secret("synthetic-second-app").unwrap();
+    assert_eq!(other.upstream_protocol, crate::UpstreamProtocolPolicy::Auto);
+}
+
+#[test]
+fn application_protocol_resolves_only_retained_hidden_models_and_keeps_revocations() {
+    let runtime = runtime(Some((
+        CapabilityStatus::Declared,
+        CapabilityOrigin::Catalog,
+    )));
+    let key = runtime.authenticate_secret("synthetic-secret").unwrap();
+    let route = runtime
+        .configured_executor_routes(&key, "glm-test", &[WireApi::Responses], false)
+        .remove(0);
+    runtime.bind_response_route_affinity(Some("resp_synthetic_owned"), &route, 1);
+    runtime.set_key_upstream_protocol("synthetic-key", crate::UpstreamProtocolPolicy::Messages);
+    let key = runtime.authenticate_secret("synthetic-secret").unwrap();
+    assert!(
+        runtime
+            .resolve_visible_model(&key, "glm-test", &[WireApi::Responses], 2)
+            .is_none()
+    );
+    let retained =
+        json!({"previous_response_id":"resp_synthetic_owned","input":"Synthetic continuation"});
+    assert_eq!(
+        runtime
+            .resolve_retained_continuation_model(
+                &key,
+                "glm-test",
+                &[WireApi::Responses],
+                &retained,
+                2,
+            )
+            .as_deref(),
+        Some("glm-test")
+    );
+    for request in [
+        json!({"input":"New conversation"}),
+        json!({"previous_response_id":"resp_unknown","input":"Synthetic input"}),
+        json!({"input":[
+            {"type":"function_call_output","call_id":"call_orphan","output":"Synthetic result"}
+        ]}),
+    ] {
+        assert!(
+            runtime
+                .resolve_retained_continuation_model(
+                    &key,
+                    "glm-test",
+                    &[WireApi::Responses],
+                    &request,
+                    2,
+                )
+                .is_none()
+        );
+    }
+    assert!(
+        runtime
+            .resolve_retained_continuation_model(
+                &key,
+                "unknown-model",
+                &[WireApi::Responses],
+                &retained,
+                2,
+            )
+            .is_none()
+    );
+    runtime.set_hidden_models(vec!["glm-test".into()]);
+    assert!(
+        runtime
+            .resolve_retained_continuation_model(
+                &key,
+                "glm-test",
+                &[WireApi::Responses],
+                &retained,
+                2,
+            )
+            .is_none()
+    );
+    runtime.set_hidden_models(Vec::new());
+    assert!(runtime.update_key_scope(
+        "synthetic-key",
+        crate::CandidateScope {
+            source_ids: Some(Default::default()),
+            ..Default::default()
+        },
+    ));
+    assert!(
+        runtime
+            .resolve_retained_continuation_model(
+                &key,
+                "glm-test",
+                &[WireApi::Responses],
+                &retained,
+                2,
+            )
+            .is_none()
+    );
+}
+
 fn runtime_with_sources(sources: Vec<RuntimeSource>, metadata: &str) -> GatewayRuntime {
-    let catalog = ModelMetadataCatalog::from_models_dev_json(metadata).unwrap();
-    GatewayRuntime::from_pool(
+    runtime_with_sources_and_keys(
         sources,
+        metadata,
         vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
             id: "synthetic-key".into(),
             secret: "synthetic-secret".into(),
         })],
+    )
+}
+
+fn runtime_with_sources_and_keys(
+    sources: Vec<RuntimeSource>,
+    metadata: &str,
+    keys: Vec<RuntimeLocalKey>,
+) -> GatewayRuntime {
+    let catalog = ModelMetadataCatalog::from_models_dev_json(metadata).unwrap();
+    GatewayRuntime::from_pool(
+        sources,
+        keys,
         GatewayRuntimeOptions {
             model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(catalog)),
             ..Default::default()

@@ -243,6 +243,28 @@
   border-top: 1px solid var(--relay-border);
 }
 
+.gateway-setting-row.application-protocol-control {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 270px);
+  gap: 12px 24px;
+  padding: 16px 20px;
+}
+
+.application-protocol-options {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.application-protocol-options > small {
+  color: var(--relay-muted);
+}
+
+@container (max-width: 620px) {
+  .gateway-setting-row.application-protocol-control {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .integration-chatgpt-settings .gateway-setting-row.codex-feature-control {
   min-height: 76px;
   padding: 16px 20px;
@@ -272,7 +294,9 @@
   gap: 16px;
 }
 
-.codex-memory-model-menu .relay-option-trigger {
+.codex-memory-model-menu .relay-option-trigger,
+.application-protocol-options .relay-option-trigger,
+.integration-chatgpt-settings .oauth-binding-account-control .relay-option-trigger {
   min-width: 0;
   min-height: 36px;
   padding: 8px 12px;
@@ -281,7 +305,9 @@
   background: color-mix(in srgb, var(--relay-text) 3%, var(--relay-surface));
 }
 
-.codex-memory-model-menu .relay-option-trigger:hover:not(:disabled) {
+.codex-memory-model-menu .relay-option-trigger:hover:not(:disabled),
+.application-protocol-options .relay-option-trigger:hover:not(:disabled),
+.integration-chatgpt-settings .oauth-binding-account-control .relay-option-trigger:hover:not(:disabled) {
   border-color: var(--relay-border-strong);
 }
 

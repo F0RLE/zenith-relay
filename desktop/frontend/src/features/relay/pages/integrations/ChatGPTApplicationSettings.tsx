@@ -10,6 +10,7 @@ import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl"
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { ApplicationLaunchPath } from "./ApplicationLaunchPath";
+import { ApplicationProtocolControl } from "./ApplicationProtocolControl";
 
 export function ChatGPTApplicationSettings() {
   const { t } = useTranslation();
@@ -19,6 +20,7 @@ export function ChatGPTApplicationSettings() {
     <div className="integration-chatgpt-settings">
       <ChatGPTSetup />
       {mode === "local" ? <div className="gateway-settings-panel gateway-application-panel">
+        <ApplicationProtocolControl application="chatgpt" />
         <CodexBackgroundTasksControl className="gateway-setting-row" />
         <CodexMemoryModelControl stage="extraction" />
         <CodexMemoryModelControl stage="consolidation" />

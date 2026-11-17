@@ -348,6 +348,7 @@ error_codes! {
     UPSTREAM_INVALID_WORKSPACE => ("upstream_invalid_workspace", "invalid_workspace_selected", Some((403, "selected upstream workspace is invalid; select a valid workspace or sign in again"))),
     UPSTREAM_MODEL_CAPACITY => ("upstream_model_capacity", "model_at_capacity", Some((503, "upstream model is at capacity"))),
     UPSTREAM_MODEL_NOT_FOUND => ("upstream_model_not_found", "model_not_found", Some((404, "upstream model is unavailable"))),
+    UPSTREAM_PROTOCOL_UNAVAILABLE => ("upstream_protocol_unavailable", "upstream_protocol_unavailable", None),
     UPSTREAM_MODEL_UNAVAILABLE => ("upstream_model_unavailable", "model_not_available", Some((503, "upstream model is temporarily unavailable"))),
     UPSTREAM_MODEL_UNSUPPORTED => ("upstream_model_unsupported", "model_not_supported", Some((406, "upstream does not support this model"))),
     UPSTREAM_NOT_FOUND => ("upstream_not_found", "not_found", Some((404, "upstream resource was not found"))),

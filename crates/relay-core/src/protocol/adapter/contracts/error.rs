@@ -52,6 +52,15 @@ pub struct AdapterError {
 }
 
 impl AdapterError {
+    pub(crate) const fn upstream_protocol_unavailable() -> Self {
+        Self {
+            code: error_codes::UPSTREAM_PROTOCOL_UNAVAILABLE,
+            message: "no compatible route supports the application's selected upstream protocol",
+            parameter: Some("upstream_protocol"),
+            diagnostic: None,
+        }
+    }
+
     pub const fn code(self) -> &'static str {
         self.code
     }

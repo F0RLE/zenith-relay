@@ -12,6 +12,8 @@ pub(super) async fn connect_upstream(
     attempt_offset: u16,
     recovery: Option<ConnectRecovery>,
 ) -> Result<ConnectedTransport, GatewayFailure> {
+    let key = request.key_snapshot(key);
+    let key = &key;
     let mut recovery =
         recovery.unwrap_or_else(|| ConnectRecovery::new(allow_previous_response_reset));
     let mut attempt = attempt_offset;

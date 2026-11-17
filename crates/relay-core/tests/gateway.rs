@@ -66,6 +66,8 @@ mod protocol_bridges;
 #[path = "support/local_server.rs"]
 mod local_server;
 use local_server::{TestServer, spawn};
+#[path = "support/application_protocol.rs"]
+mod application_protocol;
 #[path = "support/catalog_endpoints.rs"]
 mod catalog_endpoints;
 #[path = "support/source_discovery.rs"]

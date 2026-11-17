@@ -625,6 +625,8 @@ export function initializeTauriMock(input: MockOptions) {
       return true;
     };
     const applicationLaunchPaths: Record<string, string | null> = {};
+    const applicationProtocols: Record<string, string> = {};
+    const applicationProtocolOptions = ["auto", "responses", "chat_completions", "messages", "gemini"];
     const detectedApplicationPaths: Record<string, string> = {
       chatgpt: "C:\\Program Files\\ChatGPT\\ChatGPT.exe",
       "claude-desktop": "C:\\Users\\Test\\AppData\\Local\\Claude\\Claude.exe",
@@ -1291,6 +1293,18 @@ export function initializeTauriMock(input: MockOptions) {
           case "restore_full_codex_profile_snapshot":
           case "delete_codex_profile_snapshot": return null;
           case "get_application_launch_path": return { path: applicationLaunchPaths[String(args.application)] ?? null, detectedPath: detectedApplicationPaths[String(args.application)] ?? null };
+          case "get_application_upstream_protocol": return {
+            policy: applicationProtocols[String(args.application)] ?? "auto",
+            available: input.populated ? applicationProtocolOptions : ["auto"],
+            reconnectRequired: false,
+          };
+          case "set_application_upstream_protocol": {
+            const application = String(args.application);
+            if ((applicationProtocols[application] ?? "auto") !== args.expected) throw { code: "conflict", message: "Reload the protocol setting" };
+            if (!applicationProtocolOptions.includes(String(args.policy))) throw { code: "conflict", message: "Unsupported protocol" };
+            applicationProtocols[application] = String(args.policy);
+            return { policy: applicationProtocols[application], available: applicationProtocolOptions, reconnectRequired: false };
+          }
           case "set_application_launch_path": {
             applicationLaunchPaths[String(args.application)] = args.path == null ? null : String(args.path);
             return { path: applicationLaunchPaths[String(args.application)], detectedPath: detectedApplicationPaths[String(args.application)] ?? null };

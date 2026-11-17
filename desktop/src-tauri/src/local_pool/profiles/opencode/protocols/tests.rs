@@ -4,6 +4,55 @@ use zenith_relay_core::protocol::ModelProtocolRoute;
 mod pooled_capabilities;
 
 #[test]
+fn application_protocol_projects_sdk_and_models_without_touching_images() {
+    use crate::local_pool::profiles::application_protocol::filter_models;
+    use zenith_relay_core::UpstreamProtocolPolicy;
+
+    let mut dual = model("synthetic-dual", WireApi::Responses);
+    dual.protocol_routes
+        .extend(model("synthetic-dual", WireApi::Messages).protocol_routes);
+    let image = model("gpt-image-2", WireApi::Responses);
+    let image_routes = image.protocol_routes.clone();
+    let mut models = vec![
+        dual,
+        model("synthetic-chat", WireApi::ChatCompletions),
+        image,
+    ];
+    filter_models(&mut models, UpstreamProtocolPolicy::Messages);
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].id, "synthetic-dual");
+    assert!(
+        models[0]
+            .protocol_routes
+            .iter()
+            .all(|route| { route.upstream_wire_api == WireApi::Messages })
+    );
+    assert_eq!(models[1].protocol_routes, image_routes);
+    let mut config = Map::new();
+    apply(
+        &mut config,
+        "http://127.0.0.1:14998/v1",
+        "synthetic",
+        &models[..1],
+    )
+    .unwrap();
+    assert_eq!(
+        config["provider"]["zenith-relay-messages"]["npm"],
+        "@ai-sdk/anthropic"
+    );
+    assert!(
+        config["provider"]["zenith-relay-messages"]["models"]
+            .get("synthetic-dual")
+            .is_some()
+    );
+    assert!(
+        config["provider"][PROVIDER_ID]["models"]
+            .get("synthetic-dual")
+            .is_none()
+    );
+}
+
+#[test]
 fn sdk_selection_and_refresh_omit_nonstreaming_and_interactions_only_models() {
     let mut buffered = model("buffered-only", WireApi::Responses);
     for route in &mut buffered.protocol_routes {

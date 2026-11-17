@@ -381,6 +381,19 @@ pub(super) fn inspect(library: &Path, recovery_path: &Path) -> Result<LibrarySta
     })
 }
 
+pub(super) fn uses_gateway_secret(library: &Path, secret: &str) -> Result<bool> {
+    let meta = metadata(read(&library.join("_meta.json"))?.as_deref())?;
+    if meta["appliedId"] != PROFILE_ID {
+        return Ok(false);
+    }
+    let Some(bytes) = read(&library.join(format!("{PROFILE_ID}.json")))? else {
+        return Ok(false);
+    };
+    let profile = parse(&bytes)?;
+    Ok(profile["inferenceProvider"] == "gateway"
+        && profile["inferenceGatewayApiKey"].as_str() == Some(secret))
+}
+
 pub(super) fn apply(
     library: &Path,
     recovery_path: &Path,

@@ -968,6 +968,12 @@ export const ru = {
     disable: "Отключить {{model}}",
   },
   integrations: {
+    protocolTitle: "Формат запросов",
+    protocolDescription: "Автоматически — Relay сам выбирает формат для поставщика модели. Вручную — использует только выбранный.",
+    protocolReconnect: "Чтобы применить выбор, заново подключите приложение к пулу.",
+    protocolLoadFailed: "Не удалось загрузить формат запросов. Нажмите «Повторить».",
+    protocolSaveFailed: "Не удалось сохранить формат запросов. Нажмите «Повторить», чтобы загрузить текущую настройку.",
+    protocols: { auto: "Автоматически", responses: "OpenAI Responses", chat_completions: "OpenAI Chat Completions", messages: "Anthropic Messages", gemini: "Google Gemini" },
     sections: "Разделы доступа",
     localApi: "Локальный API",
     apiTitle: "Доступ к пулу",

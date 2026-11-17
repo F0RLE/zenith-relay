@@ -1,3 +1,4 @@
+pub(crate) mod application_protocol;
 pub(in crate::local_pool) mod catalog;
 pub(crate) mod claude_desktop;
 pub mod codex;

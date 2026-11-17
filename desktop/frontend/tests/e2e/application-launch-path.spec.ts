@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
+import { chooseOption } from "./operations/helpers";
 
 const applications = [
   { id: "chatgpt", name: "ChatGPT", path: "D:\\Apps\\ChatGPT\\ChatGPT.exe", detected: "C:\\Program Files\\ChatGPT\\ChatGPT.exe" },
@@ -8,6 +9,90 @@ const applications = [
 ] as const;
 
 type InvokeCall = { command: string; args: Record<string, unknown> };
+
+test("upstream protocol is independent per application and does not restart clients", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+  await page.goto("/");
+  await openApplications(page);
+  const protocols = ["messages", "responses", "gemini"];
+  for (const [index, application] of applications.entries()) {
+    await selectApplication(page, application);
+    const control = page.locator(`[data-application-protocol="${application.id}"]`);
+    await expect(control.getByRole("button", { name: /^Request format:/ })).toBeEnabled();
+    await chooseOption(page, control, "Request format", protocols[index]);
+  }
+  await selectApplication(page, applications[0]);
+  await expect(page.getByRole("button", { name: "Request format: Anthropic Messages" })).toBeVisible();
+  const invoked = await calls(page);
+  expect(invoked.filter((call) => call.command === "set_application_upstream_protocol").map((call) => call.args)).toEqual([
+    { application: "chatgpt", policy: "messages", expected: "auto" },
+    { application: "claude-desktop", policy: "responses", expected: "auto" },
+    { application: "opencode", policy: "gemini", expected: "auto" },
+  ]);
+  expect(invoked.filter((call) => /^(launch_|stop_|restart_|attach_|connect_)/.test(call.command))).toEqual([]);
+});
+
+test("upstream protocol only offers backend choices and retains the saved value after failure", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+  await page.goto("/");
+  await overrideCommand(page, { command: "get_application_upstream_protocol", result: {
+    policy: "responses", available: ["auto", "responses"], reconnectRequired: true,
+  } });
+  await overrideCommand(page, { command: "set_application_upstream_protocol", failTimes: 1 });
+  await openApplications(page);
+  const control = page.locator('[data-application-protocol="chatgpt"]');
+  await expect(control.getByText("Reconnect this application to the pool to apply the selection.")).toBeVisible();
+  await control.getByRole("button", { name: "Request format: OpenAI Responses" }).click();
+  await expect(page.getByRole("option")).toHaveCount(2);
+  await page.getByRole("option", { name: "Automatic", exact: true }).click();
+  await expect(control.getByRole("alert")).toContainText("Could not save the request format");
+  await expect(control.getByRole("button", { name: "Request format: OpenAI Responses" })).toBeEnabled();
+  await overrideCommand(page, { command: "get_application_upstream_protocol", result: {
+    policy: "auto", available: ["auto"], reconnectRequired: false,
+  } });
+  await control.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(control.getByRole("button", { name: "Request format: Automatic" })).toBeEnabled();
+  await expect(control.getByRole("alert")).toHaveCount(0);
+});
+
+for (const { width, theme } of [390, 1280].flatMap((width) =>
+  (["dark", "light"] as const).map((theme) => ({ width, theme })))) {
+  test(`upstream protocol follows account with matching outlined selectors at ${width}px in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await installTauriMock(page, { locale: "ru", mode: "local", populated: true, theme });
+    await page.goto("/");
+    await openApplications(page, true);
+    const settings = page.locator(".integration-chatgpt-settings");
+    const control = page.locator('[data-application-protocol="chatgpt"]');
+    const reference = settings.locator(".codex-memory-model-menu .relay-option-trigger").first();
+    await expect(reference).toBeEnabled();
+    const referenceStyle = await reference.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { color: style.borderTopColor, width: style.borderTopWidth, radius: style.borderTopLeftRadius, background: style.backgroundColor };
+    });
+    expect(referenceStyle.color).not.toBe("rgba(0, 0, 0, 0)");
+    expect(referenceStyle.width).toBe("1px");
+    expect(await settings.locator("h2").allTextContents()).toEqual([
+      "Аккаунт ChatGPT", "Формат запросов", "Фоновые задачи ChatGPT",
+      "Извлечение памяти", "Сводки памяти", "WebSocket для ChatGPT",
+    ]);
+    for (const trigger of [
+      settings.locator(".oauth-binding-account-control .relay-option-trigger"),
+      control.locator(".relay-option-trigger"),
+    ]) {
+      await expect(trigger).toHaveCSS("border-top-color", referenceStyle.color);
+      await expect(trigger).toHaveCSS("border-top-width", referenceStyle.width);
+      await expect(trigger).toHaveCSS("border-top-style", "solid");
+      await expect(trigger).toHaveCSS("border-top-left-radius", referenceStyle.radius);
+      await expect(trigger).toHaveCSS("background-color", referenceStyle.background);
+    }
+    await control.scrollIntoViewIfNeeded();
+    await expect(control.getByRole("button", { name: /^Формат запросов:/ })).toBeEnabled();
+    await expect(control.locator("header p")).toHaveText("Автоматически — Relay сам выбирает формат для поставщика модели. Вручную — использует только выбранный.");
+    expect(await control.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/application-protocol-ru-${width}-${theme}.png` });
+  });
+}
 
 async function calls(page: Page) {
   return page.evaluate(() => (window as unknown as {

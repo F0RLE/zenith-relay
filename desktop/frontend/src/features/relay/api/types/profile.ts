@@ -4,6 +4,14 @@ import type { SourceProtocolBinding, SourceWireApi } from "./source";
 
 export type LaunchApplication = "chatgpt" | "claude-desktop" | "opencode";
 
+export type UpstreamProtocolPolicy = "auto" | "responses" | "chat_completions" | "messages" | "gemini";
+
+export interface ApplicationProtocolSetting {
+  policy: UpstreamProtocolPolicy;
+  available: UpstreamProtocolPolicy[];
+  reconnectRequired: boolean;
+}
+
 export type LaunchPathSetting = {
   path: string | null;
   detectedPath: string | null;

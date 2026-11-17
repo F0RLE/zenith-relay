@@ -1,4 +1,5 @@
 use super::secret_store::cleanup_created_secret;
+use crate::launcher::settings::Application;
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalGatewayKeyRecord, ProviderSourceRecord},
@@ -12,6 +13,46 @@ use uuid::Uuid;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 pub(in crate::local_pool) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
 pub(in crate::local_pool) const LAN_GATEWAY_KEY_ID: &str = "key_lan";
+
+fn application_key(id: &str) -> bool {
+    Application::ALL
+        .iter()
+        .any(|application| application.pool_key_id() == id)
+}
+
+/// Each managed app has an authenticated principal. User-agent strings and
+/// client-supplied headers never select another application's routing policy.
+pub(in crate::local_pool) fn ensure_application_gateway_key(
+    state: &DesktopState,
+    application: Application,
+) -> LocalResult<LocalGatewayKeyRecord> {
+    let id = application.pool_key_id();
+    if let Some(key) = state
+        .store()?
+        .keys()
+        .iter()
+        .find(|key| key.id == id)
+        .cloned()
+    {
+        ensure_local_gateway_key_secret(&key)?;
+        return Ok(key);
+    }
+    let key = LocalGatewayKeyRecord {
+        id: id.into(),
+        secret_ref: system_gateway_secret_ref(id),
+        label: application.pool_key_label().into(),
+        enabled: true,
+        system: true,
+        created_at: Utc::now().to_rfc3339(),
+        last_used_at: None,
+    };
+    ensure_local_gateway_key_secret(&key)?;
+    if let Err(error) = state.store()?.upsert_key(key.clone()) {
+        cleanup_created_secret(&key.secret_ref, &error)?;
+        return Err(error);
+    }
+    Ok(key)
+}
 
 pub(in crate::local_pool) fn ensure_lan_gateway_key(
     state: &DesktopState,
@@ -66,8 +107,9 @@ pub(in crate::local_pool) fn ensure_system_gateway_key(
         keys.iter()
             .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
             .or_else(|| {
-                keys.iter()
-                    .find(|key| key.system && key.id != LAN_GATEWAY_KEY_ID)
+                keys.iter().find(|key| {
+                    key.system && key.id != LAN_GATEWAY_KEY_ID && !application_key(&key.id)
+                })
             })
             .cloned()
     };
@@ -119,8 +161,9 @@ pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> 
             .iter()
             .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
             .or_else(|| {
-                keys.iter()
-                    .find(|key| key.system && key.id != LAN_GATEWAY_KEY_ID)
+                keys.iter().find(|key| {
+                    key.system && key.id != LAN_GATEWAY_KEY_ID && !application_key(&key.id)
+                })
             })
             .map(|key| key.id.clone());
         (store.sources().to_vec(), keys, canonical_id)
@@ -128,14 +171,18 @@ pub(crate) fn retire_user_gateway_keys(state: &DesktopState) -> LocalResult<()> 
     let retired = all_keys
         .iter()
         .filter(|key| {
-            canonical_id.as_deref() != Some(key.id.as_str()) && key.id != LAN_GATEWAY_KEY_ID
+            canonical_id.as_deref() != Some(key.id.as_str())
+                && key.id != LAN_GATEWAY_KEY_ID
+                && !application_key(&key.id)
         })
         .cloned()
         .collect::<Vec<_>>();
     let mut retained = all_keys
         .iter()
         .filter(|key| {
-            canonical_id.as_deref() == Some(key.id.as_str()) || key.id == LAN_GATEWAY_KEY_ID
+            canonical_id.as_deref() == Some(key.id.as_str())
+                || key.id == LAN_GATEWAY_KEY_ID
+                || application_key(&key.id)
         })
         .cloned()
         .collect::<Vec<_>>();

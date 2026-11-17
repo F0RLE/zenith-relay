@@ -102,9 +102,14 @@ async fn execute_client_request_inner(
         return invalid_host();
     }
     let key = super::super::auth::authenticate_client(&runtime, &headers, client_wire_api);
-    let Some(key) = key else {
+    let Some(mut key) = key else {
         return unauthorized();
     };
+    // A WebSocket-to-HTTP handoff belongs to the already admitted request.
+    // Reauthenticate permissions without replacing its protocol snapshot.
+    if let Some(policy) = parts.extensions.get::<crate::UpstreamProtocolPolicy>() {
+        key.upstream_protocol = *policy;
+    }
     let client_api = match client_wire_api {
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
@@ -322,6 +327,15 @@ async fn execute_client_request_inner(
             candidate_protocols(client_wire_api),
             now_ms(),
         )
+        .or_else(|| {
+            runtime.resolve_retained_continuation_model(
+                &key,
+                &requested_model,
+                candidate_protocols(client_wire_api),
+                &request_json,
+                now_ms(),
+            )
+        })
         .or_else(|| {
             let resolved = runtime.resolve_configured_model(
                 &key,

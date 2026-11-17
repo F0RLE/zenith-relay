@@ -100,6 +100,8 @@ async fn start_next_request(
             return Ok(true);
         }
     };
+    let key = client_request.key_snapshot(key);
+    let key = &key;
     client_request.websocket_authorization = Some(state.websocket_authorization());
     if let Err(failure) = state
         .responses
@@ -373,7 +375,7 @@ async fn start_next_request(
         send_request(upstream, prepared_request.payload, upstream_origin).await?;
         return Ok(true);
     }
-    let connected = connect_upstream_while_client_connected(
+    let connected = connect_transport_while_client_connected(
         downstream,
         runtime,
         key,
@@ -384,5 +386,13 @@ async fn start_next_request(
         None,
     )
     .await?;
-    Ok(install_connected(upstream, runtime, key, state, connected))
+    match connected {
+        ConnectedTransport::Websocket(connected) => {
+            Ok(install_connected(upstream, runtime, key, state, *connected))
+        }
+        ConnectedTransport::Http(fallback) => {
+            state.http_handoff = Some(*fallback);
+            Ok(true)
+        }
+    }
 }

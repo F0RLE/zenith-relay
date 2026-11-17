@@ -111,9 +111,16 @@ pub async fn connect_opencode_to_local_gateway(
 ) -> Result<OpenCodeConnectionResult, CommandError> {
     let _mutation = state.setup_guard().await;
     let config_path = default_opencode_config_path();
-    let prepared = commands::state::build_streaming_client_state(&state)
+    let mut prepared = commands::state::build_streaming_client_state(&state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
+    super::application_protocol::filter_models(
+        &mut prepared.gateway.models,
+        super::application_protocol::policy(
+            &state,
+            crate::launcher::settings::Application::Opencode,
+        )?,
+    );
     let model_ids = model_ids(&prepared.gateway.models);
     if model_ids.is_empty() {
         return Err(LocalPoolError::new(
@@ -122,7 +129,10 @@ pub async fn connect_opencode_to_local_gateway(
         )
         .into());
     }
-    let gateway_key = gateway_keys::ensure_system_gateway_key(&state)?;
+    let gateway_key = gateway_keys::ensure_application_gateway_key(
+        &state,
+        crate::launcher::settings::Application::Opencode,
+    )?;
     if !gateway_key.enabled || !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -250,3 +260,31 @@ pub async fn restore_opencode_config(state: State<'_, DesktopState>) -> Result<b
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn uses_application_pool_key(state: &DesktopState) -> Result<bool, LocalPoolError> {
+    let (key, port) = {
+        let store = state.store()?;
+        (
+            store
+                .keys()
+                .iter()
+                .find(|key| {
+                    key.id == crate::launcher::settings::Application::Opencode.pool_key_id()
+                })
+                .cloned(),
+            store.gateway().port,
+        )
+    };
+    let Some(key) = key else {
+        return Ok(false);
+    };
+    let Some(secret) = secret_store::load(&key.secret_ref)? else {
+        return Ok(false);
+    };
+    let config = read_config(&default_opencode_config_path())?;
+    Ok(refresh::owns_connection(
+        &config,
+        &format!("http://127.0.0.1:{port}/v1"),
+        &secret,
+    ))
+}

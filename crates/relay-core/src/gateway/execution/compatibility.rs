@@ -51,8 +51,12 @@ pub(in crate::gateway) fn incompatible_routes(
                     .any(|level| level.eq_ignore_ascii_case(effort))
             })
     });
-    for route in runtime.configured_executor_routes(key, model, candidate_protocols(client), stream)
-    {
+    for route in runtime.configured_executor_routes_unfiltered(
+        key,
+        model,
+        candidate_protocols(client),
+        stream,
+    ) {
         if admitted.contains_key(&route.candidate_id) {
             continue;
         }
@@ -61,6 +65,7 @@ pub(in crate::gateway) fn incompatible_routes(
                 return Err(AdapterError::reasoning_unsupported());
             }
             runtime.validate_continuation_route(&route, &key.id, request, now_ms)?;
+            runtime.validate_key_upstream_protocol(key, &route, request, now_ms)?;
             let capability = runtime
                 .model_capabilities(&route.source_model)
                 .for_route(route.route_capability.as_ref());
@@ -186,7 +191,11 @@ pub(in crate::gateway) fn incompatible_routes(
         match validate() {
             Err(error) => {
                 excluded.insert(route.candidate_id);
-                last_error = Some(error);
+                if error.code() != crate::error_codes::UPSTREAM_PROTOCOL_UNAVAILABLE
+                    || last_error.is_none()
+                {
+                    last_error = Some(error);
+                }
             }
             Ok(()) => {
                 excluded.remove(&route.candidate_id);

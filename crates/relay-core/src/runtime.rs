@@ -68,6 +68,8 @@ pub(crate) mod siwc_socket;
 mod source_metadata;
 mod support;
 mod tool_catalog;
+mod upstream_protocol;
+pub use upstream_protocol::UpstreamProtocolPolicy;
 
 pub(in crate::runtime) use support::{
     all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
@@ -101,7 +103,7 @@ use session_state::RuntimeSessionState;
 use crate::{
     CandidateKind, UsageEvent, normalize_source_protocol_bindings, unix_time_ms as current_time_ms,
 };
-pub(crate) use images::is_image_model_id;
+pub use images::is_image_model_id;
 pub use images::{CODEX_IMAGE_MODELS, IMAGE_API_MODEL, normalize_image_base_model};
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
@@ -159,6 +161,7 @@ struct CachedModelManifest {
 #[derive(Clone)]
 pub(crate) struct AuthenticatedKey {
     pub(crate) id: String,
+    pub(crate) upstream_protocol: UpstreamProtocolPolicy,
     scope: Arc<RwLock<CandidateScope>>,
     scope_revision: Arc<AtomicU64>,
     pub(crate) model_rules: ModelRules,
@@ -327,6 +330,7 @@ pub(crate) enum ExecutorPrepareError {
 
 struct RuntimeKey {
     id: String,
+    upstream_protocol: RwLock<UpstreamProtocolPolicy>,
     enabled: bool,
     secret_hash: [u8; 32],
     scope: Arc<RwLock<CandidateScope>>,

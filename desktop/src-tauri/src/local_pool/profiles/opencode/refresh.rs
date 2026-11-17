@@ -1,7 +1,7 @@
 use super::*;
 use std::fs;
 
-fn owns_connection(config: &Map<String, Value>, base_url: &str, secret: &str) -> bool {
+pub(super) fn owns_connection(config: &Map<String, Value>, base_url: &str, secret: &str) -> bool {
     let Some(providers) = config.get("provider").and_then(Value::as_object) else {
         return false;
     };
@@ -47,35 +47,51 @@ pub(in crate::local_pool) async fn refresh_active_opencode_catalog(
     {
         return Ok(());
     }
-    let snapshot = commands::state::build_streaming_client_state(state)
+    let mut snapshot = commands::state::build_streaming_client_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
-    let (key, sources) = {
+    let (keys, sources) = {
         let store = state.store()?;
         (
-            store.keys().iter().find(|key| key.system).cloned(),
+            store
+                .keys()
+                .iter()
+                .filter(|key| key.system)
+                .cloned()
+                .collect::<Vec<_>>(),
             store.sources().to_vec(),
         )
     };
     let mut updated = false;
     let mut model_order = Vec::new();
-    if let Some(key) = key
-        && let Some(secret) = secret_store::load(&key.secret_ref)?
-        && owns_connection(&config, &snapshot.gateway.base_url, &secret)
-    {
-        protocols::apply(
-            &mut config,
-            &snapshot.gateway.base_url,
-            &secret,
-            &snapshot.gateway.models,
-        )?;
-        model_order = snapshot
-            .gateway
-            .models
-            .iter()
-            .map(|model| model.id.clone())
-            .collect();
-        updated = true;
+    for key in keys {
+        if let Some(secret) = secret_store::load(&key.secret_ref)?
+            && owns_connection(&config, &snapshot.gateway.base_url, &secret)
+        {
+            if key.id == crate::launcher::settings::Application::Opencode.pool_key_id() {
+                super::super::application_protocol::filter_models(
+                    &mut snapshot.gateway.models,
+                    super::super::application_protocol::policy(
+                        state,
+                        crate::launcher::settings::Application::Opencode,
+                    )?,
+                );
+            }
+            protocols::apply(
+                &mut config,
+                &snapshot.gateway.base_url,
+                &secret,
+                &snapshot.gateway.models,
+            )?;
+            model_order = snapshot
+                .gateway
+                .models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect();
+            updated = true;
+            break;
+        }
     }
     if !updated {
         for source in sources.iter().filter(|source| source.enabled) {

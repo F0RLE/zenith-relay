@@ -18,6 +18,7 @@ mod agent_messages;
 mod client_requests;
 mod frame_contract;
 mod initial_request;
+mod upstream_protocol;
 
 fn runtime() -> GatewayRuntime {
     runtime_with_events(Arc::new(|_| {}))

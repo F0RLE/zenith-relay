@@ -116,6 +116,7 @@ pub use runtime::{
     normalize_model_service_tier_overrides, pool_catalog_visibility_changed,
     pool_dispatch_permission_changed,
 };
+pub use runtime::{UpstreamProtocolPolicy, is_image_model_id};
 pub use scheduler::refresh::{
     RefreshCompletion, RefreshCoordinator, RefreshIdentity, RefreshJob, RefreshJobId, RefreshKind,
     RefreshOutcome,

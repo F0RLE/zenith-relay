@@ -146,6 +146,30 @@ async fn execute_account_endpoint_inner(
             }
         };
     let mut state = AttemptState::from_prepared(continuation);
+    // Account-only endpoints cannot manufacture another provider protocol.
+    // Retained response/tool ownership may still keep an already-started chain.
+    if !key.upstream_protocol.allows(WireApi::Responses)
+        && !runtime
+            .configured_executor_routes_unfiltered(
+                &key,
+                &resolved_model,
+                &[WireApi::Responses],
+                false,
+            )
+            .iter()
+            .any(|route| {
+                route.account_id.is_some()
+                    && runtime
+                        .validate_continuation_route(route, &key.id, &request, now_ms())
+                        .is_ok()
+                    && runtime.has_retained_continuation_route(route, &key.id, &request, now_ms())
+            })
+    {
+        return adapter_error_response(
+            crate::AdapterError::upstream_protocol_unavailable(),
+            Some(&request_id),
+        );
+    }
     let account_only_exclusions = runtime.api_source_candidate_ids();
     state.retry.tried = account_only_exclusions.clone();
     let operation = if endpoint == AccountEndpoint::Compact {

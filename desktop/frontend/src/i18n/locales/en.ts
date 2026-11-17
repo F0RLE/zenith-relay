@@ -968,6 +968,12 @@ export const en = {
     disable: "Disable {{model}}",
   },
   integrations: {
+    protocolTitle: "Request format",
+    protocolDescription: "Automatic lets Relay choose the format used to contact the model provider. A manual selection uses only that format.",
+    protocolReconnect: "Reconnect this application to the pool to apply the selection.",
+    protocolLoadFailed: "Could not load the request format. Select Retry.",
+    protocolSaveFailed: "Could not save the request format. Select Retry to load the current setting.",
+    protocols: { auto: "Automatic", responses: "OpenAI Responses", chat_completions: "OpenAI Chat Completions", messages: "Anthropic Messages", gemini: "Google Gemini" },
     sections: "Access sections",
     localApi: "Local API",
     apiTitle: "Pool access",

@@ -30,6 +30,7 @@ pub(super) struct PreparedPayload {
 #[derive(Clone)]
 pub(super) struct ClientRequest {
     local_key_id: String,
+    pub(super) upstream_protocol: crate::UpstreamProtocolPolicy,
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) request_id: String,
     pub(super) budget: SharedRequestBudget,
@@ -49,6 +50,15 @@ pub(super) struct ClientRequest {
 }
 
 impl ClientRequest {
+    pub(super) fn key_snapshot(
+        &self,
+        key: &crate::runtime::AuthenticatedKey,
+    ) -> crate::runtime::AuthenticatedKey {
+        let mut key = key.clone();
+        key.upstream_protocol = self.upstream_protocol;
+        key
+    }
+
     pub(super) fn websocket_reauth(
         &self,
         candidate_id: &str,
@@ -113,6 +123,7 @@ impl ClientRequest {
         key: &crate::runtime::AuthenticatedKey,
     ) -> Result<(HashSet<String>, BTreeMap<String, ExecutorRoute>), GatewayFailure> {
         use crate::gateway::execution::compatibility::{RouteCompatibility, incompatible_routes};
+        let key = self.key_snapshot(key);
         let started = Instant::now();
         let mut request = self.request_body.clone();
         if let Some(object) = request.as_object_mut() {
@@ -121,7 +132,7 @@ impl ClientRequest {
         }
         let (excluded, admitted, error) = incompatible_routes(RouteCompatibility {
             runtime,
-            key,
+            key: &key,
             model: &self.resolved_model,
             client: WireApi::Responses,
             request: &request,

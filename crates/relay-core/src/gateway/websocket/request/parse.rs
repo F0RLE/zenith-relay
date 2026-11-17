@@ -61,6 +61,10 @@ impl super::ClientRequest {
         connection_responses: Option<&super::super::connection_responses::ConnectionResponses>,
     ) -> Result<Self, GatewayFailure> {
         let started = std::time::Instant::now();
+        // Authentication belongs to the socket; the protocol preference belongs
+        // to this response.create. Keep retries and continuations request-scoped.
+        let key = runtime.snapshot_request_key(key);
+        let key = &key;
         if request_bytes.len() > super::super::MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::invalid_request(
                 "WebSocket request is too large",
@@ -149,6 +153,15 @@ impl super::ClientRequest {
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .or_else(|| {
+                runtime.resolve_retained_continuation_model(
+                    key,
+                    &requested_model,
+                    WEBSOCKET_PROTOCOLS,
+                    &request_body,
+                    now_ms(),
+                )
+            })
+            .or_else(|| {
                 runtime
                     .route_recovery_enabled()
                     .then(|| {
@@ -214,6 +227,7 @@ impl super::ClientRequest {
         );
         Ok(Self {
             local_key_id: key.id.clone(),
+            upstream_protocol: key.upstream_protocol,
             tool_policy,
             request_id,
             budget: SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),

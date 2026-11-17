@@ -74,7 +74,14 @@ pub async fn connect_claude_desktop(
             "Start the local pool before connecting Claude Desktop",
         )
     })?;
-    let snapshot = commands::state::build_streaming_client_state(&state).await?;
+    let mut snapshot = commands::state::build_streaming_client_state(&state).await?;
+    super::application_protocol::filter_models(
+        &mut snapshot.gateway.models,
+        super::application_protocol::policy(
+            &state,
+            crate::launcher::settings::Application::ClaudeDesktop,
+        )?,
+    );
     let path = paths::config_library()?;
     let models = client_models(&snapshot.gateway.models, &path).await?;
     if models.is_empty() {
@@ -84,7 +91,10 @@ pub async fn connect_claude_desktop(
         )
         .into());
     }
-    let key = gateway_keys::ensure_system_gateway_key(&state)?;
+    let key = gateway_keys::ensure_application_gateway_key(
+        &state,
+        crate::launcher::settings::Application::ClaudeDesktop,
+    )?;
     if !key.enabled || !commands::pool::has_usable_pool_candidate(&state)? {
         return Err(
             LocalPoolError::new(ErrorCode::Conflict, "The local pool is unavailable").into(),
@@ -220,29 +230,52 @@ pub(in crate::local_pool) async fn refresh_catalog(state: &DesktopState) -> Loca
     let Some(address) = state.gateway.address().await else {
         return Ok(());
     };
-    let snapshot = commands::state::build_streaming_client_state(state)
+    let mut snapshot = commands::state::build_streaming_client_state(state)
         .await
         .map_err(|error| LocalPoolError::new(error.code, error.message))?;
-    let key = state
-        .store()?
-        .keys()
-        .iter()
-        .find(|key| key.system && key.enabled)
-        .cloned();
-    let key = key.ok_or_else(|| {
+    let keys = state.store()?.keys().to_vec();
+    let mut connected = None;
+    for key in keys.iter().filter(|key| key.system && key.enabled) {
+        if let Some(secret) = secret_store::load(&key.secret_ref)?
+            && library::uses_gateway_secret(&path, &secret)?
+        {
+            connected = Some((key, secret));
+            break;
+        }
+    }
+    let (key, secret) = connected.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::Conflict,
             "The local pool request key is unavailable; reconnect Claude Desktop",
         )
     })?;
-    let secret = secret_store::load(&key.secret_ref)?.ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::Conflict,
-            "The local pool request key is unavailable; reconnect Claude Desktop",
-        )
-    })?;
+    if key.id == crate::launcher::settings::Application::ClaudeDesktop.pool_key_id() {
+        super::application_protocol::filter_models(
+            &mut snapshot.gateway.models,
+            super::application_protocol::policy(
+                state,
+                crate::launcher::settings::Application::ClaudeDesktop,
+            )?,
+        );
+    }
     let models = client_models(&snapshot.gateway.models, &path).await?;
     let config = models::gateway_config(&format!("http://{address}"), &secret, models);
     library::apply(&path, &recovery, &config, false)?;
     Ok(())
+}
+
+pub(super) fn uses_application_pool_key(state: &DesktopState) -> LocalResult<bool> {
+    let key = state
+        .store()?
+        .keys()
+        .iter()
+        .find(|key| key.id == crate::launcher::settings::Application::ClaudeDesktop.pool_key_id())
+        .cloned();
+    let Some(key) = key else {
+        return Ok(false);
+    };
+    let Some(secret) = secret_store::load(&key.secret_ref)? else {
+        return Ok(false);
+    };
+    library::uses_gateway_secret(&paths::config_library()?, &secret)
 }

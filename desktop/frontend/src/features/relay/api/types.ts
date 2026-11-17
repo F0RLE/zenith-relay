@@ -102,6 +102,8 @@ export type {
 
 export type {
   LaunchApplication,
+  UpstreamProtocolPolicy,
+  ApplicationProtocolSetting,
   LaunchPathSetting,
   ClaudeDesktopStatus,
   ClaudeDesktopConnection,
