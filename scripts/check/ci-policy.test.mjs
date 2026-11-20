@@ -84,7 +84,7 @@ describe("desktop CI", () => {
     expect(JSON.stringify(build)).not.toContain("relay-server/");
     const dependabot = Bun.YAML.parse(readFileSync(new URL("../../.github/dependabot.yml", import.meta.url), "utf8"));
     expect(dependabot.updates.filter((update) => update["package-ecosystem"] === "cargo")
-      .map((update) => update.directory).sort()).toEqual(["/crates/relay-core", "/desktop/src-tauri"]);
+      .map((update) => update.directory).sort()).toEqual(["/crates/relay-core", "/desktop/src-tauri", "/hosted/server"]);
   });
 
   test("an older pull request run is cancelled, but a tag or manual run is not", () => {
@@ -125,6 +125,9 @@ describe("desktop CI", () => {
     expect(web.steps.some((step) => step.run?.startsWith("bunx --no-install playwright install")
       && step.run.includes("chromium"))).toBe(true);
     expect(needs(build.jobs["publish-release"])).toContain("check-web");
+    const bootstrap = web.steps.find(step => step.run?.includes("cargo test --locked --manifest-path hosted/server/Cargo.toml"));
+    expect(bootstrap?.env.RELAY_HOSTED_TEST_WEB).toBe("1");
+    expect(bootstrap?.run).toContain("--include-ignored");
   });
 
   test("browser shards run independently without cancelling the remaining coverage", () => {
@@ -195,7 +198,7 @@ describe("desktop CI", () => {
     const prepare = steps.findIndex((step) => step.name === "Prepare RustSec advisory database");
     expect(steps[prepare].run).toContain("fetch --depth=1 origin refs/heads/main");
     expect(steps[prepare].run).toContain("RustSec snapshot: %H (%cI)");
-    for (const file of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock"]) {
+    for (const file of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock", "hosted/server/Cargo.lock"]) {
       const audit = steps.findIndex((step) => step.run?.startsWith("cargo audit ") && step.run.includes(file));
       expect(audit).toBeGreaterThan(prepare);
       expect(steps[audit].run).toContain('--db "$RUSTSEC_ADVISORY_DB" --no-fetch');

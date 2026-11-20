@@ -62,6 +62,14 @@ updates:
       time: "09:20"
       timezone: Europe/Minsk
     open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /hosted/server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:25"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /
     schedule:

@@ -36,7 +36,7 @@ export function verificationSteps({ quick = false, base } = {}) {
   add("Web preview tests", ["run", "test"], "hosted/web", "web");
   add("Web preview build", ["run", "build"], "hosted/web", "web");
   if (!quick) {
-    for (const manifest of ["crates/relay-core/Cargo.toml", "desktop/src-tauri/Cargo.toml"]) {
+    for (const manifest of ["crates/relay-core/Cargo.toml", "desktop/src-tauri/Cargo.toml", "hosted/server/Cargo.toml"]) {
       cargo(`Rust formatting: ${manifest}`, ["fmt", "--manifest-path", manifest, "--all", "--", "--check"]);
       cargo(`Rust lint: ${manifest}`, ["clippy", "--manifest-path", manifest, "--all-targets", "--locked", "--", "-D", "warnings"]);
       cargo(`Rust tests: ${manifest}`, ["test", "--manifest-path", manifest, "--locked", ...(manifest.startsWith("desktop/src-tauri/") ? ["--", "--test-threads=1"] : [])]);
@@ -45,7 +45,7 @@ export function verificationSteps({ quick = false, base } = {}) {
     add("Web browser tests", ["run", "test:e2e"], "hosted/web", "web");
     add("Desktop dependency audit", ["audit"], "desktop/frontend", "desktop");
     add("Web dependency audit", ["audit"], "hosted/web", "web");
-    for (const lockfile of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock"]) {
+    for (const lockfile of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock", "hosted/server/Cargo.lock"]) {
       cargo(`Rust dependency audit: ${lockfile}`, ["audit", "--file", lockfile]);
     }
   }

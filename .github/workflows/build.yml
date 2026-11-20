@@ -97,6 +97,7 @@ jobs:
         run: cargo test --manifest-path crates/relay-core/Cargo.toml --locked --lib large_mixed_queue_reaches_per_principal_limit_without_starvation -- --ignored
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file crates/relay-core/Cargo.lock
       - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file desktop/src-tauri/Cargo.lock
+      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file hosted/server/Cargo.lock
       - run: bun audit
         working-directory: desktop/frontend
       - name: Run verification with Linux Secret Service
@@ -189,7 +190,7 @@ jobs:
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked key_storage::native::tests::synthetic_secret_survives_entry_recreation -- --ignored --exact --test-threads=1
 
   check-web:
-    name: Check web preview
+    name: Check Hosted web and server
     needs: check-plan
     if: ${{ !cancelled() && (needs.check-plan.result == 'skipped' || needs.check-plan.result == 'success') && needs.check-plan.outputs.run-checks != 'false' }}
     runs-on: ubuntu-latest
@@ -211,6 +212,23 @@ jobs:
         run: bunx --no-install playwright install --with-deps chromium
         timeout-minutes: 10
       - run: bun run test:e2e
+      - uses: dtolnay/rust-toolchain@d5e4d57b030548f435d0befec15ff413a2c60eff # 1.100.0
+        with:
+          components: rustfmt, clippy
+      - name: Test closed Hosted installation, owner sessions and connection vault
+        working-directory: .
+        env:
+          RELAY_HOSTED_TEST_WEB: "1"
+        run: |
+          sudo apt-get install -y --no-install-recommends postgresql libssl-dev pkg-config
+          initdb_bin="$(find /usr/lib/postgresql -type f -name initdb | sort -V | tail -1)"
+          test -x "$initdb_bin"
+          export RELAY_TEST_PG_BIN="$(dirname "$initdb_bin")"
+          cargo fmt --manifest-path hosted/server/Cargo.toml -- --check
+          rustfmt --edition 2024 --check crates/relay-vault-envelope/src/lib.rs
+          cargo clippy --locked --manifest-path hosted/server/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path hosted/server/Cargo.toml -p zenith-relay-vault-envelope
+          cargo test --locked --manifest-path hosted/server/Cargo.toml -- --include-ignored
 
   build:
     name: ${{ matrix.name }}
