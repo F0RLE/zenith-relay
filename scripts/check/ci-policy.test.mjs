@@ -195,12 +195,17 @@ describe("desktop CI", () => {
 
   test("RustSec is refreshed once and both lockfiles use that recorded snapshot", () => {
     const steps = build.jobs["check-runtime"].steps;
+    const hostedFetch = steps.findIndex(step => step.run === "cargo fetch --manifest-path hosted/server/Cargo.toml --locked");
+    expect(hostedFetch).toBeGreaterThan(-1);
+    expect(steps[hostedFetch].if).toBeUndefined();
+    expect(steps[hostedFetch]["continue-on-error"]).toBeUndefined();
     const prepare = steps.findIndex((step) => step.name === "Prepare RustSec advisory database");
     expect(steps[prepare].run).toContain("fetch --depth=1 origin refs/heads/main");
     expect(steps[prepare].run).toContain("RustSec snapshot: %H (%cI)");
     for (const file of ["crates/relay-core/Cargo.lock", "desktop/src-tauri/Cargo.lock", "hosted/server/Cargo.lock"]) {
       const audit = steps.findIndex((step) => step.run?.startsWith("cargo audit ") && step.run.includes(file));
       expect(audit).toBeGreaterThan(prepare);
+      expect(audit).toBeGreaterThan(hostedFetch);
       expect(steps[audit].run).toContain('--db "$RUSTSEC_ADVISORY_DB" --no-fetch');
       expect(steps[audit]["continue-on-error"]).toBeUndefined();
     }
