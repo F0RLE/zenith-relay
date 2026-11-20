@@ -39,7 +39,8 @@ apply production Zenith billing, route-evidence, or operations skills to Relay.
 | --- | --- |
 | `desktop/frontend/src` | React rendering, i18n, UI state, typed Tauri wrappers |
 | `desktop/src-tauri/src` | Desktop I/O, secret-store adapters, sign-in windows, profiles, process lifecycle |
-| `hosted/web` | Independent Hosted UI preview; no Desktop IPC or server authority |
+| `hosted/server` | Closed installation, PostgreSQL and local first-owner provisioning; [server checks](hosted/server/README.md#verify) |
+| `hosted/web` | Production public/setup UI and development dashboards; no Desktop IPC or server authority |
 | `crates/relay-core` | Shared provider auth/lifecycle, account policies, discovery, scheduling, protocols, gateway, quota, usage |
 
 Keep validation/side effects in Rust and Hosted/local pool boundaries distinct.

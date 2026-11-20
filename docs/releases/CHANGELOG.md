@@ -12,6 +12,29 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
 
 ### Changed
 
+- Applications launched from Relay can use a saved proxy independently of pool
+  routing and native sign-in. Authenticated proxies use a managed local bridge
+  without exposing credentials to child processes. Connection status appears before account
+  settings as a colored icon, with details on hover or keyboard focus. A proxy
+  reachability check alone does not mark application routing as active.
+
+- Sign-in opens inside Desktop on request; login notes retain their expanded
+  state. Account exports let users choose sign-in methods and include a bound
+  proxy explicitly; imports preview the proposed binding.
+
+- Add the Hosted server and connected web interface: owner setup, passkey/OIDC
+  access, device pairing, approved source transfers, customer keys and wallets,
+  published pricing, bounded text execution, usage reports and operational
+  diagnostics. Shared vault and device contracts also support Desktop pairing.
+
+- Request details show the measured share of cached input; routing traces and stage
+  timings stay in the diagnostic export. SIWC retains independent sockets when a
+  chat switches models. Equally recent backup connections prefer the latest success.
+
+- Update OpenAI migration guidance, localized Help and Desktop/Hosted acceptance
+  requirements for model-specific request options, preserved reasoning and
+  cache-write accounting.
+
 - Manual account refresh keeps model discovery on the selected sign-in, including
   SIWC with linked Codex/BPS quota metadata. Rust resolves the quota source;
   refreshing from Connections or Pool does not change the selected route.
@@ -144,6 +167,8 @@ Development changes are tracked in [PR #102](https://github.com/F0RLE/zenith-rel
   remaining quota. At or below that threshold, quota-only switching requires a
   ten-percentage-point lead. Successful load spillovers follow the same ownership
   rule; new-chat expiry priorities, capacity and availability checks stay intact.
+  When the primary hits a quota or rate limit, a text chat can reuse its warm
+  SIWC backup instead of switching again for a higher linked quota estimate.
 - Automatic rotation uses speed preferences after 20 measured successful requests
   per member and route within ten minutes, preserving normal rotation and warm
   chats while the latency history is insufficient.

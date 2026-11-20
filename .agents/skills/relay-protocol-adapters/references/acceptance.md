@@ -130,6 +130,26 @@ Group preferences do not establish support for tools, reasoning, caching, or a
 particular endpoint. A change of route or credential must not reuse incompatible
 state. Retry policy still requires a known not-sent or pre-execution rejection.
 
+## OpenAI migration acceptance
+
+Use the [current migration contract](contracts.md#openai-model-migrations), not
+model naming or a successful text request, to qualify a route:
+
+- Cover GPT-6.2 tool cycles through Responses upstreams in JSON/SSE; Chat-only
+  upstreams must not acquire tool support from the client format or group name.
+- Check supported effort and unsupported sampling/logprob options without
+  silent downgrades; preserve model-specific catalog and explicit exclusions.
+- Replay `configuration_update`, `additional_tools`, original tool results and
+  encrypted reasoning in order. Exercise changed effort/schema/tools, stateless
+  continuation, compaction, and forbidden cross-owner/model/organization reuse.
+- Verify implicit/explicit cache policy, no-breakpoint explicit mode, mixed TTL
+  writes, read-versus-write lifetime renewal and missing counters. Do not
+  double-count reads/writes or turn unknown cost into zero. Compare cache hits,
+  write cost, latency and final total cost.
+- Distinguish provider cache comparisons and `input_transformations` from local
+  structural fingerprints. Use synthetic fixtures; live generation still needs
+  authorization and exact endpoint/grant evidence.
+
 ## Evidence
 
 Reuse the owning checks from CONTRIBUTING within current permissions. Record

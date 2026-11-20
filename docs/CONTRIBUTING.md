@@ -130,6 +130,12 @@ Use official documentation and SDK types for the exact endpoint/version:
 Compatible API names do not establish identical features. BPS/account transport
 behavior is observed, not specified by the public OpenAI API.
 
+For OpenAI model migrations, start with the current
+[latest-model guide](https://developers.openai.com/api/docs/guides/latest-model)
+and the maintained [OpenAI migration contract](../.agents/skills/relay-protocol-adapters/references/contracts.md#openai-model-migrations).
+Check model-specific parameters, tool support, cache accounting and ordered
+continuation together.
+
 Follow the [protocol skill](../.agents/skills/relay-protocol-adapters/SKILL.md) and
 the matrix for the affected protocol pair and contract. Third-party comparisons
 need an inspected revision, file paths and retained license/attribution. Implement
@@ -767,8 +773,10 @@ bun run test:e2e
 Browser tests use only loopback. Install their Chromium with
 `bunx --no-install playwright install chromium`, or set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to an existing executable. The Build workflow
-checks this package separately before packaging. Qualify the Hosted backend and
-real WebView integration after connecting them.
+checks this package separately and exercises the built site against the independent
+Rust server, a disposable PostgreSQL cluster and a virtual passkey. For local
+commands and test prerequisites see the [server guide](../hosted/server/README.md#verify).
+The installed Desktop WebView and real authenticator/provider acceptance remain separate.
 
 ### Build artifacts
 
@@ -808,10 +816,9 @@ Run the opt-in native regression on a Windows desktop with WebView2 installed:
 bun scripts/build/cargo.mjs test --manifest-path desktop/src-tauri/Cargo.toml --locked --bin zenith-relay private_webviews_start_clean_while_another_private_window_stays_open -- --ignored --test-threads=1
 ~~~
 
-It opens hidden WebViews against a synthetic loopback page, checks cookies and
-local storage across consecutive sign-in windows while another private window
-stays open, and verifies cache cleanup after browser shutdown. It uses temporary
-profiles, not saved accounts, provider requests or the installed Relay process.
+It opens hidden WebViews against a synthetic loopback page, checks private
+storage isolation and verifies cache cleanup. The embedded pane is also checked
+for client-area placement and the absence of the Relay IPC bridge.
 
 ### Shared runtime
 

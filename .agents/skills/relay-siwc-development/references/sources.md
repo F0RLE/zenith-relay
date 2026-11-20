@@ -2,9 +2,8 @@
 
 Read the section relevant to the requested operation. Official SIWC documentation
 sets the integration contract; repository examples supply implementation ideas
-and regression scenarios. A pinned revision is reproducible evidence, not a claim
-about the latest release. Fetch the relevant page or file rather than relying on
-search excerpts, and retain its URL and inspected revision in the review evidence.
+and regression scenarios. Fetch the relevant page or file and retain its URL
+and inspected revision.
 
 ## Official contract
 
@@ -24,6 +23,9 @@ Use the general Responses, prompt-caching, reasoning, or WebSocket documentation
 only alongside the SIWC-specific restrictions for that feature. Do not freeze
 model names, eligibility plans, token lifetimes, unsupported-field lists, or
 telemetry availability in this skill; verify their current contract when needed.
+The shared [OpenAI migration contract](../../relay-protocol-adapters/references/contracts.md#openai-model-migrations)
+tracks public model parameters and prefix-preservation rules. Apply the current
+SIWC grant and preview restrictions when using them.
 
 ## Official implementation examples
 

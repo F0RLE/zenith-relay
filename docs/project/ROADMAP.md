@@ -3,7 +3,7 @@
 Open Desktop work and acceptance criteria.
 Current contracts are in [PLANNING.md](PLANNING.md); development and release
 checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
-Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
+Hosted implementation has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
 
 ## Delivery focus
 
@@ -11,10 +11,9 @@ Prioritize a qualified current runtime, a reusable product core, and Hosted
 implementation over adding unrelated providers or expanding Desktop features.
 These are delivery priorities, not claims that planned capabilities are shipped.
 
-**Active stage: current Desktop/runtime confirmation.** Hosted design, shared-core
-extraction for Hosted, and H00–H17 implementation are deferred until this stage
-is reviewed and the next stage is explicitly opened. Current core work is limited
-to qualifying existing behavior and correcting failures found by that qualification.
+**Active:** Desktop/runtime confirmation and the first closed Hosted installation.
+The Hosted boundary qualifies one synthetic native text route; it does not close
+the installed-client and real-provider checks below.
 
 | Priority | Target | Exit evidence |
 | --- | --- | --- |
@@ -23,7 +22,7 @@ to qualifying existing behavior and correcting failures found by that qualificat
 | 3 | Start Hosted implementation through H02 and its dependent packages | Buildable server composition, validated configuration, PostgreSQL/migration and API fixtures, followed by the ordered internal end-to-end proof in the Hosted plan. Public release retains its full acceptance gates. |
 | 4 | Expand subscription authorizations and application integrations after the first Hosted release passes acceptance | Each new connector proves its account lifecycle and permitted execution; each new client proves supported launch/connection modes, tool roundtrips and profile recovery using the shared product core. |
 
-When Hosted work resumes, qualify its exact offered routes; unrelated Desktop
+Qualify each exact Hosted route before offering it; unrelated Desktop
 picker issues or unoffered connectors do not become server prerequisites.
 Neither a passing fixture nor a working personal account establishes commercial
 permission or live Hosted acceptance.
@@ -74,6 +73,8 @@ qualification and specific missing semantics.
 | Catalog provenance and refresh | Source failures preserve valid data; changed identity/price/capability is traceable; generated exports update atomically without private inventory or manual model rows. |
 | Endpoint feature evidence | Advertised protocol does not grant unsupported continuation, tools, reasoning, cache, media, or usage semantics. Pins and explicit exclusions survive reload. |
 | Conversation compatibility | Each advertised source/client/version passes text → call → result → next answer in JSON and SSE, including its supported reasoning/media/schema features. |
+| OpenAI model migrations | Qualify the [current migration contract](../../.agents/skills/relay-protocol-adapters/references/contracts.md#openai-model-migrations): GPT-6.2 Responses-only upstream tool calling, model-specific options, ordered configuration/tool updates, encrypted reasoning and native versus summary compaction. Keep exact model/grant/endpoint evidence; do not infer parity from native passthrough. |
+| OpenAI cache and reasoning evidence | Qualify implicit/explicit breakpoints, mixed-TTL reads/writes and missing usage, plus opt-in provider comparisons and `input_transformations` where supported. Measure total cost and latency, not only cache-hit ratio; local fingerprints do not prove reasoning reuse. |
 | Client startup context | Establish a lossless foreign representation for standalone Responses results without `call_id` and interleaved system/developer instructions, including Messages-to-Gemini history, before claiming full client parity; do not invent calls, erase context, or hoist instructions. |
 | Native fidelity | Ordered schemas, precise numbers, repeated permitted headers, opaque state, and native extensions survive without lossy conversion. |
 | Accounting and errors | One logical outcome plus retained attempts; partial/unknown usage remains explicit; the failing stage and origin are safe and understandable. |
@@ -222,7 +223,7 @@ inheriting commercial or transfer permission from a personal login.
   opaque token metadata and native Codex endpoints are not a compatible API.
 - SIWC local acceptance: authorize a real grant with user consent, verify catalog,
   text → tool call → result → next answer, refresh/restart/revocation and denied
-  plan permission. Qualify the Tauri WebView flow on supported platforms, including
+  plan permission. Qualify Desktop WebView sign-in on supported platforms, including
   MFA/social-login restrictions, proxy, cancel/reopen and copy-link browser recovery;
   the provider documents system-browser sign-in, not embedded compatibility.
   Local tests do not establish live provider acceptance. Native
@@ -235,6 +236,26 @@ authentication, renewal/revocation, protected storage, entitlements, quota units
 usage, models, execution, and recovery. A generic API codec is not a subscription
 connector. Kimi Code subscription and MiniMax M Plan readers remain unqualified
 until their exact cloud contracts are verified.
+
+## Claude Desktop connection
+
+- [x] Save the connection in Claude Desktop's supported native configuration.
+  Keep its selector before account settings, separate from the launch path.
+- [ ] Verify supported Claude versions and coverage of sign-in, desktop and
+  backend traffic. The adapter targets an existing local profile on Windows.
+- [x] Apply reversible, field-scoped changes and restore only unchanged settings
+  owned by Relay. Preserve unrelated settings, later external edits, account
+  proxy bindings and pool routes.
+- [ ] Use Claude's supported protected credential storage; reject
+  combinations that would require plaintext secrets. The native adapter currently
+  rejects authenticated endpoints. Keep credentials out of
+  logs and diagnostics.
+- [ ] Distinguish saved, restart-required, confirmed and error states through the
+  status icon and tooltip. Green requires a verified application route, not just
+  a saved selection or successful proxy probe.
+- [ ] Accept with ordinary Windows launch, Relay closed, native sign-in outside
+  the pool, application restart, Windows reboot, proxy changes and restoration.
+  Verify traffic coverage and that unrelated applications remain unchanged.
 
 ## Future application integrations
 

@@ -34,6 +34,9 @@ unfinished capability or acceptance, not as a prerequisite for every fix.
   state from client-supplied history and foreign opaque payloads.
 - Read the exact endpoint's [official contract](references/contracts.md) first.
   For undocumented account transports, mark observed behavior explicitly.
+  OpenAI model upgrades also use the maintained
+  [migration contract](references/contracts.md#openai-model-migrations), including
+  endpoint-specific tools, append-only updates, reasoning and cache-write usage.
   Use [implementations.md](references/implementations.md) only for a targeted
   implementation comparison; record its inspected SHA and file paths if used.
   For BPS-specific source discovery, use

@@ -1,8 +1,7 @@
 # Zenith Relay documentation
 
-Relay's working product is the local-first Desktop application. The independent
-web package previews Hosted screens; its service, authentication and billing are
-planned, not an available deployment.
+Relay ships a local-first Desktop application. The independent Hosted server
+currently supports a closed installation, not public paid service.
 
 ## Find the right document
 
@@ -11,6 +10,7 @@ planned, not an available deployment.
 | Product, download, first run | [Project README](../README.md) |
 | Desktop user steps and recovery | [English Help](help/en/README.md), [Russian Help](help/ru/README.md) |
 | Development, checks, cleanup, releases | [Contributor guide](CONTRIBUTING.md) |
+| Provider API references and OpenAI migration requirements | [Protocol contracts](../.agents/skills/relay-protocol-adapters/references/contracts.md), [OpenAI migrations](../.agents/skills/relay-protocol-adapters/references/contracts.md#openai-model-migrations) |
 | Private vulnerability reports | [Security reporting](../.github/SECURITY.md) |
 | Repository instructions and safety boundaries | [AGENTS.md](../AGENTS.md) |
 | Current architecture and implementation contracts | [Architecture](project/PLANNING.md) |
@@ -24,14 +24,15 @@ filename. Start with its [contract map](project/PLANNING.md#contract-map).
 Help contains task instructions followed by an error reference; the application
 renders the reference separately. Both are maintained in each localized guide.
 
-### Hosted: preview and planned service
+### Hosted: implementation and target service
 
 | Subject | Owner |
 | --- | --- |
+| How the service works, from setup to closure | [Hosted architecture](hosted/HOSTED_RELAY_ARCHITECTURE.md#step-by-step-scenario-map) |
+| Customer and owner screens, actions and states | [Hosted web design](hosted/HOSTED_RELAY_WEB_DESIGN.md#screen-inventory) |
+| Implementation order, tests and release criteria | [Hosted roadmap](hosted/HOSTED_RELAY_ROADMAP.md#delivery-stages) |
 | Existing web preview, launch commands and integration limits | [Web preview](../hosted/web/README.md) |
-| Target service contracts | [Hosted architecture](hosted/HOSTED_RELAY_ARCHITECTURE.md) |
-| Planned dependencies and acceptance | [Hosted roadmap](hosted/HOSTED_RELAY_ROADMAP.md) |
-| Target presentation and interaction | [Hosted web design](hosted/HOSTED_RELAY_WEB_DESIGN.md) |
+| Install, migrate, provision the first owner, run and test the closed service | [Server guide](../hosted/server/README.md) |
 
 Update the owning document for each subject. Current code and focused tests
 define implemented behavior; roadmaps describe planned work and acceptance.
@@ -57,8 +58,9 @@ zenith-relay/
 |-- desktop/                    Downloadable, independently built local application
 |   |-- frontend/               React UI, tests, assets and locked dependencies
 |   `-- src-tauri/              Native Rust package, permissions, icons and installers
-|-- hosted/                     Hosted preview and planned server product
-|   `-- web/                    Independent Hosted UI preview and tests
+|-- hosted/                     Independent Hosted product
+|   |-- server/                 Rust server, PostgreSQL migrations and tests
+|   `-- web/                    Production entry and development dashboard preview
 |-- scripts/
 |   |-- build/                  Tauri and Cargo launchers
 |   |-- setup/                  Explicit dependency preparation and start
@@ -80,8 +82,7 @@ zenith-relay/
 Desktop is distributed as release binaries/installers or built from source. Its
 build does not require Hosted. The web preview builds without Tauri; it reuses
 pure presentation helpers and styles, not Desktop IPC or credentials.
-The future server crate and deployment assets belong in `hosted/server/` and
-`hosted/deploy/`; those directories are added when their implementation starts.
+The existing server crate is under `hosted/server/`; deployment artifacts are planned.
 Shared runtime code stays in `crates/relay-core/`. See the
 [Hosted roadmap](hosted/HOSTED_RELAY_ROADMAP.md) for service delivery.
 

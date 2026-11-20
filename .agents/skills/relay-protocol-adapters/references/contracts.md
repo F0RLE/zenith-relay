@@ -69,8 +69,10 @@ the endpoint's general numeric range does not establish model-specific support.
 For cache optimization, use OpenAI's [prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
 and [cache diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
 Keep stable instructions, tool definitions and ordering ahead of changing input;
-measure observed cached input tokens, not presumed hits. A stable cache key is
-an advisory routing hint, not conversation authorization or a guaranteed hit.
+measure observed cached input tokens, not presumed hits. Before GPT-5.6, a stable
+cache key can influence cache routing; on GPT-5.6 and later it separates cache
+accounting and is not needed to optimize routing. It never grants conversation
+authorization or guarantees a hit.
 Public API retention/breakpoint support does not establish support on undocumented
 account transports; do not add those fields without endpoint-specific evidence.
 
@@ -116,14 +118,91 @@ strict controls from a format variant that cannot carry them. Gemini's
 and the Google SDK below define the MIME string and alternative schema fields;
 wrong-type MIME values are not an absent setting.
 
+## OpenAI model migrations
+
+Public API guidance checked on **2026-11-18**:
+[latest model](https://developers.openai.com/api/docs/guides/latest-model),
+[unchanged prefixes](https://developers.openai.com/api/docs/guides/keep-prefix-unchanged),
+[reasoning](https://developers.openai.com/api/docs/guides/reasoning), and
+[prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+Use the [acceptance matrix](acceptance.md#openai-migration-acceptance) and
+[Desktop roadmap](../../../../docs/project/ROADMAP.md#model-provider-and-harness-compatibility).
+Subscription entitlement and SIWC/Codex/BPS restrictions require their own evidence.
+
+### Endpoint and parameter selection
+
+- Resolve the exact discovered model, authorization and upstream endpoint. The
+  current guide covers `gpt-6.2-astra` and `gpt-6.2-sol`; do not replace catalog
+  discovery or another provider's capabilities with a hardcoded family rule.
+- GPT-6.2 Astra/Sol support Chat Completions for text, but their tool calling
+  requires Responses. An application using a foreign client format still needs
+  a compatible Responses upstream and qualified conversion for its tool cycle.
+- For a new integration, OpenAI recommends `medium` reasoning. Migration from
+  `none`/`minimal` uses a supported effort such as `low`. Relay preserves explicit
+  requests and rejects unsupported values.
+  Keep Responses `reasoning.effort` distinct from Chat `reasoning_effort`.
+- For these models, omit `temperature`, `top_p`, `logprobs` and `top_logprobs`
+  from new Chat requests. In Responses, omit `temperature`, `top_p` and
+  `top_logprobs`, and remove `message.output_text.logprobs` from `include`.
+  Relay must preserve supported intent or return a specific incompatibility,
+  not silently strip meaningful options. Check tiers, regions and retention
+  eligibility against the exact model/organization contract.
+
+### Continuation without rewriting history
+
+- Preserve original messages, tool declarations/results, native item order and
+  opaque reasoning. GPT-6.2 can discard reasoning after prefix edits, a model
+  downgrade, or a change of end user/organization. Cache hits do not prove that
+  reasoning survived; routing affinity does not authorize foreign-state replay.
+- On supported Responses routes, append `configuration_update` for effort or
+  structured-output changes, keeping the original request-level setting. Append
+  developer-role `additional_tools` for new tools; use supported `allowed_tools`
+  restrictions rather than rewriting historical declarations. Retain each update
+  at its original position on subsequent turns. Do not invent a cross-protocol
+  representation when the target cannot preserve these semantics.
+- Append new developer instructions instead of editing earlier ones. Shorten
+  tool outputs or resize media before their first send, never by silently
+  rewriting previously submitted history. Provider-native compaction has its own
+  reasoning-preservation contract; Relay's SIWC text-summary bridge and BPS
+  preparation are not equivalent guarantees. For explicit
+  [native compaction](https://developers.openai.com/api/docs/guides/compaction),
+  omit `instructions` from `/responses/compact`, preserve the returned window's
+  order, and restore configuration updates/developer-added tools as documented.
+- Stateless/ZDR continuations replay complete compatible output, including
+  encrypted reasoning, in order. `store: false` alone neither grants approved
+  ZDR nor changes Relay's local retention policy.
+
+### Cache policy, accounting and diagnosis
+
+- On GPT-5.6 and later, use supported `prompt_cache_options.ttl` (`"30m"` by
+  default, or `"12h"` for Responses) instead of migrating the older
+  `prompt_cache_retention` field blindly. Older models retain their own contract.
+  Preserve caller-selected modes, breakpoints and per-breakpoint TTL overrides;
+  never opt a user into longer paid cache writes automatically.
+  A minimum TTL is not a deletion deadline. A read does not restart a 12-hour
+  lifetime; it preserves any later expiry and provides at least 30 more minutes.
+- Explicit-only caching without an explicit breakpoint performs no cache reads
+  or writes. The current public minimum is 1,024 visible input tokens for this
+  model generation; older interval/rounding rules are not universal. Transport
+  choice or a persistent socket alone does not guarantee cache reuse.
+- Input reads and writes are distinct subsets of total input. For complete
+  usage, ordinary input is `input_tokens - cached_tokens - cache_write_tokens`.
+  Apply the evidenced model/tier rates to ordinary input, reads and each write
+  TTL separately. Write prices are full component rates, not an extra fee on
+  ordinary input; do not add the aggregate write count again after its TTL
+  components. Missing counters or prices remain unknown, not free usage.
+- Where supported, request an explicit comparison with
+  `prompt_cache_options.comparison_response_id` and inspect provider cache
+  diagnostics. Inspect `input_transformations` separately for discarded reasoning.
+  Comparison is best-effort evidence, not proof of reasoning reuse. Keep this
+  targeted and opt-in; never log raw input, signatures or provider bodies.
+
 ## Typed contract references
 
 ### Current SDK source index
 
-Default-branch SDK revisions and the linked source files were rechecked on
-**2026-10-23**. This index refresh does not update Relay's dependencies or prove
-support for every field exposed by a newer SDK. Read the exact endpoint's
-official documentation and the relevant type before changing the contract.
+SDK revisions and linked source files were checked on **2026-10-23**. Before
+changing a contract, check the endpoint documentation and relevant SDK type.
 
 | SDK | Rechecked revision | Rechecked source |
 | --- | --- | --- |

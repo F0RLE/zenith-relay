@@ -20,6 +20,13 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Permission discovery is token-incarnation-scoped, coalesced, bounded, and
   cached briefly. A changed token or failed access read cannot reuse old access.
   Restricted models and account policy are enforced at execution.
+- HTTP generation refreshes BPS access for the requested model's configured
+  routes. It waits only until a fresh eligible route exists; remaining reads
+  finish in one bounded background batch per runtime. Expired or failed access
+  never grants eligibility. A required continuation owner is checked before peers;
+  portable tool history does not wait for its former owner's access refresh.
+  For an unknown model, or when no configured route is visible,
+  discovery checks the key's full BPS scope. Catalog reads keep that full scope.
 - Debug-mode account refresh and import diagnostics compare the received BPS
   catalog with the parser's accepted models. Counts cover the complete catalog;
   at most 64 rows retain a validated model ID, upstream row index and exclusion
@@ -215,6 +222,10 @@ transfer costs; BPS compatibility requires a separate endpoint check.
 - Context sizes, local CPU probes, provider token usage, prompt-cache evidence
   and transport latency are separate measurements. A faster envelope parser
   alone establishes neither smaller requests nor provider/cache improvements.
+  `upstreamHistory` compares actual prepared items, including turn-local catalog
+  instructions; `rewritten` does not mean a provider cache miss. Leading-context
+  alignment counts the known BPS-generated prefix separately from client instructions.
+  Transport labels serialize as `bps` and `bps_transport`; old labels remain readable.
 - Buffered SSE consumption is retained on the current physical attempt as valid
   usage frames arrive, before final response assembly or discovery continuation.
   Cancellation keeps those reported counters; absent counters stay unknown.
@@ -270,6 +281,11 @@ transfer costs; BPS compatibility requires a separate endpoint check.
   zero stays zero. Failed/incomplete/cancelled responses do not claim successful
   readiness. These counters persist in existing routing JSON, without content
   retention or a new database schema.
+  `upstreamReasoningTextFirstMs` marks nonempty reasoning text/summary deltas;
+  these can precede tools without making `textOutput` true. Empty deltas do not
+  start output timers. Discovery resets body/JSON/output observations for each
+  generation and leaves unmeasured subsequent preparation absent. Offsets retain
+  the logical dispatch clock; usage totals and earlier attempt records stay intact.
 - `requestPreparation` optionally breaks that duration into request building
   (`bodyMs`), initial schema validation (`schemaValidationMs`, a subset of
   `bodyMs`), catalog preload/fallback (`catalogMs`), final JSON encoding

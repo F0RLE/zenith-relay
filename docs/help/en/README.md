@@ -19,7 +19,7 @@ Install your client and have your account or provider API key ready.
 1. Select **Computer** mode.
 2. Add at least one connection:
    - account: **Connections → Accounts → Sign in**, choose **ChatGPT (SIWC)**
-     or **Excel / Basis Points** for text, then **Open sign-in window**;
+     or **Excel / Basis Points** for text, then **Open sign-in page** (or **Open sign-in window**);
    - API: **Connections → Sources → Add source**, select the service
      and enter its key.
 3. Open **Pool → Members → Add**. Select the saved connection and add it.
@@ -91,11 +91,30 @@ A pooled request follows this path:
 | Mode | When to choose it |
 | --- | --- |
 | **Computer** | The pool and its API run on this computer. The usual starting point. |
-| **Relay Hosted** | In development. |
+| **Relay Hosted** | View saved connections and copy a compatible API source to a paired server. |
 
 In **Computer**, closing the window keeps Relay in the tray; quitting stops
 the local API and automations. Changing modes keeps the local API running and
 credentials on this device.
+
+In the server's **Admin → Connections → Paired devices**, name the computer
+and create an invitation. Paste it into **Relay Hosted → Review server**.
+Check the server address and installation ID. Paste the displayed approval
+code back into the same invitation, approve it, then select **View server
+connections** in Desktop. Invitations last five minutes; access lasts 24 hours.
+**Forget on this computer** removes the local pairing. Use **Revoke access**
+on the server to end its grant immediately.
+
+For an HTTPS server, open **Copy an API source to the server** in Desktop.
+Choose a Responses source and check the server address and route. Paste the
+review code into **Admin → Connections → Desktop source copy** and approve it
+with your passkey. Within ten minutes, choose **Check server result** and
+**Copy to server** in Desktop.
+
+The copy includes the source's assigned proxy and its authentication, or keeps
+the route direct. Your local connection is unchanged. The new connection is
+saved outside the server pool. If the result is unclear, check the same operation
+before clearing its local review.
 
 ### Install on macOS
 
@@ -123,14 +142,18 @@ weekly allowance from your requests. **All models** of the selected subscription
 is the default. Each account counts once; Plus and Pro are estimated separately.
 The model menu lists each name once. A selected model uses observations for that
 model only; mixed-model intervals remain in **All models**. Subscription and model
-menus appear only when there are alternatives; hover or focus a point for its date,
-amount and estimate range when available. Subscription comparisons use measured quota consumption.
+menus appear only when there are alternatives. Subscription comparisons use measured quota consumption.
 
 Measurements require at least 5% paired weekly consumption and fully priced usage.
-Collection runs in the background without provider requests. Linked Codex/BPS/SIWC
-routes count once; only Codex/BPS establish subscription quota.
-Prefer the last 24 hours; expire after 72 hours or reset. History lasts 30 days.
-Missing data makes gaps; resets and plan/price changes are separate events.
+Collection runs in the background without provider requests. Codex/BPS connections
+with the same workspace count once. SIWC usage is recorded separately in request statistics.
+The amount above the chart uses current prices and prefers measurements from the
+last 24 hours. It expires 72 hours after the measurement started or at reset,
+whichever comes first. One line connects daily estimates in Week or Month and
+hourly estimates in Today. Periods without measurements have no points.
+Hover or focus a point for the measurement time, amount at the prices then
+(up to six decimal places), and range when available. A dash above the chart
+does not hide history.
 External use and delayed quota updates can bias estimates.
 
 **Today** covers 24 hours including the current hour; **Week**, 7 days;
@@ -183,27 +206,31 @@ Codex also supports linked SIWC quota display and explicit image-only pool
 membership. Text pool access requires separate consent in Settings. BPS and SIWC
 require manual pool admission and access checks for their own authorization.
 
-1. Select **Open sign-in window**.
+1. In **Connections**, select the sign-in method. On Windows select
+   **Open sign-in page** to show the form beside **Notes**. On macOS or Linux
+   select **Open sign-in window**.
 2. Sign in. Relay saves the account and closes the dialog.
 3. Add the account to **Pool** manually when needed.
 
+**Sign in with a proxy** uses the only compatible HTTP proxy immediately or
+lets you choose from several. Right-click repeats the previous choice if available.
 Every method has **Copy sign-in link** for browser recovery on the same computer.
-Each Relay sign-in window starts with a fresh private browser session. Cookies
-and website storage are not reused on the next opening. Saved accounts, Notes
-and Relay settings are kept. An external browser manages its own session.
+Each new Relay sign-in page starts with a private session, without reusing
+cookies or site storage. The external browser uses its own session and proxy settings.
 
-**Notes** saves email, phone, password and 2FA with the account. A new-account
-draft survives folding, clears on cancellation, and does not autofill login forms.
+Relay remembers whether **Notes** is expanded. The notes go with the account.
+A new-account draft survives folding, clears on cancellation, and does not
+autofill login forms.
 
-The password/2FA **Copy** button copies the whole value without revealing it.
-For selected text, use **Ctrl+C** (**Cmd+C** on macOS) or the context menu.
+Copy the email, password or current 2FA code from Notes.
 
 For an existing **Excel / Basis Points** account, right-click **Sign-in required**
 to use saved email/password and optional authenticator 2FA. Left-click stays manual.
 This works on Windows, macOS and Linux with a fresh private session and the account's proxy.
 CAPTCHA, additional checks, consent, unfamiliar forms, errors or a 45-second limit
-reveal the window for manual continuation. **Open sign-in window** does so at any
-time. Email/SMS codes and social sign-in remain manual. Relay validates account
+leave the same page available for manual continuation. On Windows select
+**Sign in manually** to stop autofill; on macOS or Linux select
+**Open sign-in window**. Email/SMS codes and social sign-in remain manual. Relay validates account
 identity before saving; adding a route never reuses another client's grant.
 
 For SIWC, authorize plan usage during sign-in. Codex/BPS counters do not confirm SIWC limits.
@@ -253,6 +280,11 @@ returns it disabled and outside the pool; enable and add it separately.
 Right-click **Delete → Delete permanently** (or use the action below a Trash
 card), then confirm to irreversibly remove the account and sign-in data.
 Exports contain sign-in data: protect them like passwords, never attach them to reports.
+To transfer proxies, choose **Zenith → Include account proxies**. The file or clipboard
+includes only proxies used by the selected accounts (including a shared proxy), with
+their usernames and passwords. Otherwise proxy data is omitted. On import, choose the
+file proxies or this Relay’s settings. A shared proxy from the file is bound to each
+new account that used it; existing accounts and the destination’s shared proxy keep their routes.
 
 ### Account timezones
 
@@ -335,6 +367,8 @@ accounts, and a model if required. Actions can start a countdown after
 the primary quota recovers or request a reset when weekly quota is exhausted.
 Automatic weekly resets are reserve capacity: Relay first uses fresh ordinary
 quota on other compatible pool accounts. Unknown capacity defers redemption.
+Reserve mode requires 0% remaining on the account's own seven-day window.
+An exhausted five-hour window alone does not spend a reset credit.
 An available reset nearing expiration may restore an exhausted week before the
 next quota check; an imminent natural weekly recovery takes precedence. Relay
 verifies recovery before another automatic reset. Manual reset remains available.
@@ -345,10 +379,10 @@ selected pool member. That reader can remain outside the pool.
 For an explicit quota threshold, choose **Reset timing → At a quota threshold**
 and enter the remaining weekly percentage. This option is off by default.
 0 or blank means exhausted only; a full quota never triggers a reset, even at
-100%. Primary and model-specific limits do not trigger it. Relay requires a fresh
-weekly observation and a known future reset date. An uncertain redemption waits
-for confirmed recovery; a confirmed threshold reset is not repeated before the
-original weekly deadline.
+100%. Primary and model-specific limits do not trigger it. Both modes require
+a fresh seven-day window observation with a known future reset date. If the
+outcome is unclear, Relay waits for confirmed recovery. It does not repeat a
+confirmed threshold reset before the original weekly deadline.
 Save the rule and enable its switch; its card shows the result.
 After saving or enabling it, Relay checks current quota. An already-full window
 is considered without waiting for another transition to 100% or repeating a wake
@@ -366,7 +400,7 @@ Saved personal-server settings now open **Computer**. Server credentials and
 inactive local recovery records are preserved. Stop the old server's use of an
 account before choosing **Recover local account**. Recovery uses the local copy;
 the account stays disabled and outside the pool until you explicitly enable it.
-**Relay Hosted** is a separate service in development. To share this computer's
+**Relay Hosted** pairs with a separate installation. To share this computer's
 pool, enable **Access → Local API → Allow local network access**.
 
 ## 3. Pool
@@ -405,12 +439,18 @@ without closing your settings.
   A warm chat stays on its primary connection while fresh remaining quota is
   above 10%, even if another member has more. At 10% or below, quota-based
   switching needs an alternative with at least 10 percentage points more.
+  For SIWC with a linked quota estimate, the threshold is 2%, including zero;
+  the replacement still needs a 10-point lead. A missing or stale estimate does
+  not move the chat. The same rule protects a warm backup while the primary is
+  quota- or rate-limited.
   Other quota comparisons keep the 5-point margin.
   Availability and concurrency limits still apply.
   Speed affects selection after 20 measured successful requests per member and
   route within ten minutes.
   New independent work first uses the nearest at-risk subscription group:
   up to 3 days remaining, over 3 through 6, and subsequent three-day bands.
+  Relay skips a group of near-empty SIWC members only if the selected replacement
+  has at least 10 percentage points more quota than each of them.
   Within the group, load and bounded request shares distribute work fairly.
   Fresh reset counts add urgency only while the matching weekly reset rule is
   enabled. Fresh dates determine group order; resets change shares within a group.
@@ -501,6 +541,7 @@ quota. Missing or expired evidence shows `—`.
 Use **Configuration preset** to save settings or import them with a preview
 of changes. A preset contains pool, model, and price rules; it does not include
 accounts, keys, quota, or request history.
+The preset checks proxy bindings without transferring them; a different route stops the import.
 
 ## 4. Access
 
@@ -549,6 +590,12 @@ address needs updating.
 becomes available again. The client can cancel the wait.
 This does not fix a wrong key, an invalid format, or a response already started.
 
+**New OpenAI models:** use enabled IDs from `/v1/models`, not just names from
+public announcements. Some models support Chat Completions for text but require
+a Responses upstream for tools. Keep **Request format** on **Automatic**, or select
+a compatible Responses route; changing format does not grant model access or
+missing capabilities. See the [migration requirements](../../../.agents/skills/relay-protocol-adapters/references/contracts.md#openai-model-migrations).
+
 SIWC automatically omits client output-token caps, which its preview API does not
 support. The provider sets the response bound, so answers may exceed the requested
 cap and use more quota. Other routes retain their existing limit handling.
@@ -591,6 +638,11 @@ with the folder button or enter an absolute path, then **Save**. Use the desktop
 configuration folders are invalid. Clear and save to restore automatic discovery.
 Saving only stores the local path; it neither connects nor launches the client.
 Paths stay out of pool presets.
+
+Under the path, **Connection** lets you select a saved connection for the app
+regardless of how you sign in. **As usual** keeps the app's network settings.
+Fully close the app and open it from Relay to apply a change; local pool access
+stays direct. ChatGPT and Claude Desktop need a connection without a password.
 
 Launch priority: saved path → `OPENCODE_BIN` / `CLAUDE_DESKTOP_BIN` → discovery.
 Fix or clear an invalid override; Relay never silently substitutes an installation.
@@ -690,26 +742,25 @@ Filter local pool requests by period, status, model or member; open a row in
 records. **More filters** adds protocol, transport, error category and request ID;
 its **Reset** clears only that group.
 
-Details show status, timing, cost, tokens, tools and copyable provider errors.
-**Technical details** adds IDs, route, transport and requested/sent/provider-declared
-model names. A provider-declared name is not independent identity verification.
+Details show the outcome, timing, cost and tokens. **Input from cache** is the
+share of input tokens the provider reported as cached for that send. No valid
+pair of counts means no percentage. **Tokens and cost** lists each component
+and its API-price equivalent. **Request parameters and IDs** includes the protocol,
+connection choice, model differences and copyable IDs. If the provider reports
+cache storage, its default and the writes for each duration appear there separately.
 `≈` marks an API-price estimate; `—` marks missing data, distinct from zero.
 
 **Sends** counts calls, retries and tool lookups; **Client requests** counts final
 outcomes once. Timings start with the client request. Cache tokens are included in
 input, reasoning in output. Logs exclude request/response text and secrets.
 
-**Cache retention (estimate)** starts at the latest observed read/write for the
-same chat, connection and upstream model. Misses do not renew it; expiry does not
-prove eviction. Unknown TTL remains unknown; mixed TTLs belong to separate prefixes.
-Use the route's observed retention, not another service's advertised TTL.
+Cache reads and writes are different; paid writes can cost more than ordinary
+input. Compare total cost, not only hit rate. HTTP versus WebSocket alone does
+not determine cache reuse. Keep earlier instructions, tools and history unchanged
+and append new turns; transport-specific route requirements still apply.
 
-**Technical details → Context** compares JSON bytes, including instructions,
-history and tools; cache hits still occupy context. BPS can add unobserved context.
-[BPS catalog lookup](../../project/BASIS_POINTS.md) describes on-demand schemas.
-Structural differences alone do not establish a cache-miss cause.
-
-**Save diagnostics** exports redacted JSON locally. TTFT comparisons use recorded
+**Save diagnostics** exports redacted JSON locally, including recorded routing,
+context comparisons and transport timings. TTFT comparisons use recorded
 single-send requests on the same route, grouped by effective reasoning. They show
 sample counts, median, p95 when sufficient, input/cache sizes and missing data.
 
@@ -945,7 +996,7 @@ such as 429, explains why. More retries do not replenish quota.
 | `upstream_stream`, `stream_error`, `upstream_terminal` | A provider error event ended the stream. | Follow the embedded provider code in request details. Initial HTTP 200 does not prove successful completion. |
 | `http_headers_timeout` · 504 | The optional Relay native HTTP deadline expired before response headers; upstream execution may have started. | Check the client outcome before manually resending. Increase or unset `ZENITH_RELAY_HTTP_HEADERS_TIMEOUT_SECONDS` for slow sources. No automatic replay or account penalty occurs. |
 | `http_send_start_timeout` · 504 | HTTP/3 startup exceeded 10 seconds, not a generation timeout. | Check connectivity and the client outcome before resending. Later requests temporarily use TCP; no automatic replay or account penalty. To disable HTTP/3, restart with `ZENITH_RELAY_HTTP3=0`. |
-| `stream_invalid` | Invalid stream event. | Report the request ID and `relay_stream_parser` diagnostics from request details: category, position and frame sizes, without content. For missing diagnostics, reproduce on the current build. |
+| `stream_invalid` | Invalid stream event. | Share the request ID and the `relay_stream_parser` entry from the diagnostic export. |
 | `stream_incomplete`, `upstream_websocket_closed`, `upstream_websocket` | The connection ended before completion. | Check network and proxy timeouts. Retry the unfinished step from the client; a partial answer is not a completed answer. |
 | `stream_first_output_timeout`, `stream_idle_timeout`, `websocket_idle_timeout`, `stream_semantic_timeout` | Legacy/external timeout; current Relay does not time out active generation. | Update Relay, check provider/proxy limits, or cancel a stuck request in the client. |
 | `stream_event_too_large` | A WebSocket frame exceeded Relay's 64 MiB frame limit. | Shorten that turn or use HTTP streaming. For a small request, verify the API and report its error ID. |
