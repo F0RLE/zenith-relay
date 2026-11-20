@@ -123,8 +123,9 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     expect((await probe.get(api + "admin/devices")).status()).toBe(401);
     expect((await probe.get(api + "device/connections")).status()).toBe(401);
     expect((await probe.post(api + "auth/customer/logout", { headers: { Origin: origin, "X-Relay-CSRF":acctB.csrf_token } })).status()).toBe(403);
-    const session = (await a.context().cookies()).find(v => v.name === "__Host-relay_customer");
-    expect(session).toMatchObject({ httpOnly: true, secure: true, sameSite: "Strict" });
+    expect(await a.context().cookies()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "__Host-relay_customer", httpOnly: true, secure: true, sameSite: "Strict" }),
+    ]));
     await login(other); await expect(other.getByRole("alert")).toHaveText(/Access was not granted/);
     expect((await other.context().request.get(api + "account")).status()).toBe(401);
     issue("customers",JSON.stringify([acctA.workspace_id,acctB.workspace_id]));

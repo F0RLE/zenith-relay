@@ -9,10 +9,10 @@ export function fixturePath(candidate, leaf) {
   const temporary = realpathSync(tmpdir());
   const absolute = resolve(candidate);
   const parts = relative(temporary, absolute).split(sep);
-  if (!/^relay-hosted-[A-Za-z0-9_-]{6,}$/.test(parts[0])
-    || parts.some(part => !/^[A-Za-z0-9_.-]+$/.test(part) || part === "." || part === ".."))
+  const rootName = parts.shift();
+  if (!/^relay-hosted-[A-Za-z0-9_-]{6,}$/.test(rootName))
     throw new Error("Path is outside the isolated Hosted fixture");
-  const root = join(temporary, parts[0]);
+  const root = join(temporary, rootName);
   let path = root;
   const rootStat = lstatSync(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
@@ -22,8 +22,11 @@ export function fixturePath(candidate, leaf) {
     if (!/^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,95}$/.test(leaf)) throw new Error("Invalid fixture leaf");
     parts.push(leaf);
   }
-  for (let i = 1; i < parts.length; i++) {
-    path = join(path, parts[i]);
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    if (!/^[A-Za-z0-9_.-]+$/.test(part) || part === "." || part === "..") throw new Error("Invalid fixture component");
+    path = join(path, part);
+    if (!path.startsWith(root + sep)) throw new Error("Expected a fixture child");
     try {
       const stat = lstatSync(path);
       if (stat.isSymbolicLink() || (i < parts.length - 1 ? !stat.isDirectory() : !stat.isFile() && !stat.isDirectory()))

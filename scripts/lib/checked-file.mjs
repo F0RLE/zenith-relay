@@ -19,7 +19,7 @@ export function openCheckedFile(path, { directories = false, writable = false } 
   // required on every platform; these flags additionally reject POSIX links/FIFOs.
   const access = writable && (before.isFile() || process.platform === "win32") ? fs.constants.O_RDWR : fs.constants.O_RDONLY;
   const flags = access | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
-  const fd = io.openSync(path, flags);
+  const fd = io.openSync(path, flags, 0o600);
   try {
     const stat = io.fstatSync(fd, { bigint: true });
     if (!sameFileState(before, stat)) throw fileChanged(path);

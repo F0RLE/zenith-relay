@@ -24,6 +24,13 @@ function fixture(run) {
 }
 
 test("checked text reads a regular file and skips directories", () => fixture(({ root, path, io }) => {
+  const open = io.openSync;
+  io.openSync = (path, flags, mode) => {
+    expect(flags & fs.constants.O_CREAT).toBe(0);
+    expect(flags & fs.constants.O_TRUNC).toBe(0);
+    expect(mode).toBe(0o600);
+    return open(path, flags, mode);
+  };
   expect(readCheckedText(path, io)).toBe("synthetic source");
   expect(readCheckedText(root, io)).toBeNull();
 }));

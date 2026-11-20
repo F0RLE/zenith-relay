@@ -99,7 +99,8 @@ fn verifier_rejects_wrong_keys_algorithms_and_ambiguous_jwks() {
     assert!(check(&encode(&header, &claims, &key).unwrap(), &keys).is_err());
     let hmac = EncodingKey::from_secret(
         ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref(),
-    );
+    )
+    .unwrap();
     assert!(
         check(
             &encode(&Header::new(Algorithm::HS256), &claims, &hmac).unwrap(),
