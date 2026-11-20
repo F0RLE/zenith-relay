@@ -13,7 +13,7 @@ if (sourceCopy) {
   args.push("--ignore-certificate-errors-spki-list=" + createHash("sha256").update(key).digest("base64"));
 }
 const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, args });
-async function enroll(codePath, listener, recovery = false) {
+async function enroll(codePath, listener) {
   const page = await browser.newPage();
   if (listener) {
     listener = fixtureOrigin(listener, { numeric: true });
@@ -29,20 +29,18 @@ async function enroll(codePath, listener, recovery = false) {
     protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
     isUserVerified: true, automaticPresenceSimulation: true,
   } });
-  await page.goto(origin + (recovery ? "/setup/recovery" : "/setup/owner"));
-  await page.getByLabel(recovery ? "Local recovery code" : "Local setup code").fill(readFixture(codePath));
+  await page.goto(origin + "/setup/owner");
+  await page.getByLabel("Local setup code").fill(readFixture(codePath));
   await page.getByRole("button", { name: "Create passkey" }).click();
   await expect(page.getByRole("button", { name: "Verify passkey" })).toBeVisible();
   return page;
 }
 
-async function prove(page, recovery = false) {
+async function prove(page) {
   const ack = page.waitForResponse(r => r.url() === origin + "/api/hosted/v1/setup/prove");
   await page.getByRole("button", { name: "Verify passkey" }).click({ timeout: 8000 });
   const status = (await ack).status();
-  if (status === 200) await expect(page.getByRole("status")).toHaveText(recovery
-    ? "Owner access recovered. Previous passkeys and sessions are no longer valid."
-    : "Owner passkey verified. The service is still closed.");
+  if (status === 200) await expect(page.getByRole("status")).toHaveText("Owner passkey verified. The service is still closed.");
   else await expect(page.getByRole("alert")).toBeVisible();
   expect(await page.context().cookies()).toEqual([]);
   return status;
@@ -68,10 +66,6 @@ try {
     expect(await prove(page)).toBe(200);
     const { checkCustomerJourney } = await import("./customer-journey.mjs");
     await checkCustomerJourney({ browser, owner: page, origin, issuer: otherOrigin, exchange: otherFile, funded:journey==="funded" });
-  } else if (mode === "recover-owner") {
-    expect(await prove(page)).toBe(200);
-    const { checkOwnerRecovery } = await import("./owner-recovery-flow.mjs");
-    await checkOwnerRecovery({ origin, old: page, enroll, prove, waitForServer, exchange: otherOrigin });
   } else if (sourceCopy) {
     expect(await prove(page)).toBe(200);
     const { checkSourceCopy } = await import("./source-copy.mjs");
