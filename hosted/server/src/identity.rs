@@ -10,8 +10,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use oidc::{Failure, Provider};
-use openidconnect::{Nonce, PkceCodeVerifier};
+use oidc::{Failure, Nonce, PkceCodeVerifier, Provider};
 use ring::{hmac, rand::SystemRandom};
 use serde_json::json;
 use std::{

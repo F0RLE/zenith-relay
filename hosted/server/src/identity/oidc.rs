@@ -1,14 +1,11 @@
-use openidconnect::{
-    AdditionalClaims, ClientId, IdToken, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
-    core::{
-        CoreGenderClaim, CoreIdTokenVerifier, CoreJsonWebKeySet, CoreJweContentEncryptionAlgorithm,
-        CoreJwsSigningAlgorithm,
-    },
-};
+mod token;
+use jsonwebtoken::jwk::JwkSet;
+use oauth2::PkceCodeChallenge;
+pub(super) use oauth2::{CsrfToken as Nonce, PkceCodeVerifier};
 use reqwest::{Client, Response, header};
 use ring::hmac;
-use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use serde::Deserialize;
+use std::time::Duration;
 use url::{Host, Url};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -78,14 +75,6 @@ pub(super) struct Provider {
     digest_key: hmac::Key,
     http: Client,
 }
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Validity {
-    nbf: Option<i64>,
-}
-impl AdditionalClaims for Validity {}
-type CustomerToken =
-    IdToken<Validity, CoreGenderClaim, CoreJweContentEncryptionAlgorithm, CoreJwsSigningAlgorithm>;
 
 fn tag(key: &hmac::Key, fields: &[&[u8]]) -> [u8; 32] {
     let mut ctx = hmac::Context::with_key(key);
@@ -177,7 +166,7 @@ impl Provider {
         }
         let bytes = bounded_json(response, false).await?;
         let Exchange { id_token } = serde_json::from_slice(&bytes).map_err(|_| Denied)?;
-        let id: CustomerToken = Zeroizing::new(id_token).parse().map_err(|_| Denied)?;
+        let id = Zeroizing::new(id_token);
         let response = self
             .http
             .get(&s.jwks_uri)
@@ -185,35 +174,12 @@ impl Provider {
             .send()
             .await
             .map_err(|_| Unavailable)?;
-        let keys: CoreJsonWebKeySet = serde_json::from_slice(&bounded_json(response, true).await?)
+        let keys: JwkSet = serde_json::from_slice(&bounded_json(response, true).await?)
             .map_err(|_| Unavailable)?;
-        if keys.keys().is_empty() || keys.keys().len() > 32 {
+        if keys.keys.is_empty() || keys.keys.len() > 32 {
             return Err(Unavailable);
         }
-        let checker = CoreIdTokenVerifier::new_public_client(
-            ClientId::new(s.client_id.clone()),
-            IssuerUrl::new(s.issuer.clone()).map_err(|_| Unavailable)?,
-            keys,
-        )
-        .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256]);
-        let claims = id.claims(&checker, &nonce).map_err(|_| Denied)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Unavailable)?
-            .as_secs() as i64;
-        let sub = claims.subject().as_str();
-        if claims.issuer().as_str() != s.issuer
-            || claims.audiences().len() != 1
-            || claims
-                .authorized_party()
-                .is_some_and(|azp| azp.as_str() != s.client_id)
-            || !(now - 210..=now + 30).contains(&claims.issue_time().timestamp())
-            || claims.additional_claims().nbf.is_some_and(|t| t > now)
-            || !(1..=255).contains(&sub.len())
-            || !sub.bytes().all(|b| b.is_ascii() && !b.is_ascii_control())
-        {
-            return Err(Denied);
-        }
+        let sub = token::subject(&id, &keys, &s.issuer, &s.client_id, nonce.secret())?;
         Ok(tag(
             &self.digest_key,
             &[

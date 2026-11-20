@@ -12,7 +12,8 @@ unsafe_code = "forbid"
 [dependencies]
 atomicwrites = "0.4.4"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-openidconnect = { version = "4.1.0", default-features = false }
+oauth2 = { version = "5.0.0", default-features = false }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -38,3 +39,7 @@ zenith-relay-hosted-device = { path = "../../crates/relay-hosted-device" }
 [target.'cfg(windows)'.dependencies]
 # Build the passkey verifier without a system-wide OpenSSL installation.
 openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+base64 = "0.22.1"
+openssl = "0.10"
