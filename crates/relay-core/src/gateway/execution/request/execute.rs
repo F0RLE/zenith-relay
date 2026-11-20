@@ -11,9 +11,12 @@ use crate::gateway::response::attach_request_id;
 pub(in crate::gateway::execution) async fn execute_request(
     context: RequestExecution,
 ) -> Response<Body> {
-    let scope = context
-        .runtime
-        .track_request_usage(&context.request_id, &context.budget);
+    let scope = context.runtime.track_request_usage_from(
+        &context.request_id,
+        &context.budget,
+        context.started,
+        context.ingress_timing,
+    );
     let request_id = context.request_id.clone();
     let mut response = execute_request_inner(context).await;
     attach_request_id(&mut response, &request_id);
@@ -30,6 +33,8 @@ pub(in crate::gateway::execution) async fn execute_request(
 async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
     let started = Instant::now();
     let RequestExecution {
+        started: request_started,
+        ingress_timing,
         mut tool_policy,
         runtime,
         key,
@@ -42,6 +47,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         forwarded_headers,
         client_context_id,
         client_affinity_id,
+        siwc_socket_context,
         mut state,
         client_wire_api,
         responses_lite,
@@ -112,6 +118,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
         {
             state.continuation.response_affinity_key = None;
         }
+        let selection_started = runtime.diagnostics_enabled().then(Instant::now);
         let (mut incompatible, mut admitted, admission_error) =
             incompatible_routes(RouteCompatibility {
                 runtime: &runtime,
@@ -218,7 +225,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             }
         };
         state.continuation.detach_repair_owner();
-        let Some(route) = admitted.remove(&selected.candidate_id) else {
+        let Some(mut route) = admitted.remove(&selected.candidate_id) else {
             state
                 .retry
                 .preparation_exclusions
@@ -227,6 +234,12 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             drop(lease);
             continue;
         };
+        if route.account_transport == crate::runtime::AccountTransport::Siwc {
+            route.siwc_socket_context.clone_from(&siwc_socket_context);
+        }
+        if let Some(started) = selection_started {
+            runtime.record_request_selection(&request_id, started);
+        }
         let driven = drive_selected_attempt(DriveAttemptInput {
             route,
             selected,
@@ -296,6 +309,8 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
             state.continuation.confirmed_response_missing = false;
             state.retry.tried.clear();
             return Box::pin(execute_request(RequestExecution {
+                started: request_started,
+                ingress_timing,
                 tool_policy,
                 runtime,
                 key,
@@ -308,6 +323,7 @@ async fn execute_request_inner(context: RequestExecution) -> Response<Body> {
                 forwarded_headers,
                 client_context_id,
                 client_affinity_id,
+                siwc_socket_context,
                 state,
                 client_wire_api,
                 responses_lite,

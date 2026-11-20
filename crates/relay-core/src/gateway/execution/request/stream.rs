@@ -196,10 +196,11 @@ pub(super) async fn open_response_stream(stream_input: OpenStreamInput<'_>) -> O
                 .as_ref()
                 .is_some_and(|error| responses_tool_call_is_missing_output_message(&error.message));
             let tool_links_rejected = bootstrap_failure.responses_tool_call_links_rejected;
+            let execution = bootstrap_failure.execution_for_transport(route.account_transport);
             let mut failure = bootstrap_failure
                 .failure
                 .with_retry_headers(response_headers);
-            failure.execution = bootstrap_failure.execution;
+            failure.execution = execution;
             *last_preserved_upstream_error = bootstrap_failure.preserved;
             let upstream_error = bootstrap_failure.upstream_error;
             let mut event = usage_event(

@@ -212,6 +212,7 @@ pub(super) fn prepare_request_attempt(
             tool_policy.diagnostics.client_context.is_some(),
         ) {
             Ok(original) => {
+                route.cache_context_relay_prefix = original.relay_prefix();
                 Some(original.with_agent_messages(runtime.agent_message_context(&key.id)))
             }
             Err(error) => return stop_for_adapter_error(error, last_adapter_error),

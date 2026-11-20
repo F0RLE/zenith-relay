@@ -220,6 +220,7 @@ async fn serve_http_fallback_request(
             budget: client_request.budget.clone(),
             transport: crate::UsageTransport::Websocket,
             transport_fallback: Some(transport_fallback),
+            siwc_socket_context: downstream.siwc_socket_context(&client_request),
             service_tier_policy: client_request.service_tier_policy.clone(),
             recovery,
         });

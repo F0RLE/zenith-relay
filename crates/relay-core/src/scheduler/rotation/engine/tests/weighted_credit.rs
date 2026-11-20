@@ -48,6 +48,89 @@ fn reserve_and_release(engine: &mut RotationEngine, request: &RotationRequest) -
 }
 
 #[test]
+fn scoped_requests_keep_their_shares_across_interleaved_owned_work() {
+    for mode in [RotationMode::Automatic, RotationMode::WeightedRoundRobin] {
+        for (weight, expected_a) in [(1, 20), (3, 10)] {
+            let mut engine = engine_with([
+                candidate("a", 0, 1),
+                candidate("b", 0, weight),
+                candidate("c", 0, 1),
+            ]);
+            engine.set_mode(mode);
+            let scope = BTreeSet::from(["a".into(), "b".into()]);
+            let mut selected_a = 0;
+            for id in 1..=40 {
+                let scoped = request(id * 2).with_allowed_candidates(scope.clone());
+                selected_a += usize::from(reserve_and_release(&mut engine, &scoped) == "a");
+                let owned = request(id * 2 + 1).with_owner("c");
+                assert_eq!(reserve_and_release(&mut engine, &owned), "c");
+            }
+            assert_eq!(selected_a, expected_a, "{mode:?}, weight {weight}");
+        }
+    }
+}
+
+#[test]
+fn a_forced_turn_does_not_clip_existing_weighted_credit() {
+    let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
+    for id in 1..=60 {
+        reserve_and_release(&mut engine, &preferred_request(id, "a"));
+    }
+    let before = engine.rotation_credit.clone();
+    assert_eq!(
+        reserve_and_release(&mut engine, &request(61).with_owner("a")),
+        "a"
+    );
+    assert_eq!(engine.rotation_credit, before);
+}
+
+#[test]
+fn round_robin_resumes_each_disjoint_scope_in_saved_order() {
+    let mut engine = engine_with(["a", "b", "c", "d"].map(|id| candidate(id, 0, 1)));
+    engine.set_mode(RotationMode::RoundRobin);
+    for i in 0..10 {
+        for (scope, expected) in [
+            (["a", "b"], if i % 2 == 0 { "a" } else { "b" }),
+            (["c", "d"], if i % 2 == 0 { "c" } else { "d" }),
+        ] {
+            let request = request(2 * i + u64::from(scope[0] == "c"))
+                .with_allowed_candidates(BTreeSet::from(scope.map(String::from)));
+            assert_eq!(engine.select(&request, 100).unwrap().candidate_id, expected);
+            assert_eq!(reserve_and_release(&mut engine, &request), expected);
+        }
+    }
+}
+
+#[test]
+fn scoped_turn_history_follows_the_physical_member_and_prunes_retired_keys() {
+    let alias = |name: &str, key: &str| candidate(name, 0, 1).with_capacity(key, 1);
+    let mut engine = engine_with([
+        alias("a", "shared"),
+        alias("alias", "shared"),
+        candidate("b", 0, 1),
+    ]);
+    engine.set_mode(RotationMode::RoundRobin);
+    for (i, id) in ["a", "alias", "b"].into_iter().enumerate() {
+        let scoped = request(i as u64).with_allowed_candidates(BTreeSet::from([id.to_owned()]));
+        assert_eq!(reserve_and_release(&mut engine, &scoped), id);
+    }
+    assert_eq!(
+        engine.round_robin_cursor["responses:gpt"].last_turn.len(),
+        2
+    );
+    engine.remove("a").unwrap();
+    assert!(
+        engine.round_robin_cursor["responses:gpt"]
+            .last_turn
+            .contains_key("shared")
+    );
+    engine.upsert(alias("alias", "replacement")).unwrap();
+    let turns = &engine.round_robin_cursor["responses:gpt"].last_turn;
+    assert_eq!(turns.len(), 1);
+    assert!(turns.contains_key("b"));
+}
+
+#[test]
 fn sticky_traffic_keeps_affinity_without_accumulating_unbounded_rotation_debt() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
     for id in 1..=10_000 {

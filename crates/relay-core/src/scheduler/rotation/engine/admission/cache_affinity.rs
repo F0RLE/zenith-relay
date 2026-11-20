@@ -19,7 +19,11 @@ impl RotationEngine {
             } else {
                 CacheAffinitySelection::Other
             },
-            reason: CacheAffinityReason::NoBinding,
+            reason: if request.owner.is_some() {
+                CacheAffinityReason::ResponseOwner
+            } else {
+                CacheAffinityReason::NoBinding
+            },
             owner_block_reason: None,
             preferred: preferred.and_then(|id| self.cache_affinity_member(id, now_ms)),
             selected: selected_member,
@@ -28,7 +32,7 @@ impl RotationEngine {
             best_provider_credits_unlimited: false,
             quota_low_water_basis_points: preferred
                 .filter(|id| self.is_primary_soft_preference(request, id))
-                .map(|_| CACHE_AFFINITY_QUOTA_LOW_WATER_BASIS_POINTS),
+                .map(|id| self.warm_quota_low_water(id)),
             quota_switch_margin_basis_points: preferred
                 .map_or(QUOTA_SWITCH_MARGIN_BASIS_POINTS, |id| {
                     self.quota_switch_margin(request, id)
@@ -39,10 +43,10 @@ impl RotationEngine {
         let Some(preferred) = preferred else {
             return Some(diagnostics);
         };
-        diagnostics.reason = if preferred == selected {
-            CacheAffinityReason::Retained
-        } else if request.owner.is_some() {
+        diagnostics.reason = if request.owner.is_some() {
             CacheAffinityReason::ResponseOwner
+        } else if preferred == selected {
+            CacheAffinityReason::Retained
         } else if !self.mode.is_adaptive() {
             CacheAffinityReason::RoutingPolicy
         } else {
@@ -119,7 +123,7 @@ impl RotationEngine {
         let runtime = self.candidates.get(id)?;
         let credits = self.fresh_provider_credits(id, now_ms);
         Some(CacheAffinityMember {
-            quota_remaining_basis_points: self.fresh_quota_remaining(id, now_ms),
+            quota_remaining_basis_points: self.fresh_quota_observation(id, now_ms),
             provider_credits_micro_units: credits.filter(|value| *value != u64::MAX),
             provider_credits_unlimited: credits == Some(u64::MAX),
             in_flight: self.capacity_in_flight(&runtime.candidate.capacity_key),

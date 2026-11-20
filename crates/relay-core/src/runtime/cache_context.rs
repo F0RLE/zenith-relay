@@ -156,6 +156,7 @@ impl CacheContextStore {
         CacheContextObservation { inner: observation }
     }
 
+    #[cfg(test)]
     fn prepare(
         &self,
         observation: &CacheContextObservation,
@@ -163,13 +164,26 @@ impl CacheContextStore {
         candidate_id: &str,
         now_ms: u64,
     ) -> CacheContextDiagnostics {
+        self.prepare_with_prefix(observation, upstream, candidate_id, now_ms, 0..0)
+    }
+
+    fn prepare_with_prefix(
+        &self,
+        observation: &CacheContextObservation,
+        upstream: &Value,
+        candidate_id: &str,
+        now_ms: u64,
+        relay_prefix: std::ops::Range<usize>,
+    ) -> CacheContextDiagnostics {
         let observed = &observation.inner;
         let upstream = self
             .inner
             .salt
             .as_ref()
             .filter(|_| observed.client.is_some())
-            .and_then(|salt| RequestFingerprint::capture(upstream, salt))
+            .and_then(|salt| {
+                RequestFingerprint::capture_with_relay_prefix(upstream, salt, relay_prefix)
+            })
             .map(Arc::new);
         let mut diagnostics = diagnostics(observed, upstream.as_deref(), now_ms);
         let candidate = self
@@ -318,11 +332,12 @@ impl GatewayRuntime {
         }
         if let Some(routing) = route.routing.as_mut() {
             let now_ms = super::runtime_now_ms();
-            let diagnostics = self.session_state.cache_context.prepare(
+            let diagnostics = self.session_state.cache_context.prepare_with_prefix(
                 observation,
                 upstream,
                 &route.candidate_id,
                 now_ms,
+                route.cache_context_relay_prefix.clone(),
             );
             if route.account_transport == AccountTransport::Siwc {
                 add_provider_comparison(observation, upstream, &diagnostics, now_ms);
@@ -347,11 +362,12 @@ impl GatewayRuntime {
             return;
         }
         if let Some(observation) = route.cache_context_observation.as_ref() {
-            self.session_state.cache_context.prepare(
+            self.session_state.cache_context.prepare_with_prefix(
                 observation,
                 upstream,
                 &route.candidate_id,
                 super::runtime_now_ms(),
+                route.cache_context_relay_prefix.clone(),
             );
         }
     }

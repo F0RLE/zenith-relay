@@ -35,11 +35,24 @@ impl ImageAttempt<'_> {
             success,
             status.as_u16(),
             category,
-            self.started.elapsed().as_millis() as u64,
+            self.route
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.transport.as_ref()?.upstream_response_ms)
+                .unwrap_or_else(|| self.started.elapsed().as_millis() as u64),
         );
         event.image_usage = Some(crate::usage::ImageUsage::default());
         if let Some(routing) = event.routing.as_mut() {
             routing.endpoint_kind = Some("images".to_owned());
+            if let Some(payload) = routing
+                .transport
+                .as_mut()
+                .and_then(|transport| transport.request_payload.as_mut())
+                && payload.mode == crate::usage::RequestPayloadMode::Full
+            {
+                payload.full_request_reason =
+                    Some(crate::usage::FullRequestReason::StatelessImageRequest);
+            }
         }
         event
     }

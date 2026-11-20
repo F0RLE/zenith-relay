@@ -85,6 +85,47 @@ async fn removed_retry_owner_does_not_hold_a_portable_request() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn readding_the_same_id_cannot_inherit_a_pending_owner_retry() {
+    for allow_fallback in [false, true] {
+        let runtime = runtime();
+        runtime.set_route_recovery_enabled(true);
+        let budget = SharedRequestBudget::for_incoming_request(4);
+        let owner = rejected_owner(&runtime, &budget, allow_fallback).await;
+        {
+            let mut scheduler = runtime.lock_scheduler();
+            let removed = scheduler.remove(&owner).unwrap();
+            scheduler.upsert(removed);
+        }
+        let selected = runtime
+            .select_and_reserve_with_budget(
+                &key(&runtime),
+                "model-a",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                crate::unix_time_ms(),
+                &budget,
+            )
+            .await;
+        if allow_fallback {
+            assert_ne!(selected.unwrap().0.candidate_id, owner);
+        } else {
+            assert!(
+                selected.is_none(),
+                "only the original registration may retry"
+            );
+            assert!(!budget.can_dispatch());
+        }
+        assert_eq!(budget.dispatches(), 1);
+        assert!(budget.retry_candidate().is_none());
+        let fresh = SharedRequestBudget::for_incoming_request(1);
+        let lease = reserve_from(&runtime, &fresh, WireApi::Responses, &owner).await;
+        lease.begin_rotation_http_dispatch().unwrap();
+        lease.settle_rotation_success(crate::unix_time_ms());
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelling_a_retry_releases_its_waiter_without_another_dispatch() {
     let runtime = runtime();
     runtime.set_route_recovery_enabled(true);

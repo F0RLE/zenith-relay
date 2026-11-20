@@ -24,6 +24,8 @@ pub(in crate::gateway) struct ReservedCandidate {
 }
 
 pub(super) struct RequestExecution {
+    pub(super) started: tokio::time::Instant,
+    pub(super) ingress_timing: crate::runtime::RequestIngressTiming,
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) runtime: Arc<GatewayRuntime>,
     pub(super) key: AuthenticatedKey,
@@ -36,6 +38,7 @@ pub(super) struct RequestExecution {
     pub(super) forwarded_headers: HeaderMap,
     pub(super) client_context_id: Option<String>,
     pub(super) client_affinity_id: Option<String>,
+    pub(super) siwc_socket_context: Option<String>,
     pub(super) state: AttemptState,
     pub(super) client_wire_api: WireApi,
     pub(super) responses_lite: Option<HeaderValue>,

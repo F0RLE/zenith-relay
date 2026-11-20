@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub use snapshot::{
     ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
-    ModelRetryRuntime, RequestTiming, RoutingDiagnostics, SelectionReason,
+    ModelRetryRuntime, RequestTiming, RequestTimingPhases, RoutingDiagnostics, SelectionReason,
 };
 
 // Keep response ownership across busy personal pools without allowing an
@@ -78,6 +78,7 @@ pub struct Selection {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
+    keep_unknown_quota_affinity: BTreeSet<String>,
     spend_deadlines: BTreeMap<String, crate::quota::QuotaSpendDeadline>,
     cooldown_metadata: BTreeMap<(String, String), CooldownMetadata>,
     shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
@@ -93,8 +94,9 @@ pub struct PoolScheduler {
     execution_fences: BTreeMap<String, (u64, u32)>,
     next_execution_fence_epoch: u64,
     capability_blocks: BTreeSet<(String, String)>,
-    /// Only structural permission edits advance this fence. Priority and
-    /// weight updates leave already reserved, still-permitted work intact.
+    /// Registrations and structural permission edits share one sequence so a
+    /// removed ID cannot match a pending retry when it is registered again.
+    next_candidate_permission_revision: u64,
     candidate_permission_revisions: BTreeMap<String, u64>,
     /// Removed candidates remain as tombstones while leases are active.
     retired_candidates: BTreeSet<String>,
@@ -116,6 +118,7 @@ impl PoolScheduler {
         Self {
             candidates: BTreeMap::new(),
             quota_references: BTreeMap::new(),
+            keep_unknown_quota_affinity: BTreeSet::new(),
             spend_deadlines: BTreeMap::new(),
             cooldown_metadata: BTreeMap::new(),
             shared_rate_limits: BTreeMap::new(),
@@ -137,6 +140,7 @@ impl PoolScheduler {
             execution_fences: BTreeMap::new(),
             next_execution_fence_epoch: 0,
             capability_blocks: BTreeSet::new(),
+            next_candidate_permission_revision: 0,
             candidate_permission_revisions: BTreeMap::new(),
             retired_candidates: BTreeSet::new(),
             rotation: RotationEngine::default(),
@@ -154,33 +158,15 @@ impl PoolScheduler {
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(
-            request,
-            InFlightLane::Text,
-            RotationOperation::Text,
-            None,
-            false,
-        )
+        self.select_for_operation(request, RotationOperation::Text, None, false)
     }
 
     pub(crate) fn select_image(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(
-            request,
-            InFlightLane::Image,
-            RotationOperation::Image,
-            None,
-            false,
-        )
+        self.select_for_operation(request, RotationOperation::Image, None, false)
     }
 
     pub(crate) fn select_compaction(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(
-            request,
-            InFlightLane::Text,
-            RotationOperation::Compaction,
-            None,
-            false,
-        )
+        self.select_for_operation(request, RotationOperation::Compaction, None, false)
     }
 
     pub(crate) fn select_with_rotation_capture(
@@ -189,28 +175,20 @@ impl PoolScheduler {
         operation: RotationOperation,
         capture: Option<&mut Option<RotationDebugCapture>>,
     ) -> Option<Selection> {
-        let lane = if operation == RotationOperation::Image {
-            InFlightLane::Image
-        } else {
-            InFlightLane::Text
-        };
-        self.select_for_operation(request, lane, operation, capture, true)
+        self.select_for_operation(request, operation, capture, true)
     }
 
     fn select_for_operation(
         &mut self,
         request: SelectionRequest<'_>,
-        lane: InFlightLane,
         operation: RotationOperation,
         capture: Option<&mut Option<RotationDebugCapture>>,
         diagnostics_enabled: bool,
     ) -> Option<Selection> {
+        let lane = operation.into();
         let mut prepared = self.prepare_rotation_request(&request, operation);
-        if let Some(allowed) = prepared
-            .as_mut()
-            .and_then(|rotation| rotation.allowed_candidates.as_mut())
-        {
-            allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
+        if let Some(projected) = &mut prepared {
+            self.retain_free_lanes(projected);
         }
         if let Some(capture) = capture {
             *capture = Some(self.capture_rotation(&request, prepared.as_ref(), lane, operation));

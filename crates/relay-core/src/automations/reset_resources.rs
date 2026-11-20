@@ -3,11 +3,12 @@ use super::{WakeTask, WakeTrigger};
 use crate::accounts::{
     AccountAuthState, AccountHealthState, AccountRouteGroup, management::ManagedAccount,
 };
-use crate::quota::{QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus};
+use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus};
 use std::collections::BTreeMap;
 
 pub const THRESHOLD_PREFIX: &str = "weekly-threshold:";
 pub const PENDING_SUFFIX: &str = ":pending";
+const WEEKLY_WINDOW_MINUTES: u32 = 7 * 24 * 60;
 
 pub fn registration_eligible<A: ManagedAccount>(record: &A) -> bool {
     let account = record.account();
@@ -101,6 +102,23 @@ pub fn subscription_allows_reset(subscription: &Subscription, now_ms: u64) -> bo
         .is_none_or(|expiry| expiry > now_ms)
 }
 
+pub fn weekly_reset_window(quota: &QuotaSnapshot, now_ms: u64) -> Option<&QuotaWindow> {
+    quota.secondary.as_ref().filter(|window| {
+        window.kind == QuotaWindowKind::Secondary
+            && window.window_minutes == Some(WEEKLY_WINDOW_MINUTES)
+            && window.reset_at_ms.is_some_and(|reset| reset > now_ms)
+    })
+}
+
+pub fn fresh_weekly_reset_window(quota: &QuotaSnapshot, now_ms: u64) -> Option<&QuotaWindow> {
+    weekly_reset_window(quota, now_ms).filter(|window| {
+        quota.error.is_none()
+            && now_ms
+                .checked_sub(window.observed_at_ms)
+                .is_some_and(|age| age <= crate::scheduler::QUOTA_STALE_AFTER_MS)
+    })
+}
+
 pub fn threshold_window<'a, A: ManagedAccount>(
     reader: &'a A,
     selected: &A,
@@ -117,19 +135,9 @@ pub fn threshold_window<'a, A: ManagedAccount>(
     {
         return None;
     }
-    let window = account.quota.secondary.as_ref()?;
+    let window = fresh_weekly_reset_window(&account.quota, now_ms)?;
     let remaining = window.available_basis_points?;
-    if window.kind != QuotaWindowKind::Secondary
-        || remaining >= 10_000
-        || window.explicitly_full == Some(true)
-        || window
-            .window_minutes
-            .is_some_and(|minutes| minutes != 10_080)
-        || window.reset_at_ms.is_none_or(|reset| reset <= now_ms)
-        || !now_ms
-            .checked_sub(window.observed_at_ms)
-            .is_some_and(|age| age <= crate::scheduler::QUOTA_STALE_AFTER_MS)
-    {
+    if remaining >= 10_000 || window.explicitly_full == Some(true) {
         return None;
     }
     tasks

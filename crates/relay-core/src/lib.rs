@@ -152,6 +152,7 @@ pub use scheduler::{
     RotationDebugCapture, RotationDebugSink, RotationPreset, RoutingDiagnostics, RuntimeCandidate,
     Selection, SelectionReason, SelectionRequest, account_candidate_health, resolve_pool_routing,
 };
+pub use sources::observed_responses_models;
 pub use sources::{
     CacheWriteTtl, CapabilityOrigin, CapabilityStatus, ConnectionProbeObservation,
     ConnectionProbeStatus, LocalGatewayKey, MAX_SOURCE_RECOVERY_DELAY_SECONDS,

@@ -123,7 +123,12 @@ pub(super) async fn dispatch_request_attempt(
             budget,
             tool_use,
         ) {
-            Ok((mut body, session)) => {
+            Ok(super::super::basis_points::discovery::native::PreparedDiscovery {
+                mut body,
+                session,
+                relay_prefix_items,
+            }) => {
+                route.cache_context_relay_prefix = 0..relay_prefix_items;
                 if let Some(observation) = route.cache_context_observation.clone() {
                     runtime.observe_cache_context(&observation, &mut route, &mut body);
                 }
@@ -288,7 +293,10 @@ pub(super) async fn dispatch_request_attempt(
                 turn_scope: turn_scope.as_ref(),
                 budget: Some(budget),
                 lease: Some(lease),
-                usage_event: Some((&authorization_event, started)),
+                usage_event: Some(
+                    crate::runtime::DispatchUsage::tracked(&authorization_event, started)
+                        .with_siwc_socket_context(route.siwc_socket_context.as_deref()),
+                ),
             },
             attachment_owner.as_ref(),
         )

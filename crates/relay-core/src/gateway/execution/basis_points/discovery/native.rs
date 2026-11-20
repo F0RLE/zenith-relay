@@ -94,17 +94,26 @@ fn lookup_declaration() -> Value {
         },"additionalProperties":false},"strict":false})
 }
 
+pub(in crate::gateway::execution) struct PreparedDiscovery {
+    pub body: Value,
+    pub session: Option<DiscoverySession>,
+    pub relay_prefix_items: usize,
+}
+
 pub(in crate::gateway::execution) fn prepare_dispatch(
     original: &Value,
     upstream: &Value,
     budget: &crate::scheduler::rotation::SharedRequestBudget,
     tool_use: &mut ToolUseDiagnostics,
-) -> Result<(Value, Option<DiscoverySession>), AdapterError> {
-    // Client history is not evidence that our private helper owns this name.
-    // Keep native forwarding rather than shadowing a past client declaration
-    // or treating its next invocation as an internal catalog operation.
+) -> Result<PreparedDiscovery, AdapterError> {
+    let passthrough = || PreparedDiscovery {
+        body: upstream.clone(),
+        session: None,
+        relay_prefix_items: 0,
+    };
+    // Preserve native forwarding for client tools that use the private helper's name.
     if history_uses_lookup_name(original) || budget.with_budget(|budget| budget.remaining()) < 2 {
-        return Ok((upstream.clone(), None));
+        return Ok(passthrough());
     }
     let tools = client_tools(original)?;
     let mut settings = NativeSettings {
@@ -131,7 +140,7 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
         .iter()
         .any(|tool| tool.validate_parameter_schema().is_err())
     {
-        return Ok((upstream.clone(), None));
+        return Ok(passthrough());
     }
     let eager = loaded_names(&tools.iter().collect::<Vec<_>>(), &json!({}));
     let mut loaded = eager.clone();
@@ -248,7 +257,13 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
         preload_checkpoint: None,
         native: Some(settings),
     });
-    Ok((body, session))
+    // `additional_tools` and the catalog instruction at indices 0 and 1
+    // were inserted above. No client item can claim this provenance.
+    Ok(PreparedDiscovery {
+        body,
+        session,
+        relay_prefix_items: 2,
+    })
 }
 
 pub(in crate::gateway) fn capture_wire_catalog(tool_use: &mut ToolUseDiagnostics, body: &Value) {
@@ -262,6 +277,63 @@ pub(super) fn is_lookup(item: &Value) -> bool {
     item["type"] == "function_call"
         && item["name"] == NATIVE_LOOKUP
         && item.get("namespace").is_none_or(Value::is_null)
+}
+
+/// A done item may be published before terminal only when later calls cannot
+/// violate a single-call policy. The stream still proves index/terminal order.
+pub(in crate::gateway) fn can_stream_call(session: &DiscoverySession, item: &Value) -> bool {
+    session
+        .native
+        .as_ref()
+        .is_some_and(|native| native.parallel)
+        && matches!(
+            item["type"].as_str(),
+            Some("function_call" | "custom_tool_call")
+        )
+        && item["id"].as_str().is_some_and(|id| !id.trim().is_empty())
+        && item
+            .get("namespace")
+            .is_none_or(|value| value.is_null() || value.is_string())
+        && !is_lookup(item)
+        && validate_call(session, item).is_ok()
+}
+
+fn validate_call<'a>(session: &DiscoverySession, item: &'a Value) -> Result<&'a str, AdapterError> {
+    validate_tool_completion(item)?;
+    let id = item["call_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty() && !session.call_ids.contains(*id))
+        .ok_or_else(|| invalid_tool_output("output.call_id"))?;
+    if is_lookup(item) {
+        return Ok(id);
+    }
+    let name = client_tool_call_name(item.as_object().unwrap());
+    let tool = session
+        .tools
+        .iter()
+        .find(|tool| tool.matches_key(&name) && session.loaded.contains(&name))
+        .ok_or_else(|| invalid_tool_output("output.tool.name"))?;
+    if item["name"].as_str() != Some(tool.name.as_str())
+        || item.get("namespace").and_then(Value::as_str) != tool.namespace.as_deref()
+    {
+        return Err(invalid_tool_output("output.tool.namespace"));
+    }
+    if tool.kind == "function" && item["type"] == "function_call" {
+        let args = item["arguments"]
+            .as_str()
+            .and_then(|args| crate::strict_json::parse(args).ok())
+            .filter(Value::is_object)
+            .ok_or_else(|| invalid_tool_output("output.tool.arguments"))?;
+        if let Some(schema) = super::super::schema::parameter_schema(tool) {
+            super::super::schema::validate(&args, schema)?;
+        }
+    } else if tool.kind != "custom"
+        || item["type"] != "custom_tool_call"
+        || !item["input"].is_string()
+    {
+        return Err(invalid_tool_output("output.tool.type"));
+    }
+    Ok(id)
 }
 
 pub(super) fn advance(
@@ -303,42 +375,8 @@ pub(super) fn advance(
     }
     let mut ids = BTreeSet::new();
     for item in &calls {
-        validate_tool_completion(item)?;
-        let id = item["call_id"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| invalid_tool_output("output.call_id"))?;
-        if !ids.insert(id) || session.call_ids.contains(id) {
+        if !ids.insert(validate_call(session, item)?) {
             return Err(invalid_tool_output("output.call_id"));
-        }
-        if is_lookup(item) {
-            continue;
-        }
-        let name = client_tool_call_name(item.as_object().unwrap());
-        let tool = session
-            .tools
-            .iter()
-            .find(|tool| tool.matches_key(&name) && session.loaded.contains(&name))
-            .ok_or_else(|| invalid_tool_output("output.tool.name"))?;
-        if item["name"].as_str() != Some(tool.name.as_str())
-            || item.get("namespace").and_then(Value::as_str) != tool.namespace.as_deref()
-        {
-            return Err(invalid_tool_output("output.tool.namespace"));
-        }
-        if tool.kind == "function" && item["type"] == "function_call" {
-            let args = item["arguments"]
-                .as_str()
-                .and_then(|args| serde_json::from_str::<Value>(args).ok())
-                .filter(Value::is_object)
-                .ok_or_else(|| invalid_tool_output("output.tool.arguments"))?;
-            if let Some(schema) = super::super::schema::parameter_schema(tool) {
-                super::super::schema::validate(&args, schema)?;
-            }
-        } else if tool.kind != "custom"
-            || item["type"] != "custom_tool_call"
-            || !item["input"].is_string()
-        {
-            return Err(invalid_tool_output("output.tool.type"));
         }
     }
     let lookups = calls

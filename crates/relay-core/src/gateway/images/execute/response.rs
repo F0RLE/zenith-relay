@@ -93,6 +93,12 @@ pub(super) fn handle_collected_image(
         }
         event.upstream_error = Some(upstream_error);
         apply_failure_state(&mut event, failure_state);
+        if !retry && let Some(routing) = event.routing.as_mut() {
+            routing.attempt_outcome = Some(crate::AttemptOutcome::ReturnedFailure);
+            if let Some(transport) = routing.transport.as_mut() {
+                transport.downstream_http_status = Some(status.as_u16());
+            }
+        }
         emit_usage(runtime, event);
         if retry {
             return ImageAttemptStep::Retry(failure);
@@ -145,6 +151,9 @@ pub(super) fn handle_collected_image(
         event.error_category = Some(category.to_owned());
         if let Some(routing) = event.routing.as_mut() {
             routing.attempt_outcome = Some(crate::AttemptOutcome::ExecutionUncertain);
+            if let Some(transport) = routing.transport.as_mut() {
+                transport.downstream_http_status = Some(502);
+            }
         }
         emit_usage(runtime, event);
         return ImageAttemptStep::Respond(api_error(
@@ -154,9 +163,7 @@ pub(super) fn handle_collected_image(
         ));
     }
     event.success = true;
-    event.latency_ms = observed.started.elapsed().as_millis() as u64;
-    finish_image_success(runtime, lease, event);
-    ImageAttemptStep::Respond(proxy_json_response(
+    let response = proxy_json_response(
         status,
         &response_headers,
         Body::from(normalize_response(
@@ -167,7 +174,17 @@ pub(super) fn handle_collected_image(
                 .get("output_format")
                 .and_then(serde_json::Value::as_str),
         )),
-    ))
+    );
+    if let Some(transport) = event
+        .routing
+        .as_mut()
+        .and_then(|routing| routing.transport.as_mut())
+    {
+        transport.downstream_http_status = Some(status.as_u16());
+        transport.client_response_ready_ms = Some(observed.started.elapsed().as_millis() as u64);
+    }
+    finish_image_success(runtime, lease, event);
+    ImageAttemptStep::Respond(response)
 }
 
 fn finish_image_success(runtime: &GatewayRuntime, lease: &CandidateLease, mut event: UsageEvent) {

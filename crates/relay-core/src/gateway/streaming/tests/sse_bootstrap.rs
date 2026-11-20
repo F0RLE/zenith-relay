@@ -107,6 +107,39 @@ async fn bootstrap_eof_diagnostics_never_persist_unframed_provider_content() {
 }
 
 #[tokio::test]
+async fn siwc_websocket_bootstrap_keeps_transport_cause_without_authorizing_retry() {
+    use crate::runtime::siwc_socket::SiwcStreamError;
+    use reqwest::ResponseBuilderExt;
+
+    const PROGRESS: &[u8] = b"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"synthetic-private-id\",\"usage\":{\"output_tokens\":1}}}\n\n";
+    for (cause, label) in [
+        (SiwcStreamError::PeerClosed, "close_before_terminal"),
+        (SiwcStreamError::InvalidJson, "invalid_event_json"),
+        (SiwcStreamError::ResponseIdChanged, "response_id_changed"),
+    ] {
+        let upstream = axum::http::Response::builder()
+            .header("content-type", "text/event-stream")
+            .url("http://127.0.0.1/v1/responses".parse().unwrap())
+            .body(reqwest::Body::wrap_stream(stream::iter([
+                Ok(Bytes::from_static(PROGRESS)),
+                Err(cause),
+            ])))
+            .unwrap()
+            .into();
+        let failure = bootstrap_stream(upstream, None).await.err().unwrap();
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+        assert_eq!(failure.partial_body, PROGRESS);
+        let details = failure.upstream_error.unwrap();
+        let message = details.message.unwrap();
+        assert!(message.ends_with(&format!("siwc={label}")), "{message}");
+        assert!(!message.contains("synthetic-private"));
+    }
+}
+
+#[tokio::test]
 async fn observed_bootstrap_keeps_body_json_and_output_boundaries_distinct() {
     for (body, parsed, output, success) in [
         (": heartbeat\n\n", false, false, false),
@@ -121,6 +154,16 @@ async fn observed_bootstrap_keeps_body_json_and_output_boundaries_distinct() {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
             true,
             true,
+            true,
+        ),
+        (
+            concat!(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic\",",
+                "\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",",
+                "\"content\":[{\"type\":\"output_text\",\"text\":\"synthetic\"}]}]}}\n\n"
+            ),
+            true,
+            false,
             true,
         ),
         (

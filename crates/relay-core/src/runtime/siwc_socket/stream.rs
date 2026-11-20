@@ -3,17 +3,59 @@ use axum::body::Bytes;
 use reqwest::ResponseBuilderExt;
 use serde_json::Value;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SiwcStreamError {
+    Eof,
+    PeerClosed,
+    Read,
+    UnexpectedFrame,
+    HeartbeatTimeout,
+    Heartbeat,
+    InvalidJson,
+    InvalidEventType,
+    InvalidResponseId,
+    ResponseIdChanged,
+}
+
+impl SiwcStreamError {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Eof => "eof_before_terminal",
+            Self::PeerClosed => "close_before_terminal",
+            Self::Read => "read_failed",
+            Self::UnexpectedFrame => "unexpected_frame",
+            Self::HeartbeatTimeout => "heartbeat_timeout",
+            Self::Heartbeat => "heartbeat_failed",
+            Self::InvalidJson => "invalid_event_json",
+            Self::InvalidEventType => "invalid_event_type",
+            Self::InvalidResponseId => "invalid_response_id",
+            Self::ResponseIdChanged => "response_id_changed",
+        }
+    }
+}
+
+impl std::fmt::Display for SiwcStreamError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl std::error::Error for SiwcStreamError {}
+
 impl PendingSocket {
     pub(crate) async fn send(mut self) -> Result<Response, AuthorizedRequestError> {
         let payload = std::mem::take(&mut self.plan.payload);
-        if tokio::time::timeout(
+        let Ok(Ok(sent)) = tokio::time::timeout(
             Duration::from_secs(30),
             self.connection.socket.send_request(payload),
         )
         .await
-        .map_or(true, |result| result.is_err())
-        {
+        else {
             return Err(AuthorizedRequestError::WebsocketSend);
+        };
+        if let Some(payload) = self.payload_diagnostics.as_mut() {
+            payload.body_bytes = sent.body_bytes;
+            payload.content_encoding = sent.content_encoding;
         }
         let diagnostics = self.diagnostics.clone();
         let payload_diagnostics = self.payload_diagnostics.clone();
@@ -30,31 +72,32 @@ impl PendingSocket {
                     .socket
                     .next()
                     .await
-                    .ok_or_else(|| std::io::Error::other("SIWC socket closed before terminal"))?
-                    .map_err(|_| std::io::Error::other("SIWC WebSocket read failed"))?;
+                    .ok_or(SiwcStreamError::Eof)?
+                    .map_err(|_| SiwcStreamError::Read)?;
                 let text = match message {
                     Message::Text(text) => text,
                     Message::Ping(_) | Message::Pong(_) => {
                         tokio::time::timeout(CONNECT_TIMEOUT, state.connection.socket.flush())
                             .await
-                            .map_err(|_| std::io::Error::other("SIWC heartbeat timed out"))?
-                            .map_err(|_| std::io::Error::other("SIWC heartbeat failed"))?;
+                            .map_err(|_| SiwcStreamError::HeartbeatTimeout)?
+                            .map_err(|_| SiwcStreamError::Heartbeat)?;
                         continue;
                     }
-                    _ => return Err(std::io::Error::other("SIWC socket ended before terminal")),
+                    Message::Close { .. } => return Err(SiwcStreamError::PeerClosed),
+                    Message::Binary(_) => return Err(SiwcStreamError::UnexpectedFrame),
                 };
-                let event = crate::strict_json::parse(&text)
-                    .map_err(|_| std::io::Error::other("Invalid SIWC response event"))?;
+                let event =
+                    crate::strict_json::parse(&text).map_err(|_| SiwcStreamError::InvalidJson)?;
                 state.observe_response_identity(&event)?;
                 let kind = event
                     .get("type")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| std::io::Error::other("Missing SIWC event type"))?;
+                    .ok_or(SiwcStreamError::InvalidEventType)?;
                 if !kind
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_'))
                 {
-                    return Err(std::io::Error::other("Invalid SIWC event type"));
+                    return Err(SiwcStreamError::InvalidEventType);
                 }
                 state
                     .completed_output
@@ -106,7 +149,7 @@ impl PendingSocket {
         Ok(response)
     }
 
-    fn observe_response_identity(&mut self, event: &Value) -> std::io::Result<()> {
+    fn observe_response_identity(&mut self, event: &Value) -> Result<(), SiwcStreamError> {
         for id in [
             event.get("response_id"),
             event
@@ -119,15 +162,13 @@ impl PendingSocket {
             let id = id
                 .as_str()
                 .filter(|id| !id.is_empty() && id.len() <= 256)
-                .ok_or_else(|| std::io::Error::other("Invalid SIWC response identity"))?;
+                .ok_or(SiwcStreamError::InvalidResponseId)?;
             if self
                 .response_id
                 .as_ref()
                 .is_some_and(|expected| expected != id)
             {
-                return Err(std::io::Error::other(
-                    "SIWC response identity changed during generation",
-                ));
+                return Err(SiwcStreamError::ResponseIdChanged);
             }
             self.response_id.get_or_insert_with(|| id.to_owned());
         }

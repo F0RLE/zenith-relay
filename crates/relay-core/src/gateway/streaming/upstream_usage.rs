@@ -11,6 +11,7 @@ pub(in crate::gateway) struct UpstreamUsage {
     finished: bool,
     timing: Option<(Instant, super::super::response::BufferedResponseTiming)>,
     observed_started: Option<Instant>,
+    generation_reset: bool,
 }
 
 impl UpstreamUsage {
@@ -25,6 +26,7 @@ impl UpstreamUsage {
             finished: false,
             timing: None,
             observed_started: None,
+            generation_reset: false,
         }
     }
 
@@ -44,6 +46,7 @@ impl UpstreamUsage {
 
     pub(super) fn reset_generation(&mut self) {
         self.finished = false;
+        self.generation_reset = true;
         if let Some((_, timing)) = &mut self.timing {
             *timing = super::super::response::BufferedResponseTiming::default();
         }
@@ -59,15 +62,10 @@ impl UpstreamUsage {
         self.event.applied_service_tier = None;
         if let Some(routing) = self.event.routing.as_mut() {
             routing.upstream_response_model = None;
-            if let Some(timing) = routing
-                .transport
-                .as_mut()
-                .and_then(|transport| transport.stream_response.as_mut())
-            {
-                timing.upstream_reasoning_first_ms = None;
-                timing.upstream_text_first_ms = None;
-                timing.upstream_tool_first_ms = None;
-                timing.upstream_tool_first_complete_ms = None;
+            if let Some(transport) = routing.transport.as_mut() {
+                transport.stream_response = Some(Default::default());
+                transport.request_preparation_ms = None;
+                transport.request_preparation = None;
             }
             if let Some(cache) = routing.cache_context.as_mut() {
                 cache.provider = None;
@@ -140,6 +138,18 @@ impl UpstreamUsage {
         if self.finished || bytes.is_empty() {
             return true;
         }
+        if let Some(started) = self.observed_started
+            && let Some(transport) = self
+                .event
+                .routing
+                .as_mut()
+                .and_then(|r| r.transport.as_mut())
+        {
+            transport
+                .stream_response
+                .get_or_insert_default()
+                .observe_body(true, started.elapsed().as_millis() as u64);
+        }
         let pending = crate::protocol::push_pending_sse_frames(
             std::mem::take(&mut self.pending),
             bytes,
@@ -169,15 +179,18 @@ impl UpstreamUsage {
                     .as_mut()
                     .and_then(|routing| routing.transport.as_mut())
             {
-                transport
-                    .stream_response
-                    .get_or_insert_default()
-                    .observe_delta(
-                        delta.output_text,
-                        delta.tool_arguments,
-                        delta.nonempty_text,
-                        started.elapsed().as_millis() as u64,
-                    );
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let timing = transport.stream_response.get_or_insert_default();
+                timing.observe_event(true, delta.nonempty_text, elapsed_ms);
+                timing.observe_delta(
+                    delta.output_text,
+                    delta.tool_arguments,
+                    delta.nonempty_text,
+                    elapsed_ms,
+                );
+                if delta.reasoning_text {
+                    timing.observe_reasoning_delta(delta.nonempty_text, elapsed_ms);
+                }
             }
             if delta.nonempty_text
                 && let Some((started, timing)) = &mut self.timing
@@ -203,6 +216,11 @@ impl UpstreamUsage {
             {
                 let timing = transport.stream_response.get_or_insert_default();
                 let elapsed_ms = started.elapsed().as_millis() as u64;
+                timing.observe_event(
+                    parsed.valid,
+                    parsed.has_output_delta && !parsed.is_compaction,
+                    elapsed_ms,
+                );
                 timing.observe_reasoning(payload, elapsed_ms);
                 timing.observe_output(payload, elapsed_ms);
             }
@@ -267,10 +285,20 @@ impl UpstreamUsage {
             {
                 let source = source.stream_response.clone().unwrap_or_default();
                 let target = target.stream_response.get_or_insert_default();
+                target.decoded_body_first_ms = source.decoded_body_first_ms;
+                target.sse_json_first_ms = source.sse_json_first_ms;
                 target.upstream_reasoning_first_ms = source.upstream_reasoning_first_ms;
+                target.upstream_reasoning_text_first_ms = source.upstream_reasoning_text_first_ms;
+                target.upstream_output_first_ms = source.upstream_output_first_ms;
                 target.upstream_text_first_ms = source.upstream_text_first_ms;
                 target.upstream_tool_first_ms = source.upstream_tool_first_ms;
                 target.upstream_tool_first_complete_ms = source.upstream_tool_first_complete_ms;
+            }
+            if self.generation_reset
+                && let Some(transport) = target.transport.as_mut()
+            {
+                transport.request_preparation_ms = None;
+                transport.request_preparation = None;
             }
             if let (Some(source), Some(target)) =
                 (source.cache_context.as_ref(), target.cache_context.as_mut())
@@ -338,6 +366,42 @@ mod tests {
         assert_eq!(event.cache_write_input_tokens, Some(6));
         assert_eq!(event.output_tokens, Some(2));
         assert_eq!(event.total_tokens, Some(12));
+    }
+
+    #[test]
+    fn reasoning_tokens_distinguish_omitted_null_and_reported_zero_on_json_and_sse() {
+        for (details, expected) in [
+            (json!({}), None),
+            (json!({"reasoning_tokens":null}), None),
+            (json!({"reasoning_tokens":"0"}), None),
+            (json!({"reasoning_tokens":0}), Some(0)),
+        ] {
+            let response = json!({"status":"completed","usage":{
+                "input_tokens":100,"output_tokens":20,"output_tokens_details":details
+            }});
+            let wire = format!(
+                "data: {}\n\n",
+                json!({
+                    "type":"response.completed","response":response
+                })
+            );
+            let body = serde_json::to_vec(&response).unwrap();
+            let mut event = crate::gateway::test_support::test_usage_event();
+            let mut capture = UpstreamUsage::new(event.clone(), None);
+            for observed in [body.as_slice(), wire.as_bytes()] {
+                crate::gateway::response::populate_tokens(&mut event, observed);
+                assert_eq!(event.reasoning_tokens, expected);
+                assert_eq!(event.output_tokens, Some(20));
+            }
+            assert!(capture.observe(wire.as_bytes()));
+            capture.apply_to(&mut event);
+            assert_eq!(event.reasoning_tokens, expected);
+            assert_eq!(event.output_tokens, Some(20));
+            capture.reset_generation();
+            capture.finish_json_generation(&body);
+            capture.apply_to(&mut event);
+            assert_eq!(event.reasoning_tokens, expected);
+        }
     }
 
     #[test]
@@ -469,6 +533,7 @@ mod tests {
                 assert_eq!(event.input_tokens, Some(20));
                 assert_eq!(event.cache_write_input_tokens, Some(short + long));
                 let details = event.tool_use.provider_usage.as_ref().unwrap();
+                assert_eq!(details.cache_retention.as_deref(), Some("30m"));
                 assert_eq!(details.cache_write_tokens_by_ttl.get("12h"), Some(&long));
                 assert_eq!(details.cache_write_tokens_by_ttl.get("30m"), Some(&short));
 
@@ -477,7 +542,9 @@ mod tests {
                 capture.apply_to(&mut event);
                 assert_eq!(event.cache_write_ttl.as_deref(), Some("30m"));
                 assert_eq!(event.cache_write_input_tokens, None);
-                assert!(event.tool_use.provider_usage.is_none());
+                let details = event.tool_use.provider_usage.as_ref().unwrap();
+                assert_eq!(details.cache_retention.as_deref(), Some("30m"));
+                assert!(details.cache_write_tokens_by_ttl.is_empty());
             }
         }
     }
@@ -728,6 +795,16 @@ mod tests {
         );
         assert_eq!(event.tool_use.tool_calls_ready_ms, None);
         assert_eq!(transport.client_first_output_ms, None);
+        assert!(timing.decoded_body_first_ms.is_some());
+        assert!(timing.sse_json_first_ms.is_some());
+        event
+            .routing
+            .as_mut()
+            .unwrap()
+            .transport
+            .as_mut()
+            .unwrap()
+            .request_preparation_ms = Some(19);
         capture.reset_generation();
         capture.apply_to(&mut event);
         let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
@@ -735,6 +812,31 @@ mod tests {
         assert_eq!(timing.upstream_text_first_ms, None);
         assert_eq!(timing.upstream_tool_first_ms, None);
         assert_eq!(timing.upstream_tool_first_complete_ms, None);
+        assert_eq!(timing.decoded_body_first_ms, None);
+        assert_eq!(timing.sse_json_first_ms, None);
+        assert_eq!(transport.request_preparation_ms, None);
+        assert_eq!(transport.request_preparation, None);
+        capture.observe(b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"synthetic summary\"}\n\n");
+        capture.apply_to(&mut event);
+        let timing = event
+            .routing
+            .as_ref()
+            .unwrap()
+            .transport
+            .as_ref()
+            .unwrap()
+            .stream_response
+            .as_ref()
+            .unwrap();
+        assert!(timing.decoded_body_first_ms.is_some());
+        assert!(timing.sse_json_first_ms.is_some());
+        assert_eq!(
+            timing.upstream_reasoning_text_first_ms,
+            timing.upstream_output_first_ms
+        );
+        assert!(timing.upstream_reasoning_text_first_ms.is_some());
+        assert_eq!(timing.upstream_text_first_ms, None);
+        assert!(!event.tool_use.text_output);
     }
 
     #[test]

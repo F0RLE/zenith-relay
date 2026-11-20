@@ -121,6 +121,7 @@ pub(in crate::gateway::websocket) async fn send_request(
     upstream
         .send_request(request_payload)
         .await
+        .map(|_| ())
         .map_err(|_| GatewayFailure::transport(origin))
 }
 

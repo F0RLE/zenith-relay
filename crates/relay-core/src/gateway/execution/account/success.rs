@@ -219,7 +219,7 @@ fn account_response(
     }
     let body = serde_json::from_slice::<Value>(&bytes)
         .map_err(|_| Box::new(AttemptFailure::stream(crate::error_codes::STREAM_INVALID).into()))?;
-    validate_upstream_response(&body, expected_model)?;
+    validate_upstream_response(&body, &bytes, expected_model)?;
     let completion = match endpoint {
         AccountEndpoint::Wake => ResponseCompletion::for_protocol(crate::WireApi::Responses, &body),
         AccountEndpoint::Compact => {

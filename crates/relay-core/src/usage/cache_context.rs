@@ -161,7 +161,7 @@ pub struct CacheHistoryDiagnostics {
     pub input_bytes: Option<u64>,
     pub shared_prefix_items: Option<u32>,
     pub first_changed_item_kind: Option<CacheInputKind>,
-    /// Same-request comparison after leading developer/system blocks only.
+    /// Same-request comparison after leading developer/system and Relay-owned catalog blocks.
     /// The literal prefix above remains authoritative; this is not cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leading_context_alignment: Option<LeadingContextAlignment>,
@@ -172,6 +172,9 @@ pub struct CacheHistoryDiagnostics {
 pub struct LeadingContextAlignment {
     pub skipped_client_items: u32,
     pub skipped_upstream_items: u32,
+    /// Subset of skipped upstream items known to be Relay-added catalog blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_upstream_relay_items: Option<u32>,
     pub shared_prefix_items: u32,
     pub comparison: CacheHistoryComparison,
 }

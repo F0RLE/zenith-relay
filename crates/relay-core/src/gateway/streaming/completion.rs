@@ -56,6 +56,9 @@ impl StreamCompletionSettlement {
                 .as_mut()
                 .and_then(|routing| routing.transport.as_mut())
             {
+                if let Some(socket) = &progress.socket {
+                    socket.observe(transport);
+                }
                 transport
                     .request_payload
                     .clone_from(&progress.request_payload);

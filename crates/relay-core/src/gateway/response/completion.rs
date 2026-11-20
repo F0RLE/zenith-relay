@@ -68,7 +68,7 @@ impl BufferedResponseTiming {
             observation.observe_reasoning(payload, elapsed_ms);
             self.first_reasoning_ms = observation.upstream_reasoning_first_ms;
         }
-        // A completed snapshot is not evidence of when its first token arrived.
+        // Record first-token timing from live output events.
         if event.valid && event.has_output_delta && !event.is_compaction {
             self.observe_first_output(elapsed_ms);
         }
@@ -84,16 +84,19 @@ impl BufferedResponseTiming {
     }
 
     pub(in crate::gateway) fn apply(&self, event: &mut crate::usage::UsageEvent) {
-        if let Some(reasoning) = self.first_reasoning_ms
+        if (self.first_reasoning_ms.is_some() || self.first_output_ms.is_some())
             && let Some(transport) = event
                 .routing
                 .as_mut()
                 .and_then(|routing| routing.transport.as_mut())
         {
-            transport
-                .stream_response
-                .get_or_insert_default()
-                .upstream_reasoning_first_ms = Some(reasoning);
+            let timing = transport.stream_response.get_or_insert_default();
+            if let Some(reasoning) = self.first_reasoning_ms {
+                timing.upstream_reasoning_first_ms.get_or_insert(reasoning);
+            }
+            if let Some(output) = self.first_output_ms {
+                timing.upstream_output_first_ms.get_or_insert(output);
+            }
         }
         if self.finished_ms.is_none() && self.first_output_ms.is_none() {
             // A default recorder is also used by transports it does not observe.
@@ -321,7 +324,7 @@ pub(in crate::gateway) fn completed_upstream_response(
     expected_model: Option<&str>,
 ) -> Result<Vec<u8>, Box<StreamBootstrapFailure>> {
     if let Ok(upstream_json) = serde_json::from_slice::<Value>(bytes) {
-        validate_upstream_response(&upstream_json, expected_model)?;
+        validate_upstream_response(&upstream_json, bytes, expected_model)?;
         // Buffered account traffic uses Responses. Generic API traffic is
         // validated against its selected protocol by the request executor.
         if account_stream
@@ -450,14 +453,13 @@ pub(in crate::gateway) fn completed_upstream_response(
 /// Check error and served-model evidence for account endpoints with their own schema.
 pub(in crate::gateway) fn validate_upstream_response(
     upstream_json: &Value,
+    original_bytes: &[u8],
     expected_model: Option<&str>,
 ) -> Result<(), Box<StreamBootstrapFailure>> {
     if !upstream_json.is_object() {
         return Err(invalid_buffered_response("response.json"));
     }
     let response_payload = upstream_json.get("response").unwrap_or(upstream_json);
-    let bytes = serde_json::to_vec(upstream_json)
-        .map_err(|_| invalid_buffered_response("response.serialization"))?;
     if response_payload
         .get("error")
         .is_some_and(|error| !error.is_null())
@@ -467,7 +469,8 @@ pub(in crate::gateway) fn validate_upstream_response(
             Some("failed" | "cancelled" | "canceled")
         )
     {
-        let failure = AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(&bytes));
+        let failure =
+            AttemptFailure::status_with_body(StatusCode::BAD_GATEWAY, Some(original_bytes));
         return Err(Box::new(StreamBootstrapFailure {
             execution: if has_generation_evidence(upstream_json, None) {
                 crate::scheduler::rotation::ExecutionObservation::accepted()

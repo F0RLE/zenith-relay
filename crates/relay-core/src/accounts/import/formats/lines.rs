@@ -28,14 +28,14 @@ pub(super) fn parse_json_lines(import_document: &str) -> Result<ParsedEntries, I
                 parsed_entries.push(InputEntry {
                     ordinal,
                     import_value: Some(normalize_token_value(json_value)),
-                    issue: None,
+                    ..Default::default()
                 });
             }
             Err(_) => match token {
                 Some(token) => parsed_entries.push(InputEntry {
                     ordinal,
                     import_value: Some(access_token_value(token)),
-                    issue: None,
+                    ..Default::default()
                 }),
                 None if has_multiple_lines => parsed_entries.push(InputEntry {
                     ordinal,
@@ -44,6 +44,7 @@ pub(super) fn parse_json_lines(import_document: &str) -> Result<ParsedEntries, I
                         ImportIssueCode::MalformedJson,
                         "malformed JSON or access token line",
                     )),
+                    ..Default::default()
                 }),
                 None => {
                     return Err(ImportError::new(

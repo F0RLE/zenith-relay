@@ -62,6 +62,7 @@ tokio = { version = "1.54.1", features = ["macros", "time"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["compat"] }
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 url = "2.5.8"
+yawc = { version = "0.5.0", default-features = false }
 zstd = "0.14.4"
 
 [dev-dependencies]

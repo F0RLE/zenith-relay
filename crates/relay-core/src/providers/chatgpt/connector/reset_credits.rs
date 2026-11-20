@@ -17,7 +17,7 @@ const RESET_CREDITS_CONSUME_URL: &str =
 const MAX_RESET_CREDITS_RESPONSE_BYTES: usize = 256 * 1024;
 const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
-/// Connector capability, not evidence of current authorization or available credits.
+/// Connector reset support; check authorization and credits separately.
 pub fn supports_reset_credits(kind: OAuthClientKind) -> bool {
     matches!(kind, OAuthClientKind::Codex | OAuthClientKind::ExcelBps)
 }

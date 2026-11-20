@@ -167,7 +167,7 @@ fn actual_dispatch_uses_the_current_incident_after_another_request_succeeds() {
             .unwrap();
         if retained {
             engine
-                .begin_transport_dispatch(pending.lease_id, &mut budget)
+                .begin_transport_dispatch(pending.lease_id, &mut budget, 10)
                 .unwrap();
         } else {
             engine

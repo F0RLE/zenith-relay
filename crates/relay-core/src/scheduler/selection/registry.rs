@@ -45,6 +45,11 @@ impl PoolScheduler {
         true
     }
 
+    pub(crate) fn keep_unknown_quota_affinity(&mut self, candidate_id: &str) {
+        self.keep_unknown_quota_affinity
+            .insert(candidate_id.to_owned());
+    }
+
     pub fn set_quota_stale_after_ms(&mut self, stale_after_ms: u64) {
         self.quota_stale_after_ms = stale_after_ms.max(1);
     }
@@ -56,45 +61,40 @@ impl PoolScheduler {
                 || previous.source_id != candidate.source_id
                 || previous.account_id != candidate.account_id
         }) {
-            self.spend_deadlines.remove(&candidate_id);
+            self.remove(&candidate_id);
         }
-        if self
-            .candidates
-            .get(&candidate_id)
-            .is_some_and(|previous_candidate| {
-                previous_candidate.enabled != candidate.enabled
-                    || previous_candidate.draining != candidate.draining
-                    || previous_candidate.secret_available != candidate.secret_available
-                    || previous_candidate.kind != candidate.kind
-                    || previous_candidate.source_id != candidate.source_id
-                    || previous_candidate.account_id != candidate.account_id
-                    || previous_candidate.protocol != candidate.protocol
-                    || previous_candidate.model_protocols != candidate.model_protocols
-                    || previous_candidate.native_images != candidate.native_images
-                    || previous_candidate.model_rules != candidate.model_rules
-                    || previous_candidate
-                        .models
-                        .difference(&candidate.models)
-                        .next()
-                        .is_some()
+        let new_registration = if self.retired_candidates.remove(&candidate_id) {
+            self.clear_registration_gates(&candidate_id);
+            true
+        } else {
+            !self.candidates.contains_key(&candidate_id)
+        };
+        let previous = self.candidates.get(&candidate_id);
+        if new_registration
+            || previous.is_some_and(|old| {
+                old.enabled != candidate.enabled
+                    || old.draining != candidate.draining
+                    || old.secret_available != candidate.secret_available
+                    || old.protocol != candidate.protocol
+                    || old.model_protocols != candidate.model_protocols
+                    || old.native_images != candidate.native_images
+                    || old.model_rules != candidate.model_rules
+                    || !old.models.is_subset(&candidate.models)
             })
         {
             self.forget_shared_rate_limits(&candidate_id);
             let revision = self
-                .candidate_permission_revisions
-                .entry(candidate_id.clone())
-                .or_default();
-            *revision = revision
+                .next_candidate_permission_revision
                 .checked_add(1)
                 .expect("candidate permission revision exhausted");
+            self.next_candidate_permission_revision = revision;
+            self.candidate_permission_revisions
+                .insert(candidate_id.clone(), revision);
         }
-        // A newly reintroduced id must not inherit an opaque response owner
-        // from a previously deleted credential or source. Existing candidates
-        // are updated in place and keep their conversation affinity.
-        if !self.candidates.contains_key(&candidate_id) {
+        if new_registration {
             self.response_affinity.invalidate_candidate(&candidate_id);
+            self.prompt_affinity.invalidate_candidate(&candidate_id);
         }
-        self.retired_candidates.remove(&candidate_id);
         self.cooldown_metadata.retain(|(id, model), _| {
             id != &candidate_id || candidate.cooldowns.contains_key(model)
         });
@@ -103,11 +103,13 @@ impl PoolScheduler {
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.spend_deadlines.remove(candidate_id);
+        self.keep_unknown_quota_affinity.remove(candidate_id);
         self.forget_shared_rate_limits(candidate_id);
         self.quota_references.retain(|id, reference| {
             id != candidate_id && reference.source_account_id != candidate_id
         });
         let existing = self.candidates.get(candidate_id).cloned()?;
+        self.candidate_permission_revisions.remove(candidate_id);
         // The rotation engine retains old leases itself. Retire its identity now,
         // not after drain, so a same-id re-add cannot inherit a late outcome.
         self.rotation.remove(candidate_id);
@@ -138,19 +140,7 @@ impl PoolScheduler {
         self.prompt_affinity.invalidate_candidate(candidate_id);
         self.activity.remove_candidate(candidate_id);
         self.reservations.remove_candidate(candidate_id);
-        self.execution_fences.remove(candidate_id);
-        self.candidate_permission_revisions.remove(candidate_id);
-        self.capability_blocks
-            .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
-        self.cooldown_metadata
-            .retain(|(cooled_candidate, _), _| cooled_candidate != candidate_id);
-        if self
-            .protected_candidate
-            .as_ref()
-            .is_some_and(|(protected_id, _)| protected_id == candidate_id)
-        {
-            self.protected_candidate = None;
-        }
+        self.clear_registration_gates(candidate_id);
         let removed = self.candidates.remove(candidate_id);
         if let Some(candidate) = &removed {
             let key = members::member_key(candidate);
@@ -165,6 +155,21 @@ impl PoolScheduler {
         removed
     }
 
+    fn clear_registration_gates(&mut self, candidate_id: &str) {
+        self.execution_fences.remove(candidate_id);
+        self.capability_blocks
+            .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
+        self.cooldown_metadata
+            .retain(|(cooled_candidate, _), _| cooled_candidate != candidate_id);
+        if self
+            .protected_candidate
+            .as_ref()
+            .is_some_and(|(protected_id, _)| protected_id == candidate_id)
+        {
+            self.protected_candidate = None;
+        }
+    }
+
     pub(super) fn finalize_retired_if_idle(&mut self, candidate_id: &str) {
         if self.retired_candidates.contains(candidate_id)
             && self.active_request_count(candidate_id) == 0
@@ -175,6 +180,15 @@ impl PoolScheduler {
 
     pub fn candidate(&self, candidate_id: &str) -> Option<&RuntimeCandidate> {
         self.candidates.get(candidate_id)
+    }
+
+    /// Removed records can still own active work, but settings and discovery
+    /// must not register them again while that work drains.
+    pub(crate) fn candidate_for_update(&self, candidate_id: &str) -> Option<&RuntimeCandidate> {
+        if self.retired || self.retired_candidates.contains(candidate_id) {
+            return None;
+        }
+        self.candidate(candidate_id)
     }
 
     pub(crate) fn candidate_permission_revision(&self, candidate_id: &str) -> u64 {

@@ -35,6 +35,7 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) budget: SharedRequestBudget,
     pub(in crate::gateway) transport: UsageTransport,
     pub(in crate::gateway) transport_fallback: Option<crate::usage::TransportFallbackReason>,
+    pub(in crate::gateway) siwc_socket_context: Option<String>,
     pub(in crate::gateway) service_tier_policy: ServiceTierPolicy,
     pub(in crate::gateway) recovery: Option<ContinuationRecovery>,
 }
@@ -95,7 +96,8 @@ async fn execute_client_request_inner(
     force_stream: bool,
     reserved_candidate: Option<ReservedCandidate>,
 ) -> Response<Body> {
-    let started = std::time::Instant::now();
+    let request_started = tokio::time::Instant::now();
+    let started = request_started.into_std();
     let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
@@ -120,10 +122,16 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
+    let detailed = runtime.diagnostics_enabled();
+    let body_started = detailed.then(std::time::Instant::now);
     let request_fields = if client_wire_api == WireApi::Responses {
         super::super::request_body::read_responses_json_object(&headers, request_body).await
     } else {
         super::super::request_body::read_json_object(&headers, request_body).await
+    };
+    let mut ingress_timing = crate::runtime::RequestIngressTiming {
+        body_read_and_parse_ms: body_started.map(|start| start.elapsed().as_millis() as u64),
+        ..Default::default()
     };
     let mut request_json = match request_fields {
         Ok(request_object) => Value::Object(request_object),
@@ -145,7 +153,6 @@ async fn execute_client_request_inner(
     {
         return super::request::adapter_error_response(error, None);
     }
-    runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts
         .extensions
         .get::<super::super::request::RequestToolPolicy>()
@@ -263,6 +270,7 @@ async fn execute_client_request_inner(
         && background_kind.is_none()
         && parts.extensions.get::<RoutedCompactionRequest>().is_none()
     {
+        let cache_started = detailed.then(std::time::Instant::now);
         tool_policy.capture_cache_context(
             &runtime,
             &request_json,
@@ -270,6 +278,8 @@ async fn execute_client_request_inner(
             &request_id,
             client_context_id.as_deref(),
         );
+        ingress_timing.cache_context_ms =
+            cache_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let continuation = match client_wire_api {
         WireApi::GeminiInteractions => Some(crate::gateway::continuation::interactions::prepare(
@@ -320,34 +330,38 @@ async fn execute_client_request_inner(
         }
     };
 
-    let resolved_model = runtime
-        .resolve_visible_model(
+    let protocols = candidate_protocols(client_wire_api);
+    let access_started = detailed.then(std::time::Instant::now);
+    let access_owner = continuation
+        .as_ref()
+        .filter(|continuation| continuation.requires_affinity_owner)
+        .and_then(|continuation| continuation.response_affinity_key.as_deref())
+        .and_then(|affinity| runtime.response_affinity_candidate(affinity, now_ms()));
+    runtime
+        .refresh_basis_points_access_for_request(
             &key,
             &requested_model,
-            candidate_protocols(client_wire_api),
-            now_ms(),
+            protocols,
+            access_owner.as_deref(),
         )
+        .await;
+    ingress_timing.bps_access_refresh_ms =
+        access_started.map(|start| start.elapsed().as_millis() as u64);
+    let resolved_model = runtime
+        .resolve_visible_model(&key, &requested_model, protocols, now_ms())
         .or_else(|| {
             runtime.resolve_retained_continuation_model(
                 &key,
                 &requested_model,
-                candidate_protocols(client_wire_api),
+                protocols,
                 &request_json,
                 now_ms(),
             )
         })
         .or_else(|| {
-            let resolved = runtime.resolve_configured_model(
-                &key,
-                &requested_model,
-                candidate_protocols(client_wire_api),
-            )?;
+            let resolved = runtime.resolve_configured_model(&key, &requested_model, protocols)?;
             (runtime.route_recovery_enabled()
-                || runtime.basis_points_access_failed_for_model(
-                    &key,
-                    &resolved,
-                    candidate_protocols(client_wire_api),
-                ))
+                || runtime.basis_points_access_failed_for_model(&key, &resolved, protocols))
             .then_some(resolved)
         });
     let Some(resolved_model) = resolved_model else {
@@ -391,6 +405,8 @@ async fn execute_client_request_inner(
         ),
     };
     execute_request(RequestExecution {
+        started: request_started,
+        ingress_timing,
         tool_policy,
         runtime: runtime.clone(),
         key,
@@ -403,6 +419,10 @@ async fn execute_client_request_inner(
         forwarded_headers,
         client_context_id,
         client_affinity_id: client_identity.affinity_id,
+        siwc_socket_context: parts
+            .extensions
+            .get::<RoutedRequestIdentity>()
+            .and_then(|identity| identity.siwc_socket_context.clone()),
         state,
         client_wire_api,
         responses_lite,

@@ -40,7 +40,6 @@ pub(super) struct RejectionCarry<'a> {
     pub(super) allow_previous_response_reset: bool,
     pub(super) response_affinity_hit: bool,
     pub(super) selected_error_origin: ErrorOrigin,
-    pub(super) prompt_affinity_key: &'a Option<String>,
     pub(super) account_route: bool,
     pub(super) forwarded_headers: &'a HeaderMap,
 }
@@ -96,7 +95,6 @@ pub(super) async fn handle_upstream_failure(
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
-                prompt_affinity_key,
                 account_route,
                 forwarded_headers,
             },
@@ -208,7 +206,6 @@ pub(super) async fn handle_upstream_failure(
             allow_previous_response_reset,
             response_affinity_hit,
             selected_error_origin,
-            prompt_affinity_key,
             account_route,
             forwarded_headers,
         },

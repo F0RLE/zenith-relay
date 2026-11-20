@@ -9,6 +9,7 @@ use crate::providers::chatgpt::{
 use futures_util::{StreamExt, stream};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const ACCESS_TTL: Duration = Duration::from_secs(60);
@@ -191,24 +192,113 @@ impl GatewayRuntime {
         Ok(prepared)
     }
 
-    /// Refresh scoped accounts concurrently without creating a second background
-    /// owner. Cancellation drops the HTTP response and the per-account lock.
     pub(crate) async fn refresh_basis_points_access(&self, key: &AuthenticatedKey) {
-        let scope = key.scope_snapshot();
-        let candidate_ids = {
-            let scheduler = self.lock_scheduler();
-            self.account_state
+        self.refresh_scoped_basis_points_access(key, None).await;
+    }
+
+    /// Known generation routes need access checks only for their own model.
+    /// A catalog miss still discovers new models from the whole key scope.
+    pub(crate) async fn refresh_basis_points_access_for_request(
+        self: &Arc<Self>,
+        key: &AuthenticatedKey,
+        requested_model: &str,
+        protocols: &[crate::WireApi],
+        response_owner: Option<&str>,
+    ) {
+        if !key.upstream_protocol.allows(crate::WireApi::Responses)
+            || !self
+                .account_state
                 .executors
                 .values()
-                .filter(|account| {
-                    account.oauth_client_kind == OAuthClientKind::ExcelBps
-                        && scheduler
-                            .candidate(&account.id)
-                            .is_some_and(|candidate| candidate.is_discovery_visible(&scope))
-                })
-                .map(|account| account.id.clone())
-                .collect::<Vec<_>>()
+                .any(|account| account.oauth_client_kind == OAuthClientKind::ExcelBps)
+        {
+            return;
+        }
+        let Some(model) = self.resolve_configured_model(key, requested_model, protocols) else {
+            self.refresh_basis_points_access(key).await;
+            return;
         };
+        let scope = key.scope_snapshot();
+        if !self
+            .lock_scheduler()
+            .candidates()
+            .any(|candidate| candidate.is_catalog_visible(&model, protocols, &scope))
+        {
+            self.refresh_basis_points_access(key).await;
+            return;
+        }
+        let candidates = self.scoped_basis_points_candidates(key, Some((&model, protocols)));
+        let mut pending = candidates
+            .iter()
+            .filter(|id| self.cached_basis_points_access(id).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return;
+        }
+        if let Some(index) =
+            response_owner.and_then(|owner| pending.iter().position(|id| id == owner))
+        {
+            pending.swap(0, index);
+        }
+        let ready = || {
+            // Credential guards must precede the scheduler lock. Stale access
+            // stays ineligible even while its replacement is being fetched.
+            let fresh = self.basis_points_model_snapshot();
+            self.lock_scheduler().candidates().any(|candidate| {
+                response_owner.is_none_or(|owner| candidate.id == owner)
+                    && candidate.is_eligible(&model, protocols, &scope, super::runtime_now_ms())
+                    && fresh.model_available(&candidate.id, &model)
+            })
+        };
+        let guard = self
+            .account_state
+            .access_prefetch
+            .clone()
+            .try_lock_owned()
+            .ok();
+        if ready() && guard.is_none() {
+            return;
+        }
+        let runtime = self.clone();
+        let mut refreshes = stream::iter(pending.into_iter().map(move |candidate_id| {
+            let runtime = runtime.clone();
+            async move {
+                if runtime.cached_basis_points_access(&candidate_id).is_none() {
+                    let _ = runtime
+                        .prepare_basis_points_authorization(&candidate_id)
+                        .await;
+                }
+            }
+        }))
+        .buffer_unordered(4)
+        .boxed();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        // A cold request needs one freshly authorized route, not the slowest
+        // account in the pool. Finish warming peers without delaying dispatch.
+        while !ready() {
+            if !matches!(
+                tokio::time::timeout_at(deadline, refreshes.next()).await,
+                Ok(Some(()))
+            ) {
+                return;
+            }
+        }
+        if let Some(guard) = guard {
+            tokio::spawn(async move {
+                let _guard = guard;
+                let _ = tokio::time::timeout_at(deadline, refreshes.collect::<Vec<_>>()).await;
+            });
+        }
+    }
+
+    async fn refresh_scoped_basis_points_access(
+        &self,
+        key: &AuthenticatedKey,
+        model: Option<(&str, &[crate::WireApi])>,
+    ) {
+        let candidate_ids = self.scoped_basis_points_candidates(key, model);
+        // Cancellation drops pending reads and their per-account locks.
         let refreshes = stream::iter(candidate_ids.into_iter().map(|candidate_id| async move {
             if self.cached_basis_points_access(&candidate_id).is_none() {
                 let _ = self.prepare_basis_points_authorization(&candidate_id).await;
@@ -217,6 +307,36 @@ impl GatewayRuntime {
         .buffer_unordered(4)
         .collect::<Vec<_>>();
         let _ = tokio::time::timeout(Duration::from_secs(12), refreshes).await;
+    }
+
+    fn scoped_basis_points_candidates(
+        &self,
+        key: &AuthenticatedKey,
+        model: Option<(&str, &[crate::WireApi])>,
+    ) -> Vec<String> {
+        let scope = key.scope_snapshot();
+        {
+            let scheduler = self.lock_scheduler();
+            let model = model.filter(|&(model, protocols)| {
+                scheduler
+                    .candidates()
+                    .any(|candidate| candidate.is_catalog_visible(model, protocols, &scope))
+            });
+            self.account_state
+                .executors
+                .values()
+                .filter(|account| {
+                    account.oauth_client_kind == OAuthClientKind::ExcelBps
+                        && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                            candidate.is_discovery_visible(&scope)
+                                && model.is_none_or(|(model, protocols)| {
+                                    candidate.is_configured(model, protocols, &scope)
+                                })
+                        })
+                })
+                .map(|account| account.id.clone())
+                .collect::<Vec<_>>()
+        }
     }
 
     pub(super) async fn read_basis_points_access(

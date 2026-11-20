@@ -10,7 +10,44 @@ pub(crate) struct AuthorizationDispatch<'a> {
     pub(crate) turn_scope: Option<&'a super::CodexTurnStateScope<'a>>,
     pub(crate) budget: Option<&'a crate::scheduler::rotation::SharedRequestBudget>,
     pub(crate) lease: Option<&'a super::CandidateLease>,
-    pub(crate) usage_event: Option<(&'a crate::UsageEvent, std::time::Instant)>,
+    pub(crate) usage_event: Option<DispatchUsage<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DispatchUsage<'a> {
+    pub(crate) event: &'a crate::UsageEvent,
+    pub(crate) siwc_socket_context: Option<&'a str>,
+    pending_since: Option<std::time::Instant>,
+}
+
+impl<'a> DispatchUsage<'a> {
+    pub(crate) fn tracked(event: &'a crate::UsageEvent, started: std::time::Instant) -> Self {
+        Self {
+            event,
+            siwc_socket_context: None,
+            pending_since: Some(started),
+        }
+    }
+
+    pub(crate) fn observed(event: &'a crate::UsageEvent) -> Self {
+        Self {
+            event,
+            siwc_socket_context: None,
+            pending_since: None,
+        }
+    }
+
+    pub(crate) fn with_siwc_socket_context(mut self, context: Option<&'a str>) -> Self {
+        self.siwc_socket_context = context;
+        self
+    }
+}
+
+impl<'a> AuthorizationDispatch<'a> {
+    fn tracked_usage(self) -> Option<(&'a crate::UsageEvent, std::time::Instant)> {
+        let usage = self.usage_event?;
+        Some((usage.event, usage.pending_since?))
+    }
 }
 
 mod dispatch;

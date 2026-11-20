@@ -45,7 +45,7 @@ impl Cache {
             .attempted_at
             .is_some_and(|at| now.saturating_duration_since(at) < RETRY_INTERVAL)
         {
-            // A suppressed lookup is not evidence of an invalid identity.
+            // Preserve identity validity while the lookup is suppressed.
             return Err(unavailable());
         }
         state.attempted_at = Some(now);

@@ -7,6 +7,7 @@ impl PoolScheduler {
         &mut self,
         reservation_id: ReservationId,
         budget: &mut RotationRequestBudget,
+        now_ms: u64,
     ) -> Result<RotationAttemptId, crate::scheduler::rotation::DispatchStartError> {
         if self.retired {
             return Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged);
@@ -18,7 +19,7 @@ impl PoolScheduler {
             .ok_or(crate::scheduler::rotation::DispatchStartError::UnknownLease)?;
         let attempt = self
             .rotation
-            .begin_transport_dispatch(lease.lease_id, budget)?;
+            .begin_transport_dispatch(lease.lease_id, budget, now_ms)?;
         self.record_reservation_dispatch(reservation_id);
         Ok(attempt)
     }

@@ -207,6 +207,44 @@ fn moving_alias_recomputes_the_previous_physical_limit() {
 }
 
 #[test]
+fn replacement_registration_does_not_inherit_the_previous_members_cooldown_or_lease() {
+    let mut engine = engine(&[]);
+    let original = member("route").with_capacity("physical-a", 3);
+    engine.upsert(original.clone()).unwrap();
+    let pending = engine.reserve(&request(1), 100).unwrap();
+    let sent = engine.reserve(&request(2), 100).unwrap();
+    let mut sent_budget = RequestBudget::default_for(sent.request_id);
+    engine
+        .begin_dispatch_at(sent.lease_id, &mut sent_budget, 100)
+        .unwrap();
+    fail(&mut engine, "route", 3, 100);
+    assert!(engine.select(&request(4), 100).is_none());
+
+    engine
+        .upsert(member("route").with_capacity("physical-b", 1))
+        .unwrap();
+    let replacement = engine
+        .reserve(&request(4), 100)
+        .expect("distinct physical member");
+    assert_eq!(engine.in_flight("route"), 1);
+    assert!(engine.release_unstarted(replacement.lease_id));
+    engine.upsert(original).unwrap();
+    let mut pending_budget = RequestBudget::default_for(pending.request_id);
+    assert_eq!(
+        engine.begin_dispatch_at(pending.lease_id, &mut pending_budget, 100),
+        Err(DispatchStartError::CandidateChanged)
+    );
+    assert_eq!(pending_budget.dispatches(), 0);
+    assert!(engine.release_unstarted(pending.lease_id));
+    let current = engine.reserve(&request(5), 100).unwrap();
+    let late = engine.cancel(sent.lease_id, &sent_budget, 100).unwrap();
+    assert!(!late.observation_current);
+    assert_eq!(engine.in_flight("route"), 1);
+    assert_eq!(engine.capacity_in_flight("physical-a"), 1);
+    assert!(engine.release_unstarted(current.lease_id));
+}
+
+#[test]
 fn begin_dispatch_rechecks_removed_disabled_and_replaced_routes() {
     for change in 0..3 {
         let mut engine = engine(&["a"]);

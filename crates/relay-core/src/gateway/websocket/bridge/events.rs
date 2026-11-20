@@ -368,6 +368,8 @@ pub(super) fn observe_buffered_setup(bytes: &[u8], state: &mut BridgeState) {
     if let Some(in_flight) = state.in_flight.as_mut()
         && let Ok(payload) = serde_json::from_slice::<Value>(bytes)
     {
+        // A setup frame can be the only policy/usage observation before disconnect.
+        in_flight.event.tool_use.observe_provider_usage(&payload);
         observe_payload_usage(&payload, in_flight);
         in_flight.event.observe_response_metadata(&payload);
     }

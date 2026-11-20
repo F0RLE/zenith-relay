@@ -396,7 +396,28 @@ async fn native_image_forbidden_is_not_replayed_as_a_responses_tool_request() {
     );
     assert!(requests[0].body.get("tools").is_none());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
     assert_eq!(events[0].http_status, 403);
+    let physical = events[0]
+        .routing
+        .as_ref()
+        .unwrap()
+        .request_timing
+        .as_ref()
+        .unwrap();
+    let final_request = events[1]
+        .routing
+        .as_ref()
+        .unwrap()
+        .request_timing
+        .as_ref()
+        .unwrap();
+    assert!(!physical.projection_only);
+    assert!(final_request.projection_only);
+    assert_eq!(events[1].request_id, events[0].request_id);
+    assert_eq!(events[1].attempt, events[0].attempt);
+    assert_eq!(events[1].http_status, 403);
+    assert!(!events[1].success);
+    assert!(final_request.duration_ms >= physical.duration_ms);
 }

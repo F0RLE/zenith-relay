@@ -88,9 +88,15 @@ impl Fixture {
     }
 
     async fn pending(&self, store: &SocketStore, body: &Value) -> PendingSocket {
-        let (mut lane, session_wait_ms) = store
-            .acquire_or_isolate(Some(planner::fingerprint(&json!("conversation"))))
-            .await;
+        let prepared = planner::parse(&serde_json::to_vec(body).unwrap()).unwrap();
+        let key = prepared.session_key(
+            "key",
+            "account",
+            "conversation",
+            &self.url,
+            crate::protocol::UsageWorkload::Conversation,
+        );
+        let (mut lane, session_wait_ms) = store.acquire_or_isolate(key).await;
         let reused = lane.idle.is_some();
         let connection = if let Some(connection) = lane.idle.take() {
             connection.resume().await.unwrap()
@@ -107,11 +113,14 @@ impl Fixture {
                 checkpoint: None,
             }
         };
-        let plan = plan(body, connection.checkpoint.as_ref());
+        let plan = prepared
+            .with_diagnostics(true)
+            .plan(connection.checkpoint.as_ref());
         let mut payload =
             RequestPayloadDiagnostics::identity(plan.payload.as_bytes(), TransportMode::Native);
         payload.full_request_reason = plan.full_request_reason;
         payload.socket_output_mismatch = plan.output_mismatch.clone();
+        payload.socket_output_reconciled = plan.output_reconciled;
         let payload_diagnostics = Some(payload);
         PendingSocket {
             lane,
@@ -140,15 +149,34 @@ fn completed(id: &str, output: Value) -> Value {
         "usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":900},"output_tokens":8}}})
 }
 
+fn only_lane_is_disconnected(store: &SocketStore) -> bool {
+    let lanes = crate::poison::mutex(&store.lanes);
+    assert_eq!(lanes.len(), 1);
+    lanes
+        .values()
+        .next()
+        .unwrap()
+        .try_lock()
+        .unwrap()
+        .idle
+        .is_none()
+}
+
 #[tokio::test]
 async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     let call = json!({"type":"function_call","id":"fc_test","call_id":"call_test",
         "name":"lookup","arguments":"{}","status":"completed","namespace":null,
         "encrypted_function_args":null,"encrypted_content":null,"async":null,
-        "created_by":"synthetic-provider-provenance"});
+        "created_by":"synthetic-provider-provenance","parsed_arguments":{}});
+    let search = json!({"type":"web_search_call","id":"ws_test","status":"completed",
+        "action":{"type":"search","query":"synthetic"},
+        "created_by":"synthetic-search-provenance"});
+    let answer = json!({"type":"message","id":"msg_test","role":"assistant",
+        "content":[{"type":"output_text","text":"synthetic answer"}]});
     let fixture = Fixture::start(vec![
-        vec![completed("first", json!([call]))],
-        vec![completed("second", json!([]))],
+        vec![completed("first", json!([search, call]))],
+        vec![completed("second", json!([answer]))],
+        vec![completed("third", json!([answer]))],
     ])
     .await;
     let store = SocketStore::default();
@@ -165,6 +193,7 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     assert!(text.contains("response.completed"));
     assert!(text.contains("cached_tokens"));
     assert!(text.contains("synthetic-provider-provenance"));
+    assert!(text.contains("synthetic-search-provenance"));
     let mut next = first.clone();
     let result = json!({"type":"function_call_output","call_id":"call_test","output":"ok"});
     let mut replay = call;
@@ -174,13 +203,19 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
         "encrypted_content",
         "async",
         "created_by",
+        "parsed_arguments",
     ] {
         replay.as_object_mut().unwrap().remove(field);
     }
+    let mut replayed_search = search;
+    replayed_search
+        .as_object_mut()
+        .unwrap()
+        .remove("created_by");
     next["input"]
         .as_array_mut()
         .unwrap()
-        .extend([replay, result.clone()]);
+        .extend([replayed_search, replay, result.clone()]);
     let response = fixture.pending(&store, &next).await.send().await.unwrap();
     assert!(
         response
@@ -197,12 +232,80 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
             .mode,
         crate::usage::RequestPayloadMode::Continuation
     );
-    response.text().await.unwrap();
+    assert_eq!(
+        response
+            .extensions()
+            .get::<RequestPayloadDiagnostics>()
+            .unwrap()
+            .socket_output_reconciled,
+        Some(crate::usage::SocketOutputReconciliation::OmittedAllowlistedOutputFields)
+    );
+    assert!(response.text().await.unwrap().contains("synthetic answer"));
+    let followup = json!({"role":"user","content":"synthetic follow-up"});
+    next["input"]
+        .as_array_mut()
+        .unwrap()
+        .extend([answer, followup.clone()]);
+    fixture
+        .pending(&store, &next)
+        .await
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     let sent = fixture.requests();
-    assert_eq!(sent.len(), 2);
+    assert_eq!(sent.len(), 3);
     assert!(sent[0].get("previous_response_id").is_none());
     assert_eq!(sent[1]["previous_response_id"], "first");
     assert_eq!(sent[1]["input"], json!([result]));
+    assert_eq!(sent[2]["previous_response_id"], "second");
+    assert_eq!(sent[2]["input"], json!([followup]));
+}
+
+#[tokio::test]
+async fn returning_to_a_model_keeps_its_own_socket_and_confirmed_predecessor() {
+    let input = json!({"role":"user","content":"synthetic start"});
+    let output = json!({"type":"message","role":"assistant",
+        "content":[{"type":"output_text","text":"synthetic reply"}]});
+    let next = json!({"role":"user","content":"synthetic next"});
+    let fixture = Fixture::start(
+        ["first-a", "first-b", "next-a", "next-b"]
+            .map(|id| vec![completed(id, json!([output]))])
+            .into(),
+    )
+    .await;
+    let store = SocketStore::default();
+    for (model, repeat) in [("a", false), ("b", false), ("a", true), ("b", true)] {
+        let mut body = request(if repeat {
+            json!([input, output, next])
+        } else {
+            json!([input])
+        });
+        body["model"] = json!(model);
+        let response = fixture.pending(&store, &body).await.send().await.unwrap();
+        assert_eq!(
+            response
+                .extensions()
+                .get::<SocketDiagnostics>()
+                .unwrap()
+                .reused,
+            repeat
+        );
+        response.text().await.unwrap();
+    }
+    let wire = fixture.requests();
+    assert_eq!(wire.len(), 4);
+    assert!(
+        wire[..2]
+            .iter()
+            .all(|r| r.get("previous_response_id").is_none())
+    );
+    for (sent, expected) in wire[2..].iter().zip(["first-a", "first-b"]) {
+        assert_eq!(sent["previous_response_id"], expected);
+        assert_eq!(sent["input"], json!([next]));
+    }
 }
 
 #[tokio::test]
@@ -358,13 +461,7 @@ async fn disconnect_and_cancel_discard_connection_without_replay() {
         } else {
             assert!(response.text().await.is_err());
         }
-        assert!(
-            store
-                .acquire(planner::fingerprint(&json!("conversation")))
-                .unwrap()
-                .idle
-                .is_none()
-        );
+        assert!(only_lane_is_disconnected(&store));
         assert!(fixture.requests().len() <= 1);
     }
     assert_eq!(
@@ -437,11 +534,7 @@ async fn failed_incomplete_and_foreign_terminal_never_reuse() {
             assert!(result.is_ok());
         }
         assert!(
-            store
-                .acquire(planner::fingerprint(&json!("conversation")))
-                .unwrap()
-                .idle
-                .is_none(),
+            only_lane_is_disconnected(&store),
             "invalid checkpoint case {index}"
         );
         assert_eq!(fixture.requests().len(), 1);
@@ -512,11 +605,5 @@ async fn ambiguous_json_cannot_be_rewritten_into_a_retryable_error() {
         .unwrap();
     assert!(response.text().await.is_err());
     assert_eq!(fixture.requests().len(), 1);
-    assert!(
-        store
-            .acquire(planner::fingerprint(&json!("conversation")))
-            .unwrap()
-            .idle
-            .is_none()
-    );
+    assert!(only_lane_is_disconnected(&store));
 }

@@ -1,10 +1,13 @@
 //! Request-owned discovery between native SSE and the ordinary BPS translator.
-//! Text before a withheld tool streams immediately; executable calls never do.
+//! BPS envelopes stay buffered. Native SIWC may release a validated call early.
 
 use super::*;
 use crate::gateway::errors::{AttemptFailure, RateLimitBodyHint};
 use crate::gateway::execution::basis_points::discovery::execution::{
     StreamingDiscovery, dispatch_continuation, record_lookup,
+};
+use crate::gateway::execution::basis_points::response::stream::{
+    emit_completed_item, emit_unseen_output_except,
 };
 use crate::gateway::response::{completed_upstream_response, emit_usage, populate_tokens};
 use crate::gateway::streaming::completion::StreamCompletionSettlement;
@@ -68,6 +71,7 @@ pub(in crate::gateway::streaming) struct DiscoveryProgress {
     pub budget: crate::scheduler::rotation::SharedRequestBudget,
     pub tool_use: ToolUseDiagnostics,
     pub request_payload: Option<crate::usage::RequestPayloadDiagnostics>,
+    pub socket: Option<crate::runtime::siwc_socket::SocketDiagnostics>,
     pub headers: Option<HeaderMap>,
 }
 
@@ -101,9 +105,13 @@ struct DiscoveryStream {
     saw_generation: bool,
     output: VecDeque<Bytes>,
     response_id: Option<String>,
+    round_response_id: Option<String>,
+    allow_early_call: bool,
     offset: usize,
     seen: HashSet<usize>,
-    blocked: bool,
+    completed_prefix: usize,
+    tool_barrier: Option<usize>,
+    released_call: Option<(usize, [u8; 32])>,
     round_terminal: bool,
     terminal: bool,
     sse: bool,
@@ -184,6 +192,7 @@ impl DiscoveryStream {
             return Ok(());
         }
         let mut parsed = crate::gateway::streaming::parse_sse_event(frame);
+        self.allow_early_call &= parsed.valid;
         if retain_frame(&parsed, &mut self.saw_generation) {
             self.raw.extend_from_slice(frame);
         }
@@ -218,8 +227,24 @@ impl DiscoveryStream {
             return Ok(());
         }
         if matches!(kind.as_str(), "response.created" | "response.in_progress") {
-            if self.offset == 0 && self.response_id.is_none() {
-                self.response_id = event["response"]["id"].as_str().map(str::to_owned);
+            if let Some(id) = event["response"]["id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+            {
+                match self.round_response_id.as_deref() {
+                    Some(existing) if existing != id => {
+                        if self.released_call.is_some() {
+                            return Err(AdapterError::upstream_stream_invalid()
+                                .with_parameter("response.id"));
+                        }
+                        self.allow_early_call = false;
+                    }
+                    None => self.round_response_id = Some(id.to_owned()),
+                    Some(_) => {}
+                }
+            }
+            if self.offset == 0 && self.response_id.is_none() && self.round_response_id.is_some() {
+                self.response_id.clone_from(&self.round_response_id);
                 let mut event = event;
                 event["type"] = json!(kind);
                 event["response"]["output"] = json!([]);
@@ -229,15 +254,41 @@ impl DiscoveryStream {
         }
         // Removing a hidden lookup can shift later output indices. Do not
         // publish those indices speculatively: flush the suffix at terminal.
-        if self
-            .tools
-            .observe(&event)
-            .map_err(|parameter| AdapterError::upstream_stream_invalid().with_parameter(parameter))?
-            .is_some()
-        {
-            self.blocked = true;
+        if let Some(index) = self.tools.observe(&event).map_err(|parameter| {
+            AdapterError::upstream_stream_invalid().with_parameter(parameter)
+        })? {
+            self.tool_barrier = Some(self.tool_barrier.map_or(index, |first| first.min(index)));
+            if self.allow_early_call
+                && self.round_response_id.is_some()
+                && self.response_id.is_some()
+                && self.released_call.is_none()
+                && self.tool_barrier == Some(index)
+                && self.completed_prefix == index
+                && self.seen.len() == index
+                && kind == "response.output_item.done"
+                && event["output_index"].as_u64() == Some(index as u64)
+                && event
+                    .get("response_id")
+                    .is_none_or(|id| id.as_str() == self.round_response_id.as_deref())
+                && std::str::from_utf8(&data)
+                    .is_ok_and(|text| crate::strict_json::validate(text).is_ok())
+                && crate::gateway::execution::basis_points::discovery::native::can_stream_call(
+                    &self.discovery.session,
+                    &event["item"],
+                )
+                && let Ok(proof) = crate::json_fingerprint::canonical_sha256(&event["item"])
+            {
+                self.released_call = Some((index, proof));
+                emit_completed_item(index, &event["item"], |event| self.emit(event));
+            }
+            if self.released_call.is_some_and(|(first, _)| index < first) {
+                return Err(
+                    AdapterError::upstream_stream_invalid().with_parameter("stream.output_index")
+                );
+            }
+            return Ok(());
         }
-        if !self.blocked
+        if self.tool_barrier.is_none()
             && let Some(index) = event["output_index"].as_u64()
         {
             let index =
@@ -246,7 +297,16 @@ impl DiscoveryStream {
                 return Err(AdapterError::upstream_stream_invalid());
             }
             self.seen.insert(index);
+            if kind == "response.output_item.done" && index == self.completed_prefix {
+                if event["item"].is_object() {
+                    self.completed_prefix += 1;
+                } else {
+                    self.allow_early_call = false;
+                }
+            }
             self.emit(event);
+        } else if self.tool_barrier.is_none() && parsed.semantic_output {
+            self.allow_early_call = false;
         }
         Ok(())
     }
@@ -339,6 +399,32 @@ impl DiscoveryStream {
         // The parsed terminal now owns the required output. Release retained
         // wire frames before waiting for another lookup round or client poll.
         self.raw = Vec::new();
+        let released = self.released_call.map(|(index, _)| index);
+        if let Some((index, proof)) = self.released_call {
+            if terminal["id"].as_str() != self.round_response_id.as_deref() {
+                return Err(AdapterError::upstream_stream_invalid()
+                    .with_parameter("response.id")
+                    .into());
+            }
+            let items = terminal["output"]
+                .as_array()
+                .ok_or_else(AdapterError::upstream_response_invalid)?;
+            if items
+                .get(index)
+                .and_then(|item| crate::json_fingerprint::canonical_sha256(item).ok())
+                != Some(proof)
+                || items[..index].iter().any(|item| {
+                    matches!(
+                        item["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    )
+                })
+            {
+                return Err(AdapterError::upstream_stream_invalid()
+                    .with_parameter("stream.tool.output")
+                    .into());
+            }
+        }
         if terminal["status"] == "completed" {
             let items = terminal["output"]
                 .as_array()
@@ -356,7 +442,9 @@ impl DiscoveryStream {
             self.response_id = terminal["id"].as_str().map(str::to_owned);
         }
         if !next {
-            self.discovery.session.finish(&mut terminal);
+            self.discovery
+                .session
+                .finish_preserving_native_call(&mut terminal, released);
             self.discovery.session.remember(
                 &self.settlement.runtime,
                 &self.event.local_key_id,
@@ -368,13 +456,13 @@ impl DiscoveryStream {
             self.update_progress();
             if self.discovery.session.is_native() {
                 // There is no BPS envelope translator after native discovery.
-                // Flush withheld client calls only after validating the entire
-                // terminal, preserving indexes of text already streamed.
+                // The validated terminal must retain previously emitted items.
                 let seen = (0..self.offset)
                     .chain(self.seen.iter().map(|index| index + self.offset))
                     .collect();
+                let released = released.map(|index| index + self.offset);
                 self.offset = 0;
-                emit_unseen_output(&terminal, &seen, |event| self.emit(event));
+                emit_unseen_output_except(&terminal, &seen, released, |event| self.emit(event));
             }
             // This is the only terminal exposed to BPS validation. Its tools
             // are still withheld by the existing translator until all validate.
@@ -387,6 +475,12 @@ impl DiscoveryStream {
             self.emit(json!({"type":kind,"response":terminal}));
             self.terminal = true;
             return Ok(());
+        }
+        // A native round with a published call cannot become a local lookup.
+        if released.is_some() {
+            return Err(AdapterError::upstream_stream_invalid()
+                .with_parameter("stream.tool.output")
+                .into());
         }
         let items = terminal["output"]
             .as_array_mut()
@@ -442,6 +536,7 @@ impl DiscoveryStream {
             &self.settlement.route,
             &self.discovery.budget,
             &self.discovery.owner,
+            &self.event,
             &self.discovery.upstream,
         )
         .await;
@@ -451,17 +546,25 @@ impl DiscoveryStream {
                 DiscoveryFailure::Upstream(Box::new(AttemptFailure::authorized_request(error)))
             })?
             .response;
+        let socket = response
+            .extensions()
+            .get::<crate::runtime::siwc_socket::SocketDiagnostics>()
+            .cloned();
         if let Some(transport) = self
             .event
             .routing
             .as_mut()
             .and_then(|routing| routing.transport.as_mut())
         {
+            if let Some(socket) = &socket {
+                socket.observe(transport);
+            }
             transport.request_payload = response
                 .extensions()
                 .get::<crate::usage::RequestPayloadDiagnostics>()
                 .cloned();
         }
+        crate::poison::mutex(&self.progress).socket = socket;
         self.update_progress();
         self.status = response.status();
         self.headers = response.headers().clone();
@@ -498,7 +601,11 @@ impl DiscoveryStream {
         self.received_bytes = 0;
         self.saw_generation = false;
         self.pending.clear();
-        self.blocked = false;
+        self.round_response_id = None;
+        self.allow_early_call = self.discovery.session.retained_native_prefix_len() == self.offset;
+        self.completed_prefix = 0;
+        self.tool_barrier = None;
+        self.released_call = None;
         self.round_terminal = false;
         Ok(())
     }
@@ -528,9 +635,13 @@ pub(in crate::gateway::streaming) fn translate_stream(
         saw_generation: false,
         output: VecDeque::new(),
         response_id: None,
+        round_response_id: None,
+        allow_early_call: true,
         offset: 0,
         seen: HashSet::new(),
-        blocked: false,
+        completed_prefix: 0,
+        tool_barrier: None,
+        released_call: None,
         round_terminal: false,
         terminal: false,
         sse: true,

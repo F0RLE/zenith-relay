@@ -1,7 +1,7 @@
 mod response;
 mod route;
 
-use super::super::{GatewayRuntime, ResponseAffinityBinding};
+use super::super::{CandidateLease, GatewayRuntime, ResponseAffinityBinding};
 use sha2::{Digest, Sha256};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -79,7 +79,7 @@ impl GatewayRuntime {
     pub(crate) fn bind_prompt_affinity_for_lease(
         &self,
         key: Option<&str>,
-        lease: &super::super::CandidateLease,
+        lease: &CandidateLease,
         now_ms: u64,
     ) {
         if !Arc::ptr_eq(&self.scheduler, &lease.scheduler) {
@@ -92,7 +92,7 @@ impl GatewayRuntime {
         &self,
         key: Option<&str>,
         candidate_id: &str,
-        lease: Option<&super::super::CandidateLease>,
+        lease: Option<&CandidateLease>,
         now_ms: u64,
     ) {
         if let Some(key) = key {
@@ -104,7 +104,10 @@ impl GatewayRuntime {
                     else {
                         return;
                     };
-                    if observed_key != key {
+                    if observed_key != key
+                        || scheduler.candidate_permission_revision(candidate_id)
+                            != lease.candidate_permission_revision
+                    {
                         return;
                     }
                     let current = scheduler.prompt_affinity_binding(key, now_ms);
@@ -161,18 +164,42 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn invalidate_prompt_affinity(&self, key: Option<&str>, candidate_id: &str) -> bool {
-        key.is_some_and(|key| {
-            let _persistence = self.lock_prompt_affinity(key);
-            // A spillover rejection or an old owner's late failure says
-            // nothing about the currently warmed owner's provider cache.
-            let invalidated = self
-                .lock_scheduler()
-                .invalidate_prompt_affinity_for_candidate(key, candidate_id);
-            if invalidated && let Some(store) = self.response_affinity_store.as_ref() {
-                let _ = store.delete(key);
-            }
-            invalidated
+    pub(crate) fn reject_prompt_affinity(&self, lease: &CandidateLease) -> bool {
+        let Some((key, Some(revision))) = &lease.prompt_owner else {
+            return false;
+        };
+        if !Arc::ptr_eq(&self.scheduler, &lease.scheduler) {
+            return false;
+        }
+        self.remove_prompt_affinity(key, lease.candidate_id(), |scheduler| {
+            scheduler.candidate_permission_revision(lease.candidate_id())
+                == lease.candidate_permission_revision
+                && scheduler
+                    .prompt_affinity_binding(key, crate::unix_time_ms())
+                    .is_some_and(|(_, current)| current == *revision)
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_prompt_affinity(&self, key: Option<&str>, candidate_id: &str) -> bool {
+        key.is_some_and(|key| self.remove_prompt_affinity(key, candidate_id, |_| true))
+    }
+
+    fn remove_prompt_affinity(
+        &self,
+        key: &str,
+        candidate_id: &str,
+        matches_binding: impl FnOnce(&mut crate::PoolScheduler) -> bool,
+    ) -> bool {
+        let _persistence = self.lock_prompt_affinity(key);
+        let invalidated = {
+            let mut scheduler = self.lock_scheduler();
+            matches_binding(&mut scheduler)
+                && scheduler.invalidate_prompt_affinity_for_candidate(key, candidate_id)
+        };
+        if invalidated && let Some(store) = self.response_affinity_store.as_ref() {
+            let _ = store.delete(key);
+        }
+        invalidated
     }
 }

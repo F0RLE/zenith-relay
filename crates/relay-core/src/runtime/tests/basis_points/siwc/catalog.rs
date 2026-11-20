@@ -48,6 +48,11 @@ fn answer() -> Value {
     )
 }
 
+fn events(text: &str) -> impl Iterator<Item = Value> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.strip_prefix("data: ")?).ok())
+}
+
 fn terminal(text: &str, stream: bool) -> Value {
     assert!(
         !text.contains("relay_catalog"),
@@ -56,10 +61,7 @@ fn terminal(text: &str, stream: bool) -> Value {
     if !stream {
         return serde_json::from_str(text).unwrap();
     }
-    let events = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line.strip_prefix("data: ")?).ok())
-        .collect::<Vec<_>>();
+    let events = events(text).collect::<Vec<_>>();
     assert!(
         !events.iter().any(|event| event["type"] == "error"),
         "{text}"
@@ -237,6 +239,167 @@ async fn siwc_native_catalog_websocket_hides_lookup_and_keeps_client_calls() {
 }
 
 #[tokio::test]
+async fn siwc_native_catalog_releases_a_complete_call_before_terminal_without_replay() {
+    for (late_event, custom_first) in [
+        ("complete", false),
+        ("complete", true),
+        ("incomplete", false),
+        ("incomplete", true),
+        ("failure", false),
+        ("changed_id", false),
+        ("changed_call", false),
+        ("changed_call", true),
+    ] {
+        let siwc = AccessServer::start(json!([]), false).await;
+        let native = AccessServer::start(json!([]), false).await;
+        siwc.state.stream_generations.store(true, Ordering::SeqCst);
+        siwc.state
+            .stream_gate_after_tool_done
+            .store(true, Ordering::SeqCst);
+        let gate = Arc::new(Semaphore::new(0));
+        crate::poison::mutex(&siwc.state.stream_gates)
+            .extend([Arc::new(Semaphore::new(1)), gate.clone()]);
+        let lookup = lookup("resp_delayed_lookup");
+        let mut normal = calls();
+        if custom_first {
+            normal["output"].as_array_mut().unwrap().swap(0, 1);
+        }
+        if late_event == "complete" {
+            normal["output"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("status");
+        }
+        let encode = |response: &Value| {
+            crate::gateway::test_support::basis_points_stream(
+                &serde_json::to_vec(response).unwrap(),
+            )
+        };
+        let mut wire = encode(&normal);
+        if late_event != "complete" {
+            let mut pending = wire;
+            wire = Vec::new();
+            while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
+                let event: Value = serde_json::from_slice(&crate::protocol::sse_data(&frame))
+                    .unwrap_or(Value::Null);
+                if event["type"] == "response.completed" {
+                    let mut event = event;
+                    match late_event {
+                        "failure" => {
+                            event["type"] = json!("response.failed");
+                            event["response"]["status"] = json!("failed");
+                            event["response"]["error"] =
+                                json!({"code":"server_error","message":"Synthetic late failure"});
+                        }
+                        "incomplete" => {
+                            event["type"] = json!("response.incomplete");
+                            event["response"]["status"] = json!("incomplete");
+                            event["response"]["incomplete_details"] =
+                                json!({"reason":"max_output_tokens"});
+                        }
+                        "changed_id" => event["response"]["id"] = json!("resp_other"),
+                        "changed_call" if custom_first => {
+                            event["response"]["output"][0]["input"] = json!("Different raw input");
+                        }
+                        "changed_call" => {
+                            event["response"]["output"][0]["arguments"] =
+                                json!("{\"path\":\"different.txt\"}");
+                        }
+                        _ => unreachable!(),
+                    }
+                    wire.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+                    break;
+                }
+                wire.extend_from_slice(&frame);
+            }
+        }
+        crate::poison::mutex(&siwc.state.stream_bodies).extend([encode(&lookup), wire]);
+        crate::poison::mutex(&siwc.state.generation_replies)
+            .extend([(StatusCode::OK, lookup), (StatusCode::OK, normal.clone())]);
+        *crate::poison::mutex(&siwc.state.generation_body) = answer();
+        let runtime = runtime(&siwc, &native).await;
+        let (base, task) = recovery::gateway(runtime).await;
+        let client = retry_admission::bounded_client();
+        let send = |payload: &Value| {
+            client
+                .post(format!("{base}/v1/responses"))
+                .bearer_auth("local-secret")
+                .header("x-codex-session-id", "synthetic-native-delayed")
+                .json(payload)
+                .send()
+        };
+        let mut payload = request(true);
+        let mut response = send(&payload).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut prefix = Vec::new();
+        let early = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                prefix.extend(response.chunk().await.unwrap().expect("SSE closed early"));
+                while let Some(frame) = crate::protocol::take_sse_event(&mut prefix) {
+                    let event: Value =
+                        serde_json::from_slice(&crate::protocol::sse_data(&frame)).unwrap();
+                    assert_ne!(event["type"], "response.completed");
+                    assert_ne!(event["type"], "error", "{event}");
+                    if event["type"] == "response.output_item.done" {
+                        return event;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("Relay must release the tool while the upstream terminal is gated");
+        assert_eq!(early["output_index"], 0);
+        assert_eq!(early["item"], normal["output"][0]);
+        assert_eq!(gate.available_permits(), 0);
+        gate.add_permits(1);
+        prefix.extend(response.bytes().await.unwrap());
+        let tail = String::from_utf8(prefix).unwrap();
+        assert!(!tail.contains("relay_catalog"));
+        assert!(
+            !events(&tail).any(|event| {
+                event["type"] == "response.output_item.done"
+                    && event["item"]["id"] == early["item"]["id"]
+            }),
+            "{tail}"
+        );
+        if late_event == "complete" {
+            let completed = terminal(&tail, true);
+            assert_eq!(completed["output"], normal["output"]);
+            payload["previous_response_id"] = completed["id"].clone();
+            payload["input"] = json!([
+                {"type":"function_call_output","call_id":"call_native_read","output":"Synthetic read result"},
+                {"type":"custom_tool_call_output","call_id":"call_native_edit","output":"Synthetic edit result"}
+            ]);
+            if custom_first {
+                payload["input"].as_array_mut().unwrap().swap(0, 1);
+            }
+            let next = send(&payload).await.unwrap().text().await.unwrap();
+            assert_eq!(terminal(&next, true)["output"], answer()["output"]);
+        } else if late_event == "incomplete" {
+            let result = events(&tail)
+                .find(|event| event["type"] == "response.incomplete")
+                .expect("an incomplete response retains its published item");
+            assert_eq!(result["response"]["output"], json!([early["item"]]));
+        } else {
+            assert!(
+                events(&tail).any(|event| matches!(
+                    event["type"].as_str(),
+                    Some("error" | "response.failed")
+                )),
+                "{tail}"
+            );
+            assert!(!tail.contains("\"type\":\"response.completed\""), "{tail}");
+        }
+        assert_eq!(
+            siwc.state.generation_requests.load(Ordering::SeqCst),
+            if late_event == "complete" { 3 } else { 2 }
+        );
+        assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn siwc_native_catalog_rejects_invalid_calls_without_retrying_execution() {
     for stream in [false, true] {
         for invalid in ["schema", "unknown", "parallel"] {
@@ -321,6 +484,7 @@ async fn siwc_native_catalog_reports_actual_per_generation_usage_and_loaded_coun
         let result = retry_admission::bounded_client()
             .post(format!("{base}/v1/responses"))
             .bearer_auth("local-secret")
+            .header("x-codex-session-id", "synthetic-catalog-usage")
             .json(&request(stream))
             .send()
             .await
@@ -335,9 +499,57 @@ async fn siwc_native_catalog_reports_actual_per_generation_usage_and_loaded_coun
             Some(crate::AttemptOutcome::ToolDiscovery)
         );
         assert!(events[1].success);
+        let transport =
+            |event: &crate::UsageEvent| event.routing.as_ref().unwrap().transport.clone();
+        let first = transport(&events[0]);
+        let second = transport(&events[1]);
+        assert_eq!(first.is_some(), debug);
+        assert_eq!(second.is_some(), debug);
+        if let (Some(first), Some(second)) = (first, second) {
+            assert_eq!(first.connection_reused, Some(false));
+            assert_eq!(second.connection_reused, Some(true));
+            assert_eq!(second.connection_reset_reason, None);
+            assert_eq!(
+                second.request_payload.unwrap().mode,
+                crate::usage::RequestPayloadMode::Continuation
+            );
+        }
+        assert_eq!(siwc.state.websocket_requests.load(Ordering::SeqCst), 1);
+        {
+            let frames = crate::poison::mutex(&siwc.state.websocket_bodies);
+            assert_eq!(frames.len(), 2);
+            assert_eq!(frames[1]["previous_response_id"], "resp_usage_lookup");
+            let delta = frames[1]["input"].as_array().unwrap();
+            assert_eq!(delta.len(), 2);
+            assert_eq!(delta[0]["type"], "function_call_output");
+            assert_eq!(delta[1]["type"], "additional_tools");
+        }
         assert_eq!(events[0].tool_use.forwarded_tool_count, 1);
         assert_eq!(events[1].tool_use.forwarded_tool_count, 3);
         for (index, event) in events.iter().enumerate() {
+            let timing = event
+                .routing
+                .as_ref()
+                .unwrap()
+                .request_timing
+                .as_ref()
+                .unwrap();
+            assert_eq!(timing.phases.is_some(), debug);
+            if let Some(phases) = &timing.phases {
+                assert!(phases.body_read_and_parse_ms.is_some());
+                assert!(phases.candidate_selection_ms.is_some());
+                assert!(phases.cache_context_ms.is_some());
+                assert_eq!(
+                    phases.pre_attempt_ms + event.latency_ms + phases.post_attempt_ms.unwrap(),
+                    timing.duration_ms
+                );
+                assert_eq!(
+                    phases.upstream_ttft_ms.is_some(),
+                    upstream_stream,
+                    "stream={stream}, debug={debug}, attempt={}",
+                    event.attempt
+                );
+            }
             let (short, long, ttl) = if index == 0 {
                 (20, 0, "30m")
             } else {

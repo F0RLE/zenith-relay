@@ -27,7 +27,7 @@ pub use discovery::{
     SourceCatalogEvidence, SourceCatalogFailure, SourceCatalogRecord, SourceDiscovery,
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, discover_source_with_protocol_config,
-    discover_source_with_protocol_config_with_scope, read_source_models,
+    discover_source_with_protocol_config_with_scope, observed_responses_models, read_source_models,
     read_source_models_with_scope, source_catalog_changed,
 };
 pub use stats::{

@@ -504,6 +504,34 @@ fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserte
     scheduler.upsert(candidate("owner"));
     assert_eq!(scheduler.response_affinity_candidate("response", 1), None);
 }
+
+#[test]
+fn replacement_registration_does_not_inherit_the_active_members_conversation() {
+    for drain in [true, false] {
+        let mut scheduler = PoolScheduler::new();
+        let owner = candidate("owner");
+        scheduler.upsert(owner.clone());
+        let slot = scheduler
+            .reserve_request("owner", "gpt-5", 0, false)
+            .unwrap();
+        assert!(scheduler.bind_response_affinity("response", "owner", 0));
+        assert!(scheduler.bind_prompt_affinity("prompt", "owner", 0));
+        let mut replacement = owner;
+        if drain {
+            scheduler.remove("owner").unwrap();
+            assert!(scheduler.candidate("owner").is_some(), "still draining");
+            assert!(scheduler.has_response_affinity("response", 1));
+        } else {
+            replacement.source_id = "different-source".into();
+        }
+        scheduler.upsert(replacement);
+        assert!(!scheduler.has_response_affinity("response", 2));
+        assert!(scheduler.prompt_affinity_binding("prompt", 2).is_none());
+        assert!(scheduler.release_reservation(slot));
+        assert!(scheduler.candidate("owner").is_some());
+    }
+}
+
 #[test]
 fn invalidated_response_affinity_allows_retry_on_another_candidate() {
     let mut scheduler = PoolScheduler::new();

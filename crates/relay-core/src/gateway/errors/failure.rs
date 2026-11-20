@@ -105,7 +105,8 @@ impl AttemptFailure {
             AuthorizedRequestError::Prepare(error) => Self::prepare(error),
             AuthorizedRequestError::Transport(error) => Self::transport(&error),
             AuthorizedRequestError::NotReplayable => Self::upstream_response_body_failure(),
-            AuthorizedRequestError::DispatchBudgetExhausted => Self::no_candidate(),
+            AuthorizedRequestError::DispatchBudgetExhausted
+            | AuthorizedRequestError::HostedClaim(_) => Self::no_candidate(),
             AuthorizedRequestError::ModelAccess(failure) => {
                 let rate_limited = failure.code
                     == crate::providers::chatgpt::ModelDiscoveryFailureCode::RateLimited;

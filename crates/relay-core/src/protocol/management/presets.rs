@@ -3,7 +3,7 @@ use super::*;
 mod rules;
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
-pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 6;
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 7;
 const MIN_CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
 const MAX_PRESET_MEMBERS: usize = 2_048;
 

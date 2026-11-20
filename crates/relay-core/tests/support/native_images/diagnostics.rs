@@ -57,8 +57,42 @@ async fn native_image_diagnostics_observe_final_send_without_changing_response_o
             let diagnostics = events[0].routing.as_ref().unwrap().images.as_ref();
             if !debug {
                 assert!(diagnostics.is_none());
+                assert!(events[0].routing.as_ref().unwrap().transport.is_none());
                 continue;
             }
+            let routing = events[0].routing.as_ref().unwrap();
+            let transport = routing.transport.as_ref().unwrap();
+            assert_eq!(transport.upstream_http_status, Some(status.as_u16()));
+            assert_eq!(transport.downstream_http_status, Some(status.as_u16()));
+            assert!(transport.http_version.is_some());
+            assert!(transport.response_headers_ms.is_some());
+            assert!(transport.request_preparation_ms.is_some());
+            assert!(transport.upstream_response_ms >= transport.response_headers_ms);
+            assert_eq!(events[0].ttft_ms, None);
+            assert_eq!(
+                transport.client_response_ready_ms.is_some(),
+                status.is_success()
+            );
+            let payload = transport.request_payload.as_ref().unwrap();
+            assert_eq!(
+                serde_json::to_value(payload).unwrap()["fullRequestReason"],
+                "stateless_image_request"
+            );
+            assert!(payload.authorization_ms.is_some());
+            assert!(payload.http_dispatch_preparation_ms.is_some());
+            assert!(payload.http_send_to_headers_ms.is_some());
+            let timing = routing.request_timing.as_ref().unwrap();
+            let phases = timing.phases.as_ref().unwrap();
+            assert!(phases.body_read_and_parse_ms.is_some());
+            assert!(phases.candidate_selection_ms.is_some());
+            assert!(phases.request_preparation_ms.is_some());
+            assert_eq!(
+                phases.pre_attempt_ms
+                    + phases.prior_attempts_ms.unwrap()
+                    + events[0].latency_ms
+                    + phases.post_attempt_ms.unwrap(),
+                timing.duration_ms
+            );
             let diagnostics = diagnostics.unwrap();
             assert_eq!(diagnostics.requested.size.as_deref(), Some("3840x2160"));
             assert_eq!(

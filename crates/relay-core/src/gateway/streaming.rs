@@ -156,6 +156,10 @@ impl StreamExecution {
             transport.downstream_http_status = Some(status.as_u16());
         }
         let mut first = first;
+        let native_timing = adapter_is_passthrough
+            && route.client_wire_api == WireApi::Responses
+            && basis_points_request.is_none()
+            && discovery.is_none();
         let upstream_usage = (!adapter_is_passthrough
             || basis_points_request.is_some()
             || discovery.is_some())
@@ -203,6 +207,7 @@ impl StreamExecution {
                     .as_ref()
                     .and_then(|routing| routing.transport.as_ref())
                     .and_then(|transport| transport.request_payload.clone()),
+                socket: None,
                 headers: None,
             }))
         });
@@ -284,6 +289,7 @@ impl StreamExecution {
             completion_native_response,
         );
         usage_stream.tool_call_capture = Some(tool_call_capture);
+        usage_stream.native_timing = native_timing;
         usage_stream.expected_model = adapter_is_passthrough.then_some(expected_model).flatten();
         let origin = route_error_origin(&route);
         let mut streamed_response =

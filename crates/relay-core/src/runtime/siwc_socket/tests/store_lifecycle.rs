@@ -90,7 +90,12 @@ fn pending_borrowers_pin_idle_lanes_against_expiry_and_capacity_eviction() {
 async fn memory_and_background_work_keep_their_own_reusable_lanes() {
     let store = SocketStore::default();
     let url = "https://api.openai.com/v1/responses".parse().unwrap();
-    let key = |workload| session_key("key", "account", "context", &url, workload);
+    let prepared = planner::parse(&serde_json::to_vec(&request(json!([]))).unwrap()).unwrap();
+    let key = |workload| {
+        prepared
+            .session_key("key", "account", "context", &url, workload)
+            .unwrap()
+    };
     let mut memory = store.acquire(key(UsageWorkload::Memory)).unwrap();
     memory.bind(authority(10));
     let (chat, waited_ms) = store

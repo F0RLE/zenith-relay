@@ -69,6 +69,52 @@ fn queued(runtime: &GatewayRuntime) -> (usize, usize) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn due_route_waits_for_the_recovery_permit_held_on_another_model() {
+    let runtime = runtime();
+    for model in ["model-a", "model-b"] {
+        let (_, lease) = runtime
+            .admit(request(&runtime, 0, model), 100)
+            .await
+            .unwrap();
+        lease.begin_rotation_dispatch().unwrap();
+        lease.settle_rotation_transient(None, 100);
+    }
+    let (first, held) = runtime
+        .admit(request(&runtime, 0, "model-a"), 350)
+        .await
+        .unwrap();
+    assert!(first.half_open_probe);
+    held.begin_rotation_dispatch().unwrap();
+    let pending = request(&runtime, 1, "model-b");
+    let mut waiting = Box::pin(runtime.admit(pending.clone(), 350));
+    assert!(
+        poll!(&mut waiting).is_pending(),
+        "a busy recovery permit is not a missing route"
+    );
+    assert_eq!(queued(&runtime).0, 1);
+    assert_eq!(pending.budget.dispatches(), 0);
+    let b = runtime
+        .lock_scheduler()
+        .runtime_order(350)
+        .into_iter()
+        .find(|c| c.candidate_id == "b")
+        .unwrap();
+    assert!(!b.available && b.capacity_wait);
+    assert_eq!(b.next_retry_at_ms, None);
+
+    let released_at = Instant::now();
+    held.settle_rotation_success(350);
+    let (second, lease) = waiting.await.unwrap();
+    assert_eq!(Instant::now(), released_at);
+    assert_eq!(second.candidate_id, "b");
+    assert!(second.half_open_probe);
+    lease.begin_rotation_dispatch().unwrap();
+    lease.settle_rotation_success(350);
+    assert_eq!(pending.budget.dispatches(), 1);
+    assert_eq!(queued(&runtime), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
 async fn settled_attempt_waits_for_physical_reservation_release() {
     use crate::scheduler::rotation::{AttemptObservation, ExecutionObservation, HealthObservation};
 
@@ -102,6 +148,20 @@ async fn settled_attempt_waits_for_physical_reservation_release() {
 
         let mut pending = request(&runtime, 1, model);
         pending.operation = operation;
+        let scope = pending.key.scope_snapshot();
+        let retry_at = || {
+            runtime
+                .lock_scheduler()
+                .recovery_retry_at_for(pending.selection(&scope, now), operation)
+        };
+        let snapshot = runtime.lock_scheduler().runtime_order(now);
+        let member = snapshot.iter().find(|c| c.candidate_id == "a").unwrap();
+        assert!(!member.available && member.capacity_wait);
+        assert_eq!(
+            retry_at(),
+            None,
+            "only physical release, not an immediate retry, can admit {operation:?}"
+        );
         let mut waiting = Box::pin(runtime.admit(pending.clone(), now));
         assert!(
             poll!(&mut waiting).is_pending(),
@@ -110,6 +170,7 @@ async fn settled_attempt_waits_for_physical_reservation_release() {
         assert_eq!(queued(&runtime).0, 1);
         assert_eq!(pending.budget.dispatches(), 0);
         drop(held);
+        assert_eq!(retry_at(), Some(now));
         drop(waiting.await.expect("the released member remains eligible"));
         assert_eq!(queued(&runtime), (0, 0));
     }

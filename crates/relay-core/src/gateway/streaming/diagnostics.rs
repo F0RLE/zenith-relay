@@ -1,4 +1,4 @@
-use crate::{error_codes, usage::UpstreamErrorDetails};
+use crate::{error_codes, runtime::siwc_socket::SiwcStreamError, usage::UpstreamErrorDetails};
 use serde_json::json;
 
 pub(super) fn incomplete_stream(
@@ -46,6 +46,7 @@ pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> Upst
     let mut io = "unknown";
     let mut http2 = "none";
     let mut http2_reason = "none";
+    let mut siwc = None;
     // Error Display strings and URLs may contain credentials or provider data.
     // Inspect a bounded source chain for fixed transport categories only.
     for _ in 0..8 {
@@ -93,18 +94,23 @@ pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> Upst
                 _ => "other",
             };
         }
+        if let Some(error) = current.downcast_ref::<SiwcStreamError>() {
+            timeout |= *error == SiwcStreamError::HeartbeatTimeout;
+            siwc = Some(error.label());
+        }
         source = current
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::get_ref)
             .map(|inner| inner as &(dyn std::error::Error + 'static))
             .or_else(|| current.source());
     }
+    let siwc = siwc.map_or_else(String::new, |label| format!("; siwc={label}"));
     UpstreamErrorDetails::from_value(
         None,
         &json!({
             "code": error_codes::UPSTREAM_STREAM,
             "type": "relay_stream_transport",
-            "message": format!("Relay stream transport: timeout={timeout}; body={body}; decode={decode}; io={io}; http2={http2}; http2_reason={http2_reason}"),
+            "message": format!("Relay stream transport: timeout={timeout}; body={body}; decode={decode}; io={io}; http2={http2}; http2_reason={http2_reason}{siwc}"),
         }),
     )
 }

@@ -296,7 +296,7 @@ pub(super) fn present_import_item<'a>(
     let credentials = import_object
         .get("credentials")
         .and_then(Value::as_object)
-        .or_else(|| (format == ImportFormat::ZenithV1).then_some(auth).flatten())
+        .or_else(|| format.is_zenith().then_some(auth).flatten())
         .unwrap_or(import_object);
     if format == ImportFormat::PortableAccountBundleV1
         && string_field(import_object, &["platform"])

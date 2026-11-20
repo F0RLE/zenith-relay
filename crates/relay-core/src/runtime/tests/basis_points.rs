@@ -10,6 +10,7 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, Semaphore};
 
+mod access_latency;
 mod cache_context;
 mod catalog_discovery;
 mod free_images;
@@ -44,6 +45,7 @@ struct AccessState {
     websocket_generations: AtomicBool,
     websocket_requests: AtomicUsize,
     websocket_upgrade_reply: Mutex<Option<AccessReply>>,
+    websocket_upgrade_delay: Mutex<Duration>,
     websocket_bodies: Mutex<Vec<Value>>,
     attachment_requests: AtomicUsize,
     attachment_file_id: Mutex<Option<String>>,
@@ -57,6 +59,7 @@ struct AccessState {
     stream_bodies: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_prefixes: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
+    stream_gate_after_tool_done: AtomicBool,
     generation_header_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
     stream_closures: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>>,
     first_started: Notify,
@@ -94,6 +97,7 @@ impl AccessServer {
             websocket_generations: AtomicBool::new(false),
             websocket_requests: AtomicUsize::new(0),
             websocket_upgrade_reply: Mutex::new(None),
+            websocket_upgrade_delay: Mutex::new(Duration::ZERO),
             websocket_bodies: Mutex::new(Vec::new()),
             attachment_requests: AtomicUsize::new(0),
             attachment_file_id: Mutex::new(None),
@@ -107,6 +111,7 @@ impl AccessServer {
             stream_bodies: Mutex::new(Default::default()),
             stream_prefixes: Mutex::new(Default::default()),
             stream_gates: Mutex::new(Default::default()),
+            stream_gate_after_tool_done: AtomicBool::new(false),
             generation_header_gates: Mutex::new(Default::default()),
             stream_closures: Mutex::new(Default::default()),
             first_started: Notify::new(),
@@ -264,13 +269,23 @@ fn generation_reply(
     );
     let mut pending = wire.clone();
     let mut split = wire.len();
+    let stop_after_tool = state.stream_gate_after_tool_done.load(Ordering::SeqCst);
     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
         let event: Value =
             serde_json::from_slice(&crate::protocol::sse_data(&frame)).unwrap_or(Value::Null);
-        if matches!(
-            event["type"].as_str(),
-            Some("response.output_text.delta" | "response.function_call_arguments.delta")
-        ) {
+        let boundary = if stop_after_tool {
+            event["type"] == "response.output_item.done"
+                && matches!(
+                    event["item"]["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                )
+        } else {
+            matches!(
+                event["type"].as_str(),
+                Some("response.output_text.delta" | "response.function_call_arguments.delta")
+            )
+        };
+        if boundary {
             split = wire.len() - pending.len();
             break;
         }

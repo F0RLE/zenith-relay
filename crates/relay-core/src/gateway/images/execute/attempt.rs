@@ -43,6 +43,8 @@ pub(super) async fn run_selected_attempt(
         lease,
         mut route,
     } = selected_image_route;
+    let preparation_started = runtime.diagnostics_enabled().then(Instant::now);
+    route.observe_http_dispatch(None);
     budget.mark_image_generation();
     let account_route = route.account_id.is_some();
     let basis_points =
@@ -102,6 +104,9 @@ pub(super) async fn run_selected_attempt(
         content_type.to_str().unwrap_or_default(),
     )
     .await;
+    if let Some(started) = preparation_started {
+        route.observe_request_preparation(started.elapsed().as_millis() as u64, Default::default());
+    }
     let started = Instant::now();
     let mut upstream = runtime
         .request_client(&route.candidate_id)
@@ -148,7 +153,10 @@ pub(super) async fn run_selected_attempt(
                 turn_scope: None,
                 budget: Some(budget),
                 lease: Some(lease),
-                usage_event: Some((&authorization_event, started)),
+                usage_event: Some(crate::runtime::DispatchUsage::tracked(
+                    &authorization_event,
+                    started,
+                )),
             },
             None,
         )
@@ -156,12 +164,18 @@ pub(super) async fn run_selected_attempt(
     let attempt = u16::from(budget.dispatches());
     let upstream = match upstream_result {
         Ok(upstream) => {
+            route.observe_http_payload(&upstream.response);
+            route.observe_http_response(
+                upstream.response.headers(),
+                started.elapsed().as_millis() as u64,
+            );
             route.account_token_generation = upstream.account_token_generation;
             route.account_token_revision =
                 upstream.authorization_incarnation.token_revision().cloned();
             upstream.response
         }
         Err(error) => {
+            route.observe_authorized_dispatch_failure(&error);
             let observed = ImageAttempt {
                 request_id,
                 attempt,
@@ -181,10 +195,16 @@ pub(super) async fn run_selected_attempt(
                 if uncertain {
                     lease.settle_rotation_unknown(now_ms());
                 }
-                emit_usage(
-                    runtime,
-                    observed.event(false, failure.status, Some(failure.category.to_string())),
-                );
+                let mut event =
+                    observed.event(false, failure.status, Some(failure.category.to_string()));
+                if let Some(routing) = event.routing.as_mut() {
+                    routing.attempt_outcome = Some(if uncertain {
+                        crate::AttemptOutcome::ExecutionUncertain
+                    } else {
+                        crate::AttemptOutcome::ReturnedFailure
+                    });
+                }
+                emit_usage(runtime, event);
                 return ImageAttemptStep::Respond(api_error(
                     failure.status,
                     failure.message,
@@ -205,19 +225,18 @@ pub(super) async fn run_selected_attempt(
             return ImageAttemptStep::Retry(failure);
         }
     };
-    let observed = ImageAttempt {
-        request_id,
-        attempt,
-        key,
-        route: &route,
-        prepared,
-        started,
-    };
-
     let status = upstream.status();
     let response_headers = upstream.headers().clone();
     if status.is_success() && prepared.stream {
-        let event = observed.event(false, status, None);
+        let event = ImageAttempt {
+            request_id,
+            attempt,
+            key,
+            route: &route,
+            prepared,
+            started,
+        }
+        .event(false, status, None);
         return ImageAttemptStep::Respond(super::stream::image_stream_response(
             runtime.clone(),
             lease.clone(),
@@ -239,6 +258,22 @@ pub(super) async fn run_selected_attempt(
         |_| false,
     )
     .await;
+    if collected.is_ok()
+        && let Some(transport) = route
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+    {
+        transport.upstream_response_ms = Some(started.elapsed().as_millis() as u64);
+    }
+    let observed = ImageAttempt {
+        request_id,
+        attempt,
+        key,
+        route: &route,
+        prepared,
+        started,
+    };
     let bytes = match collected {
         Ok(bytes) => bytes,
         Err(partial) => {

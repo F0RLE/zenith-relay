@@ -8,6 +8,8 @@ use super::events::{TerminalOutcome, is_empty_responses_terminal, parse_sse_even
 use crate::error_codes;
 use crate::protocol::completion::{GeminiStreamCompletion, ResponseCompletion};
 use crate::protocol::sse_event_end;
+use crate::runtime::AccountTransport;
+use crate::scheduler::rotation::{ExecutionCertainty, ExecutionObservation};
 use axum::body::Bytes;
 use futures_util::StreamExt;
 use std::time::Instant;
@@ -61,14 +63,16 @@ impl StreamBootstrapObservation<'_> {
                 started,
                 transport: Some(transport),
                 ..
-            } if event.event_payload.is_some() => {
+            } if let Some(payload) = &event.event_payload => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 let timing = transport.stream_response.get_or_insert_default();
-                timing.observe_event(true, event.semantic_output, elapsed_ms);
-                if let Some(payload) = &event.event_payload {
-                    timing.observe_reasoning(payload, elapsed_ms);
-                    timing.observe_output(payload, elapsed_ms);
-                }
+                timing.observe_event(
+                    event.valid,
+                    event.has_output_delta && !event.is_compaction,
+                    elapsed_ms,
+                );
+                timing.observe_reasoning(payload, elapsed_ms);
+                timing.observe_output(payload, elapsed_ms);
             }
             Self::Buffered {
                 started, timing, ..
@@ -81,7 +85,7 @@ impl StreamBootstrapObservation<'_> {
 }
 
 pub(in crate::gateway) struct StreamBootstrapFailure {
-    pub(in crate::gateway) execution: crate::scheduler::rotation::ExecutionObservation,
+    pub(in crate::gateway) execution: ExecutionObservation,
     /// Local fixed-label validation evidence, never a provider-supplied field name.
     pub(in crate::gateway) validation_parameter: Option<&'static str>,
     pub(in crate::gateway) upstream_error: Option<crate::usage::UpstreamErrorDetails>,
@@ -92,10 +96,29 @@ pub(in crate::gateway) struct StreamBootstrapFailure {
     pub(in crate::gateway) partial_body: Vec<u8>,
 }
 
+impl StreamBootstrapFailure {
+    pub(in crate::gateway) fn execution_for_transport(
+        &self,
+        transport: AccountTransport,
+    ) -> ExecutionObservation {
+        // A status or message inside a successful BPS HTTP response is not
+        // admission evidence. Keep the 429, but don't replay an unproven turn.
+        if transport == AccountTransport::ExcelBasisPoints
+            && self.failure.category == error_codes::UPSTREAM_RATE_LIMITED
+            && self.execution.certainty == ExecutionCertainty::NotSent
+            && !self.failure.cooldown_hint.explicit_transient_rejection
+        {
+            ExecutionObservation::unknown()
+        } else {
+            self.execution
+        }
+    }
+}
+
 impl From<AttemptFailure> for StreamBootstrapFailure {
     fn from(failure: AttemptFailure) -> Self {
         Self {
-            execution: crate::scheduler::rotation::ExecutionObservation::unknown(),
+            execution: ExecutionObservation::unknown(),
             validation_parameter: None,
             failure,
             upstream_error: None,
@@ -277,9 +300,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
                         completed_output_items = completed_output_items.saturating_add(1);
                     }
                     saw_output |= event.semantic_output;
-                    // An unexplained empty terminal is a source failure, but
-                    // does not prove that generation was never accepted.
-                    // Its execution stays unknown, so no automatic retry is safe.
+                    // An empty terminal leaves execution uncertain: fail without retry.
                     // A non-empty incomplete response belongs to the client.
                     if !(prewarm && event.outcome == Some(TerminalOutcome::Success))
                         && event
@@ -344,6 +365,7 @@ pub(in crate::gateway) async fn bootstrap_observed_stream(
             }
             Some(Err(error)) => {
                 return Err(Box::new(StreamBootstrapFailure {
+                    upstream_error: Some(super::diagnostics::transport_error(&error)),
                     partial_body: buffered,
                     ..AttemptFailure::transport(&error).into()
                 }));

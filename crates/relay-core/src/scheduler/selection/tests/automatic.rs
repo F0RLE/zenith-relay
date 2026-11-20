@@ -32,6 +32,46 @@ fn automatic_ranks_linked_quota_without_changing_own_capacity() {
 }
 
 #[test]
+fn siwc_prompt_owner_survives_a_lost_linked_quota_observation() {
+    let mut scheduler = reference_quota_scheduler();
+    scheduler.keep_unknown_quota_affinity("account");
+    scheduler.bind_prompt_affinity("synthetic-chat", "account", 100);
+    scheduler.set_quota_references(BTreeMap::new());
+    assert_eq!(
+        rotation::dispatch(&mut scheduler, 100, Some("synthetic-chat")),
+        "account"
+    );
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+}
+
+#[test]
+fn a_linked_zero_preserves_or_moves_the_durable_siwc_owner_at_the_admission_margin() {
+    for (remaining, moves) in [(100, false), (999, false), (1_000, true)] {
+        let mut scheduler = reference_quota_scheduler();
+        scheduler.keep_unknown_quota_affinity("account");
+        scheduler
+            .quota_references
+            .get_mut("account")
+            .unwrap()
+            .remaining_basis_points = 0;
+        scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(remaining);
+        scheduler.bind_prompt_affinity("chat", "account", 100);
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, Some("chat")),
+            if moves { "api-a" } else { "account" }
+        );
+        assert_eq!(
+            scheduler.bind_prompt_affinity_sticky("chat", "api-a", 101),
+            moves
+        );
+        assert_eq!(
+            scheduler.prompt_affinity.get("chat", 101),
+            Some(if moves { "api-a" } else { "account" })
+        );
+    }
+}
+
+#[test]
 fn reference_quota_never_overrides_own_observation_or_auth() {
     for quota in [
         CandidateQuota::Available(100),

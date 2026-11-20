@@ -41,7 +41,8 @@ mod authentication;
 mod authorization;
 mod basis_points_access;
 mod request_usage;
-pub(crate) use authorization::AuthorizationDispatch;
+pub(crate) use authorization::{AuthorizationDispatch, DispatchUsage};
+pub(crate) use request_usage::RequestIngressTiming;
 mod build;
 pub(crate) mod cache_context;
 mod candidates;
@@ -226,6 +227,8 @@ pub(crate) struct ExecutorRoute {
     pub(crate) account_token_generation: Option<u64>,
     pub(crate) account_token_revision: Option<TokenDispatchRevision>,
     pub(crate) client_context_id: Option<String>,
+    /// Volatile downstream WS lane identity; never an upstream cache key.
+    pub(crate) siwc_socket_context: Option<String>,
     /// Client contract. The adapter maps it to the upstream protocol.
     pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
@@ -246,6 +249,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) basis_points_discovery: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
     pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
+    pub(crate) cache_context_relay_prefix: std::ops::Range<usize>,
 }
 
 impl ExecutorRoute {
@@ -305,6 +309,7 @@ pub(crate) struct AuthorizedResponse {
 
 #[derive(Debug)]
 pub(crate) enum AuthorizedRequestError {
+    HostedClaim(crate::gateway::hosted::ClaimError),
     Prepare(ExecutorPrepareError),
     Transport(reqwest::Error),
     NotReplayable,

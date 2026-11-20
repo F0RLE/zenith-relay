@@ -100,6 +100,8 @@ impl fmt::Debug for AccountExportRequest {
 
 #[derive(Clone)]
 pub struct AccountExportCredential {
+    /// Populated only for an explicitly requested Zenith proxy transfer.
+    pub transfer_proxy_url: Option<String>,
     pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
     pub siwc_registration: Option<crate::providers::chatgpt::SiwcRegistration>,
     pub basis_points_headers: Option<crate::providers::chatgpt::BasisPointsCapturedHeaders>,

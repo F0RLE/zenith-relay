@@ -4,6 +4,7 @@ mod cache_diagnostics;
 mod decision_trace;
 mod expiry_spending;
 mod latency_diagnostics;
+mod priced;
 mod quota_affinity;
 mod scenarios;
 mod weighted_credit;

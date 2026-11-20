@@ -175,9 +175,8 @@ pub(in crate::gateway) fn classify_upstream_error_value(
     }
     if zenith_gateway_invalid_request_value(error_payload) {
         return UpstreamErrorClassification {
-            // The legacy gateway envelope does not prove a route failure or
-            // a repairable continuation. Return the rejection without cooling
-            // the candidate or replaying the same request on another route.
+            // Return this rejection without cooling the candidate or replaying
+            // the request on another route.
             category: error_codes::UPSTREAM_INVALID_REQUEST,
             message: upstream_failure_message(error_codes::UPSTREAM_INVALID_REQUEST),
         };

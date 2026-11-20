@@ -136,9 +136,8 @@ pub fn normalize_native_codex_catalog_entry(
     if !codex_catalog_entry_is_compatible(&catalog_value) {
         return None;
     }
-    // This is a client transport selector, not evidence of model support. The
-    // original account manifest stays unchanged; Relay catalogs select full
-    // Responses so Codex does not enable Lite and disable parallel calls.
+    // Select full Responses in the Relay catalog to preserve parallel calls;
+    // leave the original account manifest unchanged.
     catalog_value["use_responses_lite"] = Value::Bool(false);
     Some(catalog_value)
 }

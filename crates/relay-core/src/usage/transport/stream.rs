@@ -12,6 +12,9 @@ pub struct StreamResponseDiagnostics {
     /// First typed reasoning activity; independent of generated text and TTFT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_reasoning_first_ms: Option<u64>,
+    /// First nonempty reasoning text/summary delta, distinct from a reasoning item opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_reasoning_text_first_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_output_first_ms: Option<u64>,
     /// First nonempty upstream text delta, not reasoning or a terminal snapshot.
@@ -44,6 +47,12 @@ impl StreamResponseDiagnostics {
             nonempty_delta,
             elapsed_ms,
         );
+        if matches!(
+            kind,
+            Some("response.reasoning_text.delta" | "response.reasoning_summary_text.delta")
+        ) {
+            self.observe_reasoning_delta(nonempty_delta, elapsed_ms);
+        }
         if !matches!(
             kind,
             Some("response.output_item.added" | "response.output_item.done")
@@ -91,6 +100,14 @@ impl StreamResponseDiagnostics {
         }
         if tool {
             self.upstream_tool_first_ms.get_or_insert(elapsed_ms);
+        }
+    }
+
+    pub(crate) fn observe_reasoning_delta(&mut self, nonempty: bool, elapsed_ms: u64) {
+        if nonempty {
+            self.upstream_reasoning_first_ms.get_or_insert(elapsed_ms);
+            self.upstream_reasoning_text_first_ms
+                .get_or_insert(elapsed_ms);
         }
     }
 

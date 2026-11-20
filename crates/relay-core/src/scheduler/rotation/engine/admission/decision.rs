@@ -37,7 +37,7 @@ impl RotationEngine {
         };
         observe(RotationDecisionStageKind::PhysicalMember, &physical);
         observe(RotationDecisionStageKind::RecoveryBudget, &ready);
-        let group = self.selection_group_observed(&ready, request, now_ms, &mut observe);
+        let (group, _) = self.selection_group_observed(&ready, request, now_ms, &mut observe);
         let selected = self.choose_for_request(request, &group);
         let credit_limit =
             rotation_total_weight(&group).saturating_mul(ROTATION_CREDIT_HORIZON_ROUNDS);
@@ -131,7 +131,7 @@ impl RotationEngine {
                     (RotationDecisionAvailability::Blocked, Some(reason), None)
                 }
             };
-        let quota_remaining = self.fresh_quota_remaining(&candidate.id, now_ms);
+        let quota_remaining = self.fresh_quota_observation(&candidate.id, now_ms);
         let credits = self.fresh_provider_credits(&candidate.id, now_ms);
         let expiry = candidate.spend_deadline.and_then(|deadline| {
             Some(RotationExpiryEvidence {

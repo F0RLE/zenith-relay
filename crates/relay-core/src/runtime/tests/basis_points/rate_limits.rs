@@ -50,6 +50,106 @@ async fn persistent_rate_limit_wait_reuses_its_account_for_json_and_sse() {
 }
 
 #[tokio::test]
+async fn explicit_sse_rate_limit_wait_reuses_its_account_for_json_and_sse() {
+    for stream in [false, true] {
+        let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+        server
+            .state
+            .stream_generations
+            .store(true, Ordering::SeqCst);
+        let mut refusal = rate_limit();
+        refusal["type"] = json!("error");
+        crate::poison::mutex(&server.state.stream_bodies)
+            .push_back(format!("event: error\ndata: {refusal}\n\n").into_bytes());
+        *crate::poison::mutex(&server.state.generation_body) = json!({
+            "id":"resp_synthetic","model":"gpt-test","status":"completed",
+            "output":[{"type":"message","id":"msg_synthetic","role":"assistant",
+                "content":[{"type":"output_text","text":"synthetic success"}]}]
+        });
+        let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+        let captured = events.clone();
+        let mut runtime = retry_admission::pool_runtime(&server, 1, false).await;
+        runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+        runtime.set_route_recovery_enabled(true);
+        runtime.set_route_recovery_window_ms(10_000);
+        let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap()
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .json(&json!({"model":"gpt-test","input":"synthetic input","stream":stream}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.text().await.unwrap().contains("synthetic success"));
+        assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 2);
+        let events = crate::poison::mutex(&events);
+        let attempts = events
+            .iter()
+            .filter(|event| !event.is_request_completion())
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].http_status, 429);
+        assert_eq!(
+            attempts[0].upstream_error.as_ref().unwrap().http_status,
+            Some(200)
+        );
+        assert!(attempts[1].success);
+        assert_eq!(attempts[0].candidate_id, attempts[1].candidate_id);
+        assert_eq!(attempts[0].request_id, attempts[1].request_id);
+        drop(events);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn ambiguous_or_executed_sse_rate_limit_is_not_replayed() {
+    for stream in [false, true] {
+        for evidence in [
+            json!({"type":"error","status":429,"message":"synthetic refusal"}).to_string(),
+            json!({"type":"response.failed","response":{"status":"failed","output":[],
+                "error":{"message":"Too many requests"}}})
+            .to_string(),
+            json!({"type":"response.failed","response":{"status":"failed","output":[],
+                "usage":{"output_tokens":7},"error":rate_limit()["error"]}})
+            .to_string(),
+            r#"{"type":"error","error":{"code":"unknown","code":"rate_limit_exceeded"}}"#
+                .to_owned(),
+        ] {
+            let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+            server
+                .state
+                .stream_generations
+                .store(true, Ordering::SeqCst);
+            crate::poison::mutex(&server.state.stream_bodies)
+                .push_back(format!("data: {evidence}\n\n").into_bytes());
+            let runtime = retry_admission::pool_runtime(&server, 2, false).await;
+            runtime.set_route_recovery_enabled(true);
+            runtime.set_route_recovery_window_ms(1_000);
+            let (base, task) = recovery::gateway(Arc::new(runtime)).await;
+            let response = retry_admission::bounded_client()
+                .post(format!("{base}/v1/responses"))
+                .bearer_auth("local-secret")
+                .json(&json!({"model":"gpt-test","input":"synthetic input","stream":stream}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            let _ = response.bytes().await.unwrap();
+            assert_eq!(
+                server.state.generation_requests.load(Ordering::SeqCst),
+                1,
+                "stream={stream}, event={evidence}"
+            );
+            task.abort();
+        }
+    }
+}
+
+#[tokio::test]
 async fn disabling_persistent_bps_rate_limit_wait_finishes_with_429_and_final_timing() {
     for stream in [false, true] {
         let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;

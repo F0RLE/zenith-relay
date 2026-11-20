@@ -51,6 +51,7 @@ struct Entry<T> {
 struct State<T> {
     coordinator: RefreshCoordinator,
     entries: BTreeMap<RefreshKey, Entry<T>>,
+    activity_groups: BTreeMap<String, Vec<String>>,
     stopped: bool,
 }
 
@@ -79,6 +80,7 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
             state: Mutex::new(State {
                 coordinator: RefreshCoordinator::new(limits)?,
                 entries: BTreeMap::new(),
+                activity_groups: BTreeMap::new(),
                 stopped: false,
             }),
             clock: Instant::now(),

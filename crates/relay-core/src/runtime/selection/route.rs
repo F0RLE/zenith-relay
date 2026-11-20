@@ -178,6 +178,7 @@ impl GatewayRuntime {
             account_token_generation: None,
             account_token_revision: None,
             client_context_id: None,
+            siwc_socket_context: None,
             client_wire_api: source_route.wire_api,
             adapter: source_route.adapter,
             reasoning_mode: source_route.reasoning_mode,
@@ -198,6 +199,7 @@ impl GatewayRuntime {
             basis_points_discovery: false,
             routing: None,
             cache_context_observation: None,
+            cache_context_relay_prefix: 0..0,
         })
     }
 
@@ -239,6 +241,7 @@ impl GatewayRuntime {
             account_token_generation: None,
             account_token_revision: None,
             client_context_id: None,
+            siwc_socket_context: None,
             client_wire_api: wire_api,
             adapter,
             reasoning_mode: if adapter.is_passthrough() {
@@ -271,6 +274,7 @@ impl GatewayRuntime {
             basis_points_discovery: false,
             routing: None,
             cache_context_observation: None,
+            cache_context_relay_prefix: 0..0,
         }
     }
 }

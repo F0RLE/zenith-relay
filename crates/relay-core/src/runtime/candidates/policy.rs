@@ -57,7 +57,8 @@ impl GatewayRuntime {
                     continue;
                 }
                 matched = true;
-                let Some(mut candidate) = scheduler.candidate(candidate_id).cloned() else {
+                let Some(mut candidate) = scheduler.candidate_for_update(candidate_id).cloned()
+                else {
                     return false;
                 };
                 if candidate.kind != CandidateKind::ApiSource
@@ -100,7 +101,7 @@ impl GatewayRuntime {
         }
         let rules = model_rules(&policy.allowed_models, &policy.excluded_models);
         let mut scheduler = self.lock_scheduler();
-        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+        let Some(mut candidate) = scheduler.candidate_for_update(account_id).cloned() else {
             return false;
         };
         if candidate.kind != CandidateKind::OAuthAccount

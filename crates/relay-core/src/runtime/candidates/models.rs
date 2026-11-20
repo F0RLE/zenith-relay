@@ -23,10 +23,7 @@ impl GatewayRuntime {
         };
         let plan = crate::poison::read(&account.subscription_plan_type);
         let mut scheduler = self.lock_scheduler();
-        if scheduler.is_retired() {
-            return false;
-        }
-        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+        let Some(mut candidate) = scheduler.candidate_for_update(account_id).cloned() else {
             return false;
         };
         if candidate.kind != CandidateKind::OAuthAccount

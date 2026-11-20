@@ -312,7 +312,6 @@ pub(super) async fn drive_selected_attempt(drive_input: DriveAttemptInput<'_>) -
                 allow_previous_response_reset,
                 response_affinity_hit,
                 selected_error_origin,
-                prompt_affinity_key: &prompt_affinity_key,
                 account_route,
                 forwarded_headers,
             },

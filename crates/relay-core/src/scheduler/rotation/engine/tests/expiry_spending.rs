@@ -582,6 +582,164 @@ fn urgent_group_does_not_lose_its_last_positive_quota_before_reset() {
     );
 }
 
+fn expiring_siwc(remaining: u64) -> RotationCandidate {
+    linked_member("near", remaining, 1)
+}
+
+fn linked_member(id: &str, remaining: u64, days: u64) -> RotationCandidate {
+    let mut member = spending_candidate(id, 0, Some(days * 86_400_000));
+    member.quota = QuotaState::Unknown;
+    member.quota_remaining_basis_points = None;
+    member.quota_observed_at_ms = None;
+    member.keep_unknown_quota_affinity = true;
+    member.quota_reference = Some(crate::CandidateQuotaReference {
+        source_account_id: "linked".into(),
+        remaining_basis_points: remaining,
+        observed_at_ms: 100,
+        valid_until_ms: Some(200),
+    });
+    member
+}
+
+#[test]
+fn cold_expiry_replacement_must_itself_offer_the_quota_lead() {
+    for far_date in [Some(12 * 86_400_000), None] {
+        for (remaining, expected) in [(300, "far"), (1_199, "far"), (1_200, "middle")] {
+            let mut engine = engine_with([
+                expiring_siwc(100),
+                linked_member("near-peer", 200, 2),
+                linked_member("middle", remaining, 5),
+                spending_candidate("far", 7_700, far_date),
+            ]);
+            let req = request(1);
+            assert_eq!(engine.select(&req, 100).unwrap().candidate_id, expected);
+            let trace = engine.decision_trace(&req, 100);
+            assert_eq!(trace.selected_candidate_id.as_deref(), Some(expected));
+            if expected == "far" {
+                let middle = trace
+                    .candidates
+                    .iter()
+                    .find(|c| c.candidate_id == "middle")
+                    .unwrap();
+                assert_eq!(
+                    middle.eliminated_at,
+                    Some(RotationDecisionStageKind::ResourceHeadroom)
+                );
+            }
+            assert_eq!(complete(&mut engine, 1), expected);
+
+            let mut retry = request(2);
+            retry.tried.insert("far".into());
+            let next = engine.select(&retry, 100).unwrap().candidate_id;
+            match remaining {
+                300 => assert!(matches!(next.as_str(), "near" | "near-peer")),
+                1_199 => assert_eq!(next, "near-peer"),
+                _ => assert_eq!(next, "middle"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_measured_member_in_the_nearest_band_keeps_its_own_expiry_priority() {
+    let mut engine = engine_with([
+        expiring_siwc(100),
+        spending_candidate("near-measured", 50, Some(2 * 86_400_000)),
+        spending_candidate("far", 7_700, Some(12 * 86_400_000)),
+    ]);
+    assert_eq!(complete(&mut engine, 1), "near-measured");
+}
+
+#[test]
+fn automatic_does_not_restore_a_near_empty_siwc_by_expiry_on_a_new_request_or_retry() {
+    for later_date in [None, Some(12 * 86_400_000)] {
+        for (low, better, expected) in [
+            (100, 7_700, "later"),
+            (200, 1_200, "later"),
+            (200, 1_199, "near"),
+            (201, 7_700, "near"),
+        ] {
+            let mut engine = engine_with([
+                expiring_siwc(low),
+                spending_candidate("later", better, later_date),
+                candidate("previous", 0, 1),
+            ]);
+            for retry in [false, true] {
+                let mut request = request(1);
+                if retry {
+                    request.tried.insert("previous".into());
+                    request.preferred = Some("previous".into());
+                }
+                let trace = engine.decision_trace(&request, 100);
+                assert_eq!(trace.selected_candidate_id.as_deref(), Some(expected));
+                let selection = engine.select(&request, 100).unwrap();
+                assert_eq!(selection.candidate_id, expected);
+                if expected == "later" {
+                    let near = trace
+                        .candidates
+                        .iter()
+                        .find(|c| c.candidate_id == "near")
+                        .unwrap();
+                    assert_eq!(
+                        near.eliminated_at,
+                        Some(RotationDecisionStageKind::ResourceHeadroom)
+                    );
+                    assert_eq!(near.fallback_rank, Some(2));
+                    if retry || later_date.is_none() {
+                        assert_eq!(selection.reason, RotationSelectionReason::QuotaHeadroom);
+                    }
+                }
+                let lease = engine.reserve(&request, 100).unwrap();
+                assert_eq!(lease.candidate_id, expected);
+                assert!(engine.release_unstarted(lease.lease_id));
+            }
+        }
+    }
+}
+
+#[test]
+fn low_linked_quota_is_not_a_block_or_an_override_of_explicit_order() {
+    let mut later = spending_candidate("later", 7_700, Some(12 * 86_400_000));
+    later.max_concurrency = 1;
+    let mut near = expiring_siwc(100);
+    near.priority = 10;
+    let mut engine = engine_with([near, later]);
+    for mode in [
+        RotationMode::SubscriptionExpiry,
+        RotationMode::Failover,
+        RotationMode::RoundRobin,
+        RotationMode::WeightedRoundRobin,
+    ] {
+        engine.set_mode(mode);
+        assert_eq!(
+            engine.select(&request(1), 100).unwrap().candidate_id,
+            "near"
+        );
+    }
+    engine.set_mode(RotationMode::Automatic);
+    assert_eq!(
+        engine
+            .select(&request(2).with_owner("near"), 100)
+            .unwrap()
+            .candidate_id,
+        "near"
+    );
+    let busy = engine
+        .reserve(&request(3).with_owner("later"), 100)
+        .unwrap();
+    assert_eq!(
+        engine.select(&request(4), 100).unwrap().candidate_id,
+        "near"
+    );
+    assert!(engine.release_unstarted(busy.lease_id));
+    record_ready_latency(&mut engine, "later", 5_000, 100);
+    record_ready_latency(&mut engine, "near", 100, 100);
+    assert_eq!(
+        engine.select(&request(5), 100).unwrap().candidate_id,
+        "near"
+    );
+}
+
 #[test]
 fn enabled_fresh_reset_budget_weights_only_the_nearest_group() {
     use crate::quota::QuotaSpendResets;

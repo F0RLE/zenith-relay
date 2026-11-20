@@ -54,6 +54,8 @@ impl PoolScheduler {
         rotation_candidate.enabled = candidate.enabled;
         rotation_candidate.draining = candidate.draining;
         rotation_candidate.quota_reference = self.quota_references.get(&candidate.id).cloned();
+        rotation_candidate.keep_unknown_quota_affinity =
+            self.keep_unknown_quota_affinity.contains(&candidate.id);
         rotation_candidate.spend_deadline = self.spend_deadlines.get(&candidate.id).copied();
         rotation_candidate.routes.clear();
         rotation_candidate.route_rates.clear();

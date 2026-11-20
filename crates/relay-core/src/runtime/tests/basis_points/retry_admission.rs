@@ -246,7 +246,15 @@ async fn incompatible_bps_pool_does_not_block_a_later_compatible_request() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(events.load(Ordering::SeqCst), 0);
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+        // Peer discovery completes in the background after admission can proceed.
+        let discovery = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.account_state.access_prefetch.lock(),
+        )
+        .await
+        .unwrap();
         assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 5);
+        drop(discovery);
         {
             let scheduler = runtime.lock_scheduler();
             for index in 0..5 {
@@ -333,10 +341,17 @@ async fn incompatible_bps_route_can_fall_back_to_a_compatible_native_account() {
             }
             assert_eq!(events.load(Ordering::SeqCst), 2);
             // Catalog discovery is independent of execution admission.
+            let discovery = tokio::time::timeout(
+                Duration::from_secs(2),
+                runtime.account_state.access_prefetch.lock(),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 server.state.access_requests.load(Ordering::SeqCst),
                 bps_count
             );
+            drop(discovery);
             assert!(!runtime.lock_scheduler().is_retired());
             task.abort();
         }

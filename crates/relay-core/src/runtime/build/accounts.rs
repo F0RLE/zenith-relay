@@ -96,7 +96,7 @@ pub(super) fn build_accounts(
         };
         let models = normalized_set(account.models.iter());
         // Native Images is a separate operation, not a GPT text-tool bridge.
-        // Publishing the route is not proof of the account's image quota.
+        // Image quota is checked separately from route publication.
         let mut candidate_models = if images_only {
             BTreeSet::new()
         } else {
@@ -144,6 +144,9 @@ pub(super) fn build_accounts(
         registry.replace(candidate.id.clone(), published_models.iter());
         let candidate_id = candidate.id.clone();
         scheduler.upsert(candidate);
+        if siwc {
+            scheduler.keep_unknown_quota_affinity(&candidate_id);
+        }
         team_members
             .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
             .or_default()

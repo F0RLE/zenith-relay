@@ -303,7 +303,10 @@ pub(super) async fn dispatch_account_attempt(
                 turn_scope: turn_scope.as_ref(),
                 budget: Some(budget),
                 lease: Some(lease),
-                usage_event: Some((&authorization_event, started)),
+                usage_event: Some(crate::runtime::DispatchUsage::tracked(
+                    &authorization_event,
+                    started,
+                )),
             },
             attachment_owner.as_ref(),
         )

@@ -105,6 +105,42 @@ fn cache_buckets_do_not_invent_missing_totals_or_positive_write_windows() {
 }
 
 #[test]
+fn responses_cache_usage_skips_empty_stream_envelope_usage() {
+    for placeholder in [Value::Null, serde_json::json!({})] {
+        let wire = format!(
+            "data: {}\n\n",
+            serde_json::json!({"type":"response.completed","usage":placeholder,"response":{
+                "status":"completed","usage":{"input_tokens":100,"output_tokens":10,
+                    "input_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}
+            }})
+        );
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, wire.as_bytes());
+        assert_eq!(event.input_tokens, Some(100));
+        assert_eq!(event.cached_input_tokens, Some(40));
+        assert_eq!(event.cache_write_input_tokens, Some(50));
+    }
+}
+
+#[test]
+fn cache_write_usage_skips_null_aliases_but_keeps_explicit_zero() {
+    for (primary, alternate, expected) in [
+        (Value::Null, serde_json::json!(40), Some(40)),
+        (serde_json::json!(0), serde_json::json!(40), Some(0)),
+        (Value::Null, Value::Null, None),
+    ] {
+        let body = serde_json::json!({"usage":{"input_tokens":100,"output_tokens":10,
+            "input_tokens_details":{"cached_tokens":50,"cache_write_tokens":primary},
+            "cache_write_tokens":alternate
+        }});
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, &serde_json::to_vec(&body).unwrap());
+        assert_eq!(event.cached_input_tokens, Some(50));
+        assert_eq!(event.cache_write_input_tokens, expected);
+    }
+}
+
+#[test]
 fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
     for ttl in ["30m", "12h"] {
         let response = serde_json::json!({
@@ -122,6 +158,13 @@ fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
             populate_tokens(&mut event, &body);
             assert_eq!(event.cache_write_input_tokens, Some(40));
             assert_eq!(event.cache_write_ttl.as_deref(), Some(ttl));
+            let usage = event.tool_use.provider_usage.as_ref().unwrap();
+            assert_eq!(usage.cache_retention.as_deref(), Some(ttl));
+            assert_eq!(
+                usage.cache_mode,
+                Some(crate::usage::CachePolicyMode::Implicit)
+            );
+            assert!(usage.cache_write_tokens_by_ttl.is_empty());
         }
     }
     let mut event = test_usage_event();
@@ -206,7 +249,10 @@ fn generated_usage_prevents_replaying_json_and_buffered_stream_failures() {
         let response = serde_json::json!({"status":"failed","output":[],"usage":usage,
             "error":{"code":"model_capacity_exhausted","message":"Synthetic capacity refusal"}
         });
-        let failure = validate_upstream_response(&response, None).err().unwrap();
+        let bytes = serde_json::to_vec(&response).unwrap();
+        let failure = validate_upstream_response(&response, &bytes, None)
+            .err()
+            .unwrap();
         assert_eq!(
             failure.execution.certainty,
             crate::scheduler::rotation::ExecutionCertainty::Accepted
@@ -221,6 +267,20 @@ fn generated_usage_prevents_replaying_json_and_buffered_stream_failures() {
             crate::scheduler::rotation::ExecutionCertainty::Accepted
         );
     }
+}
+
+#[test]
+fn duplicate_buffered_error_codes_do_not_authorize_basis_points_replay() {
+    let bytes = br#"{"error":{"code":"provider_unknown","code":"rate_limit_exceeded"}}"#;
+    let failure = completed_upstream_response(bytes, true, None).unwrap_err();
+    assert_eq!(
+        failure.failure.status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        failure.execution_for_transport(crate::runtime::AccountTransport::ExcelBasisPoints),
+        crate::scheduler::rotation::ExecutionObservation::unknown()
+    );
 }
 
 #[test]

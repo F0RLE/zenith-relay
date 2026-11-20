@@ -196,8 +196,7 @@ impl TokenAuthority {
     }
 
     /// Apply a synchronous observation only to the still-current credential.
-    /// A busy refresh/replacement is not evidence that an old result belongs
-    /// to its eventual winner. Never wait for it or expose credential material.
+    /// Skip busy refreshes/replacements; never wait or expose credential material.
     pub(crate) fn with_usage_observation<T>(
         &self,
         account_id: &str,

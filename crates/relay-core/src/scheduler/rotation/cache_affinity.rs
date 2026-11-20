@@ -1,4 +1,4 @@
-//! Selection-time evidence, not a claim about provider KV-cache residency.
+//! Cache-affinity inputs for candidate selection.
 
 use serde::{Deserialize, Serialize};
 

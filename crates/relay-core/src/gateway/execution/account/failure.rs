@@ -55,7 +55,6 @@ pub(super) struct AccountStatusFailureInput<'a> {
     pub(super) selected_error_origin: ErrorOrigin,
     pub(super) response_affinity_hit: bool,
     pub(super) has_previous_response_id: bool,
-    pub(super) prompt_affinity_key: &'a Option<String>,
     pub(super) state: &'a mut AttemptState,
 }
 
@@ -313,7 +312,6 @@ fn settle_account_failure(
         selected_error_origin,
         response_affinity_hit,
         has_previous_response_id,
-        prompt_affinity_key,
         state,
         ..
     } = input;
@@ -372,7 +370,7 @@ fn settle_account_failure(
     }
     let rejection_state = settle_route_failure(runtime, lease, route, &failure, response_headers);
     if classified.cache_write_rejected {
-        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
+        runtime.reject_prompt_affinity(lease);
     }
     if not_sent
         && (lease.has_transient_retry()

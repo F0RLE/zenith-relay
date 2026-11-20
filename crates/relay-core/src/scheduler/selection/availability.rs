@@ -33,13 +33,15 @@ impl PoolScheduler {
         selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> bool {
-        let lane = if operation == RotationOperation::Image {
-            InFlightLane::Image
-        } else {
-            InFlightLane::Text
-        };
-        self.select_for_operation(selection_request, lane, operation, None, false)
+        self.select_for_operation(selection_request, operation, None, false)
             .is_some()
+    }
+
+    pub(super) fn retain_free_lanes(&self, request: &mut RotationRequest) {
+        if let Some(allowed) = &mut request.allowed_candidates {
+            let lane = request.operation.into();
+            allowed.retain(|id| self.lane_allows(&self.candidates[id], lane));
+        }
     }
 
     pub(super) fn model_operation(model: &str) -> RotationOperation {
@@ -58,11 +60,7 @@ impl PoolScheduler {
         let Some(projected) = self.prepare_rotation_request(&selection_request, operation) else {
             return false;
         };
-        let lane = if operation == RotationOperation::Image {
-            InFlightLane::Image
-        } else {
-            InFlightLane::Text
-        };
+        let lane = operation.into();
         self.candidates.values().any(|candidate| {
             match self.rotation.candidate_availability(
                 &projected,
@@ -85,9 +83,13 @@ impl PoolScheduler {
         selection_request: SelectionRequest<'_>,
         operation: RotationOperation,
     ) -> Option<u64> {
-        let projected = self.prepare_rotation_request(&selection_request, operation)?;
-        // A timer may have elapsed while another request completed. In that
-        // case the caller can immediately retry, using its original budget.
+        let mut projected = self.prepare_rotation_request(&selection_request, operation)?;
+        // A busy lane can still have a provider deadline, but only a free
+        // lane may signal that the request can be retried immediately.
+        let next_wakeup = self
+            .rotation
+            .next_wakeup(&projected, selection_request.now_ms);
+        self.retain_free_lanes(&mut projected);
         if self
             .rotation
             .select(&projected, selection_request.now_ms)
@@ -95,8 +97,7 @@ impl PoolScheduler {
         {
             return Some(selection_request.now_ms);
         }
-        self.rotation
-            .next_wakeup(&projected, selection_request.now_ms)
+        next_wakeup
     }
 
     pub fn earliest_retry_at(&mut self, selection_request: SelectionRequest<'_>) -> Option<u64> {

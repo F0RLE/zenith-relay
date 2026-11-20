@@ -12,8 +12,10 @@ pub enum RequestPayloadMode {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FullRequestReason {
+    #[serde(rename = "bps_transport", alias = "basis_points_transport")]
     BasisPointsTransport,
     ProtocolConversion,
+    StatelessImageRequest,
     /// A fact about this payload, not an inferred client decision or cache miss.
     NoPreviousResponseId,
     SocketCheckpointUnavailable,
@@ -28,6 +30,8 @@ pub enum FullRequestReason {
 pub enum RequestContentEncoding {
     Identity,
     Zstd,
+    #[serde(rename = "permessage-deflate")]
+    PerMessageDeflate,
 }
 
 /// Fixed labels only: never serialize client-defined keys or item values.
@@ -100,6 +104,16 @@ pub enum SocketReplayItemKind {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketOutputReconciliation {
+    OmittedCompletedFunctionStatus,
+    OmittedParsedFunctionArguments,
+    OmittedOptionalFunctionFields,
+    OmittedReasoningCreatedBy,
+    OmittedAllowlistedOutputFields,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPayloadDiagnostics {
@@ -108,6 +122,8 @@ pub struct RequestPayloadDiagnostics {
     pub full_request_reason: Option<FullRequestReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_output_mismatch: Option<SocketOutputMismatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_output_reconciled: Option<SocketOutputReconciliation>,
     pub json_bytes: u64,
     pub body_bytes: u64,
     pub content_encoding: RequestContentEncoding,
@@ -117,6 +133,12 @@ pub struct RequestPayloadDiagnostics {
     /// Microseconds preserve sub-millisecond observations; not codec CPU time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_us: Option<u64>,
+    /// Credential preparation and BPS access checks before this physical send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_ms: Option<u64>,
+    /// Post-authorization setup before HTTP execute, including encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_dispatch_preparation_ms: Option<u64>,
     /// HTTP execute to response headers, excluding compression/authorization.
     /// Includes connection setup and upstream waiting; not isolated upload time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,11 +170,14 @@ impl RequestPayloadDiagnostics {
                 TransportMode::Native => FullRequestReason::NoPreviousResponseId,
             }),
             socket_output_mismatch: None,
+            socket_output_reconciled: None,
             json_bytes: bytes.len() as u64,
             body_bytes: bytes.len() as u64,
             content_encoding: RequestContentEncoding::Identity,
             compression_ms: None,
             compression_us: None,
+            authorization_ms: None,
+            http_dispatch_preparation_ms: None,
             http_send_to_headers_ms: None,
         }
     }
@@ -238,18 +263,47 @@ mod tests {
         let mut observed = RequestPayloadDiagnostics::identity(b"{}", TransportMode::Native);
         let legacy = serde_json::to_value(&observed).unwrap();
         assert!(legacy.get("compressionUs").is_none());
+        assert!(legacy.get("authorizationMs").is_none());
+        assert!(legacy.get("httpDispatchPreparationMs").is_none());
         assert!(legacy.get("httpSendToHeadersMs").is_none());
         assert!(legacy.get("socketOutputMismatch").is_none());
         let restored: RequestPayloadDiagnostics = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.compression_us, None);
+        assert_eq!(restored.authorization_ms, None);
+        assert_eq!(restored.http_dispatch_preparation_ms, None);
         assert_eq!(restored.http_send_to_headers_ms, None);
         assert_eq!(restored.socket_output_mismatch, None);
         observed.compression_ms = Some(0);
         observed.compression_us = Some(420);
+        observed.authorization_ms = Some(0);
+        observed.http_dispatch_preparation_ms = Some(0);
         observed.http_send_to_headers_ms = Some(0);
         let encoded = serde_json::to_value(observed).unwrap();
         assert_eq!(encoded["compressionUs"], 420);
+        assert_eq!(encoded["authorizationMs"], 0);
+        assert_eq!(encoded["httpDispatchPreparationMs"], 0);
         assert_eq!(encoded["httpSendToHeadersMs"], 0);
+    }
+
+    #[test]
+    fn websocket_payload_diagnostics_preserve_encoding_and_reconciliation() {
+        let mut observed = RequestPayloadDiagnostics::identity(
+            br#"{"previous_response_id":"resp_synthetic","input":[]}"#,
+            TransportMode::Native,
+        );
+        observed.socket_output_reconciled =
+            Some(SocketOutputReconciliation::OmittedReasoningCreatedBy);
+        observed.content_encoding = RequestContentEncoding::PerMessageDeflate;
+        let encoded = serde_json::to_value(&observed).unwrap();
+        assert_eq!(
+            encoded["socketOutputReconciled"],
+            "omitted_reasoning_created_by"
+        );
+        assert_eq!(encoded["contentEncoding"], "permessage-deflate");
+        assert_eq!(
+            serde_json::from_value::<RequestPayloadDiagnostics>(encoded).unwrap(),
+            observed
+        );
     }
 
     #[test]
@@ -287,6 +341,16 @@ mod tests {
             );
             assert_eq!(full.mode, RequestPayloadMode::Full);
             assert_eq!(full.full_request_reason, Some(reason));
+        }
+        assert_eq!(
+            serde_json::to_value(FullRequestReason::BasisPointsTransport).unwrap(),
+            "bps_transport"
+        );
+        for name in ["bps_transport", "basis_points_transport"] {
+            assert_eq!(
+                serde_json::from_value::<FullRequestReason>(serde_json::json!(name)).unwrap(),
+                FullRequestReason::BasisPointsTransport
+            );
         }
     }
 }

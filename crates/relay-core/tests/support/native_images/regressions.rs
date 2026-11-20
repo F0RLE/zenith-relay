@@ -174,7 +174,7 @@ async fn codex_edit_stream_completion_reaches_http_client_under_edit_event_names
         StreamChunk::Data("event: image_generation.partial_image\ndata: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"cHJldmlldw==\"}\n\n"),
         StreamChunk::Data("event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"aW1hZ2U=\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"),
     ])]).await;
-    let (gateway, events, _, _) = spawn_mixed_gateway(
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![account(
             "image-account",
@@ -186,6 +186,10 @@ async fn codex_edit_stream_completion_reaches_http_client_under_edit_event_names
         ready_authority("image-account", "synthetic-access").await,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            diagnostics_enabled: || true,
+            ..Default::default()
+        },
     )
     .await;
     let response = reqwest::Client::new().post(format!("{}/v1/images/edits", gateway.base_url))
@@ -203,6 +207,32 @@ async fn codex_edit_stream_completion_reaches_http_client_under_edit_event_names
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
     assert_eq!(events[0].total_tokens, Some(5));
+    let routing = events[0].routing.as_ref().unwrap();
+    let transport = routing.transport.as_ref().unwrap();
+    assert_eq!(transport.upstream_http_status, Some(200));
+    assert_eq!(transport.downstream_http_status, Some(200));
+    assert!(transport.response_headers_ms.is_some());
+    assert!(
+        transport
+            .stream_response
+            .as_ref()
+            .unwrap()
+            .upstream_output_first_ms
+            .is_some()
+    );
+    assert!(transport.client_first_output_ms.is_some());
+    assert!(transport.upstream_response_ms.is_some());
+    assert!(transport.client_response_ready_ms >= transport.upstream_response_ms);
+    let timing = routing.request_timing.as_ref().unwrap();
+    let phases = timing.phases.as_ref().unwrap();
+    assert!(phases.body_read_and_parse_ms.is_some());
+    assert_eq!(
+        phases.pre_attempt_ms
+            + phases.prior_attempts_ms.unwrap()
+            + events[0].latency_ms
+            + phases.post_attempt_ms.unwrap(),
+        timing.duration_ms
+    );
 }
 
 #[tokio::test]

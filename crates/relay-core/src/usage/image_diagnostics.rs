@@ -1,4 +1,4 @@
-//! Opt-in observations, not proof that a provider honored image options.
+//! Opt-in requested, sent and provider-reported image options.
 use serde::{Deserialize, Serialize};
 
 mod options;
@@ -43,6 +43,7 @@ pub enum ImageHeaderStatus {
 pub struct ImageOutputDiagnostics {
     pub index: u8,
     /// Per-image metadata, never filled from requested or envelope defaults.
+    #[serde(default, skip_serializing_if = "ImageOptionsDiagnostics::is_empty")]
     pub reported: ImageOptionsDiagnostics,
     pub header_status: ImageHeaderStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]

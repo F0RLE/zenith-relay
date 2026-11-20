@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn busy_image_lane_does_not_offer_an_immediate_retry_or_block_text() {
+    let mut scheduler = PoolScheduler::new();
+    let mut account = oauth_candidate("account");
+    account.models.insert("gpt-image-2".into());
+    scheduler.upsert(account);
+    let lease = scheduler
+        .reserve_request("account", "gpt-image-2", 100, true)
+        .unwrap();
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    let request = |model| SelectionRequest {
+        model,
+        allowed_protocols: &[WireApi::Responses],
+        scope: &scope,
+        tried: &tried,
+        response_affinity_key: None,
+        prompt_affinity_key: None,
+        now_ms: 100,
+    };
+    let image = RotationOperation::Image;
+    let image_retry =
+        |pool: &mut PoolScheduler| pool.recovery_retry_at_for(request("gpt-image-2"), image);
+    assert_eq!(image_retry(&mut scheduler), None);
+    assert!(scheduler.capacity_blocked_for(request("gpt-image-2"), image));
+    assert_eq!(
+        scheduler.recovery_retry_at_for(request("gpt-5"), RotationOperation::Text),
+        Some(100)
+    );
+    scheduler.set_cooldown("account", "gpt-image-2", 300);
+    assert_eq!(image_retry(&mut scheduler), Some(300));
+    assert!(scheduler.release_reservation(lease));
+    assert_eq!(image_retry(&mut scheduler), Some(300));
+    scheduler.clear_cooldown("account", "gpt-image-2");
+    assert_eq!(image_retry(&mut scheduler), Some(100));
+}
+
+#[test]
 fn image_lane_is_separate_from_text_load_and_caps_each_oauth_account() {
     let mut first = oauth_candidate("first");
     first.models.insert("gpt-image-2".to_string());

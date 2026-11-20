@@ -19,6 +19,7 @@ pub(crate) struct RequestFingerprint {
     input: Vec<InputFingerprint>,
     input_bytes: u64,
     continuation: bool,
+    relay_prefix: std::ops::Range<usize>,
 }
 
 struct InputFingerprint {
@@ -28,6 +29,14 @@ struct InputFingerprint {
 
 impl RequestFingerprint {
     pub(super) fn capture(request: &Value, salt: &[u8; 32]) -> Option<Self> {
+        Self::capture_with_relay_prefix(request, salt, 0..0)
+    }
+
+    pub(super) fn capture_with_relay_prefix(
+        request: &Value,
+        salt: &[u8; 32],
+        relay_prefix: std::ops::Range<usize>,
+    ) -> Option<Self> {
         let mut fingerprints = JsonFingerprinter::new(salt);
         let mut sections = Vec::new();
         for (section, field) in [
@@ -106,6 +115,7 @@ impl RequestFingerprint {
                 .get("previous_response_id")
                 .and_then(Value::as_str)
                 .is_some(),
+            relay_prefix,
         })
     }
 
@@ -127,14 +137,20 @@ impl RequestFingerprint {
         if self.continuation || client.continuation {
             return diagnostics;
         }
-        let leading = |items: &[InputFingerprint]| {
-            items
+        let leading = |request: &Self| {
+            request
+                .input
                 .iter()
-                .take_while(|item| item.kind == CacheInputKind::Developer)
+                .enumerate()
+                .take_while(|(index, item)| {
+                    item.kind == CacheInputKind::Developer
+                        || (request.relay_prefix.contains(index)
+                            && item.kind == CacheInputKind::AdditionalTools)
+                })
                 .count()
         };
-        let client_prefix = leading(&client.input);
-        let upstream_prefix = leading(&self.input);
+        let client_prefix = leading(client);
+        let upstream_prefix = leading(self);
         if diagnostics.shared_prefix_items.unwrap_or(0) >= client_prefix.max(upstream_prefix) as u32
             || (client_prefix == client.input.len() && upstream_prefix == self.input.len())
         {
@@ -147,6 +163,11 @@ impl RequestFingerprint {
         diagnostics.leading_context_alignment = Some(LeadingContextAlignment {
             skipped_client_items: client_prefix as u32,
             skipped_upstream_items: upstream_prefix as u32,
+            skipped_upstream_relay_items: Some(
+                upstream_prefix
+                    .min(self.relay_prefix.end)
+                    .saturating_sub(self.relay_prefix.start) as u32,
+            ),
             shared_prefix_items: shared as u32,
             comparison,
         });

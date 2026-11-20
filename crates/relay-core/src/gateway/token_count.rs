@@ -1,5 +1,4 @@
-//! Native, non-generating token counts. A generation route is not evidence of
-//! a tokenizer for another provider: unsupported routes never estimate or infer.
+//! Native, non-generating token counts on routes with tokenizer support.
 
 use super::auth::{
     authenticate_client, client_api_forbidden, invalid_host, unauthorized, valid_local_host,

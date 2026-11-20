@@ -11,7 +11,7 @@ use crate::gateway::response::{
 };
 use crate::runtime::{
     AuthenticatedKey, AuthorizationDispatch, AuthorizationIdentityPolicy, AuthorizedResponse,
-    CandidateLease, ExecutorRoute,
+    CandidateLease, DispatchUsage, ExecutorRoute,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics, UsageEvent};
@@ -338,6 +338,7 @@ pub(in crate::gateway::execution) async fn resolve(
             context.route,
             context.budget,
             &expected_owner,
+            &event,
             &upstream,
         )
         .await
@@ -360,22 +361,12 @@ pub(in crate::gateway) async fn dispatch_continuation(
     route: &ExecutorRoute,
     budget: &SharedRequestBudget,
     owner: &crate::runtime::AuthorizationIncarnation,
+    event: &UsageEvent,
     upstream: &Value,
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
     let basis_points =
         route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints;
     runtime.observe_basis_points_dispatch(route, upstream);
-    let body = serde_json::to_vec(upstream).expect("prepared JSON is serializable");
-    let payload = route.diagnostics_enabled.then(|| {
-        crate::usage::RequestPayloadDiagnostics::identity(
-            &body,
-            if basis_points {
-                crate::usage::TransportMode::BasisPoints
-            } else {
-                crate::usage::TransportMode::Native
-            },
-        )
-    });
     let request = runtime
         .request_client(&route.candidate_id)
         .post(route.upstream_url.clone())
@@ -389,7 +380,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
                 "application/json"
             },
         )
-        .body(body);
+        .body(serde_json::to_vec(upstream).expect("prepared JSON is serializable"));
     let mut response = runtime
         .send_account_request_with_owner(
             &route.candidate_id,
@@ -400,7 +391,12 @@ pub(in crate::gateway) async fn dispatch_continuation(
                 turn_scope: None,
                 budget: Some(budget),
                 lease: Some(lease),
-                usage_event: None,
+                // The discovery loop settles this attempt. Keep the chat lane
+                // and wire diagnostics without installing another usage tracker.
+                usage_event: Some(
+                    DispatchUsage::observed(event)
+                        .with_siwc_socket_context(route.siwc_socket_context.as_deref()),
+                ),
             },
             owner,
         )
@@ -417,10 +413,6 @@ pub(in crate::gateway) async fn dispatch_continuation(
             },
         )
         .await;
-    }
-    // Catalog continuations are not compressed or rewritten by Codex guards.
-    if let Some(payload) = payload {
-        response.response.extensions_mut().insert(payload);
     }
     Ok(response)
 }

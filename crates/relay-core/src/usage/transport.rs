@@ -8,7 +8,8 @@ mod server_timing;
 mod stream;
 pub use payload::{
     FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
-    SocketOutputMismatch, SocketReplayField, SocketReplayItemKind, SocketUnknownFieldChanges,
+    SocketOutputMismatch, SocketOutputReconciliation, SocketReplayField, SocketReplayItemKind,
+    SocketUnknownFieldChanges,
 };
 pub use server_timing::CodexServerTiming;
 pub use stream::StreamResponseDiagnostics;
@@ -61,12 +62,12 @@ pub struct AttachmentPreparationDiagnostics {
 pub struct TransportDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_http_status: Option<u16>,
-    /// Response constructed for HTTP ingress, not proof of client receipt.
+    /// HTTP response status constructed at ingress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downstream_http_status: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<TransportFailureKind>,
-    /// Dispatch boundary, not proof that the provider accepted a generation.
+    /// Transport selected at dispatch.
     pub upstream: UsageTransport,
     pub mode: TransportMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +151,7 @@ pub enum ConnectionResetReason {
 pub enum TransportMode {
     Native,
     ProtocolConversion,
+    #[serde(rename = "bps", alias = "basis_points")]
     BasisPoints,
 }
 
@@ -585,7 +587,10 @@ mod tests {
     fn stage_timings_preserve_missing_zero_and_reset_between_attempts() {
         let legacy = json!({"upstream":"http", "mode":"basis_points"});
         let decoded: TransportDiagnostics = serde_json::from_value(legacy.clone()).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            json!({"upstream":"http", "mode":"bps"})
+        );
         let mut route = route();
         route.observe_http_dispatch(None);
         let preparation = RequestPreparationDiagnostics {

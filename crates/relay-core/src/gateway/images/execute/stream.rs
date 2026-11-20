@@ -34,6 +34,19 @@ impl ImageCompletion {
             return;
         };
         event.latency_ms = self.started.elapsed().as_millis() as u64;
+        if let Some(transport) = event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        {
+            if let Some(completed) = transport.upstream_response_ms {
+                event.latency_ms = completed;
+            }
+            if error.is_none() {
+                transport.client_response_ready_ms =
+                    Some(self.started.elapsed().as_millis() as u64);
+            }
+        }
         event.generation_ms = event
             .ttft_ms
             .map(|ttft| event.latency_ms.saturating_sub(ttft));
@@ -122,7 +135,29 @@ impl ImageStream {
                         normalized_frame = Some(rewritten);
                     }
                     let kind = normalized_kind.as_deref().or(envelope.kind.as_deref());
+                    let elapsed_ms = self.completion.started.elapsed().as_millis() as u64;
+                    let has_image = envelope
+                        .b64_json
+                        .as_deref()
+                        .is_some_and(|data| !data.trim().is_empty());
+                    let image_output = has_image
+                        && kind.is_some_and(|kind| {
+                            kind.ends_with(".partial_image") || kind == self.terminal_kind
+                        });
                     if let Some(event) = self.completion.event.as_mut() {
+                        if let Some(transport) = event
+                            .routing
+                            .as_mut()
+                            .and_then(|routing| routing.transport.as_mut())
+                        {
+                            transport
+                                .stream_response
+                                .get_or_insert_default()
+                                .observe_event(true, image_output, elapsed_ms);
+                            if image_output {
+                                transport.client_first_output_ms.get_or_insert(elapsed_ms);
+                            }
+                        }
                         if kind == Some(self.terminal_kind.as_str()) {
                             super::super::diagnostics::observe_response(
                                 &self.completion.runtime,
@@ -131,15 +166,20 @@ impl ImageStream {
                             );
                         }
                         self.usage.observe(event, &envelope);
-                        if kind.is_some_and(|kind| {
-                            kind.ends_with(".partial_image") || kind == self.terminal_kind
-                        }) {
-                            event.ttft_ms.get_or_insert(self.completion.started.elapsed().as_millis() as u64);
+                        if image_output {
+                            event.ttft_ms.get_or_insert(elapsed_ms);
                         }
                     }
                     if envelope.error.is_some() || kind == Some("error") {
                         self.finished = true;
                         if let Some(event) = self.completion.event.as_mut() {
+                            if let Some(transport) = event
+                                .routing
+                                .as_mut()
+                                .and_then(|routing| routing.transport.as_mut())
+                            {
+                                transport.upstream_response_ms = Some(elapsed_ms);
+                            }
                             event.upstream_error =
                                 Some(crate::usage::UpstreamErrorDetails::from_response_body(
                                     Some(200),
@@ -164,6 +204,14 @@ impl ImageStream {
                         }
                         if self.completed_images >= self.expected_images {
                             self.finished = true;
+                            if let Some(transport) = self
+                                .completion
+                                .event
+                                .as_mut()
+                                .and_then(|event| event.routing.as_mut()?.transport.as_mut())
+                            {
+                                transport.upstream_response_ms = Some(elapsed_ms);
+                            }
                             self.completion.finish(None);
                         }
                     }
@@ -181,6 +229,20 @@ impl ImageStream {
             }
             match self.upstream.next().await {
                 Some(Ok(chunk)) => {
+                    if let Some(transport) = self
+                        .completion
+                        .event
+                        .as_mut()
+                        .and_then(|event| event.routing.as_mut()?.transport.as_mut())
+                    {
+                        transport
+                            .stream_response
+                            .get_or_insert_default()
+                            .observe_body(
+                                !chunk.is_empty(),
+                                self.completion.started.elapsed().as_millis() as u64,
+                            );
+                    }
                     self.incoming = chunk;
                 }
                 Some(Err(_)) | None => return Some(self.fail(error_codes::STREAM_INCOMPLETE)),
@@ -193,13 +255,20 @@ pub(super) fn image_stream_response(
     runtime: Arc<GatewayRuntime>,
     lease: Arc<CandidateLease>,
     upstream: reqwest::Response,
-    event: UsageEvent,
+    mut event: UsageEvent,
     started: Instant,
     endpoint: ImageEndpoint,
     expected_images: u64,
 ) -> Response<Body> {
     let status = upstream.status();
     let headers = upstream.headers().clone();
+    if let Some(transport) = event
+        .routing
+        .as_mut()
+        .and_then(|routing| routing.transport.as_mut())
+    {
+        transport.downstream_http_status = Some(status.as_u16());
+    }
     let normalize_codex_edits = event.account_id.is_some() && endpoint == ImageEndpoint::Edits;
     let state = ImageStream {
         upstream: Box::pin(upstream.bytes_stream()),

@@ -142,9 +142,8 @@ impl GatewayRuntime {
         )
     }
 
-    /// A refresh without a durable health transition is not evidence that a
-    /// newer live auth or entitlement block recovered. Explicit transitions
-    /// use the ordinary sync method instead.
+    /// Preserve newer auth/entitlement blocks during a metadata-only refresh.
+    /// Use ordinary sync for explicit health transitions.
     pub fn sync_account_refresh_availability_with_quota(
         &self,
         candidate_id: &str,

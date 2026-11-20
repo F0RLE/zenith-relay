@@ -17,6 +17,15 @@ impl ImageDimensions {
 }
 
 impl ImageOptionsDiagnostics {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.size.is_none()
+            && self.quality.is_none()
+            && self.complexity.is_none()
+            && self.output_format.is_none()
+            && self.n.is_none()
+    }
+
     pub(crate) fn observe(&mut self, key: &str, value: &Value) {
         let text = value.as_str().filter(|text| text.len() <= 128);
         match key {

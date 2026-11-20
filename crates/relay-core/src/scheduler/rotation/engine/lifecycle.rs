@@ -167,7 +167,17 @@ impl RotationEngine {
         lease_id: LeaseId,
         budget: &mut RequestBudget,
     ) -> Result<AttemptId, DispatchStartError> {
-        self.begin_dispatch_internal(lease_id, budget, false)
+        self.begin_dispatch_at(lease_id, budget, crate::unix_time_ms())
+    }
+
+    /// Start a reserved dispatch using the same clock as quota observations.
+    pub fn begin_dispatch_at(
+        &mut self,
+        lease_id: LeaseId,
+        budget: &mut RequestBudget,
+        now_ms: u64,
+    ) -> Result<AttemptId, DispatchStartError> {
+        self.begin_dispatch_internal(lease_id, budget, now_ms, false)
     }
 
     /// Only the transport controller can retain a lease for a proven repair
@@ -177,14 +187,16 @@ impl RotationEngine {
         &mut self,
         lease_id: LeaseId,
         budget: &mut RequestBudget,
+        now_ms: u64,
     ) -> Result<AttemptId, DispatchStartError> {
-        self.begin_dispatch_internal(lease_id, budget, true)
+        self.begin_dispatch_internal(lease_id, budget, now_ms, true)
     }
 
-    pub(super) fn begin_dispatch_internal(
+    fn begin_dispatch_internal(
         &mut self,
         lease_id: LeaseId,
         budget: &mut RequestBudget,
+        now_ms: u64,
         allow_retained_lease: bool,
     ) -> Result<AttemptId, DispatchStartError> {
         let Some(pending) = self.leases.get(&lease_id).cloned() else {
@@ -211,12 +223,9 @@ impl RotationEngine {
                     && runtime.candidate.auth == AuthState::Ready
                     && runtime.candidate.quota == pending.quota
                     && (!matches!(runtime.candidate.quota, QuotaState::CreditFallback { .. })
-                        || (runtime.candidate.provider_credits_observed_at_ms.is_some()
-                            && (runtime.candidate.provider_credits_unlimited
-                                || runtime
-                                    .candidate
-                                    .provider_credits_micro_units
-                                    .is_some_and(|balance| balance > 0))))
+                        || self
+                            .fresh_provider_credits(&pending.candidate_id, now_ms)
+                            .is_some())
                     && runtime.candidate.rate == pending.rate
                     && runtime
                         .candidate

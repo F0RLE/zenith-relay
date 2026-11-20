@@ -119,12 +119,13 @@ impl CandidateLease {
             {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
+            let now_ms = runtime_now_ms();
             if self.response_owner.as_ref().is_some_and(|(key, revision)| {
-                scheduler
-                    .response_affinity_binding(key, runtime_now_ms())
-                    .is_none_or(|(owner, observed_revision)| {
+                scheduler.response_affinity_binding(key, now_ms).is_none_or(
+                    |(owner, observed_revision)| {
                         owner != self.candidate_id || observed_revision != *revision
-                    })
+                    },
+                )
             }) {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
@@ -138,12 +139,12 @@ impl CandidateLease {
                 &self.model,
                 &self.allowed_protocols,
                 &candidate_scope,
-                runtime_now_ms(),
+                now_ms,
             ) {
                 return Err(RotationDispatchStartError::CandidateChanged);
             }
             let rotation_attempt =
-                scheduler.begin_rotation_dispatch(self.reservation_id, request_budget)?;
+                scheduler.begin_rotation_dispatch(self.reservation_id, request_budget, now_ms)?;
             if charge_wire {
                 // Both budget counters are guarded by the same lock. The
                 // availability check above makes this infallible.

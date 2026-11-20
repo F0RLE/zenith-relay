@@ -14,6 +14,10 @@ pub(in crate::runtime::tests::basis_points) async fn upgrade(
     if let Some(reply) = crate::poison::mutex(&state.websocket_upgrade_reply).as_ref() {
         return (reply.status, Json(reply.body.clone())).into_response();
     }
+    let delay = *crate::poison::mutex(&state.websocket_upgrade_delay);
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     upgrade.on_upgrade(move |socket| serve(state, socket))
 }
 

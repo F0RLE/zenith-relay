@@ -42,7 +42,10 @@ async fn queued_preparation_rechecks_credentials_and_budget_before_another_hands
             turn_scope: None,
             budget: Some(&budget),
             lease: Some(&lease),
-            usage_event: Some((&event, std::time::Instant::now())),
+            usage_event: Some(crate::runtime::DispatchUsage::tracked(
+                &event,
+                std::time::Instant::now(),
+            )),
         };
         let PreparedSocket::Ready(owner) = runtime
             .prepare_siwc_socket(candidate, &request, &prepared, dispatch, None)

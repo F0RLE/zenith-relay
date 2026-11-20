@@ -163,8 +163,7 @@ pub struct SourcePresetRule {
     pub pricing_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_provider_family: Option<String>,
-    /// Stored proxy of the source. Only the identifier is exported; the proxy
-    /// URL and its credentials never leave the proxy pool.
+    /// Reference to the expected route; no proxy URL or credentials in a preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_id: Option<String>,
     pub wire_api: WireApi,

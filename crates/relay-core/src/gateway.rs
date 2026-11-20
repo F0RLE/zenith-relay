@@ -22,6 +22,7 @@ mod compaction;
 mod continuation;
 mod errors;
 mod execution;
+pub mod hosted;
 mod images;
 mod messages;
 mod request;

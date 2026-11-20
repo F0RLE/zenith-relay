@@ -349,14 +349,17 @@ fn external_continuations_and_unsupported_wire_fields_are_rejected() {
 fn session_keys_separate_local_keys_accounts_contexts_and_endpoints() {
     use crate::protocol::UsageWorkload::{Background, Conversation, Memory};
     let url = "https://api.openai.com/v1/responses".parse().unwrap();
-    let key = session_key("key", "account", "context", &url, Conversation);
+    let prepared = planner::parse(&serde_json::to_vec(&request(json!([]))).unwrap()).unwrap();
+    let key = prepared
+        .session_key("key", "account", "context", &url, Conversation)
+        .unwrap();
     for scoped in [
-        session_key("other", "account", "context", &url, Conversation),
-        session_key("key", "other", "context", &url, Conversation),
-        session_key("key", "account", "other", &url, Conversation),
-        session_key("key", "account", "context", &url, Memory),
-        session_key("key", "account", "context", &url, Background),
-        session_key(
+        prepared.session_key("other", "account", "context", &url, Conversation),
+        prepared.session_key("key", "other", "context", &url, Conversation),
+        prepared.session_key("key", "account", "other", &url, Conversation),
+        prepared.session_key("key", "account", "context", &url, Memory),
+        prepared.session_key("key", "account", "context", &url, Background),
+        prepared.session_key(
             "key",
             "account",
             "context",
@@ -364,7 +367,17 @@ fn session_keys_separate_local_keys_accounts_contexts_and_endpoints() {
             Conversation,
         ),
     ] {
-        assert_ne!(key, scoped);
+        assert_ne!(key, scoped.unwrap());
+    }
+    for model in [Value::Null, json!(7), json!("  ")] {
+        let mut body = request(json!([]));
+        body["model"] = model;
+        let prepared = planner::parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(
+            prepared
+                .session_key("key", "account", "context", &url, Conversation)
+                .is_none()
+        );
     }
 }
 

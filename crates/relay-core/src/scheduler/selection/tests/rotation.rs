@@ -31,7 +31,7 @@ pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option
         .unwrap();
     budget.with_budget(|budget| {
         scheduler
-            .begin_rotation_dispatch(reservation, budget)
+            .begin_rotation_dispatch(reservation, budget, now)
             .unwrap();
         scheduler
             .settle_rotation(

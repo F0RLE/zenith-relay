@@ -28,18 +28,40 @@ pub fn build_account_export(
     }
     let exported_at_value = timestamp_value(exported_at_ms)?;
     let exported_at = exported_at_value.to_rfc3339_opts(SecondsFormat::Millis, true);
-    let account_exports = accounts
+    let mut account_exports = accounts
         .iter()
         .map(|account| formats::build_account_export(format, account, exported_at_ms, &exported_at))
         .collect::<Result<Vec<_>>>()?;
     let export_payload = if format == AccountExportFormat::Zenith {
+        let mut proxies = Vec::new();
+        for (account, entry) in accounts.iter().zip(&mut account_exports) {
+            if let Some(url) = &account.transfer_proxy_url {
+                let url = crate::normalize_proxy_url(url).map_err(validation)?;
+                let index = proxies
+                    .iter()
+                    .position(|saved| saved == &url)
+                    .unwrap_or_else(|| {
+                        proxies.push(url);
+                        proxies.len() - 1
+                    });
+                entry["proxyIndex"] = index.into();
+            }
+        }
         strip_nulls(json!({
             "format": "zenith",
-            "version": 1,
+            "version": if proxies.is_empty() { 1 } else { 2 },
+            "proxies": (!proxies.is_empty()).then_some(proxies),
             "exportedAt": exported_at,
             "description": description,
             "accounts": account_exports,
         }))
+    } else if accounts
+        .iter()
+        .any(|account| account.transfer_proxy_url.is_some())
+    {
+        return Err(validation(
+            "proxy transfer requires a Zenith account bundle",
+        ));
     } else if format == AccountExportFormat::Sub2api {
         json!({
             "exported_at": exported_at,

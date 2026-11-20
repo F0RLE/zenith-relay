@@ -21,6 +21,38 @@ pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<Strin
     discover_source_models_for_protocol_bindings(source, &[]).await
 }
 
+/// Hosted qualification supplies a pinned client. Return observed IDs only, never
+/// a declared allow-list or a previous snapshot when a read fails.
+pub async fn observed_responses_models(
+    client: &reqwest::Client,
+    source: &ProviderSource,
+) -> Result<Vec<String>> {
+    source.validate()?;
+    if source.wire_api != super::WireApi::Responses {
+        return Err(crate::Error::Validation(
+            "expected a native Responses source".into(),
+        ));
+    }
+    let bindings = [SourceProtocolBinding::legacy(source.wire_api, &[])];
+    let connector = SourceConnector::new(source, &bindings)?;
+    let read = fetch::discover_protocol_bindings_with_client(
+        client,
+        &connector,
+        &bindings,
+        &[],
+        &BTreeSet::new(),
+        &SourceReadHints::default(),
+        &ManagementHttpScope::default(),
+    )
+    .await?;
+    if !read.failures.is_empty() || read.resolved_base_url.is_some() {
+        return Err(crate::Error::Validation(
+            "incomplete or changed catalog route".into(),
+        ));
+    }
+    Ok(read.models)
+}
+
 /// Discovers a source catalog using each explicitly configured binding.
 /// Authentication and the discovery endpoint follow the binding's upstream
 /// protocol. No request body or response format is adapted during discovery.

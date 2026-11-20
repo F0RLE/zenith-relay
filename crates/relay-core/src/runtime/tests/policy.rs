@@ -218,6 +218,62 @@ fn runtime_updates_service_tier_and_removes_candidates_in_place() {
     assert!(runtime.remove_candidate("source-1"));
     assert!(runtime.candidate_runtime_order().is_empty());
 }
+
+#[tokio::test]
+async fn late_settings_or_model_refresh_cannot_reenroll_a_removed_member() {
+    let source_runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "synthetic-upstream",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    for (runtime, id) in [
+        (source_runtime, "source-1"),
+        (quota_runtime(QuotaSnapshot::default()), "account-1"),
+    ] {
+        let (_, lease) = runtime
+            .select_and_reserve(
+                &runtime.authenticated_key(&runtime.keys[0]),
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                current_time_ms(),
+            )
+            .await
+            .unwrap();
+        lease.begin_rotation_http_dispatch().unwrap();
+        assert!(runtime.remove_candidate(id));
+        let policy = RuntimeCandidatePolicy {
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        };
+        if id == "source-1" {
+            assert!(!runtime.update_source_policy(id, policy, 0));
+        } else {
+            assert!(!runtime.update_account_models(id, &["late-model".into()]));
+            assert!(!runtime.update_account_policy(id, policy));
+        }
+        let pending = runtime.lock_scheduler().candidate(id).cloned().unwrap();
+        assert!(pending.draining && !pending.enabled);
+        assert!(!pending.models.contains("late-model"));
+        lease.settle_rotation_success(current_time_ms());
+        assert!(runtime.lock_scheduler().candidate(id).is_none());
+    }
+}
+
 #[test]
 fn service_tier_storage_values_keep_fast_aliases_compatible() {
     assert_eq!(DefaultServiceTier::Standard.as_str(), "standard");

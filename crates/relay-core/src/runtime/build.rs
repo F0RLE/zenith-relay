@@ -125,6 +125,31 @@ pub(super) fn validate_reachability(
 }
 
 impl GatewayRuntime {
+    pub(crate) fn hosted_text_source(source: ProviderSource) -> Result<Self> {
+        let member = crate::PoolRoutingMember {
+            kind: crate::PoolMemberKind::Source,
+            id: source.id.clone(),
+            weight: 1,
+            max_concurrency: 1,
+        };
+        Self::build(
+            vec![RuntimeSource::unrestricted(source)],
+            Vec::new(),
+            Vec::new(),
+            None,
+            ReachabilityRequirement::AllowUnroutable,
+            GatewayRuntimeOptions {
+                max_retry_candidates: 1,
+                pool_routing: Some(crate::PoolRoutingPolicy {
+                    members: vec![member],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            Arc::new(|_| {}),
+        )
+    }
+
     pub fn new(
         source: ProviderSource,
         local_key: LocalGatewayKey,
@@ -368,6 +393,7 @@ impl GatewayRuntime {
             },
             account_state: super::provider_state::RuntimeAccountState {
                 executors: account_parts.executors,
+                access_prefetch: Arc::new(tokio::sync::Mutex::new(())),
                 team_members: account_parts.team_members,
                 team_breaker_recent: Mutex::new(BTreeMap::new()),
                 team_breaker_callback: Arc::new(Mutex::new(Arc::new(|_| {}))),

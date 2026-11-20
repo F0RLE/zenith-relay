@@ -110,6 +110,7 @@ impl PendingRequests {
 pub(super) struct WebSocket {
     socket: Socket,
     pending: PendingRequests,
+    connection_id: String,
 }
 
 enum Socket {
@@ -122,6 +123,7 @@ impl WebSocket {
         Self {
             socket: Socket::Raw(Box::new(socket)),
             pending: PendingRequests::default(),
+            connection_id: crate::gateway::request::request_id(),
         }
     }
 
@@ -129,7 +131,23 @@ impl WebSocket {
         Self {
             socket: Socket::Lane(Box::new(socket)),
             pending: PendingRequests::default(),
+            connection_id: crate::gateway::request::request_id(),
         }
+    }
+
+    pub(super) fn siwc_socket_context(&self, request: &super::ClientRequest) -> Option<String> {
+        let stream = request.stream_id.as_deref();
+        let context = request.client_context_id.as_deref();
+        if stream.is_none() && context.is_some() {
+            return None; // Preserve shared HTTP/WS affinity for an identified chat.
+        }
+        // stream_id is scoped to this client socket, not a global chat identity.
+        Some(format!(
+            "ws:{}:{}:{}",
+            self.connection_id,
+            stream.unwrap_or_default(),
+            context.unwrap_or_default()
+        ))
     }
 
     pub(super) fn is_http_lane(&self) -> bool {

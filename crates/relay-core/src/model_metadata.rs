@@ -39,8 +39,7 @@ const MAX_STRING_LENGTH: usize = 1_024;
 #[serde(rename_all = "camelCase")]
 pub struct ModelCapabilities {
     pub reasoning: Option<bool>,
-    /// Derived route/reference disagreement, not evidence that reasoning is
-    /// unsupported. Never accept this state from an external metadata payload.
+    /// Derived route/reference disagreement; reject externally supplied values.
     #[serde(skip)]
     pub reasoning_effort_conflict: bool,
     #[serde(default)]

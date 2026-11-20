@@ -58,17 +58,14 @@ impl RotationEngine {
 
     pub fn upsert(&mut self, mut candidate: RotationCandidate) -> Result<(), &'static str> {
         candidate.validate()?;
-        let routes_changed = self
-            .candidates
-            .get(&candidate.id)
-            .is_some_and(|runtime| runtime.candidate.routes != candidate.routes);
         let capacity_key = candidate.capacity_key.clone();
-        let previous_capacity_key = self
-            .candidates
-            .get(&candidate.id)
-            .map(|runtime| runtime.candidate.capacity_key.clone());
         let candidate_id = candidate.id.clone();
-        if let Some(runtime) = self.candidates.get_mut(&candidate_id) {
+        if let Some(runtime) = self
+            .candidates
+            .get_mut(&candidate_id)
+            .filter(|runtime| runtime.candidate.capacity_key == capacity_key)
+        {
+            let routes_changed = runtime.candidate.routes != candidate.routes;
             // Config edits are not provider observations. A weight/order edit
             // cannot clear auth, quota, rate or active leases.
             candidate.auth = runtime.candidate.auth;
@@ -97,8 +94,10 @@ impl RotationEngine {
                     .entry(route_key.clone())
                     .or_insert(RateState::Ready);
             }
-            let shares_changed = candidate.weight != runtime.candidate.weight
-                || candidate.capacity_key != runtime.candidate.capacity_key;
+            let shares_changed = candidate.weight != runtime.candidate.weight;
+            let leaving = runtime.candidate.enabled
+                && !runtime.candidate.draining
+                && (!candidate.enabled || candidate.draining);
             if shares_changed || routes_changed {
                 self.rotation_credit.retain(|(route_key, _), _| {
                     if shares_changed {
@@ -119,11 +118,20 @@ impl RotationEngine {
                         && candidate.routes.get(key) == runtime.candidate.routes.get(key))
             });
             runtime.candidate = candidate;
+            if leaving && !shares_changed {
+                self.prune_inactive_shares(&capacity_key);
+            }
+            if routes_changed {
+                self.prune_round_robin_cursors(&capacity_key);
+            }
         } else {
             let generation = self
                 .next_candidate_generation
                 .checked_add(1)
                 .ok_or("rotation identity generation exhausted")?;
+            // A route ID reassigned to another physical member starts a new
+            // generation. Outstanding leases retain their original capacity key.
+            self.remove(&candidate_id);
             self.next_candidate_generation = generation;
             self.candidate_generations
                 .insert(candidate_id.clone(), generation);
@@ -136,14 +144,6 @@ impl RotationEngine {
             );
         }
         self.recompute_capacity_limit(&capacity_key);
-        if let Some(previous_capacity_key) = previous_capacity_key
-            && previous_capacity_key != capacity_key
-        {
-            self.recompute_capacity_limit(&previous_capacity_key);
-        }
-        if routes_changed {
-            self.prune_round_robin_cursors();
-        }
         Ok(())
     }
 
@@ -176,8 +176,21 @@ impl RotationEngine {
         self.candidates.keys().cloned()
     }
 
+    fn prune_inactive_shares(&mut self, capacity_key: &str) {
+        self.rotation_credit.retain(|(route, capacity), _| {
+            capacity != capacity_key
+                || self.candidates.values().any(|runtime| {
+                    let member = &runtime.candidate;
+                    member.capacity_key == capacity_key
+                        && member.enabled
+                        && !member.draining
+                        && member.routes.contains_key(route)
+                })
+        });
+    }
+
     /// Applies owner-local observations to the rotation registry without touching
-    /// leases, circuit generations, weighted history, or response ownership.
+    /// leases, circuit generations or response ownership.
     pub fn sync_candidate_state(
         &mut self,
         candidate_id: &str,
@@ -190,11 +203,17 @@ impl RotationEngine {
         let Some(runtime) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
+        let leaving =
+            runtime.candidate.enabled && !runtime.candidate.draining && (!enabled || draining);
         runtime.candidate.enabled = enabled;
         runtime.candidate.draining = draining;
         runtime.candidate.auth = auth;
         runtime.candidate.quota = quota;
         runtime.candidate.rate = rate;
+        if leaving {
+            let capacity = runtime.candidate.capacity_key.clone();
+            self.prune_inactive_shares(&capacity);
+        }
         true
     }
 
@@ -233,16 +252,24 @@ impl RotationEngine {
         self.recompute_capacity_limit(&capacity_key);
         self.rotation_credit
             .retain(|(route_key, _), _| !runtime.candidate.routes.contains_key(route_key));
-        self.prune_round_robin_cursors();
+        self.prune_round_robin_cursors(&capacity_key);
         Some(runtime.candidate)
     }
 
-    fn prune_round_robin_cursors(&mut self) {
+    fn prune_round_robin_cursors(&mut self, changed_capacity: &str) {
         let candidates = &self.candidates;
-        self.round_robin_cursor.retain(|route, _| {
-            candidates
+        self.round_robin_cursor.retain(|route, cursor| {
+            let mut members = candidates
                 .values()
-                .any(|runtime| runtime.candidate.routes.contains_key(route))
+                .filter(|runtime| runtime.candidate.routes.contains_key(route))
+                .peekable();
+            if members.peek().is_none() {
+                return false;
+            }
+            if !members.any(|runtime| runtime.candidate.capacity_key == changed_capacity) {
+                cursor.last_turn.remove(changed_capacity);
+            }
+            true
         });
     }
 
@@ -368,9 +395,16 @@ impl RotationEngine {
     }
 
     pub fn set_enabled(&mut self, candidate_id: &str, enabled: bool) -> bool {
-        self.candidates
-            .get_mut(candidate_id)
-            .map(|runtime| runtime.candidate.enabled = enabled)
-            .is_some()
+        let Some(candidate) = self.candidate(candidate_id) else {
+            return false;
+        };
+        self.sync_candidate_state(
+            candidate_id,
+            enabled,
+            candidate.draining,
+            candidate.auth,
+            candidate.quota,
+            candidate.rate,
+        )
     }
 }

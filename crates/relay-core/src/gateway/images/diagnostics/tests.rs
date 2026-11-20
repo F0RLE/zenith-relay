@@ -101,6 +101,10 @@ fn image_diagnostics_unknown_or_invalid_metadata_is_not_inferred() {
             ImageOptionsDiagnostics::default()
         );
         let serialized = serde_json::to_string(&diagnostics).unwrap();
+        let exported = serde_json::to_value(&diagnostics).unwrap();
+        assert!(exported["outputs"][0].get("reported").is_none());
+        let restored: ImageDiagnostics = serde_json::from_value(exported).unwrap();
+        assert_eq!(restored, diagnostics);
         for forbidden in [
             "synthetic-secret",
             "example.invalid",

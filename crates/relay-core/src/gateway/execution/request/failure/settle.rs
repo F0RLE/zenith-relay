@@ -22,7 +22,6 @@ pub(super) fn settle_collected_rejection(
                 stream,
                 response_affinity_hit,
                 selected_error_origin,
-                prompt_affinity_key,
                 account_route,
                 forwarded_headers,
                 ..
@@ -131,7 +130,7 @@ pub(super) fn settle_collected_rejection(
         }
     }
     if cache_write_rejected {
-        runtime.invalidate_prompt_affinity(prompt_affinity_key.as_deref(), &route.candidate_id);
+        runtime.reject_prompt_affinity(lease);
     }
     if failure.execution.certainty == ExecutionCertainty::NotSent
         && (affinity_miss

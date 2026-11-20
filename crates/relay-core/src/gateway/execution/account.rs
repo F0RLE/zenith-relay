@@ -418,7 +418,6 @@ async fn execute_account_endpoint_inner(
                 selected_error_origin,
                 response_affinity_hit,
                 has_previous_response_id,
-                prompt_affinity_key: &prompt_affinity_key,
                 state: &mut state,
             }) {
                 AccountStatusFailure::Continue => continue,

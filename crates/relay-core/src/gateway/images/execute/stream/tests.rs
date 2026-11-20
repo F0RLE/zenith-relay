@@ -73,6 +73,7 @@ async fn image_state_with_gate(
             serde_json::from_value(serde_json::json!({
                 "reason":"only_eligible", "eligibleCandidates":1, "quotaRemainingBasisPoints":null,
                 "inFlightBefore":0, "dispatchesBefore":0,
+                "transport":{"upstream":"http","mode":"native"},
                 "images":{"requested":{"size":"3840x2160"},"sent":{"size":"3840x2160"}}
             }))
             .unwrap(),
@@ -138,6 +139,59 @@ async fn image_diagnostics_ignore_previews_and_keep_completed_outputs_after_canc
     assert_eq!(diagnostics.reported.len(), 1);
     assert_eq!(diagnostics.outputs.len(), 1);
     assert_eq!(events[0].image_usage.as_ref().unwrap().generated_images, 1);
+    let transport = events[0]
+        .routing
+        .as_ref()
+        .unwrap()
+        .transport
+        .as_ref()
+        .unwrap();
+    assert!(transport.client_first_output_ms.is_some());
+    assert!(transport.upstream_response_ms.is_none());
+    assert!(transport.client_response_ready_ms.is_none());
+}
+
+#[tokio::test]
+async fn image_stream_timings_require_nonempty_image_output() {
+    const EMPTY: &str = "data: {\"type\":\"image_generation.partial_image\",\"b64_json\":\"\"}\n\n";
+    let (mut state, events, _) =
+        image_state_with_debug(vec![EMPTY, PARTIAL, COMPLETED], true).await;
+    state.next().await.unwrap();
+    let event = state.completion.event.as_ref().unwrap();
+    assert!(event.ttft_ms.is_none());
+    let timing = event
+        .routing
+        .as_ref()
+        .unwrap()
+        .transport
+        .as_ref()
+        .unwrap()
+        .stream_response
+        .as_ref()
+        .unwrap();
+    assert!(timing.upstream_output_first_ms.is_none());
+    assert!(timing.decoded_body_first_ms.is_some());
+    while state.next().await.is_some() {}
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    let transport = events[0]
+        .routing
+        .as_ref()
+        .unwrap()
+        .transport
+        .as_ref()
+        .unwrap();
+    assert!(transport.upstream_response_ms.is_some());
+    assert!(transport.client_response_ready_ms >= transport.upstream_response_ms);
+    assert_eq!(
+        transport
+            .stream_response
+            .as_ref()
+            .unwrap()
+            .upstream_output_first_ms,
+        events[0].ttft_ms
+    );
 }
 
 #[tokio::test]

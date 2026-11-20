@@ -406,8 +406,7 @@ pub(super) fn apply_model_reasoning_allowed_levels(
             .expect("normalized catalog entry is an object")
             .remove("default_reasoning_level");
     }
-    // A manually exposed effort does not prove a provider-specific summary
-    // contract.  Keep the selector narrow and let the actual route decide.
+    // Summary controls require support from the selected route.
     model["default_reasoning_summary"] = Value::String("none".into());
     model["supports_reasoning_summary_parameter"] = Value::Bool(false);
     model["supports_reasoning_summaries"] = Value::Bool(false);

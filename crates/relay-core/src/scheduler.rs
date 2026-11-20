@@ -25,6 +25,7 @@ pub(crate) use selection::ReservationId;
 pub use selection::{
     ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
     ModelRetryRuntime, PROMPT_AFFINITY_TTL_MS, PoolScheduler, RESPONSE_AFFINITY_TTL_MS,
-    RequestTiming, RotationDebugCapture, RotationDebugSink, RoutingDiagnostics, Selection,
-    SelectionReason, SelectionRequest, account_member_key, source_member_key,
+    RequestTiming, RequestTimingPhases, RotationDebugCapture, RotationDebugSink,
+    RoutingDiagnostics, Selection, SelectionReason, SelectionRequest, account_member_key,
+    source_member_key,
 };

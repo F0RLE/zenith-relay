@@ -53,6 +53,7 @@ async fn streaming_bootstrap_retains_usage_when_cancelled_before_handoff() {
                     budget: SharedRequestBudget::for_incoming_request(3),
                     transport: crate::UsageTransport::Http,
                     transport_fallback: None,
+                    siwc_socket_context: None,
                     service_tier_policy: crate::gateway::request::ServiceTierPolicy::client_owned(
                         &body,
                     ),

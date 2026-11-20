@@ -3,6 +3,30 @@
 use super::*;
 
 impl GatewayRuntime {
+    /// In-process capability, never created from a request header or local secret.
+    pub(crate) fn hosted_source_scope(
+        &self,
+        workspace: &str,
+        key: &str,
+        source: &str,
+        model: &str,
+    ) -> Option<AuthenticatedKey> {
+        self.source_state.connectors.get(source)?;
+        Some(AuthenticatedKey {
+            id: format!("{workspace}:{key}"),
+            upstream_protocol: UpstreamProtocolPolicy::Auto,
+            scope: Arc::new(RwLock::new(CandidateScope {
+                source_ids: Some(BTreeSet::from([source.to_owned()])),
+                account_ids: Some(BTreeSet::new()),
+                model_rules: model_rules(&[model.to_owned()], &[]),
+            })),
+            scope_revision: Arc::new(AtomicU64::new(0)),
+            model_rules: ModelRules::default(),
+            model_prefix: None,
+            client_wire_apis: Some(vec![ClientWireApi::Responses]),
+        })
+    }
+
     pub(crate) fn authenticate(
         &self,
         authorization: Option<&HeaderValue>,

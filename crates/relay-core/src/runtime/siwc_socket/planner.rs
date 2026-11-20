@@ -1,4 +1,4 @@
-use crate::usage::{FullRequestReason, SocketOutputMismatch};
+use crate::usage::{FullRequestReason, SocketOutputMismatch, SocketOutputReconciliation};
 use serde_json::{Value, json};
 
 mod output_proof;
@@ -51,7 +51,7 @@ fn replay_item(value: &Value) -> std::borrow::Cow<'_, Value> {
             && field_value.is_string()
             && (matches!(
                 kind,
-                Some("reasoning" | "function_call" | "custom_tool_call")
+                Some("reasoning" | "function_call" | "custom_tool_call" | "web_search_call")
             ) || (kind == Some("message")
                 && item.get("role").and_then(Value::as_str) == Some("assistant")));
         if completed_reasoning_status || absent || empty_reasoning_content || output_provenance {
@@ -64,7 +64,13 @@ fn replay_item(value: &Value) -> std::borrow::Cow<'_, Value> {
         if field == "internal_chat_message_metadata_passthrough"
             && matches!(
                 kind,
-                Some("message" | "reasoning" | "function_call" | "custom_tool_call")
+                Some(
+                    "message"
+                        | "reasoning"
+                        | "function_call"
+                        | "custom_tool_call"
+                        | "web_search_call"
+                )
             )
         {
             // Codex compares continuation without client-only attribution and
@@ -112,6 +118,7 @@ pub(super) struct RequestState {
 pub(super) struct Checkpoint {
     request: RequestState,
     output: Vec<Fingerprint>,
+    function_projections: Vec<(usize, Fingerprint, SocketOutputReconciliation)>,
     output_proofs: Vec<output_proof::OutputProof>,
     response_id: String,
 }
@@ -122,6 +129,7 @@ pub(super) struct Plan {
     pub(super) state: RequestState,
     pub(super) full_request_reason: Option<FullRequestReason>,
     pub(super) output_mismatch: Option<SocketOutputMismatch>,
+    pub(super) output_reconciled: Option<SocketOutputReconciliation>,
 }
 
 pub(super) struct PreparedRequest {
@@ -216,6 +224,28 @@ pub(super) fn parse(bytes: &[u8]) -> Option<PreparedRequest> {
 }
 
 impl PreparedRequest {
+    pub(super) fn session_key(
+        &self,
+        local_key: &str,
+        candidate: &str,
+        context: &str,
+        url: &url::Url,
+        workload: crate::protocol::UsageWorkload,
+    ) -> Option<Fingerprint> {
+        let model = self.request.get("model")?.as_str()?;
+        if model.trim().is_empty() {
+            return None;
+        }
+        Some(fingerprint(&json!([
+            local_key,
+            candidate,
+            context,
+            url.as_str(),
+            workload,
+            model
+        ])))
+    }
+
     pub(super) fn with_diagnostics(mut self, enabled: bool) -> Self {
         self.state.diagnostics = enabled;
         self
@@ -224,6 +254,8 @@ impl PreparedRequest {
     pub(super) fn plan(self, previous: Option<&Checkpoint>) -> Plan {
         let Self { mut request, state } = self;
         let object = request.as_object_mut().expect("parsed request object");
+        let replayed = object["input"].as_array().expect("parsed input array");
+        let mut mismatch_index = None;
         let continuation = previous
             .ok_or(FullRequestReason::SocketCheckpointUnavailable)
             .and_then(|previous| {
@@ -234,38 +266,55 @@ impl PreparedRequest {
                 if !state.input.starts_with(&previous.request.input) {
                     return Err(FullRequestReason::SocketHistoryChanged);
                 }
-                if state.input.get(previous.request.input.len()..offset)
-                    != Some(previous.output.as_slice())
-                {
-                    return Err(FullRequestReason::SocketOutputChanged);
+                let mut reconciled = None;
+                let start = previous.request.input.len();
+                for (index, expected) in previous.output.iter().enumerate() {
+                    let replay = state.input.get(start + index);
+                    if replay != Some(expected) {
+                        let Some((_, _, reason)) = previous
+                            .function_projections
+                            .iter()
+                            .find(|(i, proof, _)| *i == index && replay == Some(proof))
+                        else {
+                            mismatch_index = Some(index);
+                            return Err(FullRequestReason::SocketOutputChanged);
+                        };
+                        reconciled = Some(merge_reconciliation(reconciled, *reason));
+                    }
+                    if state.diagnostics
+                        && let Some(omission) = previous
+                            .output_proofs
+                            .get(index)
+                            .and_then(|proof| proof.recognized_omission(&replayed[start + index]))
+                    {
+                        reconciled = Some(merge_reconciliation(reconciled, omission));
+                    }
                 }
                 let prewarmed =
                     previous.request.prewarm && previous.output.is_empty() && !state.prewarm;
                 if state.input.len() <= offset && !(prewarmed && state.input.len() == offset) {
                     return Err(FullRequestReason::SocketNoNewInput);
                 }
-                Ok((offset, previous.response_id.as_str()))
+                Ok((offset, previous.response_id.as_str(), reconciled))
             });
         let full_request_reason = continuation.as_ref().err().copied();
         let output_mismatch = (state.diagnostics
             && full_request_reason == Some(FullRequestReason::SocketOutputChanged))
         .then(|| {
             let previous = previous?;
-            let replayed = object.get("input")?.as_array()?;
             let start = previous.request.input.len();
-            let index = previous
-                .output
-                .iter()
-                .enumerate()
-                .find(|(index, expected)| state.input.get(start + *index) != Some(*expected))?
-                .0;
+            let index = mismatch_index?;
             previous
                 .output_proofs
                 .get(index)
                 .map(|proof| proof.mismatch(index, replayed.get(start + index)))
         })
         .flatten();
-        if let Ok((offset, id)) = continuation {
+        let mut output_reconciled = None;
+        if let Ok((offset, id, reconciled)) = continuation {
+            if state.diagnostics {
+                output_reconciled = reconciled;
+            }
             object.insert("previous_response_id".into(), json!(id));
             object
                 .get_mut("input")
@@ -283,7 +332,24 @@ impl PreparedRequest {
             state,
             full_request_reason,
             output_mismatch,
+            output_reconciled,
         }
+    }
+}
+
+fn merge_reconciliation(
+    previous: Option<SocketOutputReconciliation>,
+    next: SocketOutputReconciliation,
+) -> SocketOutputReconciliation {
+    use SocketOutputReconciliation::*;
+    match (previous, next) {
+        (None, _) => next,
+        (Some(prior), _) if prior == next => prior,
+        (Some(OmittedReasoningCreatedBy | OmittedAllowlistedOutputFields), _)
+        | (_, OmittedReasoningCreatedBy | OmittedAllowlistedOutputFields) => {
+            OmittedAllowlistedOutputFields
+        }
+        _ => OmittedOptionalFunctionFields,
     }
 }
 
@@ -317,6 +383,15 @@ impl RequestState {
             },
             request: self,
             output: output.iter().map(item_fingerprint).collect(),
+            function_projections: output
+                .iter()
+                .enumerate()
+                .flat_map(|(index, item)| {
+                    output_proof::function_projections(item)
+                        .map(move |(proof, reason)| (index, proof, reason))
+                })
+                .take(3 * output_proof::MAX_ITEMS)
+                .collect(),
             response_id: id.to_owned(),
         })
     }

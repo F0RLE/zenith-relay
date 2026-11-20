@@ -81,9 +81,9 @@ pub struct CandidateQuotaReference {
 }
 
 impl CandidateQuotaReference {
-    pub(crate) fn fresh_remaining(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
+    pub(crate) fn fresh_observation(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
         (!self.source_account_id.is_empty()
-            && (1..=10_000).contains(&self.remaining_basis_points)
+            && self.remaining_basis_points <= 10_000
             && crate::quota::observation_is_fresh(
                 Some(self.observed_at_ms),
                 now_ms,

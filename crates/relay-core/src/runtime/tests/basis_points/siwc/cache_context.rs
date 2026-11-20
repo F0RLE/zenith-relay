@@ -81,7 +81,8 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
                 {"role":"developer","content":"Synthetic stable instructions"},
                 {"role":"user","content":"Synthetic first turn"}
             ]);
-            for turn in 0..3 {
+            let writes = [Some((1_500, 500)), Some((0, 0)), None];
+            for (turn, buckets) in writes.into_iter().enumerate() {
                 let output = match turn {
                     0 => {
                         json!([{"type":"function_call","name":"lookup","call_id":"call_lookup","arguments":"{}"}])
@@ -93,11 +94,17 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
                         json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic final reply"}]}])
                     }
                 };
+                let mut input_details = json!({"cached_tokens":10_000});
+                if let Some((short, long)) = buckets {
+                    input_details["cache_write_tokens"] = json!(short + long);
+                    input_details["cache_write_tokens_details"] =
+                        json!({"ttl_30m_tokens":short,"ttl_12h_tokens":long});
+                }
                 *crate::poison::mutex(&siwc.state.generation_body) = json!({
                     "id":format!("synthetic-siwc-cache-{turn}"),"status":"completed","model":"gpt-test",
                     "output":output,
                     "prompt_cache_diagnostics":{"type":"cache_miss","reason":"input_changed","cache_missed_tokens":2048},
-                    "usage":{"input_tokens":12_000,"input_tokens_details":{"cached_tokens":10_000,"cache_write_tokens":2_000},"output_tokens":30,"total_tokens":12_030}
+                    "usage":{"input_tokens":12_000,"input_tokens_details":input_details,"output_tokens":30,"total_tokens":12_030}
                 });
                 let tools = if turn == 0 {
                     json!([lookup])
@@ -157,11 +164,23 @@ async fn siwc_preserves_append_only_tool_prefix_and_reports_cache_context_withou
                 1,
                 "one upstream connection must serve the identified conversation: stream={stream}, debug={debug}"
             );
-            for event in events.iter() {
+            for (event, buckets) in events.iter().zip(writes) {
                 assert!(event.success);
                 assert_eq!(event.input_tokens, Some(12_000));
                 assert_eq!(event.cached_input_tokens, Some(10_000));
-                assert_eq!(event.cache_write_input_tokens, Some(2_000));
+                assert_eq!(
+                    event.cache_write_input_tokens,
+                    buckets.map(|(short, long)| short + long)
+                );
+                let reported = event.tool_use.provider_usage.as_ref();
+                assert_eq!(
+                    reported.and_then(|usage| usage.cache_write_tokens_by_ttl.get("30m").copied()),
+                    buckets.map(|(short, _)| short),
+                );
+                assert_eq!(
+                    reported.and_then(|usage| usage.cache_write_tokens_by_ttl.get("12h").copied()),
+                    buckets.map(|(_, long)| long),
+                );
                 assert_eq!(
                     event.routing.as_ref().unwrap().cache_context.is_some(),
                     debug

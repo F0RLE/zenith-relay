@@ -70,7 +70,7 @@ fn quota_reset_delay_keeps_the_earliest_unverified_window_and_stable_jitter() {
 }
 
 #[test]
-fn quota_reset_verification_is_consumed_by_a_post_reset_observation() {
+fn quota_reset_verification_retries_an_unchanged_cycle_without_busy_polling() {
     let mut quota = QuotaSnapshot {
         primary: Some(reset_window(QuotaWindowKind::Primary, 100_000, 90_000)),
         ..QuotaSnapshot::default()
@@ -90,12 +90,20 @@ fn quota_reset_verification_is_consumed_by_a_post_reset_observation() {
     quota.primary.as_mut().unwrap().observed_at_ms = verification_at;
     assert_eq!(
         quota_reset_delay("synthetic", &quota, verification_at),
-        None
+        Some(30_000)
     );
     assert_eq!(
         quota_verification_delay("synthetic", &quota, verification_at + 60_000),
-        None
+        Some(0)
     );
+    quota.primary.as_mut().unwrap().observed_at_ms = verification_at + 60_000;
+    assert_eq!(
+        quota_verification_delay("synthetic", &quota, verification_at + 60_000),
+        Some(30_000)
+    );
+    // Stop accelerated retries after five minutes, even if the provider keeps
+    // returning the old reset. The ordinary cadence still verifies this account.
+    assert_eq!(quota_reset_delay("synthetic", &quota, 400_000), None);
     // Neither a stale deadline nor a local clock tick fabricates new capacity.
     assert_eq!(
         quota.primary.as_ref().unwrap().available_basis_points,
@@ -106,6 +114,16 @@ fn quota_reset_verification_is_consumed_by_a_post_reset_observation() {
     quota.secondary = None;
     quota.primary.as_mut().unwrap().reset_at_ms = None;
     assert_eq!(quota_verification_delay("synthetic", &quota, 200_000), None);
+}
+
+#[test]
+fn quota_reset_verification_tracks_the_new_cycle_instead_of_retrying_the_old_one() {
+    let quota = QuotaSnapshot {
+        primary: Some(reset_window(QuotaWindowKind::Primary, 500_000, 120_000)),
+        ..QuotaSnapshot::default()
+    };
+    let delay = quota_reset_delay("synthetic", &quota, 120_000).unwrap();
+    assert!((385_000..395_000).contains(&delay));
 }
 
 #[test]

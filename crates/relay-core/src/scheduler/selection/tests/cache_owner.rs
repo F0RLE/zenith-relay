@@ -67,6 +67,7 @@ fn response_owner_probe_uses_warm_quota_protection_without_moving_opaque_ownersh
         (1_001, 10_000, false),
         (1_000, 1_999, false),
         (1_000, 2_000, true),
+        (400, 7_700, true),
     ] {
         let mut scheduler = aliased_owner();
         for (id, remaining) in [

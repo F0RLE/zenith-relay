@@ -7,6 +7,7 @@ pub(super) struct AssembleImport<'a> {
     pub(super) ordinal: usize,
     pub(super) format: ImportFormat,
     pub(super) source_file: Option<&'a str>,
+    pub(super) proxy: Option<url::Url>,
     pub(super) import_object: &'a Map<String, Value>,
     pub(super) meta: Option<&'a Map<String, Value>>,
     pub(super) tags_value: Option<&'a Value>,
@@ -36,6 +37,7 @@ pub(super) fn assemble_parsed_item(
         ordinal,
         format,
         source_file,
+        proxy,
         import_object,
         meta,
         tags_value,
@@ -122,6 +124,12 @@ pub(super) fn assemble_parsed_item(
         label = fallback_label;
     }
     let sensitive_values = [
+        proxy.as_ref().map(url::Url::as_str),
+        proxy
+            .as_ref()
+            .map(url::Url::username)
+            .filter(|s| !s.is_empty()),
+        proxy.as_ref().and_then(url::Url::password),
         api_key.as_deref(),
         access_token.as_deref(),
         refresh_token.as_deref(),
@@ -147,7 +155,7 @@ pub(super) fn assemble_parsed_item(
 
     let source_name = match format {
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
-        ImportFormat::ZenithV1 => "zenith",
+        ImportFormat::ZenithV1 | ImportFormat::ZenithV2 => "zenith",
         _ if explicit_auth_declared => "codex_auth_json",
         _ if use_api_key => "api_key_json",
         _ => "token_json",
@@ -199,6 +207,7 @@ pub(super) fn assemble_parsed_item(
     };
     let preview = ImportPreviewRow {
         item_id: item_id.clone(),
+        bundle_proxy_endpoint: proxy.as_ref().map(|url| url.origin().ascii_serialization()),
         source_file: preview_source_file,
         label: label.clone(),
         identity,
@@ -222,6 +231,7 @@ pub(super) fn assemble_parsed_item(
     };
     let parsed_import_item = ParsedImportItem {
         item_id,
+        bundle_proxy_url: proxy.map(|url| RedactedValue::new(String::from(url))),
         identity_key,
         label,
         account_id,

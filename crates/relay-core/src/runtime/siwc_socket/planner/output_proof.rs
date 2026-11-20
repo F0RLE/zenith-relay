@@ -1,6 +1,7 @@
 use super::{Fingerprint, fingerprint, replay_item};
 use crate::usage::{
-    SocketOutputMismatch, SocketReplayField, SocketReplayItemKind, SocketUnknownFieldChanges,
+    SocketOutputMismatch, SocketOutputReconciliation, SocketReplayField, SocketReplayItemKind,
+    SocketUnknownFieldChanges,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -8,6 +9,54 @@ use std::collections::BTreeMap;
 /// Diagnostics add at most 32 small field proofs per socket; never retain bodies.
 pub(super) const MAX_ITEMS: usize = 32;
 const MAX_UNKNOWN_FIELDS: usize = 16;
+
+/// Only a drop of optional completion status or redundant SDK parse data
+/// can match. Keep opaque or changed fields and the stored response intact.
+pub(super) fn function_projections(
+    value: &Value,
+) -> impl Iterator<Item = (Fingerprint, SocketOutputReconciliation)> {
+    use SocketOutputReconciliation::*;
+    let mut proofs = [None; 3];
+    if value["type"] == "function_call"
+        && value
+            .get("status")
+            .is_none_or(|status| status == "completed")
+        && ["id", "call_id", "name"].into_iter().all(|field| {
+            value[field]
+                .as_str()
+                .is_some_and(|id| !id.trim().is_empty())
+        })
+        && let Some(arguments) = value["arguments"].as_str()
+    {
+        let status = value.get("status");
+        let parsed = value.get("parsed_arguments").filter(|decoration| {
+            decoration.is_null()
+                || crate::strict_json::parse(arguments).is_ok_and(|args| args == **decoration)
+        });
+        if status.is_some() || parsed.is_some() {
+            let mut projected = replay_item(value).into_owned();
+            let object = projected.as_object_mut().expect("function item");
+            if status.is_some() {
+                object.remove("status");
+                proofs[0] = Some((fingerprint(&projected), OmittedCompletedFunctionStatus));
+                projected["status"] = Value::String("completed".into());
+            }
+            if parsed.is_some() {
+                let object = projected.as_object_mut().expect("function item");
+                object.remove("parsed_arguments");
+                proofs[1] = Some((fingerprint(&projected), OmittedParsedFunctionArguments));
+                if status.is_some() {
+                    projected
+                        .as_object_mut()
+                        .expect("function item")
+                        .remove("status");
+                    proofs[2] = Some((fingerprint(&projected), OmittedOptionalFunctionFields));
+                }
+            }
+        }
+    }
+    proofs.into_iter().flatten()
+}
 
 const FIELDS: [(&str, SocketReplayField); 27] = [
     ("type", SocketReplayField::Type),
@@ -52,6 +101,8 @@ pub(super) struct OutputProof {
     unknown: BTreeMap<Fingerprint, UnknownProof>,
     truncated: bool,
     kind: SocketReplayItemKind,
+    omittable_created_by: bool,
+    omittable_metadata: bool,
 }
 
 struct UnknownProof {
@@ -61,7 +112,16 @@ struct UnknownProof {
 
 impl OutputProof {
     pub(super) fn new(value: &Value) -> Self {
+        let had_created_by = value.get("created_by").is_some();
+        let had_metadata = value
+            .get("internal_chat_message_metadata_passthrough")
+            .is_some();
         let value = replay_item(value);
+        let omittable_created_by = had_created_by && value.get("created_by").is_none();
+        let omittable_metadata = had_metadata
+            && value
+                .get("internal_chat_message_metadata_passthrough")
+                .is_none();
         let kind = match value.get("type").and_then(Value::as_str) {
             Some("message") => SocketReplayItemKind::Message,
             Some("reasoning") => SocketReplayItemKind::Reasoning,
@@ -111,7 +171,29 @@ impl OutputProof {
                 .as_object()
                 .is_none_or(|object| object.len() > MAX_UNKNOWN_FIELDS),
             kind,
+            omittable_created_by,
+            omittable_metadata,
         }
+    }
+
+    pub(super) fn recognized_omission(
+        &self,
+        replayed: &Value,
+    ) -> Option<SocketOutputReconciliation> {
+        if self.omittable_metadata
+            && replayed
+                .get("internal_chat_message_metadata_passthrough")
+                .is_none()
+        {
+            return Some(SocketOutputReconciliation::OmittedAllowlistedOutputFields);
+        }
+        (self.omittable_created_by && replayed.get("created_by").is_none()).then_some(
+            if self.kind == SocketReplayItemKind::Reasoning {
+                SocketOutputReconciliation::OmittedReasoningCreatedBy
+            } else {
+                SocketOutputReconciliation::OmittedAllowlistedOutputFields
+            },
+        )
     }
 
     pub(super) fn mismatch(&self, index: usize, current: Option<&Value>) -> SocketOutputMismatch {

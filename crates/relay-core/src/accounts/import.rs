@@ -28,6 +28,13 @@ pub enum ImportFormat {
     JsonLines,
     PortableAccountBundleV1,
     ZenithV1,
+    ZenithV2,
+}
+
+impl ImportFormat {
+    pub(super) fn is_zenith(self) -> bool {
+        matches!(self, Self::ZenithV1 | Self::ZenithV2)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -172,6 +179,8 @@ impl std::error::Error for ImportError {}
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreviewRow {
     pub item_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_proxy_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_file: Option<String>,
     pub label: String,
@@ -194,6 +203,14 @@ pub struct ImportPreviewRow {
     pub selectable: bool,
     pub existing: bool,
     pub warnings: Vec<ImportWarning>,
+}
+
+impl ImportPreviewRow {
+    pub fn mark_existing(&mut self) {
+        self.status = ImportPreviewStatus::Existing;
+        self.default_selected = false;
+        self.existing = true;
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -335,10 +352,19 @@ pub struct ParsedImportItem {
     phone: Option<RedactedValue>,
     password: Option<RedactedValue>,
     totp_secret: Option<RedactedValue>,
+    bundle_proxy_url: Option<RedactedValue>,
     secrets: ImportSecretMaterial,
 }
 
 impl ParsedImportItem {
+    pub fn bundle_proxy_url(&self) -> Option<&str> {
+        self.bundle_proxy_url.as_ref().map(RedactedValue::expose)
+    }
+
+    pub fn discard_bundle_proxy(&mut self) {
+        self.bundle_proxy_url = None;
+    }
+
     pub fn email(&self) -> Option<&str> {
         self.email.as_ref().map(RedactedValue::expose)
     }

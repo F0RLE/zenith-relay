@@ -17,6 +17,8 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use stream::SiwcStreamError;
+
 const MAX_SESSIONS: usize = 32;
 const IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_AGE: Duration = Duration::from_secs(55 * 60);
@@ -135,12 +137,13 @@ impl GatewayRuntime {
                     "The prepared SIWC request is incompatible with Responses WebSocket generation",
                 )
             })?;
-        let key = dispatch.usage_event.and_then(|(event, _)| {
-            let context = event
-                .client_context_id
-                .as_deref()
+        let key = dispatch.usage_event.and_then(|usage| {
+            let event = usage.event;
+            let context = usage
+                .siwc_socket_context
+                .or(event.client_context_id.as_deref())
                 .filter(|s| !s.is_empty())?;
-            Some(session_key(
+            payload.session_key(
                 &event.local_key_id,
                 candidate,
                 context,
@@ -148,7 +151,7 @@ impl GatewayRuntime {
                 crate::protocol::UsageWorkload::from_request_origin(
                     self.request_origin(&event.request_id),
                 ),
-            ))
+            )
         });
         let (mut lane, session_wait_ms) = self
             .session_state
@@ -215,7 +218,7 @@ impl GatewayRuntime {
             let started = Instant::now();
             let opened = tokio::time::timeout(
                 CONNECT_TIMEOUT,
-                transport::upgrade(
+                transport::upgrade_siwc(
                     self.websocket_client(candidate)
                         .get(request.url().clone())
                         .headers(headers),
@@ -266,6 +269,7 @@ impl GatewayRuntime {
                 RequestPayloadDiagnostics::identity(plan.payload.as_bytes(), mode);
             diagnostics.full_request_reason = plan.full_request_reason;
             diagnostics.socket_output_mismatch = plan.output_mismatch.clone();
+            diagnostics.socket_output_reconciled = plan.output_reconciled;
             diagnostics
         });
         lane.touched = Instant::now();
@@ -310,22 +314,6 @@ fn eligible_endpoint(request: &Request) -> bool {
         && url.query().is_none()
         && url.username().is_empty()
         && url.password().is_none()
-}
-
-fn session_key(
-    local_key: &str,
-    candidate: &str,
-    context: &str,
-    url: &url::Url,
-    workload: crate::protocol::UsageWorkload,
-) -> planner::Fingerprint {
-    planner::fingerprint(&serde_json::json!([
-        local_key,
-        candidate,
-        context,
-        url.as_str(),
-        workload
-    ]))
 }
 
 fn required(status: StatusCode, message: &'static str) -> AuthorizedRequestError {
@@ -376,7 +364,13 @@ impl PendingSocket {
             .and_then(|routing| routing.transport.as_mut())
         {
             self.diagnostics.observe(transport);
-            transport.request_payload = self.payload_diagnostics.clone();
+            // An interrupted compressed send has no measured encoded size.
+            transport.request_payload = self.payload_diagnostics.clone().filter(|_| {
+                !self
+                    .connection
+                    .socket
+                    .compression_candidate(self.plan.payload.len())
+            });
         }
     }
 }

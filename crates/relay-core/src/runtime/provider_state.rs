@@ -26,6 +26,7 @@ pub(super) struct RuntimeSourceState {
 /// retain their independent locks instead of an aggregate account-state lock.
 pub(super) struct RuntimeAccountState {
     pub(super) executors: BTreeMap<String, ChatGptAccountExecutor>,
+    pub(super) access_prefetch: Arc<tokio::sync::Mutex<()>>,
     pub(super) team_members: BTreeMap<String, BTreeSet<String>>,
     pub(super) team_breaker_recent: Mutex<BTreeMap<String, u64>>,
     pub(super) team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,

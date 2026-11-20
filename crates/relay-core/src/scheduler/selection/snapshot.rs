@@ -132,6 +132,43 @@ pub struct RequestTiming {
     /// Observed local waits, cumulative across retries and transport handoffs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<super::super::rotation::RequestWaitDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phases: Option<RequestTimingPhases>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTimingPhases {
+    pub pre_attempt_ms: u64,
+    /// Wall time from the first executor start to this executor start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_attempts_ms: Option<u64>,
+    pub post_attempt_ms: Option<u64>,
+    pub upstream_ttft_ms: Option<u64>,
+    pub client_first_output_ms: Option<u64>,
+    pub after_client_ready_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_read_and_parse_ms: Option<u64>,
+    #[serde(
+        default,
+        alias = "basisPointsAccessRefreshMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bps_access_refresh_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_context_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_selection_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_preparation_ms: Option<u64>,
+}
+
+impl RequestTimingPhases {
+    pub(crate) fn executor_offset_ms(&self) -> Option<u64> {
+        // Older observations stored the final executor offset in preAttemptMs.
+        self.pre_attempt_ms
+            .checked_add(self.prior_attempts_ms.unwrap_or(0))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -218,8 +255,7 @@ impl PoolScheduler {
                         now_ms,
                     ) {
                         super::super::rotation::CandidateAvailability::Ready { .. } => {
-                            let lane_ready = operation != RotationOperation::Image
-                                || self.lane_allows(candidate, InFlightLane::Image);
+                            let lane_ready = self.lane_allows(candidate, operation.into());
                             available |= lane_ready;
                             capacity_wait |= !lane_ready;
                         }
@@ -380,11 +416,7 @@ impl PoolScheduler {
                     ) else {
                         return order;
                     };
-                    if let Some(allowed) = &mut request.allowed_candidates {
-                        allowed.retain(|id| {
-                            self.lane_allows(&self.candidates[id], InFlightLane::Text)
-                        });
-                    }
+                    self.retain_free_lanes(&mut request);
                     requests.push(request);
                 }
                 let request = &requests[route_index];

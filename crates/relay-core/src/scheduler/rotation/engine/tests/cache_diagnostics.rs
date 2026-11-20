@@ -107,6 +107,22 @@ fn cache_affinity_diagnostics_keep_unknown_or_future_quota_as_null() {
 }
 
 #[test]
+fn cache_affinity_diagnostics_explain_response_ownership_without_a_prompt_binding() {
+    let mut engine = engine_with([candidate("owner", 0, 1), candidate("other", 0, 1)]);
+    quota(&mut engine, "owner", 400, 100);
+    quota(&mut engine, "other", 7_700, 100);
+    for preferred in [None, Some("owner"), Some("other")] {
+        let mut request = request(1).with_owner("owner");
+        request.preferred = preferred.map(str::to_owned);
+        let diagnostics = inspect(&engine, &request);
+        assert_eq!(diagnostics.reason, CacheAffinityReason::ResponseOwner);
+        assert_eq!(diagnostics.quota_low_water_basis_points, None);
+        assert_eq!(diagnostics.selected.quota_remaining_basis_points, Some(400));
+        assert_eq!(engine.select(&request, 100).unwrap().candidate_id, "owner");
+    }
+}
+
+#[test]
 fn cache_affinity_diagnostics_explain_normalized_load_without_ignoring_capacity() {
     let mut owner = candidate("owner", 0, 1);
     owner.capacity_limit = 4;

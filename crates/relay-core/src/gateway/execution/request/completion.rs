@@ -480,10 +480,11 @@ async fn read_completed_body(
     match collected {
         Ok(bytes) => Ok(bytes),
         Err(upstream_failure) => {
+            let execution = upstream_failure.execution_for_transport(read.route.account_transport);
             let mut failure = upstream_failure
                 .failure
                 .with_retry_headers(read.response_headers);
-            failure.execution = upstream_failure.execution;
+            failure.execution = execution;
             *read.last_preserved_upstream_error = upstream_failure.preserved;
             let failure_state = if matches!(
                 failure.category,

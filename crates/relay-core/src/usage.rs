@@ -49,9 +49,10 @@ pub use tools::{
 pub use transport::{
     AttachmentPreparationDiagnostics, CodexServerTiming, ConnectionResetReason, FullRequestReason,
     RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
-    RequestPreparationDiagnostics, SocketOutputMismatch, SocketReplayField, SocketReplayItemKind,
-    SocketUnknownFieldChanges, StreamResponseDiagnostics, TransportDiagnostics,
-    TransportFailureKind, TransportFallbackReason, TransportMode, TransportResponseFormat,
+    RequestPreparationDiagnostics, SocketOutputMismatch, SocketOutputReconciliation,
+    SocketReplayField, SocketReplayItemKind, SocketUnknownFieldChanges, StreamResponseDiagnostics,
+    TransportDiagnostics, TransportFailureKind, TransportFallbackReason, TransportMode,
+    TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

@@ -11,6 +11,11 @@ pub struct ProviderUsageDetails {
     /// These are subsets of cache-write totals, not additional consumption.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cache_write_tokens_by_ttl: BTreeMap<String, u64>,
+    /// Provider response policy, independent of writes and per-prefix overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_mode: Option<super::CachePolicyMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_retention: Option<String>,
 }
 
 impl ProviderUsageDetails {
@@ -24,6 +29,27 @@ impl ProviderUsageDetails {
         .into_iter()
         .flatten()
         {
+            let options = owner.get("prompt_cache_options");
+            if let Some(mode) = options.and_then(|v| v.get("mode")).and_then(Value::as_str) {
+                match mode {
+                    "implicit" => self.cache_mode = Some(super::CachePolicyMode::Implicit),
+                    "explicit" => self.cache_mode = Some(super::CachePolicyMode::Explicit),
+                    _ => {}
+                }
+            }
+            if let Some(retention) = options
+                .and_then(|v| v.get("ttl"))
+                .and_then(Value::as_str)
+                .filter(|ttl| ttl.len() <= 12 && !ttl.contains([',', '+']))
+                .and_then(super::normalize_reported_cache_ttls)
+                .or_else(|| match owner.get("prompt_cache_retention")?.as_str()? {
+                    "in_memory" | "in-memory" => Some("in_memory".into()),
+                    "24h" => Some("24h".into()),
+                    _ => None,
+                })
+            {
+                self.cache_retention = Some(retention);
+            }
             let Some(usage) = owner.get("usage") else {
                 continue;
             };
@@ -49,7 +75,10 @@ impl ProviderUsageDetails {
     }
 
     pub(super) fn is_empty(&self) -> bool {
-        self.server_tool_calls.is_empty() && self.cache_write_tokens_by_ttl.is_empty()
+        self.server_tool_calls.is_empty()
+            && self.cache_write_tokens_by_ttl.is_empty()
+            && self.cache_mode.is_none()
+            && self.cache_retention.is_none()
     }
 }
 
@@ -113,6 +142,28 @@ fn valid_ttl(ttl: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn returned_policy_is_not_a_write_or_an_expiry() {
+        let mut tools = crate::ToolUseDiagnostics::default();
+        tools.observe_provider_usage(&json!({"request":{"prompt_cache_options":{"ttl":"12h"}},
+            "prompt_cache_options":{"mode":"private","ttl":"private"},"prompt_cache_retention":"private"}));
+        assert!(tools.provider_usage.is_none());
+        tools.observe_provider_usage(&json!({"response":{"prompt_cache_retention":"in-memory"}}));
+        let usage = tools.provider_usage.as_ref().unwrap();
+        assert_eq!(usage.cache_retention.as_deref(), Some("in_memory"));
+        assert!(usage.cache_write_tokens_by_ttl.is_empty());
+        tools.observe_provider_usage(&json!({"response":{"response":{
+            "prompt_cache_options":{"mode":"explicit","ttl":"30m"},
+            "usage":{"input_tokens_details":{"cache_write_tokens_details":{"ttl_12h_tokens":128}}}
+        }}}));
+        tools.observe_provider_usage(&json!({"response":{"status":"completed"}}));
+        let stored = serde_json::to_value(tools.provider_usage.unwrap()).unwrap();
+        assert_eq!(
+            stored,
+            json!({"cacheMode":"explicit","cacheRetention":"30m","cacheWriteTokensByTtl":{"12h":128}})
+        );
+    }
 
     #[test]
     fn structured_counters_keep_zero_missing_and_cumulative_snapshots_distinct() {
