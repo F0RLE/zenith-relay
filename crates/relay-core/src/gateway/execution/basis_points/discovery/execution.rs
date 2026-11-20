@@ -366,10 +366,11 @@ pub(in crate::gateway) async fn dispatch_continuation(
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
     let basis_points =
         route.account_transport == crate::runtime::AccountTransport::ExcelBasisPoints;
+    let url = route.account_request_url()?;
     runtime.observe_basis_points_dispatch(route, upstream);
     let request = runtime
         .request_client(&route.candidate_id)
-        .post(route.upstream_url.clone())
+        .post(url)
         .headers(route.upstream_headers.clone())
         .header(header::CONTENT_TYPE, "application/json")
         .header(

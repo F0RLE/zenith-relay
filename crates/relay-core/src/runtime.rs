@@ -253,6 +253,11 @@ pub(crate) struct ExecutorRoute {
 }
 
 impl ExecutorRoute {
+    pub(crate) fn account_request_url(&self) -> std::result::Result<Url, AuthorizedRequestError> {
+        support::normalized_responses_url(self.upstream_url.as_str())
+            .map_err(|_| AuthorizedRequestError::NotReplayable)
+    }
+
     pub(crate) fn binding_key(&self) -> SourceProtocolBindingKey {
         SourceProtocolBindingKey {
             wire_api: self.client_wire_api,

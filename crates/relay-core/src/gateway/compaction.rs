@@ -193,12 +193,15 @@ pub(super) async fn execute(
 ) -> Result<(HeaderMap, Vec<u8>), Box<(AttemptFailure, HeaderMap)>> {
     let request_body =
         request_body(client_request).map_err(|failure| Box::new((*failure, HeaderMap::new())))?;
+    let url = route
+        .account_request_url()
+        .map_err(|error| Box::new((AttemptFailure::authorized_request(error), HeaderMap::new())))?;
     let upstream = runtime
         .send_authorized_request(
             &route.candidate_id,
             runtime
                 .request_client(&route.candidate_id)
-                .post(route.upstream_url.clone())
+                .post(url)
                 .headers(headers.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "text/event-stream")
