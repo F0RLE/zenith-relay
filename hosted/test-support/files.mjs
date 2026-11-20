@@ -8,7 +8,8 @@ export function fixturePath(candidate, leaf) {
   if (typeof candidate !== "string" || !isAbsolute(candidate)) throw new Error("Expected an absolute fixture path");
   const temporary = realpathSync(tmpdir());
   const absolute = resolve(candidate);
-  const parts = relative(temporary, absolute).split(sep);
+  const base = absolute.startsWith(temporary + sep) ? temporary : resolve(tmpdir());
+  const parts = relative(base, absolute).split(sep);
   const rootName = parts.shift();
   if (!/^relay-hosted-[A-Za-z0-9_-]{6,}$/.test(rootName))
     throw new Error("Path is outside the isolated Hosted fixture");

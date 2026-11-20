@@ -8,11 +8,12 @@ export function fileChanged(path) {
   return Object.assign(new Error(`File changed while checking: ${path}`), { code: "ESTALE" });
 }
 
-/** Pin a read-only descriptor, then validate its identity before any read. */
-export function openCheckedFile(path, io = fs) {
+/** Pin a descriptor without creation/truncation; validate it before any read. */
+export function openCheckedFile(path, io = fs, { directories = false, writable = false } = {}) {
   // Windows lacks O_NOFOLLOW/O_NONBLOCK. The descriptor identity check is
   // required on every platform; these flags additionally reject POSIX links/FIFOs.
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+  const access = writable && process.platform === "win32" ? fs.constants.O_RDWR : fs.constants.O_RDONLY;
+  const flags = access | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
   let fd;
   try { fd = io.openSync(path, flags, 0o600); }
   catch (error) {
@@ -27,7 +28,8 @@ export function openCheckedFile(path, io = fs) {
   try {
     const stat = io.fstatSync(fd, { bigint: true });
     const current = io.lstatSync(path, { bigint: true });
-    if (!stat.isFile() || current.isSymbolicLink() || !current.isFile()) return null;
+    if (current.isSymbolicLink() || (!stat.isFile() && !(directories && stat.isDirectory()))) return null;
+    if (writable && stat.isFile() && stat.nlink !== 1n) return null;
     if (!sameFileState(current, stat)) throw fileChanged(path);
     retained = true;
     return { fd, stat };

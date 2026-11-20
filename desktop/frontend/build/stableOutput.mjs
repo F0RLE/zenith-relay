@@ -15,7 +15,7 @@ function closeSnapshot(entries, io) {
 function snapshot(directory, keepOpen, io) {
   const entries = new Map();
   function visit(path, relative) {
-    const opened = openCheckedFile(path, { directories: true, writable: keepOpen }, io);
+    const opened = openCheckedFile(path, io, { directories: true, writable: keepOpen });
     if (!opened) throw fileChanged(path);
     const { stat, fd } = opened;
     const entry = { fd, stat, atime: Number(stat.atimeNs) / 1e9, mtime: Number(stat.mtimeNs) / 1e9 };
