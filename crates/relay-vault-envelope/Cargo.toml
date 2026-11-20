@@ -1,0 +1,15 @@
+[package]
+name = "zenith-relay-vault-envelope"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "AGPL-3.0-only"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"
+zeroize = "1.9.1"
