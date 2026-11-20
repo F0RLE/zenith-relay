@@ -35,13 +35,13 @@ test("checked text reads a regular file and skips directories", () => fixture(({
   expect(readCheckedText(root, io)).toBeNull();
 }));
 
-test("replacing a source after lstat cannot redirect the read", () => fixture(({ path, io }) => {
-  const open = io.openSync;
+test("replacing an opened path before validation cannot redirect the read", () => fixture(({ path, io }) => {
+  const lstat = io.lstatSync;
   let reads = 0;
-  io.openSync = (...args) => {
+  io.lstatSync = (...args) => {
     fs.renameSync(path, `${path}.original`);
     fs.writeFileSync(path, "different source");
-    return open(...args);
+    return lstat(...args);
   };
   io.readFileSync = () => { reads++; throw new Error("must not read replacement"); };
   expect(() => readCheckedText(path, io)).toThrow("File changed while checking");
