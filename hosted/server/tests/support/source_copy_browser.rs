@@ -1,0 +1,371 @@
+use crate::{
+    PROVIDER, proof, state,
+    support::{Cluster, Process, port, ready},
+};
+use reqwest::{Certificate, Client};
+use sqlx::PgPool;
+use std::{fs, path::Path, process::Command, time::Duration};
+use uuid::Uuid;
+use zenith_relay_hosted::{config::Config, db};
+use zenith_relay_hosted_device::{
+    COPY_COMMIT_PATH, COPY_STATUS_PATH, CopyKey, CopyPlan, CopyProxy, Destination, DeviceKey,
+};
+
+#[path = "source_copy_proxy.rs"]
+mod proxy;
+
+async fn checkpoint(browser: &mut Process, path: &Path) {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        while !path.is_file() {
+            assert!(
+                browser.0.try_wait().unwrap().is_none(),
+                "copy browser exited early"
+            );
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("copy browser checkpoint");
+}
+
+async fn wait_exit(child: &mut Process) {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(exit.success());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("fixture did not exit");
+}
+
+async fn grant_roles(admin: &PgPool) {
+    sqlx::raw_sql(
+        "GRANT USAGE ON SCHEMA relay_hosted TO fixture_setup, fixture_runtime;
+         GRANT SELECT ON relay_hosted.closed_installation, relay_hosted._sqlx_migrations TO fixture_setup, fixture_runtime;
+         GRANT SELECT ON relay_hosted.pending_owner TO fixture_setup;
+         GRANT EXECUTE ON FUNCTION relay_hosted.bind_first_owner(uuid,bigint,text,uuid,bytea,jsonb,bigint) TO fixture_setup;",
+    ).execute(admin).await.unwrap();
+    for (sql, var, role) in [
+        (
+            include_str!("../../runtime-grants.sql"),
+            ":\"runtime_role\"",
+            "fixture_runtime",
+        ),
+        (
+            include_str!("../../vault-grants.sql"),
+            ":\"vault_role\"",
+            "fixture_vault",
+        ),
+        (
+            include_str!("../../qualification-grants.sql"),
+            ":\"qualification_role\"",
+            "fixture_qualifier",
+        ),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.replace(var, role)))
+            .execute(admin)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL, built web assets, OpenSSL CLI and Chromium"]
+async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_proxy() {
+    let c = Cluster::new();
+    let root = c.temp.path();
+    let admin = PgPool::connect(&c.dsn("fixture_boot")).await.unwrap();
+    c.create_logins(
+        &admin,
+        &[
+            "fixture_setup",
+            "fixture_runtime",
+            "fixture_vault",
+            "fixture_qualifier",
+        ],
+    )
+    .await;
+    let mut ports = std::collections::BTreeSet::new();
+    while ports.len() < 3 {
+        ports.insert(port());
+    }
+    let [edge_port, web_port, transfer_port]: [u16; 3] =
+        ports.into_iter().collect::<Vec<_>>().try_into().unwrap();
+    let origin = format!("https://localhost:{edge_port}");
+    let web_bind = format!("http://127.0.0.1:{web_port}");
+    let transfer_bind = format!("127.0.0.1:{transfer_port}");
+    let toml = include_str!("../../config.example.toml")
+        .replace("http://localhost:1443", &origin)
+        .replace("127.0.0.1:1443", &format!("127.0.0.1:{web_port}"));
+    let conf = root.join("copy.toml");
+    fs::write(&conf, &toml).unwrap();
+    let config = Config::parse(&toml).unwrap();
+    db::migrate(&admin, &origin).await.unwrap();
+    grant_roles(&admin).await;
+
+    let cert = root.join("edge.pem");
+    let tls_key = root.join("edge-key.pem");
+    let openssl = std::env::var_os("RELAY_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
+    let cert_result = Command::new(openssl)
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
+            "-out",
+        ])
+        .arg(&cert)
+        .arg("-keyout")
+        .arg(&tls_key)
+        .output()
+        .expect("OpenSSL CLI");
+    assert!(
+        cert_result.status.success(),
+        "cannot generate the fixture TLS certificate"
+    );
+    let http = Client::builder()
+        .no_proxy()
+        .retry(reqwest::retry::never())
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(true)
+        .tls_certs_only([Certificate::from_pem(&fs::read(&cert).unwrap()).unwrap()])
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../web");
+    let dist = web.join("dist");
+    let _edge = Process(
+        Command::new("bun")
+            .current_dir(&web)
+            .arg("tests/source-copy-edge.mjs")
+            .args([
+                edge_port.to_string(),
+                web_port.to_string(),
+                transfer_port.to_string(),
+            ])
+            .arg(&cert)
+            .arg(&tls_key)
+            .spawn()
+            .unwrap(),
+    );
+    let enrollment = root.join("enrollment");
+    let exchange = root.join("exchange");
+    let vault_dir = root.join("vault");
+    let vault_key = root.join("vault-key");
+    for dir in [&enrollment, &exchange, &vault_dir] {
+        fs::create_dir(dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    fs::write(&vault_key, [43u8; 32]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&vault_key, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut setup = Process(
+        c.cli("fixture_setup", &conf)
+            .arg("setup-owner")
+            .arg("--web-dist")
+            .arg(&dist)
+            .arg("--code-dir")
+            .arg(&enrollment)
+            .spawn()
+            .unwrap(),
+    );
+    ready(&mut setup, &http, &format!("{origin}/setup/owner")).await;
+    let code = fs::read_dir(&enrollment)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut browser = Process(
+        Command::new("bun")
+            .current_dir(&web)
+            .env("RELAY_TEST_EDGE_CERT", &cert)
+            .arg("tests/owner-passkey.mjs")
+            .arg(&origin)
+            .arg(code)
+            .arg("source-copy")
+            .arg(&exchange)
+            .spawn()
+            .unwrap(),
+    );
+    wait_exit(&mut setup).await;
+    let mut web_server = Process(
+        c.cli("fixture_runtime", &conf)
+            .arg("serve")
+            .arg("--web-dist")
+            .arg(&dist)
+            .spawn()
+            .unwrap(),
+    );
+    ready(
+        &mut web_server,
+        &http,
+        &format!("{origin}/api/hosted/v1/public/config"),
+    )
+    .await;
+    let start_worker = || {
+        Process(
+            c.cli("fixture_vault", &conf)
+                .args(["serve-transfers", "--bind", &transfer_bind, "--vault-dir"])
+                .arg(&vault_dir)
+                .env("ZENITH_RELAY_HOSTED_VAULT_KEY_FILE", &vault_key)
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let mut worker = start_worker();
+    let (iid, owner): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id,owner_user_id FROM relay_hosted.installations")
+            .fetch_one(&admin)
+            .await
+            .unwrap();
+    let device = Uuid::new_v4();
+    let target = Destination::parse(&format!(
+        "{origin}/admin/connections#relay-device={iid}.{device}"
+    ))
+    .unwrap();
+    let paired = DeviceKey::generate(target.clone()).unwrap();
+    sqlx::query(
+        "INSERT INTO relay_hosted.management_devices (id,installation_id,owner_id,installation_epoch,
+          owner_epoch,label,scope,revision,invited_at,approve_by,approved_at,expires_at,verifier)
+         SELECT $1,i.id,u.id,i.authorization_epoch,u.authorization_epoch,'Copy fixture','connections.read',2,
+          now(),now()+interval '5 minutes',now(),now()+interval '24 hours',$2
+         FROM relay_hosted.installations i JOIN relay_hosted.users u ON u.id=i.owner_user_id",
+    ).bind(device).bind(paired.verifier().as_slice()).execute(&admin).await.unwrap();
+    let route = proxy::Fixture::start().await;
+    let source = Uuid::new_v4();
+    let plan = CopyPlan {
+        origin: origin.clone(),
+        installation_id: iid,
+        device_id: device,
+        operation_id: Uuid::new_v4(),
+        source_id: source,
+        label: "Synthetic copied source".to_owned(),
+        endpoint: route.endpoint.clone(),
+        proxy: CopyProxy::from_route(&route.proxy),
+    };
+    let key = CopyKey::create(&target, plan.clone(), PROVIDER, Some(&route.proxy)).unwrap();
+    let bearer = proof(&key);
+    let status = format!("{origin}{COPY_STATUS_PATH}");
+    let commit = format!("{origin}{COPY_COMMIT_PATH}");
+    let post = || {
+        http.post(&commit)
+            .bearer_auth(bearer.as_str())
+            .header("content-type", "application/octet-stream")
+            .body(format!("{PROVIDER}\n{}", route.proxy))
+    };
+    let wait_status = |mut child: Process| {
+        let http = http.clone();
+        let status = status.clone();
+        let bearer = bearer.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    assert!(
+                        child.0.try_wait().unwrap().is_none(),
+                        "transfer worker exited early"
+                    );
+                    if let Ok(response) =
+                        http.get(&status).bearer_auth(bearer.as_str()).send().await
+                        && response.status().is_success()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+            })
+            .await
+            .expect("transfer worker readiness");
+            child
+        }
+    };
+    worker = wait_status(worker).await;
+    assert_eq!(post().send().await.unwrap().status(), 401);
+    assert_eq!(
+        http.get(&status)
+            .bearer_auth(key.review().code())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("{web_bind}{COPY_COMMIT_PATH}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404,
+    );
+    checkpoint(&mut browser, &exchange.join("owner-ready")).await;
+    assert_eq!(
+        sqlx::query(
+            "UPDATE relay_hosted.admin_sessions SET created_at=created_at-interval '3 minutes'"
+        )
+        .execute(&admin)
+        .await
+        .unwrap()
+        .rows_affected(),
+        1
+    );
+    fs::write(exchange.join("review"), key.review().code()).unwrap();
+    checkpoint(&mut browser, &exchange.join("approved")).await;
+    assert_eq!(
+        post()
+            .header("origin", origin.as_str())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(state(post().send().await.unwrap()).await, "committed");
+    let record = key.protected_record();
+    drop(worker);
+    let _worker = wait_status(start_worker()).await;
+    let restored = CopyKey::restore(&record).unwrap();
+    assert_eq!(
+        state(
+            http.get(&status)
+                .bearer_auth(proof(&restored).as_str())
+                .send()
+                .await
+                .unwrap()
+        )
+        .await,
+        "committed"
+    );
+    fs::write(exchange.join("committed"), []).unwrap();
+    wait_exit(&mut browser).await;
+
+    route
+        .verify(&c, &config, &admin, owner, &plan, &vault_dir, &vault_key)
+        .await;
+}

@@ -1,0 +1,2378 @@
+openapi: 3.1.0
+info: {title: Relay Hosted control API, version: "1"}
+servers: [{url: /api/hosted/v1}]
+paths:
+  /public/config:
+    get:
+      operationId: publicConfig
+      responses:
+        "200":
+          description: Anonymous, no-store public projection. No cookies.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data, meta]
+                properties:
+                  meta: {$ref: "#/components/schemas/Meta"}
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [display_name, login_methods, registration_open, studio_enabled]
+                    properties:
+                      display_name: {type: string, minLength: 1, maxLength: 64}
+                      login_methods: {type: array, maxItems: 1, items: {type: string, format: uuid}, description: Configured customer login method; never a registration grant.}
+                      registration_open: {const: false}
+                      studio_enabled: {const: false}
+                      policy_links:
+                        type: object
+                        description: Optional operator-published HTTPS pages. No credentials, query or fragment.
+                        additionalProperties: false
+                        properties:
+                          terms: {$ref: "#/components/schemas/PublicLink"}
+                          privacy: {$ref: "#/components/schemas/PublicLink"}
+                          refunds: {$ref: "#/components/schemas/PublicLink"}
+                          support: {$ref: "#/components/schemas/PublicLink"}
+        "503": {$ref: "#/components/responses/Error"}
+    head:
+      operationId: headPublicConfig
+      responses:
+        "200": {description: Same availability and headers as GET; no body.}
+        "503": {description: Installation unavailable; no body.}
+  /auth/admin/sign-in/options:
+    post:
+      operationId: startOwnerSignIn
+      description: Exact configured Origin. No identity input. Options have no credential list or owner identifier.
+      parameters: [{$ref: "#/components/parameters/Origin"}]
+      responses:
+        "200":
+          description: Discoverable assertion options, with userVerification required. Sets a one-use two-minute attempt cookie.
+          headers:
+            Set-Cookie: {schema: {type: string}, description: "__Host-relay_admin_attempt; Path=/; Secure; HttpOnly; SameSite=Strict"}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/Options"}}
+        "403": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /auth/admin/sign-in/verify:
+    post:
+      operationId: verifyOwnerSignIn
+      security: [{adminAttempt: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}]
+      requestBody: {$ref: "#/components/requestBodies/Credential"}
+      responses:
+        "200":
+          description: Sets a fresh owner cookie after commit, clears the attempt cookie. No credential or session bearer in JSON.
+          headers:
+            Set-Cookie: {schema: {type: string}, description: "__Host-relay_admin; Path=/; Secure; HttpOnly; SameSite=Strict"}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [signed_in], properties: {signed_in: {const: true}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/overview:
+    get:
+      operationId: ownerOverview
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Authorized closed-installation projection; CSRF is scoped to this session and is not a bearer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [service_mode, csrf_token]
+                        properties: {service_mode: {$ref: "#/components/schemas/PrivateMode"}, csrf_token: {$ref: "#/components/schemas/Csrf"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/overview/usage:
+    get:
+      operationId: ownerUsageOverview
+      security: [{adminSession: []}]
+      description: Read-only aggregate of retained logical requests across all workspaces. Counts, usage and charges are attributed to request start, not posting time. Never probes a provider or returns customer, key, request or source identifiers.
+      parameters:
+        - {name: hours, in: query, schema: {type: integer, enum: [24, 168, 720, 0], default: 24}, description: Rolling hours. Zero selects all retained request history.}
+        - {$ref: "#/components/parameters/ReportModel"}
+      responses:
+        "200":
+          description: No-store snapshot at server time. An empty population is valid.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/OwnerUsageOverview"}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/usage/requests:
+    get:
+      operationId: listOwnerRequests
+      security: [{adminSession: []}]
+      description: Retained logical requests, newest first. Use rolling hours or exact UTC millisecond bounds. Diagnostic selectors must match the same retained observation. Each read observes current state and does not extend the session.
+      parameters:
+        - {$ref: "#/components/parameters/OwnerUsageHours"}
+        - {$ref: "#/components/parameters/OwnerUsageFrom"}
+        - {$ref: "#/components/parameters/OwnerUsageTo"}
+        - {$ref: "#/components/parameters/ReportModel"}
+        - {$ref: "#/components/parameters/OwnerUsageWorkspace"}
+        - {$ref: "#/components/parameters/ReportKey"}
+        - {$ref: "#/components/parameters/OwnerUsageSource"}
+        - {$ref: "#/components/parameters/ReportExecution"}
+        - {$ref: "#/components/parameters/OwnerUsageAccounting"}
+        - {$ref: "#/components/parameters/DiagnosticStage"}
+        - {$ref: "#/components/parameters/DiagnosticOrigin"}
+        - {$ref: "#/components/parameters/DiagnosticCategory"}
+        - {$ref: "#/components/parameters/DiagnosticSeverity"}
+        - {$ref: "#/components/parameters/DiagnosticCode"}
+        - {$ref: "#/components/parameters/OwnerUsageBefore"}
+      responses:
+        "200": {$ref: "#/components/responses/OwnerRequestPage"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/usage/errors:
+    get:
+      operationId: listOwnerRequestErrors
+      security: [{adminSession: []}]
+      description: The same ordering and matching rules as Requests, limited to logical requests with execution, settlement, usage evidence or charge correction issues. An empty page is not a service health assertion.
+      parameters:
+        - {$ref: "#/components/parameters/OwnerUsageHours"}
+        - {$ref: "#/components/parameters/OwnerUsageFrom"}
+        - {$ref: "#/components/parameters/OwnerUsageTo"}
+        - {$ref: "#/components/parameters/ReportModel"}
+        - {$ref: "#/components/parameters/OwnerUsageWorkspace"}
+        - {$ref: "#/components/parameters/ReportKey"}
+        - {$ref: "#/components/parameters/OwnerUsageSource"}
+        - {$ref: "#/components/parameters/ReportExecution"}
+        - {$ref: "#/components/parameters/OwnerUsageAccounting"}
+        - {$ref: "#/components/parameters/DiagnosticStage"}
+        - {$ref: "#/components/parameters/DiagnosticOrigin"}
+        - {$ref: "#/components/parameters/DiagnosticCategory"}
+        - {$ref: "#/components/parameters/DiagnosticSeverity"}
+        - {$ref: "#/components/parameters/DiagnosticCode"}
+        - {$ref: "#/components/parameters/OwnerUsageBefore"}
+      responses:
+        "200": {$ref: "#/components/responses/OwnerRequestPage"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/usage/requests/{id}:
+    get:
+      operationId: readOwnerRequest
+      security: [{adminSession: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        "200":
+          description: Read-only current receipt, retained timeline and bounded diagnostic observations. An attempt is a recorded dispatch permit, not confirmation of delivery. No request/response content, credentials or provider probes.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/OwnerRequestDetail"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/notifications:
+    get:
+      operationId: listOwnerNotifications
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Up to 16 drafts and 32 unexpired publications. Recipient totals are fixed at publication; identities and read markers are not included.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [items], properties: {items: {type: array, maxItems: 48, items: {$ref: "#/components/schemas/OwnerNotice"}}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/payment-methods:
+    get:
+      operationId: readCheckoutBuilder
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Installed sandbox profiles, the saved draft, and the separately published methods in customer order. No merchant credentials or identities.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/CheckoutBuilder"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: changeCheckoutBuilder
+      security: [{adminSession: []}]
+      description: Local-only. Saving does not activate. Checking allows publication of the same revision for ten minutes. Publish and disable require owner verification within two minutes. A repeated identical operation acknowledges the original effect.
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CheckoutBuilderChange"}
+      responses:
+        "200":
+          description: Command committed or previously committed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [applied, operation_id], properties: {applied: {const: true}, operation_id: {type: string, format: uuid}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/notifications/{id}:
+    post:
+      operationId: changeOwnerNotification
+      security: [{adminSession: []}]
+      description: Save or discard an unpublished draft, or publish its exact revision to the currently registered qualification audience. Publication requires fresh passkey verification. Resending an acknowledged operation does not repeat it.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/Origin"}
+        - {$ref: "#/components/parameters/Csrf"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NoticeChange"}
+      responses:
+        "200":
+          description: The operation committed (or previously committed with the same command).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [applied, operation_id], properties: {applied: {const: true}, operation_id: {type: string, format: uuid}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /auth/admin/logout:
+    post:
+      operationId: endOwnerSession
+      security: [{adminSession: []}]
+      parameters:
+        - {$ref: "#/components/parameters/Origin"}
+        - {name: X-Relay-CSRF, in: header, required: true, schema: {$ref: "#/components/schemas/Csrf"}}
+      responses:
+        "200":
+          description: Session revoked server-side; clear both owner cookies.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [signed_out], properties: {signed_out: {const: true}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /auth/customer/{provider_id}/begin:
+    parameters: [{$ref: "#/components/parameters/ProviderId"}]
+    post:
+      operationId: beginCustomerSignIn
+      parameters: [{$ref: "#/components/parameters/Origin"}]
+      responses:
+        "200":
+          description: Sets a three-minute Secure HttpOnly SameSite=Lax attempt cookie, then navigate to authorization_url.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [authorization_url], properties: {authorization_url: {type: string, format: uri}}}}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /auth/customer/{provider_id}/callback:
+    parameters: [{$ref: "#/components/parameters/ProviderId"}]
+    get:
+      operationId: finishCustomerSignIn
+      security: [{customerAttempt: []}]
+      parameters:
+        - {name: state, in: query, required: true, schema: {$ref: "#/components/schemas/Csrf"}}
+        - {name: code, in: query, schema: {type: string, minLength: 1, maxLength: 2048}}
+        - {name: iss, in: query, schema: {type: string, format: uri}}
+        - {name: error, in: query, schema: {type: string}}
+      responses:
+        "303": {description: "Fixed redirect to /app/overview with a new customer session, or to /login with a review ID or generic failure fragment. No client-supplied destination."}
+        "404": {$ref: "#/components/responses/Error"}
+  /models:
+    get:
+      operationId: listCustomerModels
+      security: [{customerSession: []}]
+      responses:
+        "200":
+          description: Effective models and sale prices for the current tester. No source identities or drafts.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/CatalogPage"}
+                  - properties: {data: {properties: {items: {items: {$ref: "#/components/schemas/TextListing"}}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /models/status:
+    get:
+      operationId: readCustomerModelStatus
+      security: [{customerSession: []}]
+      description: Current catalog order and stored observations. Reauthorizes each read, never sends probes, and is not cacheable.
+      parameters:
+        - {name: hours, in: query, schema: {type: integer, enum: [24, 168], default: 24}}
+      responses:
+        "200":
+          description: "Server-anchored half-open UTC bins; 48 half hours or 28 six-hour bins. Request metrics are scoped to the caller."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/ModelStatus"}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /notifications:
+    get:
+      operationId: listOwnNotifications
+      security: [{customerSession: []}]
+      responses:
+        "200":
+          description: Unexpired inbox items in the current authorized workspace and qualification scope, newest first. No-store.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [items], properties: {items: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/CustomerNotice"}}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /notifications/read:
+    post:
+      operationId: markOwnNotificationsRead
+      description: Mark only the supplied own inbox IDs. Repeat is harmless. A missing, foreign or expired item rejects the whole selection without updating a read marker.
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ids]
+              properties: {ids: {type: array, minItems: 1, maxItems: 32, uniqueItems: true, items: {type: string, format: uuid}}}
+      responses:
+        "200":
+          description: The selected items are read for this recipient.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [applied], properties: {applied: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /account:
+    get:
+      operationId: readCustomerAccount
+      security: [{customerSession: []}]
+      responses:
+        "200":
+          description: Own workspace and journal-backed USD wallet only.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [workspace_id, csrf_token, wallet]
+                        properties:
+                          workspace_id: {type: string, format: uuid}
+                          csrf_token: {$ref: "#/components/schemas/Csrf"}
+                          wallet:
+                            type: object
+                            required: [currency, precision, available_micro_usd, reserved_micro_usd, inference_reserved_micro_usd, refund_reserved_micro_usd]
+                            properties:
+                              currency: {const: USD}
+                              precision: {const: 6}
+                              available_micro_usd: {$ref: "#/components/schemas/UnsignedAmount"}
+                              reserved_micro_usd: {$ref: "#/components/schemas/UnsignedAmount", description: Sum of the inference and refund reserves.}
+                              inference_reserved_micro_usd: {$ref: "#/components/schemas/UnsignedAmount"}
+                              refund_reserved_micro_usd: {$ref: "#/components/schemas/UnsignedAmount"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /keys:
+    get:
+      operationId: listOwnKeys
+      security: [{customerSession: []}]
+      description: "Newest first, 32 per page. Use either a page cursor or an issuance operation ID. Unknown and foreign references return no records."
+      parameters:
+        - {name: before, in: query, schema: {type: string, format: uuid}}
+        - {name: operation_id, in: query, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Masked metadata only.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [keys, next_before]
+                        properties:
+                          keys: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/OwnKey"}}
+                          next_before: {type: [string, "null"], format: uuid}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: issueOwnKey
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, name]
+              properties:
+                operation_id: {type: string, format: uuid}
+                name: {type: string, minLength: 1, maxLength: 80}
+                replaces_key_id: {type: [string, "null"], format: uuid, description: Leaves the original active.}
+                expires_at_s: {type: [integer, "null"], description: Optional Unix second before the scope or original key expiry.}
+      responses:
+        "200":
+          description: First committed issuance returns the secret once. An identical scoped replay returns only its metadata.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [key]
+                        properties:
+                          key: {$ref: "#/components/schemas/OwnKey"}
+                          secret: {type: string, pattern: "^rlk_[0-9a-f]{32}\\.[0-9a-f]{64}$"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /keys/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    delete:
+      operationId: revokeOwnKey
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      responses:
+        "200":
+          description: Revocation committed, including an already revoked own key.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [id, revoked], properties: {id: {type: string, format: uuid}, revoked: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /usage/reports:
+    post:
+      operationId: captureOwnUsageReport
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [hours]
+              properties: {hours: {type: integer, enum: [24, 168, 720]}}
+      responses:
+        "200":
+          description: Captures a ten-minute, workspace-scoped report. No inference or wallet mutation.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [report_id], properties: {report_id: {type: string, format: uuid}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "429":
+          description: Active report capacity exhausted or more than 8192 receipts in the requested period. No truncated report.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /usage/reports/{id}:
+    get:
+      operationId: readOwnUsageReport
+      security: [{customerSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/ReportModel"}
+      responses:
+        "200":
+          description: >
+            Totals and consecutive UTC buckets from the saved report. Bucket zero starts at from_ms.
+            The 24-hour window has 24 hourly buckets; 7- and 30-day windows have 7 and 30 24-hour buckets.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        allOf:
+                          - {$ref: "#/components/schemas/UsageWindow"}
+                          - type: object
+                            required: [buckets, models, keys]
+                            properties:
+                              bucket: {type: "null"}
+                              buckets: {type: array, minItems: 7, maxItems: 30, items: {$ref: "#/components/schemas/UsageMetrics"}}
+                              models: {type: array, uniqueItems: true, maxItems: 8192, items: {type: string, maxLength: 128}, description: All models in the saved population, before selecting one model.}
+                              keys:
+                                type: array
+                                maxItems: 8192
+                                description: Key labels and public prefixes for the saved population, including revoked keys.
+                                items:
+                                  type: object
+                                  required: [id, name, prefix]
+                                  properties:
+                                    id: {type: string, format: uuid}
+                                    name: {type: string, minLength: 1, maxLength: 80}
+                                    prefix: {type: string, pattern: '^rlk_[0-9a-f]{12}$'}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /usage/reports/{id}/csv:
+    get:
+      operationId: downloadOwnUsageReport
+      security: [{customerSession: []}]
+      description: >
+        Export the exact saved selection, newest first, independent of pagination. Each row contains a safe
+        request reference, UTC timestamps, a public key prefix, usage/settlement evidence and integer
+        microUSD. Blank values are unknown or not posted. No credentials or customer-authored labels.
+        Up to 8192 rows and 8 MiB; an empty selection has only the CSV header.
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/ReportModel"}
+        - {$ref: "#/components/parameters/ReportBucket"}
+        - {$ref: "#/components/parameters/ReportKey"}
+        - {$ref: "#/components/parameters/ReportExecution"}
+      responses:
+        "200":
+          description: UTF-8 CSV attachment for the requested report and filters.
+          headers:
+            Content-Disposition:
+              schema: {type: string, const: 'attachment; filename="relay-usage.csv"'}
+          content:
+            text/csv:
+              schema: {type: string, format: binary}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404":
+          description: Missing, expired or foreign report.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429":
+          description: Concurrent export limit reached. No partial file.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /usage/requests:
+    get:
+      operationId: listOwnRequestReceipts
+      security: [{customerSession: []}]
+      description: >
+        Specify report for a saved page. Filter by model, zero-based bucket, API key and/or execution outcome.
+        The cursor is bound to the current session, report and all active filters. Specify id alone for a current receipt independent
+        of any report, with a separate customer-safe diagnostic when applicable. Include id with a report to read only the frozen receipt matching the filters.
+      parameters:
+        - {name: report, in: query, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/ReportModel"}
+        - {$ref: "#/components/parameters/ReportBucket"}
+        - {$ref: "#/components/parameters/ReportKey"}
+        - {$ref: "#/components/parameters/ReportExecution"}
+        - {name: before, in: query, schema: {$ref: "#/components/schemas/ReportCursor"}}
+        - {$ref: "#/components/parameters/ReceiptId"}
+      responses:
+        "200":
+          description: Newest first. A direct ID lookup without a matching receipt returns an empty list. Unavailable reports return 404.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        required: [items, next_before]
+                        properties:
+                          items: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/UsageReceipt"}}
+                          next_before: {anyOf: [{$ref: "#/components/schemas/ReportCursor"}, {type: "null"}]}
+                          diagnostic:
+                            description: Present only on a direct ID read. Null if no matching receipt or no explanation applies.
+                            anyOf: [{$ref: "#/components/schemas/CustomerDiagnostic"}, {type: "null"}]
+                        oneOf:
+                          - $ref: "#/components/schemas/UsageWindow"
+                          - not: {required: [report_id]}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /wallet/entries:
+    get:
+      operationId: listOwnWalletEntries
+      security: [{customerSession: []}]
+      description: Rolling window uses journal posting time, not request start. A direct ID lookup is independent of the window.
+      parameters: [{$ref: "#/components/parameters/Hours"}, {$ref: "#/components/parameters/Before"}, {$ref: "#/components/parameters/ReceiptId"}]
+      responses:
+        "200":
+          description: Latest postings first. A hold is not spending; a final charge can be zero.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/History"}
+                  - properties: {data: {properties: {items: {items: {$ref: "#/components/schemas/WalletEntry"}}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments/methods:
+    get:
+      operationId: listCheckoutMethods
+      security: [{customerSession: []}]
+      responses:
+        "200":
+          description: Published methods in operator order. Empty unless a method is enabled for local qualification.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [items]
+                        properties:
+                          items: {type: array, maxItems: 16, items: {$ref: "#/components/schemas/CheckoutMethod"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments/quotes:
+    post:
+      operationId: reviewWalletTopUp
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [method_id, credit_micro_usd]
+              properties:
+                method_id: {type: string, format: uuid}
+                credit_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+      responses:
+        "200":
+          description: Five-minute review of the credit, fee and payable amount. No invoice or debit.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [quote], properties: {quote: {$ref: "#/components/schemas/CheckoutQuote"}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments:
+    get:
+      operationId: listOwnPayments
+      security: [{customerSession: []}]
+      parameters:
+        - {$ref: "#/components/parameters/Before"}
+        - {name: operation_id, in: query, schema: {type: string, format: uuid}, description: Own confirmation lookup. Do not combine with before.}
+      responses:
+        "200":
+          description: Latest accepted intents first. No merchant URLs or references.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/History"}
+                  - properties: {data: {properties: {items: {items: {$ref: "#/components/schemas/CheckoutPayment"}}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: confirmWalletTopUp
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [quote_id, operation_id]
+              properties:
+                quote_id: {type: string, format: uuid}
+                operation_id: {type: string, format: uuid}
+      responses:
+        "200":
+          description: The accepted intent, or its current status on exact replay. Does not credit funds.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CheckoutPaymentResponse"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "410": {$ref: "#/components/responses/Error"}
+        "429":
+          description: Open invoice limit. The quote remains unconfirmed; `error.details` contains `open_count` and `open_limit`.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments/{id}:
+    get:
+      operationId: readOwnPayment
+      security: [{customerSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: Status and linked wallet entry, if credited. `can_resume` is a hint, not a checkout link. No merchant call.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/CheckoutPaymentResponse"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments/{id}/resume:
+    post:
+      operationId: resumeOwnPayment
+      security: [{customerSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/Origin"}
+        - {$ref: "#/components/parameters/Csrf"}
+      responses:
+        "200":
+          description: Current status and a handoff only for the same invoice if the original adapter freshly verifies it is payable.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/CheckoutPaymentResponse"}
+                  - properties:
+                      data:
+                        required: [handoff_url]
+                        properties:
+                          handoff_url: {type: [string, "null"], format: uri, maxLength: 2048, description: HTTPS on the adapter's approved origin, or null.}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /payments/{id}/refund-requests:
+    post:
+      operationId: requestOwnRefund
+      security: [{customerSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/Origin"}
+        - {$ref: "#/components/parameters/Csrf"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, amount_micro_usd]
+              properties:
+                operation_id: {type: string, format: uuid}
+                amount_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+      responses:
+        "200":
+          description: Refund case or its current state on exact replay. Asking does not change the wallet or contact the merchant.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [refund], properties: {refund: {$ref: "#/components/schemas/RefundCase"}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/payments:
+    get:
+      operationId: listOwnerRefunds
+      security: [{adminSession: []}]
+      parameters:
+        - {name: payment_id, in: query, schema: {type: string, format: uuid}, description: Match the original payment ID.}
+        - {name: before, in: query, schema: {type: string, format: uuid}, description: Exclusive case cursor.}
+      responses:
+        "200":
+          description: Bounded refund case page. No merchant evidence or customer identity.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [items, next_before]
+                        properties:
+                          items:
+                            type: array
+                            maxItems: 32
+                            items:
+                              allOf:
+                                - {$ref: "#/components/schemas/RefundCase"}
+                                - {required: [label], properties: {label: {type: string, maxLength: 64}}}
+                          next_before: {type: [string, "null"], format: uuid}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/payments/refunds/{id}:
+    post:
+      operationId: reviewOwnerRefund
+      security: [{adminSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/Origin"}
+        - {$ref: "#/components/parameters/Csrf"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, expected_state, action]
+              properties:
+                operation_id: {type: string, format: uuid}
+                expected_state: {const: requested}
+                action: {enum: [approve, decline]}
+      responses:
+        "200":
+          description: Decision recorded or exactly replayed. Approval reserves funds; it is not a confirmed refund.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [applied, operation_id], properties: {applied: {const: true}, operation_id: {type: string, format: uuid}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403":
+          description: Not authorized, refunds closed or fresh owner passkey required.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409":
+          description: Decision conflict, insufficient wallet funds or insufficient refundable credit.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /auth/customer/logout:
+    post:
+      operationId: endCustomerSession
+      security: [{customerSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      responses:
+        "200":
+          description: Revokes the session and expires customer cookies.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [signed_out], properties: {signed_out: {const: true}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/connections:
+    get:
+      operationId: listOwnerConnections
+      security: [{adminSession: []}]
+      parameters:
+        - {name: after, in: query, schema: {type: string, format: uuid}, description: Exclusive source ID from the previous page.}
+      responses:
+        "200":
+          description: Saved API sources in ascending ID order. Reading does not test credentials, admit a member or publish a model.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [items, next_after]
+                        properties:
+                          items: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/OwnerConnection"}}
+                          next_after: {type: [string, "null"], format: uuid}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/connections/{id}/purchase-limit:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: readOwnerPurchaseLimit
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Current UTC calendar month for this connection, including spending while uncapped.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/PurchaseLimit"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: changeOwnerPurchaseLimit
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      description: Requires an owner passkey verified less than two minutes ago for a new change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, expected_revision, limit_micro_usd]
+              properties:
+                operation_id: {type: string, format: uuid}
+                expected_revision: {$ref: "#/components/schemas/RuleRevision"}
+                limit_micro_usd: {$ref: "#/components/schemas/NullablePurchaseMicros"}
+      responses:
+        "200":
+          description: Change applied or identical operation already committed. Read the current cap separately.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [operation_id, applied], properties: {operation_id: {type: string, format: uuid}, applied: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error", description: "invalid_purchase_limit: malformed revision, operation, amount or request body."}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error", description: "Invalid origin or CSRF, or fresh_passkey_required."}
+        "404": {$ref: "#/components/responses/Error", description: "The connection is missing or its provider credential has been revoked."}
+        "409": {$ref: "#/components/responses/Error", description: "purchase_limit_changed: stale revision or a reused operation with different parameters."}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/devices:
+    get:
+      operationId: listOwnerDevices
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: This installation's pending and active devices first, then recent expired or revoked devices. No bearer or verifier.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [installation_id, origin, items]
+                        properties:
+                          installation_id: {type: string, format: uuid}
+                          origin: {type: string, format: uri}
+                          items: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/ManagementDevice"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: changeOwnerDevice
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      description: >
+        Fresh owner passkey (under two minutes). Invitations last five minutes, approvals grant
+        connections.read for 24 hours. Invite uses its operation_id as device_id; approve/revoke use
+        a new operation_id. Retrying the same acknowledged payload does not renew or reactivate a grant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DeviceChange"}
+      responses:
+        "200":
+          description: Change committed or same operation already applied.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [operation_id, applied], properties: {operation_id: {type: string, format: uuid}, applied: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error", description: "invalid_pairing: invalid fields, wrong approval format or invalid JSON (64 KiB limit)."}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error", description: "Wrong origin/CSRF or fresh_passkey_required; sign in again for the latter."}
+        "409": {$ref: "#/components/responses/Error", description: "device_changed: mismatched operation, outdated revision, expired or cancelled review."}
+        "429": {$ref: "#/components/responses/Error", description: "device_limit: already 16 pending or active devices."}
+        "503": {$ref: "#/components/responses/Error"}
+  /device/connections:
+    get:
+      operationId: readPairedDeviceConnections
+      security: [{pairedDesktop: []}]
+      parameters:
+        - {name: after, in: query, schema: {type: string, format: uuid}, description: Exclusive source ID from the previous page.}
+      description: Native request to the approved origin. Browser Origin and Cookie headers are rejected.
+      responses:
+        "200":
+          description: Source metadata in ascending ID order. Each page rechecks installation, owner, grant and expiry. No probe, source or proxy secrets.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [installation_id, device_id, scope, expires_at_s, items, next_after]
+                        properties:
+                          installation_id: {type: string, format: uuid}
+                          device_id: {type: string, format: uuid}
+                          scope: {const: connections.read}
+                          expires_at_s: {type: integer, description: Unix seconds.}
+                          items: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/OwnerConnection"}}
+                          next_after: {type: [string, "null"], format: uuid}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error", description: "device_unauthorized: missing, unapproved, expired, revoked or wrong credential."}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/source-copy:
+    post:
+      operationId: reviewDesktopSourceCopy
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      description: >
+        HTTPS only. Preview or read an exact operation with approve=false.
+        A new approval needs an active paired device and a passkey verified less than two minutes ago.
+        An approval lasts ten minutes; repeating it does not extend it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, approve]
+              properties:
+                code: {type: string, maxLength: 4096, pattern: '^copy1\.(?:[0-9a-f]{2})+$', description: Desktop review metadata and proof digests. Not a bearer.}
+                approve: {type: boolean}
+      responses:
+        "200":
+          description: Reviewed connection metadata and operation state. No provider key or proxy credentials.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [state, device_label, plan]
+                        properties:
+                          state: {enum: [awaiting_approval, approved, expired, committed]}
+                          device_label: {type: string}
+                          plan: {$ref: "#/components/schemas/SourceCopyPlan"}
+        "400": {$ref: "#/components/responses/Error", description: "invalid_copy_review: invalid code, wrong origin or invalid body."}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error", description: "Wrong Origin/CSRF or fresh_passkey_required."}
+        "409": {$ref: "#/components/responses/Error", description: "copy_changed: operation or source conflicts, or the device is not active."}
+        "429": {$ref: "#/components/responses/Error", description: "copy_limit: 32 pending approvals."}
+        "503": {$ref: "#/components/responses/Error"}
+  /transfer/status:
+    get:
+      operationId: readNativeCopyStatus
+      security: [{sourceCopyBearer: []}]
+      description: Native transfer worker only, behind the configured HTTPS origin. No Origin or Cookie headers. Committed receipts are readable for seven days without resending secrets.
+      responses:
+        "200": {$ref: "#/components/responses/SourceCopyStatus"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /transfer/commit:
+    post:
+      operationId: confirmNativeSourceCopy
+      security: [{sourceCopyBearer: []}]
+      description: >
+        Native transfer worker only. No Origin or Cookie headers. Confirmed by the Desktop operator
+        after matching the approval and rechecking the local source. Stores the provider
+        credential, selected proxy and receipt together, outside the pool.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: Up to 3073 bytes; ASCII provider key (1–1024 bytes), LF, then the exact normalized proxy URL (up to 2048 bytes) or no bytes for direct. Never logged.
+      responses:
+        "200": {$ref: "#/components/responses/SourceCopyStatus"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/pools/model-rules:
+    get:
+      operationId: listOwnerTextRules
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Verified inventory, admission, private purchase prices and markups, and draft and effective selling prices for the selected tester scope.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/CatalogPage"}
+                  - properties: {data: {properties: {items: {items: {$ref: "#/components/schemas/TextRule"}}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/pools/model-rules/{id}:
+    post:
+      operationId: changeOwnerTextRule
+      security: [{adminSession: []}]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: "#/components/parameters/Origin"}
+        - {$ref: "#/components/parameters/Csrf"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action, operation_id, expected_revision]
+              properties:
+                action: {enum: [admit, save, review, publish, suspend]}
+                operation_id: {type: string, format: uuid}
+                expected_revision: {$ref: "#/components/schemas/RuleRevision"}
+                rates: {$ref: "#/components/schemas/TextPrices", description: Fixed selling rates.}
+                purchase_rates: {$ref: "#/components/schemas/TextPrices"}
+                source_markup:
+                  type: object
+                  additionalProperties: false
+                  required: [expected_revision, percent]
+                  properties:
+                    expected_revision: {$ref: "#/components/schemas/RuleRevision"}
+                    percent: {oneOf: [{$ref: "#/components/schemas/MarkupPercent"}, {type: "null"}]}
+                sale_rule:
+                  description: Calculate and save a draft using admitted suppliers with compatible sizing. Does not publish.
+                  oneOf:
+                    - type: object
+                      additionalProperties: false
+                      required: [mode]
+                      properties: {mode: {const: api_default}}
+                    - type: object
+                      additionalProperties: false
+                      required: [mode, percent]
+                      properties: {mode: {const: model_markup}, percent: {$ref: "#/components/schemas/MarkupPercent"}}
+              oneOf:
+                - properties: {action: {const: save}}
+                  anyOf: [{required: [rates]}, {required: [purchase_rates]}, {required: [source_markup]}]
+                  not: {required: [sale_rule]}
+                - properties: {action: {const: review}}
+                  required: [sale_rule]
+                  not: {anyOf: [{required: [rates]}, {required: [purchase_rates]}, {required: [source_markup]}]}
+                - properties: {action: {enum: [admit, publish, suspend]}}
+                  not: {anyOf: [{required: [rates]}, {required: [purchase_rates]}, {required: [source_markup]}, {required: [sale_rule]}]}
+      responses:
+        "200":
+          description: Applied or an identical replay. Read the current rule separately.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [applied, operation_id], properties: {applied: {const: true}, operation_id: {type: string, format: uuid}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {description: Invalid origin or CSRF, or fresh_passkey_required for an admission, publication or withdrawal.}
+        "404": {$ref: "#/components/responses/Error"}
+        "409":
+          $ref: "#/components/responses/Error"
+          description: >-
+            rule_changed for revision conflicts or inactive state;
+            price_notice_required for an immediate increase;
+            purchase_prices_required for publication without priced supply;
+            price_review_stale if reviewed inputs changed;
+            no_price_proposal for a markup rule without a complete proposal;
+            unrepresentable_markup for a result outside the supported precision or range.
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/status:
+    get:
+      operationId: ownerOperationsStatus
+      security: [{adminSession: []}]
+      description: Last recorded pass for each monitored background job. Does not run jobs, test a provider, attest service readiness or renew the owner session.
+      responses:
+        "200":
+          description: No-store operations snapshot.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/OperationsStatus"}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/events:
+    get:
+      operationId: ownerOperationsEvents
+      security: [{adminSession: []}]
+      description: Retained failure groups and recovery events in descending insertion order. There are at most 128 groups per job, each expiring 14 days after its first observation.
+      parameters:
+        - name: before
+          in: query
+          description: The previous page's next_before value. Expired or evicted cursors return cursor_unavailable.
+          schema: {type: string, pattern: '^[1-9][0-9]{0,18}$'}
+      responses:
+        "200":
+          description: No-store page of observations. An empty page does not imply that the service was healthy.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/OperationsEvents"}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/diagnostic-sessions:
+    get:
+      operationId: listDiagnosticCaptures
+      security: [{adminSession: []}]
+      description: Recent owner captures and effective configuration. Null configuration disables new captures; this read does not renew the owner session.
+      responses:
+        "200":
+          description: No-store snapshot.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [version, as_of_ms, config, items]
+                        properties:
+                          version: {const: 1}
+                          as_of_ms: {type: integer}
+                          config:
+                            oneOf:
+                              - {type: "null"}
+                              - type: object
+                                additionalProperties: false
+                                required: [default_seconds, max_seconds, max_events, max_bytes, max_events_per_second]
+                                properties:
+                                  default_seconds: {type: integer, minimum: 1, maximum: 1800}
+                                  max_seconds: {type: integer, minimum: 1, maximum: 1800}
+                                  max_events: {type: integer, minimum: 1, maximum: 128}
+                                  max_bytes: {type: integer, minimum: 128, maximum: 32768}
+                                  max_events_per_second: {type: integer, minimum: 1, maximum: 16}
+                          items: {type: array, maxItems: 12, items: {$ref: "#/components/schemas/CaptureSummary"}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: startDiagnosticCapture
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      description: Start capture for one existing in-progress logical request. New starts require a passkey assertion in the previous two minutes. A matching operation replay keeps the original limits and deadline.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, request_id, reason, seconds]
+              properties:
+                operation_id: {type: string, format: uuid}
+                request_id: {type: string, format: uuid}
+                reason: {$ref: "#/components/schemas/CaptureReason"}
+                seconds: {type: integer, minimum: 1, maximum: 1800, description: Must not exceed the configured maximum.}
+      responses:
+        "200": {$ref: "#/components/responses/CaptureAcknowledgement"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error", description: Invalid Origin or CSRF, or fresh_passkey_required for a new start.}
+        "409": {$ref: "#/components/responses/Error", description: "Capture is disabled, busy, retired, assigned to a different operation payload, or the request is no longer eligible."}
+        "429": {$ref: "#/components/responses/Error", description: Capture audit retention limit reached.}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/diagnostic-sessions/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: readDiagnosticCapture
+      security: [{adminSession: []}]
+      description: Owner-only timing and state milestones. The read does not start capture or extend retention.
+      responses:
+        "200":
+          description: No-store snapshot with partial event coverage.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: false
+                        required: [version, as_of_ms, session, coverage, events]
+                        properties:
+                          version: {const: 1}
+                          as_of_ms: {type: integer}
+                          session: {$ref: "#/components/schemas/CaptureSummary"}
+                          coverage: {const: partial}
+                          events:
+                            type: array
+                            maxItems: 128
+                            items:
+                              type: object
+                              additionalProperties: false
+                              required: [sequence, code, occurred_at_ms]
+                              properties:
+                                sequence: {type: integer, minimum: 1, maximum: 128}
+                                code:
+                                  enum: [dispatch_committed, upstream_response, first_stream_frame, terminal_observed, evidence_committed, accounting_settled, accounting_pending, request_interrupted]
+                                occurred_at_ms: {type: integer}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/diagnostic-sessions/{id}/stop:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: stopDiagnosticCapture
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      description: Disarm the exact capture. A repeat returns its existing terminal state. No body and no fresh passkey required.
+      responses:
+        "200": {$ref: "#/components/responses/CaptureAcknowledgement"}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/service:
+    get:
+      operationId: readPrivateService
+      security: [{adminSession: []}]
+      responses:
+        "200":
+          description: Current admission mode and revision; does not perform qualification or open access.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [mode, revision, identity_configured], properties: {mode: {$ref: "#/components/schemas/PrivateMode"}, revision: {$ref: "#/components/schemas/Revision"}, identity_configured: {type: boolean}}}}
+        "401": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /admin/operations/service/transitions:
+    post:
+      operationId: changeCustomerQualification
+      security: [{adminSession: []}]
+      parameters: [{$ref: "#/components/parameters/Origin"}, {$ref: "#/components/parameters/Csrf"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation_id, expected_revision, target, reason_code, candidate_ids]
+              properties:
+                operation_id: {type: string, format: uuid}
+                expected_revision: {$ref: "#/components/schemas/Revision"}
+                target: {type: string, enum: [qualification, maintenance]}
+                reason_code: {type: string, enum: [verify_customer_access, pause_customer_access]}
+                candidate_ids: {type: array, uniqueItems: true, maxItems: 16, items: {type: string, format: uuid}}
+      responses:
+        "200":
+          description: The same operation returns its original acknowledgement. Read the current mode separately.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [operation_id, applied], properties: {operation_id: {type: string, format: uuid}, applied: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "401": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /setup/start:
+    post:
+      operationId: startFirstOwner
+      description: Only on the local setup-owner listener. Exact configured Origin and one-use local bearer code.
+      security: [{setupBearer: []}]
+      responses:
+        "200":
+          description: New in-memory setup session and WebAuthn registration options, in the standard envelope.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties:
+                      data:
+                        required: [session, options]
+                        properties:
+                          session: {type: string, minLength: 64, maxLength: 64}
+                          options: {$ref: "#/components/schemas/Options"}
+        "403": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /setup/register:
+    post:
+      operationId: verifyRegistration
+      description: Exact Origin and setup session. Consume registration challenge even on verification failure. Does not create an owner.
+      security: [{setupBearer: []}]
+      requestBody: {$ref: "#/components/requestBodies/Credential"}
+      responses:
+        "200":
+          description: WebAuthn assertion options; empty allowCredentials and user verification required.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {$ref: "#/components/schemas/Options"}}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+  /setup/prove:
+    post:
+      operationId: bindFirstOwner
+      description: Exact Origin and setup session. Commit only a verified, user-bound assertion. No login session.
+      security: [{setupBearer: []}]
+      requestBody: {$ref: "#/components/requestBodies/Credential"}
+      responses:
+        "200":
+          description: Owner binding committed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: "#/components/schemas/Envelope"}
+                  - properties: {data: {required: [owner_bound], properties: {owner_bound: {const: true}}}}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+        "503": {$ref: "#/components/responses/Error"}
+components:
+  parameters:
+    Origin: {name: Origin, in: header, required: true, schema: {type: string}, description: Exact configured site origin.}
+    Hours: {name: hours, in: query, schema: {type: integer, enum: [24, 168, 720], default: 24}}
+    Before: {name: before, in: query, schema: {type: string, format: uuid}, description: Exclusive cursor. Do not combine with id.}
+    ReceiptId: {name: id, in: query, schema: {type: string, format: uuid}, description: Single receipt. Do not combine with before.}
+    ReportModel: {name: model, in: query, schema: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$'}}
+    ReportBucket: {name: bucket, in: query, schema: {type: integer, minimum: 0, maximum: 29}}
+    ReportKey: {name: key_id, in: query, schema: {type: string, format: uuid}}
+    ReportExecution: {name: execution, in: query, schema: {$ref: "#/components/schemas/RequestExecution"}}
+    OwnerUsageHours: {name: hours, in: query, schema: {type: integer, enum: [24, 168, 720], default: 168}, description: Omit when specifying exact bounds.}
+    OwnerUsageFrom: {name: from_ms, in: query, schema: {type: integer, format: int64, minimum: 1}, description: Inclusive UTC Unix millisecond bound; requires to_ms.}
+    OwnerUsageTo: {name: to_ms, in: query, schema: {type: integer, format: int64, minimum: 1}, description: Exclusive UTC Unix millisecond bound; requires from_ms and cannot be in the future.}
+    OwnerUsageWorkspace: {name: workspace_id, in: query, schema: {type: string, format: uuid}}
+    OwnerUsageSource: {name: source_id, in: query, schema: {type: string, format: uuid}, description: Filter by the recorded physical supplier, not the listing source.}
+    OwnerUsageAccounting: {name: accounting, in: query, schema: {$ref: "#/components/schemas/OwnerAccounting"}}
+    DiagnosticStage: {name: stage, in: query, schema: {$ref: "#/components/schemas/DiagnosticStage"}}
+    DiagnosticOrigin: {name: origin, in: query, schema: {$ref: "#/components/schemas/DiagnosticOrigin"}}
+    DiagnosticCategory: {name: category, in: query, schema: {$ref: "#/components/schemas/DiagnosticCategory"}}
+    DiagnosticSeverity: {name: severity, in: query, schema: {$ref: "#/components/schemas/DiagnosticSeverity"}}
+    DiagnosticCode: {name: code, in: query, schema: {$ref: "#/components/schemas/DiagnosticCode"}}
+    OwnerUsageBefore: {name: before, in: query, schema: {type: string, format: uuid}, description: Exclusive last request ID of the previous page. Send that page's exact bounds; unavailable cursor returns cursor_unavailable.}
+    ProviderId: {name: provider_id, in: path, required: true, schema: {type: string, format: uuid}}
+    Csrf: {name: X-Relay-CSRF, in: header, required: true, schema: {$ref: "#/components/schemas/Csrf"}}
+  securitySchemes:
+    adminAttempt: {type: apiKey, in: cookie, name: __Host-relay_admin_attempt}
+    adminSession: {type: apiKey, in: cookie, name: __Host-relay_admin}
+    customerAttempt: {type: apiKey, in: cookie, name: __Host-relay_customer_attempt}
+    customerSession: {type: apiKey, in: cookie, name: __Host-relay_customer}
+    setupBearer: {type: http, scheme: bearer, description: Ephemeral and accepted only by the current local setup process.}
+    pairedDesktop: {type: http, scheme: bearer, description: "Installation-bound rhd1 credential from the native OS store; not an owner session, customer key, invitation or approval code."}
+    sourceCopyBearer: {type: http, scheme: bearer, description: "Native rht1 proof bound to one installation, device and operation. Not the pairing bearer or copy review code."}
+  schemas:
+    CheckoutBuilder:
+      type: object
+      additionalProperties: false
+      required: [editable, revision, draft, checked_until_s, eligible_count, methods_without_amounts, published_open_limit, adapters, published]
+      properties:
+        editable: {type: boolean}
+        revision: {$ref: "#/components/schemas/Revision"}
+        draft: {$ref: "#/components/schemas/CheckoutDraft"}
+        checked_until_s: {type: [integer, "null"], description: "Check deadline in Unix seconds, or null."}
+        eligible_count: {type: [integer, "null"], minimum: 0, maximum: 16, description: Methods eligible at check time; null without a current check.}
+        methods_without_amounts:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [binding_id, code]
+            properties:
+              binding_id: {type: string, format: uuid}
+              code: {$ref: "#/components/schemas/CheckoutMethodCode"}
+        published_open_limit: {type: integer, minimum: 1, maximum: 10}
+        adapters:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, label, methods]
+            properties:
+              id: {type: string, format: uuid}
+              label: {type: string, minLength: 1, maxLength: 64}
+              methods:
+                type: array
+                minItems: 1
+                maxItems: 16
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [code, label, min_credit_minor, max_credit_minor, fee_minor, custom_amount, merchant_pays, customer_pays]
+                  properties:
+                    code: {$ref: "#/components/schemas/CheckoutMethodCode"}
+                    label: {type: string, minLength: 1, maxLength: 64}
+                    min_credit_minor: {type: integer, minimum: 1, maximum: 1000000}
+                    max_credit_minor: {type: integer, minimum: 1, maximum: 1000000}
+                    fee_minor: {type: integer, minimum: 0, maximum: 1000000}
+                    custom_amount: {type: boolean}
+                    merchant_pays: {type: boolean}
+                    customer_pays: {type: boolean}
+        published:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, label, fee_payer, processing_fee_minor]
+            properties:
+              id: {type: string, format: uuid}
+              label: {type: string, minLength: 1, maxLength: 64}
+              fee_payer: {enum: [merchant, customer]}
+              processing_fee_minor: {type: integer, minimum: 0, maximum: 1000000}
+    CheckoutMethodCode: {type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,63}$"}
+    CheckoutDraft:
+      type: object
+      additionalProperties: false
+      description: Amounts in USD cents. Quick amounts are ordered, distinct and at or above the minimum.
+      required: [connections, methods, minimum_credit_minor, quick_amounts, custom_amount, open_limit]
+      properties:
+        connections: {type: array, maxItems: 8, uniqueItems: true, items: {type: string, format: uuid}}
+        methods:
+          type: array
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [binding_id, code, fee_payer]
+            properties:
+              binding_id: {type: string, format: uuid}
+              code: {$ref: "#/components/schemas/CheckoutMethodCode"}
+              fee_payer: {enum: [merchant, customer]}
+        minimum_credit_minor: {type: integer, minimum: 1, maximum: 1000000}
+        quick_amounts: {type: array, maxItems: 8, uniqueItems: true, items: {type: integer, minimum: 1, maximum: 1000000}}
+        custom_amount: {type: boolean}
+        open_limit: {type: integer, minimum: 1, maximum: 10}
+    CheckoutBuilderChange:
+      type: object
+      additionalProperties: false
+      required: [operation_id, expected_revision, command]
+      properties:
+        operation_id: {type: string, format: uuid}
+        expected_revision: {$ref: "#/components/schemas/Revision"}
+        command:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [action, draft]
+              properties:
+                action: {const: save}
+                draft: {$ref: "#/components/schemas/CheckoutDraft"}
+            - type: object
+              additionalProperties: false
+              required: [action]
+              properties: {action: {enum: [check, publish]}}
+            - type: object
+              additionalProperties: false
+              required: [action, method_id]
+              properties:
+                action: {const: disable}
+                method_id: {type: string, format: uuid}
+    NoticeTitle: {type: string, minLength: 1, maxLength: 120, description: Trimmed plain text at most 120 UTF-16 code units.}
+    NoticeMessage: {type: string, minLength: 1, maxLength: 4000, description: Trimmed plain text at most 4000 UTF-16 code units. Newlines and tabs are allowed.}
+    NoticeChange:
+      type: object
+      additionalProperties: false
+      required: [operation_id, expected_revision, command]
+      properties:
+        operation_id: {type: string, format: uuid}
+        expected_revision: {type: integer, minimum: 0, maximum: 2147483646, description: Zero is only for creating a new draft.}
+        command:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [action, title, message]
+              properties:
+                action: {const: save}
+                title: {$ref: "#/components/schemas/NoticeTitle"}
+                message: {$ref: "#/components/schemas/NoticeMessage"}
+            - type: object
+              additionalProperties: false
+              required: [action]
+              properties: {action: {enum: [publish, discard]}}
+    OwnerNotice:
+      type: object
+      additionalProperties: false
+      required: [id, revision, title, message, published_at_ms, recipient_count]
+      properties:
+        id: {type: string, format: uuid}
+        revision: {type: integer, minimum: 1}
+        title: {$ref: "#/components/schemas/NoticeTitle"}
+        message: {$ref: "#/components/schemas/NoticeMessage"}
+        published_at_ms: {type: [integer, "null"], description: Unix milliseconds or null for a draft.}
+        recipient_count: {type: [integer, "null"], minimum: 1, maximum: 16, description: Null for a draft. This is not a read count.}
+    CustomerNotice:
+      type: object
+      additionalProperties: false
+      required: [id, title, message, published_at_ms, read]
+      properties:
+        id: {type: string, format: uuid}
+        title: {$ref: "#/components/schemas/NoticeTitle"}
+        message: {$ref: "#/components/schemas/NoticeMessage"}
+        published_at_ms: {type: integer, description: Unix milliseconds.}
+        read: {type: boolean}
+    CatalogPage:
+      allOf:
+        - {$ref: "#/components/schemas/Envelope"}
+        - properties: {data: {type: object, required: [items], properties: {items: {type: array, maxItems: 128}}}}
+    RuleRevision: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+    NullablePurchaseMicros:
+      type: [string, "null"]
+      pattern: "^(0|[1-9][0-9]{0,18})$"
+      description: Null means no Relay cap when setting the limit. An integer string must be between 0 and 9223372036854775807 microUSD.
+    PurchaseLimit:
+      type: object
+      additionalProperties: false
+      required: [source_id, revision, month_utc, limit_micro_usd, accounted_micro_usd, outstanding_micro_usd, remaining_micro_usd, unpriced]
+      properties:
+        source_id: {type: string, format: uuid}
+        revision: {$ref: "#/components/schemas/RuleRevision"}
+        month_utc: {type: string, format: date, description: First day of the current UTC calendar month.}
+        limit_micro_usd: {$ref: "#/components/schemas/NullablePurchaseMicros"}
+        accounted_micro_usd: {type: string, pattern: "^(0|[1-9][0-9]*)$", description: Evidenced expense in the permit month.}
+        outstanding_micro_usd: {type: string, pattern: "^(0|[1-9][0-9]*)$", description: Bounds on attempts without fully priced results.}
+        remaining_micro_usd:
+          $ref: "#/components/schemas/NullablePurchaseMicros"
+          description: Null if uncapped or unpriced; otherwise zero or the remaining amount.
+        unpriced: {type: boolean, description: True if the month contains a legacy send without a purchase record.}
+    TextPrice: {type: string, pattern: '^(0|[1-9][0-9]{0,11})(\.[0-9]{1,12})?$', description: USD per million tokens; reads always have twelve decimal places.}
+    MarkupPercent: {type: string, pattern: '^(0|[1-9][0-9]{0,11})(\.[0-9]{1,12})?$', description: Nonnegative percentage of purchase cost. Explicit zero is not an unset default.}
+    TextPrices:
+      type: object
+      additionalProperties: false
+      required: [input, cached, output]
+      properties:
+        input: {$ref: "#/components/schemas/TextPrice"}
+        cached: {$ref: "#/components/schemas/TextPrice"}
+        output: {$ref: "#/components/schemas/TextPrice"}
+    TextListing:
+      type: object
+      required: [model, protocol, revision, effective_at_s, rates]
+      properties:
+        model: {type: string, maxLength: 128}
+        protocol: {const: responses}
+        revision: {$ref: "#/components/schemas/Revision"}
+        effective_at_s: {type: integer}
+        rates: {$ref: "#/components/schemas/TextPrices"}
+    ModelStatusMetrics:
+      type: object
+      additionalProperties: false
+      required: [state, span_ms, monitored_ms, operational_ms, request_ms, requests, latency_ms, latency_samples, cache_bps, cache_samples]
+      properties:
+        state: {enum: [operational, degraded, unavailable, unknown], description: Incomplete monitoring coverage is unknown. A fully covered mix of states is degraded.}
+        span_ms: {type: integer, minimum: 0, description: Interval duration; the summary sums across models.}
+        monitored_ms: {type: integer, minimum: 0}
+        operational_ms: {type: integer, minimum: 0, description: Fully operational time within the monitored duration.}
+        request_ms: {type: integer, minimum: 0, description: Own logical receipt coverage since this publication and workspace creation. Zero also covers an over-limit scan.}
+        requests: {type: [integer, "null"], minimum: 0, maximum: 8192, description: Null without coverage; zero is an observed count.}
+        latency_ms: {type: [integer, "null"], minimum: 0, description: Null until measured; not inferred from receipt timestamps.}
+        latency_samples: {type: integer, minimum: 0, maximum: 8192}
+        cache_bps: {type: [integer, "null"], minimum: 0, maximum: 10000, description: Provider-reported cache reads divided by known input in basis points.}
+        cache_samples: {type: integer, minimum: 0, maximum: 8192, description: Requests with both cache reads and nonzero input observed.}
+    ModelStatus:
+      type: object
+      additionalProperties: false
+      required: [hours, as_of_ms, intervals, summary, items]
+      properties:
+        hours: {enum: [24, 168]}
+        as_of_ms: {type: integer, description: Exclusive upper bound in UTC Unix milliseconds.}
+        intervals:
+          type: array
+          minItems: 28
+          maxItems: 48
+          items:
+            type: object
+            additionalProperties: false
+            required: [from_ms, to_ms]
+            properties:
+              from_ms: {type: integer}
+              to_ms: {type: integer}
+        summary: {$ref: "#/components/schemas/ModelStatusMetrics"}
+        items:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [model, metrics, history]
+            properties:
+              model: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$'}
+              metrics: {$ref: "#/components/schemas/ModelStatusMetrics"}
+              history: {type: array, minItems: 28, maxItems: 48, items: {$ref: "#/components/schemas/ModelStatusMetrics"}}
+    ManagementDevice:
+      type: object
+      additionalProperties: false
+      required: [id, label, state, scope, revision, expires_at_s, last_used_at_s]
+      properties:
+        id: {type: string, format: uuid}
+        label: {type: string, minLength: 1, maxLength: 64, description: Trimmed name limited to 64 UTF-8 bytes.}
+        state: {enum: [pending, active, expired, revoked]}
+        scope: {const: connections.read}
+        revision: {enum: ["1", "2", "3"]}
+        expires_at_s: {type: integer, description: Approval deadline or grant expiry in Unix seconds.}
+        last_used_at_s: {type: [integer, "null"], description: Last successful read in Unix seconds.}
+    DeviceChange:
+      type: object
+      additionalProperties: false
+      required: [operation_id, device_id, expected_revision, action]
+      properties:
+        operation_id: {type: string, format: uuid}
+        device_id: {type: string, format: uuid}
+        expected_revision: {enum: ["0", "1", "2"]}
+        action: {enum: [invite, approve, revoke]}
+        label: {type: string, minLength: 1, maxLength: 64, description: Trimmed name limited to 64 UTF-8 bytes.}
+        approval_code: {type: string, minLength: 109, maxLength: 109, pattern: '^review1\.[0-9a-f-]{36}\.[0-9a-f]{64}$', description: Must identify device_id. Never a bearer.}
+      oneOf:
+        - properties: {action: {const: invite}, expected_revision: {const: "0"}, approval_code: false}
+          required: [label]
+        - properties: {action: {const: approve}, expected_revision: {const: "1"}, label: false}
+          required: [approval_code]
+        - properties: {action: {const: revoke}, expected_revision: {enum: ["1", "2"]}, label: false, approval_code: false}
+    OwnerConnection:
+      type: object
+      additionalProperties: false
+      required: [id, label, credential_state, proxy_bound, verified_models]
+      properties:
+        id: {type: string, format: uuid}
+        label: {type: [string, "null"], maxLength: 96, description: Reviewed copy label or last label from a successful check.}
+        credential_state: {enum: [stored, revoked], description: Storage state only; does not assert upstream availability.}
+        proxy_bound: {type: boolean, description: A proxy credential is currently assigned. No address is returned.}
+        verified_models: {type: array, maxItems: 128, uniqueItems: true, items: {type: string, maxLength: 128}, description: Current tester-scope observations matching the source and proxy revisions. Not pool membership or sale.}
+    SourceCopyPlan:
+      type: object
+      additionalProperties: false
+      required: [origin, installation_id, device_id, operation_id, source_id, label, endpoint, proxy]
+      properties:
+        origin: {type: string, format: uri}
+        installation_id: {type: string, format: uuid}
+        device_id: {type: string, format: uuid}
+        operation_id: {type: string, format: uuid}
+        source_id: {type: string, format: uuid}
+        label: {type: string, minLength: 1, maxLength: 96}
+        endpoint: {type: string, format: uri, description: Canonical Responses base URL ending in /v1; no userinfo, query or fragment.}
+        proxy:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [endpoint, authenticated]
+          description: Null means explicit direct. An assigned proxy shows only its origin.
+          properties:
+            endpoint: {type: string, format: uri}
+            authenticated: {type: boolean}
+    TextRule:
+      type: object
+      required: [id, model, source, proxy, revision, admitted, enabled, ready, supply_ready, purchase, source_markup, sale_rule, draft, effective]
+      properties:
+        id: {type: string, format: uuid}
+        model: {type: string, maxLength: 128}
+        source: {type: string, maxLength: 96, description: Private owner label.}
+        proxy: {type: boolean}
+        revision: {$ref: "#/components/schemas/RuleRevision"}
+        admitted: {type: boolean}
+        enabled: {type: boolean, description: The owner has not withdrawn this publication.}
+        ready: {type: boolean, description: "This source has a current observation, matching credentials and no bound breach."}
+        supply_ready: {type: boolean, description: At least one admitted compatible source has current evidence and purchase prices. Independent of transient capacity and cooldown.}
+        purchase:
+          description: Private current purchase rates. Null means unset, not free. A send permit pins the current revision.
+          oneOf: [{$ref: "#/components/schemas/TextPrices"}, {type: "null"}]
+        source_markup:
+          type: object
+          required: [revision, percent]
+          properties:
+            revision: {$ref: "#/components/schemas/RuleRevision"}
+            percent: {oneOf: [{$ref: "#/components/schemas/MarkupPercent"}, {type: "null"}], description: Null means no default proposal.}
+        sale_rule:
+          type: object
+          required: [revision, mode, percent, stale, below_cost]
+          properties:
+            revision: {$ref: "#/components/schemas/RuleRevision"}
+            mode: {enum: [fixed, api_default, model_markup]}
+            percent: {oneOf: [{$ref: "#/components/schemas/MarkupPercent"}, {type: "null"}], description: Non-null only for model_markup.}
+            stale: {type: boolean, description: Reviewed markup inputs have changed.}
+            below_cost: {type: boolean, description: At least one draft component is below a comparable purchase price.}
+        draft: {oneOf: [{$ref: "#/components/schemas/TextPrices"}, {type: "null"}], description: Saved selling rates shared by the model's admitted sources.}
+        effective: {oneOf: [{$ref: "#/components/schemas/TextPrices"}, {type: "null"}], description: Selling tariff currently listed for testers.}
+    History:
+      allOf:
+        - {$ref: "#/components/schemas/Envelope"}
+        - properties:
+            data:
+              type: object
+              required: [items, next_before]
+              properties:
+                items: {type: array, maxItems: 32}
+                next_before: {type: [string, "null"], format: uuid}
+    ReportCursor:
+      type: string
+      pattern: '^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.[0-9a-f]{64}$'
+      description: Opaque exclusive cursor issued with the previous page.
+    UsageWindow:
+      type: object
+      required: [report_id, hours, as_of_ms, from_ms, to_ms, model, bucket, key_id, execution, coverage, currency, precision, totals]
+      properties:
+        report_id: {type: string, format: uuid}
+        hours: {type: integer, enum: [24, 168, 720], description: Width of the parent report, even on bucket reads.}
+        as_of_ms: {type: integer, description: UTC end of the parent report in Unix milliseconds. Not a revision identifier.}
+        from_ms: {type: integer, description: Inclusive lower bound of this selection.}
+        to_ms: {type: integer, description: Exclusive upper bound of this selection.}
+        model: {type: [string, "null"], maxLength: 128}
+        bucket: {type: [integer, "null"], minimum: 0, maximum: 29}
+        key_id: {type: [string, "null"], format: uuid}
+        execution: {anyOf: [{$ref: "#/components/schemas/RequestExecution"}, {type: "null"}]}
+        coverage: {const: complete, description: All retained rows for this selection; not a claim of complete provider measurements.}
+        currency: {const: USD}
+        precision: {const: 6}
+        totals: {$ref: "#/components/schemas/UsageMetrics"}
+    OwnerUsageOverview:
+      type: object
+      additionalProperties: false
+      required: [hours, model, currency, precision, from_ms, as_of_ms, step_ms, totals, models, more_models, buckets]
+      properties:
+        hours: {type: integer, enum: [24, 168, 720, 0]}
+        model: {type: [string, "null"], pattern: '^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$', description: "Exact public model filter, or null for all models."}
+        currency: {const: USD}
+        precision: {const: 6}
+        from_ms: {type: integer, description: "Inclusive lower bound in UTC Unix milliseconds. All time starts at the first retained request before as_of_ms (rounded down to milliseconds), or 24 hours before as_of_ms if empty."}
+        as_of_ms: {type: integer, description: Exclusive upper bound in UTC Unix milliseconds.}
+        step_ms: {type: integer, minimum: 1, description: Bucket width. One hour for 24h; 24 hours for 7d or 30d; ceiling of span divided by 30 for All time. Clip the last end to as_of_ms.}
+        totals: {$ref: "#/components/schemas/OwnerUsageMetrics"}
+        models: {type: array, maxItems: 256, uniqueItems: true, items: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$'}, description: First model IDs in byte order for this time window before filtering.}
+        more_models: {type: boolean, description: Further model IDs exist; unfiltered totals still include them.}
+        buckets: {type: array, minItems: 1, maxItems: 30, items: {$ref: "#/components/schemas/OwnerUsageMetrics"}, description: Oldest first; index times step_ms from from_ms. Each bucket is half-open.}
+    OwnerUsageMetrics:
+      type: object
+      additionalProperties: false
+      required: [requests, token_samples, partial_tokens, total_tokens, spend_micro_usd, unsettled]
+      properties:
+        requests: {$ref: "#/components/schemas/OverviewCount"}
+        token_samples: {$ref: "#/components/schemas/OverviewCount", description: Requests with both input and output counts.}
+        partial_tokens: {$ref: "#/components/schemas/OverviewCount", description: Requests with observed counts but no final token evidence.}
+        total_tokens: {type: [string, "null"], pattern: '^(0|[1-9][0-9]{0,38})$', description: Observed input plus output without double-counting cached input. Late complete counts replace original counts. Null when there are requests but no complete count pairs; zero for an empty population.}
+        spend_micro_usd: {type: string, pattern: '^(0|[1-9][0-9]{0,38})$', description: "Posted inference charges minus posted request credits. No holds, top-ups, payment refunds or supplier expense."}
+        unsettled: {$ref: "#/components/schemas/OverviewCount", description: Requests whose settlement remains open.}
+    OperationJob:
+      type: string
+      enum: [request_reconciliation, usage_report_cleanup, service_notice_cleanup,
+             checkout_quote_cleanup, checkout_resume_cleanup, request_diagnostic_cleanup]
+    OperationsStatus:
+      type: object
+      additionalProperties: false
+      required: [version, as_of_ms, jobs]
+      properties:
+        version: {const: 1}
+        as_of_ms: {type: integer, description: Server snapshot time in UTC Unix milliseconds.}
+        jobs:
+          type: array
+          minItems: 6
+          maxItems: 6
+          items:
+            type: object
+            additionalProperties: false
+            required: [job, state, observed_at_ms]
+            properties:
+              job: {$ref: "#/components/schemas/OperationJob"}
+              state: {type: string, enum: [succeeded, failed, stale, unobserved]}
+              observed_at_ms: {type: [integer, "null"], description: Last saved pass in UTC Unix milliseconds; null for an unobserved job.}
+    OperationsEvents:
+      type: object
+      additionalProperties: false
+      required: [version, partial, items, next_before]
+      properties:
+        version: {const: 1}
+        partial: {type: boolean, description: Known gaps due to stale or unobserved jobs, missed writes or eviction. False does not assert continuous observation.}
+        next_before: {type: [string, "null"], pattern: '^[1-9][0-9]{0,18}$'}
+        items:
+          type: array
+          maxItems: 24
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, job, code, first_at_ms, last_at_ms, observations]
+            properties:
+              id: {type: string, pattern: '^[1-9][0-9]{0,18}$'}
+              job: {$ref: "#/components/schemas/OperationJob"}
+              code: {type: string, enum: [job_failed, job_recovered]}
+              first_at_ms: {type: integer, description: First saved observation in UTC Unix milliseconds.}
+              last_at_ms: {type: integer, description: Last saved observation in UTC Unix milliseconds.}
+              observations: {type: integer, minimum: 1, maximum: 2147483647}
+    CaptureReason:
+      type: string
+      enum: [request_timing, stream_interruption, pending_outcome]
+    CaptureSummary:
+      type: object
+      additionalProperties: false
+      required: [id, operation_id, request_id, reason, state, started_at_ms, expires_at_ms, ended_at_ms, limits, consumed, audit_pending]
+      properties:
+        id: {type: string, format: uuid}
+        operation_id: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        reason: {$ref: "#/components/schemas/CaptureReason"}
+        state: {type: string, enum: [active, stopped, expired, exhausted, revoked]}
+        started_at_ms: {type: integer, description: Start time in UTC Unix milliseconds.}
+        expires_at_ms: {type: integer, description: Original deadline in UTC Unix milliseconds; never extended.}
+        ended_at_ms: {type: [integer, "null"], description: UTC Unix milliseconds; null if the capture has no recorded closure time yet.}
+        limits:
+          type: object
+          additionalProperties: false
+          required: [events, bytes, events_per_second]
+          properties:
+            events: {type: integer, minimum: 1, maximum: 128}
+            bytes: {type: integer, minimum: 128, maximum: 32768}
+            events_per_second: {type: integer, minimum: 1, maximum: 16}
+        consumed:
+          type: object
+          additionalProperties: false
+          required: [events, bytes]
+          properties:
+            events: {type: integer, minimum: 0, maximum: 128}
+            bytes: {type: integer, minimum: 0, maximum: 32768}
+        audit_pending: {type: boolean, description: Terminal state observed but its closure audit has not been saved yet.}
+    OverviewCount: {type: string, pattern: '^(0|[1-9][0-9]{0,18})$'}
+    OwnerAccounting: {type: string, enum: [held, pending, settled, released]}
+    OwnerRequestIssues:
+      type: array
+      uniqueItems: true
+      maxItems: 4
+      items: {enum: [execution, settlement, usage_evidence, credit_pending]}
+      description: Retained execution outcome needs attention, completed execution has open settlement, final usage is unconfirmed at closure, or a known credit is not yet posted. Not an inferred root cause.
+    OwnerRequestPage:
+      type: object
+      additionalProperties: false
+      required: [version, from_ms, to_ms, as_of_ms, errors, items, next_before]
+      properties:
+        version: {const: 1}
+        from_ms: {type: integer, description: Inclusive UTC Unix millisecond bound.}
+        to_ms: {type: integer, description: Exclusive UTC Unix millisecond bound.}
+        as_of_ms: {type: integer, description: Read time, not a frozen report or settlement revision.}
+        errors: {type: boolean}
+        next_before: {type: [string, "null"], format: uuid}
+        items:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [request_id, started_at_ms, model, workspace_id, key_id, source_id, execution, accounting, issues, posted_micro_usd, diagnostic]
+            properties:
+              request_id: {type: string, format: uuid}
+              started_at_ms: {type: integer}
+              model: {type: string, maxLength: 128}
+              workspace_id: {type: string, format: uuid}
+              key_id: {type: string, format: uuid}
+              source_id: {type: [string, "null"], format: uuid}
+              execution: {$ref: "#/components/schemas/RequestExecution"}
+              accounting: {$ref: "#/components/schemas/OwnerAccounting"}
+              issues: {$ref: "#/components/schemas/OwnerRequestIssues"}
+              posted_micro_usd: {$ref: "#/components/schemas/NullableAmount", description: Original posted charge minus posted correction; null before closure.}
+              diagnostic:
+                description: Latest matching retained observation; null when no observation is retained. One row per logical request.
+                anyOf: [{$ref: "#/components/schemas/OwnerDiagnostic"}, {type: "null"}]
+    OwnerRequestDetail:
+      type: object
+      additionalProperties: false
+      required: [version, as_of_ms, receipt, workspace_id, streaming, issues, attempt, timeline, diagnostics, diagnostic_coverage]
+      properties:
+        version: {const: 1}
+        as_of_ms: {type: integer}
+        receipt: {$ref: "#/components/schemas/UsageReceipt"}
+        workspace_id: {type: string, format: uuid}
+        streaming: {type: boolean}
+        issues: {$ref: "#/components/schemas/OwnerRequestIssues"}
+        attempt:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [id, source_id, purchase_revision, valued_micro_usd, terminal]
+          properties:
+            id: {type: string, format: uuid}
+            source_id: {type: [string, "null"], format: uuid}
+            purchase_revision: {anyOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
+            valued_micro_usd: {type: [string, "null"], pattern: '^(0|[1-9][0-9]{0,39})$', description: Recorded supplier valuation at the pinned purchase rate; not a customer charge.}
+            terminal: {enum: [completed, incomplete, failed, null]}
+        timeline:
+          type: array
+          minItems: 1
+          maxItems: 7
+          items:
+            type: object
+            additionalProperties: false
+            required: [event, at_ms]
+            properties:
+              event: {enum: [reserved, dispatch_permitted, terminal_observed, terminal_applied, hold_closed, late_usage, credit_posted]}
+              at_ms: {type: integer, description: Recorded UTC Unix milliseconds. Missing observations do not create events.}
+        diagnostics:
+          type: array
+          maxItems: 32
+          description: Retained observations ordered by sequence. Independent of execution and settlement evidence.
+          items: {$ref: "#/components/schemas/OwnerDiagnostic"}
+        diagnostic_coverage: {$ref: "#/components/schemas/DiagnosticCoverage"}
+    DiagnosticStage: {type: string, enum: [dispatch, upstream_read, protocol_conversion, client_delivery, checkpoint, settlement, unknown]}
+    DiagnosticOrigin: {type: string, enum: [relay, provider, account]}
+    DiagnosticCategory: {type: string, enum: [policy, timeout, transport, protocol, cancellation, accounting, storage, unknown]}
+    DiagnosticSeverity: {type: string, enum: [info, warning, error, critical]}
+    DiagnosticCode: {type: string, pattern: '^[a-z][a-z0-9_]{0,63}$'}
+    DiagnosticCoverage:
+      type: string
+      enum: [partial, unavailable]
+      description: Best-effort diagnostic coverage; absence never proves that execution was healthy.
+    OwnerDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [diagnostic_version, event_id, request_id, attempt_id, correlation_id, component, sequence, code, stage,
+        origin, category, severity, summary_key, cause_status, occurred_at_ms, observed_at_ms, expires_at_ms, evidence]
+      properties:
+        diagnostic_version: {const: 1}
+        event_id: {type: string, format: uuid}
+        request_id: {type: string, format: uuid}
+        attempt_id: {type: [string, "null"], format: uuid, description: Linked only for observations requiring dispatch evidence.}
+        correlation_id: {type: string, format: uuid, description: Same as request_id in this projection.}
+        component: {const: hosted_executor}
+        sequence: {type: string, pattern: '^[1-9][0-9]{0,18}$', description: Exact ordering value. May have gaps.}
+        code: {$ref: "#/components/schemas/DiagnosticCode"}
+        stage: {$ref: "#/components/schemas/DiagnosticStage"}
+        origin: {anyOf: [{$ref: "#/components/schemas/DiagnosticOrigin"}, {type: "null"}], description: Null when attribution is not established.}
+        category: {$ref: "#/components/schemas/DiagnosticCategory"}
+        severity: {$ref: "#/components/schemas/DiagnosticSeverity"}
+        summary_key: {type: string, maxLength: 64, description: Allowlisted locale key, not provider text.}
+        cause_status: {enum: [confirmed, unknown], description: Local observation certainty, not a claim about execution upstream.}
+        occurred_at_ms: {type: [integer, "null"], minimum: 1, description: UTC Unix milliseconds when known.}
+        observed_at_ms: {type: integer, minimum: 1, description: UTC Unix milliseconds at collection.}
+        expires_at_ms: {type: integer, minimum: 1, description: UTC Unix milliseconds when the retention window closes.}
+        evidence:
+          type: object
+          additionalProperties: false
+          required: [http_status]
+          properties:
+            http_status: {type: [integer, "null"], minimum: 100, maximum: 599, description: Observed on an unsuccessful upstream HTTP response; not proof of fault or safe retry.}
+    CustomerDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [diagnostic_version, coverage, code, summary, next_action]
+      properties:
+        diagnostic_version: {const: 1}
+        coverage: {$ref: "#/components/schemas/DiagnosticCoverage"}
+        code: {enum: [relay_settlement_pending, relay_not_dispatched, relay_upstream_failed, relay_outcome_pending,
+          relay_request_incomplete, relay_request_failed, relay_outcome_unknown]}
+        summary: {enum: [settling, not_dispatched, response_unreadable, interrupted, connection_closed, upstream_failed, model_unavailable, unavailable]}
+        next_action: {enum: [check_status, contact_support], description: Refresh status while settlement is open; otherwise use configured support. Neither resends the request.}
+    UsageMetrics:
+      type: object
+      required: [requests, token_samples, partial_tokens, total_tokens, spend_micro_usd, unsettled]
+      properties:
+        requests: {type: integer, minimum: 0, maximum: 8192, description: Admitted logical requests, counted once.}
+        token_samples: {type: integer, minimum: 0, maximum: 8192, description: Requests with both input and output counts.}
+        partial_tokens: {type: integer, minimum: 0, maximum: 8192, description: Requests with any observed counts but without final token evidence.}
+        total_tokens: {type: [string, "null"], pattern: '^(0|[1-9][0-9]{0,23})$', description: Sum of available input plus output. Null for nonempty population with no totals; zero for an empty population.}
+        spend_micro_usd: {type: string, pattern: '^(0|[1-9][0-9]{0,23})$', description: Posted original charges minus posted request credits, attributed to request start.}
+        unsettled: {type: integer, minimum: 0, maximum: 8192, description: Requests without a posted closure.}
+    UsageReceipt:
+      allOf:
+        - $ref: "#/components/schemas/TextReceipt"
+        - type: object
+          required: [started_at_ms, usage_quality]
+          properties:
+            started_at_ms: {type: integer, description: Request start in Unix milliseconds; cursor order also uses sub-millisecond precision.}
+            usage_quality:
+              enum: [final, partial, unknown]
+              description: Quality of counts independent of the original charge basis. Saved late evidence can complete token counts before its credit posts.
+    RequestExecution:
+      type: string
+      enum: [reserved, dispatched, completed, incomplete, failed, uncertain]
+    TextReceipt:
+      type: object
+      required: [request_id, key_id, model, tariff_revision, started_at_s, execution, accounting, basis, input_tokens, cached_tokens, output_tokens, total_tokens, currency, precision, hold_micro_usd, charge_micro_usd, wallet_receipt_id, credit]
+      properties:
+        request_id: {type: string, format: uuid}
+        key_id: {type: string, format: uuid}
+        model: {type: string, maxLength: 128}
+        tariff_revision: {$ref: "#/components/schemas/Revision"}
+        started_at_s: {type: integer}
+        execution: {$ref: "#/components/schemas/RequestExecution"}
+        accounting: {enum: [held, pending, settled, released]}
+        basis: {enum: [provider_final, provider_partial, not_sent, policy_waiver, null]}
+        input_tokens: {$ref: "#/components/schemas/NullableAmount"}
+        cached_tokens: {$ref: "#/components/schemas/NullableAmount", description: Subset of input tokens.}
+        output_tokens: {$ref: "#/components/schemas/NullableAmount"}
+        total_tokens: {type: [string, "null"], pattern: "^(0|[1-9][0-9]{0,19})$", description: Normalized input plus output; null if either count is unknown.}
+        currency: {const: USD}
+        precision: {const: 6}
+        hold_micro_usd: {$ref: "#/components/schemas/UnsignedAmount"}
+        charge_micro_usd: {$ref: "#/components/schemas/NullableAmount", description: Charge recorded at closure before any correction; null until closure.}
+        wallet_receipt_id: {type: [string, "null"], format: uuid}
+        credit:
+          type: [object, "null"]
+          description: Posted credit for lower verified usage, separate from the original charge.
+          required: [wallet_receipt_id, amount_micro_usd]
+          properties:
+            wallet_receipt_id: {type: string, format: uuid}
+            amount_micro_usd: {type: string, pattern: "^[1-9][0-9]{0,18}$"}
+    NullableAmount: {anyOf: [{$ref: "#/components/schemas/UnsignedAmount"}, {type: "null"}]}
+    WalletEntry:
+      type: object
+      required: [id, kind, request_id, refund_id, posted_at_s, amount_micro_usd]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {enum: [payment_credit, request_hold, request_close, request_credit, refund_hold, refund_paid, refund_release]}
+        request_id: {type: [string, "null"], format: uuid}
+        refund_id: {type: [string, "null"], format: uuid}
+        posted_at_s: {type: integer}
+        amount_micro_usd: {$ref: "#/components/schemas/UnsignedAmount"}
+    OwnKey:
+      type: object
+      additionalProperties: false
+      required: [id, operation_id, name, prefix, status, replaces_key_id, expires_at_s]
+      properties:
+        id: {type: string, format: uuid}
+        operation_id: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 80}
+        prefix: {type: string, pattern: "^rlk_[0-9a-f]{12}$"}
+        status: {type: string, enum: [active, revoked, expired]}
+        replaces_key_id: {type: [string, "null"], format: uuid}
+        expires_at_s: {type: integer}
+    Csrf: {type: string, pattern: "^[a-f0-9]{64}$"}
+    PrivateMode: {type: string, enum: [setup, qualification, maintenance]}
+    Revision: {type: string, pattern: "^[1-9][0-9]{0,18}$"}
+    UnsignedAmount: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+    PublicLink: {type: string, format: uri, maxLength: 2048, pattern: "^https://"}
+    Meta:
+      type: object
+      additionalProperties: false
+      required: [api_version, request_id]
+      properties:
+        api_version: {const: "1"}
+        request_id: {type: string, format: uuid}
+    Envelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties: {meta: {$ref: "#/components/schemas/Meta"}, data: {type: object}}
+    CheckoutCredit:
+      type: string
+      pattern: '^[1-9][0-9]{0,6}0000$'
+      description: Positive USD credit in microUSD, in whole cents. The published method may impose narrower limits.
+    CheckoutMethod:
+      type: object
+      required: [id, label, min_credit_micro_usd, max_credit_micro_usd, quick_credit_micro_usd, custom_amount]
+      properties:
+        id: {type: string, format: uuid}
+        label: {type: string, maxLength: 64}
+        min_credit_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+        max_credit_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+        quick_credit_micro_usd: {type: array, maxItems: 8, items: {$ref: "#/components/schemas/CheckoutCredit"}}
+        custom_amount: {type: boolean}
+    CheckoutQuote:
+      type: object
+      required: [id, method_id, currency, credit_micro_usd, payable_minor, fee_minor, expires_at_s]
+      properties:
+        id: {type: string, format: uuid}
+        method_id: {type: string, format: uuid}
+        currency: {const: USD}
+        credit_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+        payable_minor: {type: string, pattern: '^[1-9][0-9]{0,6}$', description: USD cents}
+        fee_minor: {type: string, pattern: '^(0|[1-9][0-9]{0,6})$', description: USD cents}
+        expires_at_s: {type: integer}
+    CheckoutPayment:
+      type: object
+      required: [id, operation_id, quote_id, label, credit_micro_usd, currency, payable_minor, receipt_id, created_at_s, state, can_resume, refundable_micro_usd, refund]
+      properties:
+        id: {type: string, format: uuid}
+        operation_id: {type: string, format: uuid}
+        quote_id: {type: string, format: uuid}
+        label: {type: string, maxLength: 64}
+        credit_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+        currency: {const: USD}
+        payable_minor: {type: string, pattern: '^[1-9][0-9]{0,6}$', description: USD cents}
+        receipt_id: {type: [string, "null"], format: uuid}
+        created_at_s: {type: integer}
+        state: {enum: [processing, awaiting_payment, paid, closed]}
+        can_resume: {type: boolean, description: Original invoice supports reopening and is a candidate for a fresh payability check.}
+        refundable_micro_usd: {$ref: "#/components/schemas/UnsignedAmount", description: Remaining credited principal in whole cents; approval also checks the available wallet.}
+        refund:
+          description: The latest refund case on this payment.
+          anyOf: [{$ref: "#/components/schemas/RefundCase"}, {type: "null"}]
+    RefundCase:
+      type: object
+      required: [id, payment_id, state, amount_micro_usd, requested_at_s, receipt_id]
+      properties:
+        id: {type: string, format: uuid}
+        payment_id: {type: string, format: uuid}
+        state: {enum: [requested, declined, queued, reconciling, succeeded, failed]}
+        amount_micro_usd: {$ref: "#/components/schemas/CheckoutCredit"}
+        requested_at_s: {type: integer}
+        receipt_id: {type: [string, "null"], format: uuid, description: Final wallet posting after success or proven failure.}
+    CheckoutPaymentResponse:
+      allOf:
+        - {$ref: "#/components/schemas/Envelope"}
+        - properties: {data: {required: [payment], properties: {payment: {$ref: "#/components/schemas/CheckoutPayment"}}}}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id, retryable]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            request_id: {type: string, format: uuid}
+            retryable: {type: boolean}
+            details:
+              type: object
+              properties: {open_count: {type: integer}, open_limit: {type: integer}}
+    Options:
+      type: object
+      required: [publicKey]
+      properties: {publicKey: {type: object, description: WebAuthn Level 3 JSON options; binary fields are base64url.}}
+  requestBodies:
+    Credential:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            description: PublicKeyCredential.toJSON() from the matching ceremony, at most 64 KiB.
+            required: [type, id, rawId, response]
+            properties: {type: {const: public-key}, id: {type: string}, rawId: {type: string}, response: {type: object}}
+  responses:
+    CaptureAcknowledgement:
+      description: No-store acknowledgement for the exact capture. Collection and closure audit can complete independently.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: "#/components/schemas/Envelope"}
+              - properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [version, as_of_ms, session]
+                    properties:
+                      version: {const: 1}
+                      as_of_ms: {type: integer}
+                      session: {$ref: "#/components/schemas/CaptureSummary"}
+    OwnerRequestPage:
+      description: No-store page of up to 32 logical requests. Pagination pins the time bounds, not live execution and settlement states.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: "#/components/schemas/Envelope"}
+              - properties: {data: {$ref: "#/components/schemas/OwnerRequestPage"}}
+    SourceCopyStatus:
+      description: Result for the same native operation, without credentials. Commit returns only committed, expired or conflict.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: "#/components/schemas/Envelope"}
+              - properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [installation_id, device_id, operation_id, state]
+                    properties:
+                      installation_id: {type: string, format: uuid}
+                      device_id: {type: string, format: uuid}
+                      operation_id: {type: string, format: uuid}
+                      state: {enum: [awaiting_approval, approved, expired, committed, conflict]}
+    Error:
+      description: Safe failure. Unregistered routes return 404; wrong API methods return 405.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
