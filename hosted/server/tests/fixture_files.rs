@@ -4,6 +4,17 @@ use std::{
     process::Command,
 };
 
+pub fn private_root() -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("relay-hosted-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().unwrap()
+}
+
 pub fn child(root: &Path, name: &std::ffi::OsStr) -> PathBuf {
     assert!(root.is_absolute());
     let mut components = Path::new(name).components();
@@ -37,7 +48,23 @@ pub fn openssl() -> Command {
 
 #[test]
 fn fixture_children_reject_traversal_and_setup_extras() {
-    let root = tempfile::tempdir().unwrap();
+    let root = private_root();
+    assert!(
+        root.path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("relay-hosted-")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            root.path().metadata().unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
     fs::write(root.path().join("relay-setup-AbCd12"), "synthetic").unwrap();
     assert_eq!(
         setup_code(root.path()),

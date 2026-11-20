@@ -184,10 +184,7 @@ async fn qualified_client_verifies_tls_and_keeps_its_pin_after_failure() {
         }
     }
 
-    let dir = tempfile::Builder::new()
-        .prefix("relay-hosted-")
-        .tempdir()
-        .unwrap();
+    let dir = fixture_files::private_root();
     let cert = dir.path().join("cert.pem");
     let key = dir.path().join("key.pem");
     let status = fixture_files::openssl()

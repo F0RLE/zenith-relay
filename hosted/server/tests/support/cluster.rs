@@ -55,15 +55,7 @@ impl Cluster {
     }
 
     fn isolated(bin: PathBuf, password: String) -> Self {
-        let temp = tempfile::Builder::new()
-            .prefix("relay-hosted-")
-            .tempdir()
-            .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        let temp = super::fixture_files::private_root();
         Self {
             temp,
             bin,
