@@ -2,6 +2,7 @@
 mod cluster;
 #[path = "support/payment_fixture.rs"]
 mod fixture;
+mod fixture_files;
 
 use cluster::Cluster;
 use fixture::{Adapter, assert_wallet, invoice};

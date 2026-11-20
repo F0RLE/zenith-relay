@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 #[path = "support/cluster.rs"]
 mod cluster;
+mod fixture_files;
 
 use serde_json::{Value, json};
 use sqlx::PgPool;
