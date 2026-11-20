@@ -18,7 +18,7 @@ const tierLabels: Record<string, MessageKey> = {
   standard: "modelCatalog.standardTier", flex: "modelCatalog.flexTier", priority: "modelCatalog.priorityTier", ultrafast: "modelCatalog.ultrafastTier",
 };
 
-function RateInput({ label, name, value, detail = false, onChange }: { label: string; name: string; value: bigint | null | undefined; detail?: boolean; onChange: (value: bigint | null) => void }) {
+function RateInput({ label, name, value, detail = false, onChange }: { label: string; name: string; value: string | null | undefined; detail?: boolean; onChange: (value: string | null) => void }) {
   const { t } = useLocale();
   const id = useId();
   const [draft, setDraft] = useState(() => modelRateInput(value));
@@ -29,7 +29,7 @@ function RateInput({ label, name, value, detail = false, onChange }: { label: st
     setInvalid(parsed === undefined);
     if (parsed === undefined) return;
     setDraft(modelRateInput(parsed));
-    if (parsed !== (value ?? null)) onChange(parsed);
+    if (modelRateInput(parsed) !== modelRateInput(value)) onChange(parsed);
   }
   return <label className="owner-model-rate" data-detail={detail}><span>{label}</span>
     <input type="text" inputMode="decimal" autoComplete="off" spellCheck={false} aria-label={name} aria-invalid={invalid || undefined} aria-describedby={invalid ? id : undefined} placeholder="—" value={draft}

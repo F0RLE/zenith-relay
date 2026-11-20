@@ -144,9 +144,9 @@ test("server default tiers remain implicit and multiple context bands keep an an
       const model = previewModels[0];
       const base = model.pricingVariants[0];
       previewModels[0] = { ...model, contextTokens: 1000000, defaultPricingVariantId: "middle", pricingVariants: [
-        { ...base, id: "last", contextBand: "above272k", rates: { input: 1200000n } },
+        { ...base, id: "last", contextBand: "above272k", rates: { input: "1.2" } },
         { ...base, id: "base", contextBand: "base" },
-        { ...base, id: "middle", contextBand: "above128k", rates: { input: 800000n } },
+        { ...base, id: "middle", contextBand: "above128k", rates: { input: "0.8" } },
         model.pricingVariants.find(variant => variant.tier === "flex")
       ] };
       previewModels.push({ ...previewModels[0], id: "test-bounded-pair", name: "Bounded pair", defaultPricingVariantId: "middle",

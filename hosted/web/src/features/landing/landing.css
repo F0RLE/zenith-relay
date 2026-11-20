@@ -42,7 +42,8 @@ html:has(.landing-home[data-theme="dark"]) { color-scheme: dark; }
 .landing-header { position: sticky; top: 0; z-index: 10; background: var(--bg); }
 .landing-header-inner { min-height: 88px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .landing-brand { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; flex-shrink: 0; }
-.landing-brand strong { font-family: var(--font-display); font-size: 27px; letter-spacing: -.035em; font-weight: 650; }
+.landing-brand:has(strong) { min-width: 0; flex-shrink: 1; }
+.landing-brand strong { font-family: var(--font-display); font-size: 27px; letter-spacing: -.035em; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .landing-brand > span { color: var(--secondary); font-size: 13px; }
 .landing .landing-mark { width: 26px; height: 30px; color: var(--accent); stroke: currentColor; stroke-width: 1.6; }
 .landing-header-actions { display: flex; align-items: center; gap: 8px; }
@@ -96,7 +97,7 @@ html:has(.landing-home[data-theme="dark"]) { color-scheme: dark; }
 .weave-request-2 { animation-duration: 6.4s; animation-delay: -3.2s; }
 .request-weave[data-motion="paused"] .weave-request { animation-play-state: paused; }
 .weave-labels { position: absolute; inset-inline: 0; bottom: 26px; display: grid; grid-template-columns: 1fr 1fr 1fr; align-items: center; color: var(--hero-muted); font-size: 13px; }
-.weave-labels > strong { text-align: center; font-size: 19px; font-weight: 550; letter-spacing: -.03em; color: var(--hero-ink); }
+.weave-labels > strong { text-align: center; font-size: 19px; font-weight: 550; letter-spacing: -.03em; color: var(--hero-ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .weave-labels > span:last-child { text-align: right; }
 @keyframes weave-request { to { stroke-dashoffset: -100; } }
 

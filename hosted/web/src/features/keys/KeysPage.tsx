@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { ChevronDown, ChevronUp, Plus } from "../../components/Icons";
-import { CopyButton } from "../../components/CopyButton";
+import { KeyDisclosure } from "./KeyDisclosure";
 import { OptionMenu } from "../../components/OptionMenu";
 import type { CustomerModel } from "../models/ModelsPage";
 import { KeyEditor } from "./KeyEditor";
@@ -40,7 +40,6 @@ export function KeysPage({ keys, models, onChange }: {
   const [sort, setSort] = useState<KeySort | null>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   const confirmation = useRef<HTMLDivElement | null>(null);
-  const reveal = useRef<HTMLElement | null>(null);
   const rows = useRef(new Map<string, HTMLElement>());
 
   const modelNames = (key: KeyRecord) => key.models.map(id => models.find(model => model.id === id)?.name ?? id).join(", ");
@@ -94,9 +93,6 @@ export function KeysPage({ keys, models, onChange }: {
       document.removeEventListener("keydown", dismissEscape);
     };
   }, [confirming]);
-  useEffect(() => {
-    if (result) reveal.current?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, [result]);
 
   function issue(draft: KeyDraft, scope: string[]) {
     if (!onChange || result) return;
@@ -135,11 +131,7 @@ export function KeysPage({ keys, models, onChange }: {
   }
   return <section className="api-keys-page">
     <header className="page-heading"><h1>{t("nav.keys")}</h1><button className="button primary-button" type="button" disabled={!onChange || !!result || action?.kind === "create"} title={result ? t("keys.saveTheNewlyCreatedKeyFirst") : undefined} onClick={event => open({ kind: "create" }, event.currentTarget)}><Plus aria-hidden="true" />{t("keys.createKey")}</button></header>
-    {result && <section className="key-reveal" aria-label={t("keys.keyCreated")} ref={reveal}>
-      <h2>{t("keys.keyCreated")}</h2><p>{t("keys.secretWarning")}</p>
-      <code>{result.secret}</code>
-      <div className="key-reveal-actions"><CopyButton text={result.secret} label={t("keys.copyKey")} /><button className="button" type="button" onClick={() => { const id = result.keyId; setResult(null); focusRow(id); }}>{t("common.done")}</button></div>
-    </section>}
+    {result && <KeyDisclosure secret={result.secret} onDone={() => { const id = result.keyId; setResult(null); focusRow(id); }} />}
     {action?.kind === "create" && <KeyEditor key="create" mode="create" onSave={save} onCancel={cancelEditor} />}
     {!onChange ? <p className="empty-state" role="status">{t("keys.unavailable")}</p> : !keys.length ? <p className="empty-state">{t("keys.empty")}</p> : <div className="keys-list table-shell">
       <div className="keys-mobile-sort"><OptionMenu label={t("keys.sortKeys")} value={sort ? `${sort.field}:${sort.direction}` : "original"} onChange={value => {

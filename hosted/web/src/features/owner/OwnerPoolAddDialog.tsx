@@ -17,7 +17,7 @@ function memberStatus(connection: OwnerConnection): { tone: string; label: Messa
   if (connection.paused) return { tone: "disabled", label: "connections.suspended" };
   if (connection.account?.quotaStatus === "requires_reauth") return { tone: "error", label: "account.signInAgain" };
   if (connection.account?.quotaStatus === "failed") return { tone: "error", label: "account.couldNotRefreshQuotas" };
-  // A saved, unpooled connection is not evidence that it can serve requests.
+  // Use the neutral state for connections outside the pool.
   return { tone: "idle", label: "connections.outsidePool" };
 }
 

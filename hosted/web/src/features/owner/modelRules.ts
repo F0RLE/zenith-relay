@@ -1,5 +1,5 @@
 import { modelIdKey } from "../../../../../desktop/frontend/src/features/relay/modelGroups";
-import { parseEditableModelPrice } from "../../../../../desktop/frontend/src/features/relay/modelPricing";
+import { canonicalRetailRate, modelRate } from "../models/retailRate";
 import { selectedModelVariant } from "../models/model";
 import type { CustomerModel, ModelRateComponent, ModelRates } from "../models/model";
 import type { OwnerConnection } from "./model";
@@ -37,25 +37,22 @@ export function poolRuleModels(models: readonly CustomerModel[], connections: re
   });
 }
 
-/** Reuse Relay's price precision and bounds; blank is unpublished, never free. */
-export function parseModelRate(text: string): bigint | null | undefined {
-  if (!text.trim()) return null;
-  const microUsd = parseEditableModelPrice(text);
-  return microUsd === null ? undefined : BigInt(microUsd);
+export function parseModelRate(text: string): string | null | undefined {
+  const draft = text.trim().replace(",", ".");
+  if (!draft) return null;
+  return canonicalRetailRate(/^\d+\.$/.test(draft) ? draft.slice(0, -1) : draft) ?? undefined;
 }
 
-export function modelRateInput(value: bigint | null | undefined) {
-  if (value == null || value < 0n) return "";
-  const whole = value / 1_000_000n;
-  const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-  return `${whole}${fraction ? `.${fraction}` : ""}`;
+export function modelRateInput(value: string | null | undefined) {
+  return modelRate(value) ?? "";
 }
 
-export function setOwnerModelRate(rules: OwnerModelRules, model: CustomerModel, variantId: string | undefined, component: ModelRateComponent, value: bigint | null): OwnerModelRules {
-  if (value !== null && (value < 0n || parseModelRate(modelRateInput(value)) !== value)) return rules;
+export function setOwnerModelRate(rules: OwnerModelRules, model: CustomerModel, variantId: string | undefined, component: ModelRateComponent, value: string | null): OwnerModelRules {
+  const rate = canonicalRetailRate(value);
+  if (value !== null && rate === null) return rules;
   if (variantId !== undefined && !model.pricingVariants?.some(variant => variant.id === variantId)) return rules;
   const rule = rules[model.id] ?? {};
-  const patch = { [component]: value };
+  const patch = { [component]: rate };
   const isDefault = !variantId || selectedModelVariant(model)?.id === variantId;
   return { ...rules, [model.id]: {
     ...rule,

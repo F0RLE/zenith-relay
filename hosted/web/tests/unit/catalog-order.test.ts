@@ -3,7 +3,7 @@ import { catalogGroups, moveCatalogItem } from "../../src/features/models/catalo
 import type { CustomerModel } from "../../src/features/models/model";
 import { projectOwnerCatalog } from "../../src/features/owner/modelRules";
 
-const model = (id: string, publisher?: string): CustomerModel => ({ id, name: id, ...(publisher ? { publisher } : {}), protocols: [], description: "", rates: { input: 10n }, revision: "test" });
+const model = (id: string, publisher?: string): CustomerModel => ({ id, name: id, ...(publisher ? { publisher } : {}), protocols: [], description: "", rates: { input: "0.00001" }, revision: "test" });
 const catalog = [model("a1", "OpenAI"), model("b1", "Anthropic"), model("a2", "OpenAI"), model("b2", "Anthropic"), model("g1", "Google")];
 const ids = (models: readonly CustomerModel[]) => models.map(model => model.id);
 
@@ -27,12 +27,12 @@ describe("company catalog order", () => {
   test("moving a company moves its entire block, including disabled models", () => {
     const order = moveCatalogItem(catalog, [], { kind: "group", source: "catalog-openai", target: "catalog-google" });
     expect(order).toEqual(["b1", "b2", "g1", "a1", "a2"]);
-    const settings = { modelDisplayOrder: order!, rules: { a1: { enabled: false }, a2: { rates: { input: 123456n } } } };
+    const settings = { modelDisplayOrder: order!, rules: { a1: { enabled: false }, a2: { rates: { input: "0.123456" } } } };
     const retail = projectOwnerCatalog(catalog, settings);
     expect(ids(retail)).toEqual(["b1", "b2", "g1", "a2"]);
-    expect(retail[3]!.rates.input).toBe(123456n);
+    expect(retail[3]!.rates.input).toBe("0.123456");
     expect(ids(projectOwnerCatalog(catalog, { ...settings, rules: { ...settings.rules, a1: { enabled: true } } }))).toEqual(order!);
-    expect(catalog[2]!.rates.input).toBe(10n);
+    expect(catalog[2]!.rates.input).toBe("0.00001");
   });
 
   test("reorders models only inside the original company", () => {

@@ -1,13 +1,14 @@
 import type { Locale } from "../../i18n/catalog";
-import { formatMoney } from "../usage/model";
+import { higherRate, modelRate } from "./retailRate";
+export { modelRate } from "./retailRate";
 import type { TokenRateSet } from "../../../../../desktop/frontend/src/features/relay/api/types/pricing";
 import { PRICE_CONTEXT_THRESHOLDS } from "../../../../../desktop/frontend/src/features/relay/api/types/pricing";
 import { priceContextRanges } from "../../../../../desktop/frontend/src/features/relay/components/sourcePriceEditorModel";
 import type { PriceBand, PriceSchedule } from "../../../../../desktop/frontend/src/features/relay/components/sourcePriceEditorModel";
 
-/** USD micro-units per one million tokens. Missing is not free. */
+/** Exact decimal USD per million. Missing is not free. */
 export type ModelRateComponent = keyof TokenRateSet;
-export type ModelRates = Partial<Record<ModelRateComponent, bigint | null>>;
+export type ModelRates = Partial<Record<ModelRateComponent, string | null>>;
 
 /** The server qualifies matching models, context bands, tiers and cache rules. */
 export interface ModelPriceComparison {
@@ -67,22 +68,18 @@ export function modelContextRanges(model: CustomerModel, tier: PriceSchedule) {
   return priceContextRanges(bands.sort((left, right) => threshold(left) - threshold(right)));
 }
 
-export function modelRate(value: bigint | null | undefined): bigint | null {
-  return typeof value === "bigint" && value >= 0n ? value : null;
-}
-
 export function pricePresentation(model: ModelPricing, component: ModelRateComponent) {
   const price = modelRate(model.rates[component]);
   const official = modelRate(model.comparison?.officialRates[component]);
   const supplied = model.comparison?.savingsPercent?.[component];
-  const comparable = price !== null && official !== null && official > price;
+  const comparable = price !== null && official !== null && higherRate(official, price);
   const discount = comparable && typeof supplied === "number" && Number.isFinite(supplied)
-    && supplied > 0 && supplied <= 100 && (supplied < 100 || price === 0n) ? supplied : null;
+    && supplied > 0 && supplied <= 100 && (supplied < 100 || price === "0") ? supplied : null;
   return { price, official: comparable ? official : null, discount };
 }
 
-/** Preserve all six micro-USD digits without showing insignificant zeroes. */
-export function formatModelPrice(value: bigint | null, locale: Locale): string {
-  if (value === null) return "—";
-  return `$${formatMoney(value, 6, locale).replace(/0+$/, "").replace(/[.,]$/, "")}`;
+export function formatModelPrice(value: string | null, locale: Locale): string {
+  const rate = modelRate(value);
+  if (rate === null) return "—";
+  return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 12 }).format(rate as Intl.StringNumericLiteral)}`;
 }

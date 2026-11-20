@@ -1,19 +1,18 @@
 import { useId, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import type { IconComponent } from "../../components/Icons";
-import type { RequestRecord } from "../usage/model";
-import type { OverviewBucket } from "./timeline";
 import { chartCeiling, chartLinePath } from "./chart-display";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { useFormatters } from "../../i18n/format";
 
-export interface ChartSeries { label: string; measure: (rows: RequestRecord[]) => number | null; tone: string; percentage?: boolean }
+export interface ChartInterval { startMs: number; interval: string; href?: string | undefined }
+export interface ChartSeries<B> { label: string; measure: (bucket: B) => number | null; tone: string; percentage?: boolean }
 
 // Hosted presentation only. Values and UTC buckets come from the existing model.
-export function Chart({ buckets, measure, icon: Icon, label, total, hint, note, unit, tone, mode = "bar", series }: {
-  buckets: OverviewBucket[]; measure: (rows: RequestRecord[]) => number | null; icon: IconComponent;
-  label: string; total: string; hint?: string; note?: string; unit: "tokens" | "requests" | "tok/s" | "USD"; tone: string;
-  mode?: "bar" | "line"; series?: ChartSeries[];
+export function Chart<B extends ChartInterval>({ buckets, measure, icon: Icon, label, total, hint, note, unit, tone, mode = "bar", series, exact }: {
+  buckets: readonly B[]; measure: (bucket: B) => number | null; icon: IconComponent;
+  label: string; total: string; hint?: string; note?: string | undefined; unit: "tokens" | "requests" | "tok/s" | "USD"; tone: string;
+  mode?: "bar" | "line"; series?: ChartSeries<B>[]; exact?: (bucket: B) => string;
 }) {
   const { t, locale } = useLocale();
   const { formatCompact, formatPercent } = useFormatters();
@@ -23,7 +22,7 @@ export function Chart({ buckets, measure, icon: Icon, label, total, hint, note, 
   const [active, setActive] = useState<number | null>(null);
   const [hidden, setHidden] = useState<string[]>([]);
   const allSeries = series ?? [{ label, measure, tone }];
-  const points = allSeries.filter(item => !hidden.includes(item.tone)).map(item => ({ ...item, values: buckets.map(bucket => item.measure(bucket.rows)) }));
+  const points = allSeries.filter(item => !hidden.includes(item.tone)).map(item => ({ ...item, values: buckets.map(item.measure) }));
   const ceiling = chartCeiling(points.filter(item => !item.percentage).flatMap(item => item.values), unit);
   const short = (value: number) => unit === "USD" ? value.toLocaleString(locale, { maximumFractionDigits: 6 }) : formatCompact(value);
   const axis = [short(ceiling), short(ceiling / 2), "0"];
@@ -33,14 +32,24 @@ export function Chart({ buckets, measure, icon: Icon, label, total, hint, note, 
   const rate = points.some(item => item.percentage);
   const primary = points.some(item => !item.percentage);
   const bar = mode === "bar" && !series;
-  const lastMeasured = buckets.reduce((last, _, index) => points.some(item => item.values[index] !== null) ? index : last, 0);
+  const linked = buckets.some(item => item.href);
+  const lastMeasured = buckets.reduce((last, item, index) => (linked ? !!item.href : points.some(point => point.values[index] !== null)) ? index : last, 0);
+  function indexAt(clientX: number, node: HTMLDivElement) {
+    const rect = node.getBoundingClientRect();
+    return Math.max(0, Math.min(buckets.length - 1, Math.floor((clientX - rect.left) / rect.width * buckets.length)));
+  }
   function pointAt(event: PointerEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    setActive(Math.max(0, Math.min(buckets.length - 1, Math.floor((event.clientX - rect.left) / rect.width * buckets.length))));
+    setActive(indexAt(event.clientX, event.currentTarget));
   }
   function navigate(event: KeyboardEvent<HTMLDivElement>) {
     const current = active ?? lastMeasured;
     if (event.key === "Escape") { setActive(null); event.stopPropagation(); return; }
+    if (event.key === "Enter" && linked) {
+      event.preventDefault();
+      const href = buckets[current]?.href;
+      if (href) location.assign(href);
+      return;
+    }
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     setActive(event.key === "Home" ? 0 : event.key === "End" ? buckets.length - 1
@@ -63,9 +72,11 @@ export function Chart({ buckets, measure, icon: Icon, label, total, hint, note, 
     <div className="hosted-chart-body" data-rate-axis={rate} data-primary-axis={primary}>
       {primary && <div className="hosted-chart-axis" aria-hidden="true">{axis.map((value, index) => <span key={index}>{value}</span>)}</div>}
       <div className={`${stem}-plot hosted-chart-plot`}>
-        <div className="hosted-chart-canvas" role="group" aria-label={t("chart.timeChart", { label })} tabIndex={0}
+        <div className="hosted-chart-canvas" role={linked ? "link" : "group"} aria-label={t("chart.timeChart", { label })} tabIndex={0}
+          data-link={bucket?.href ? true : undefined} aria-disabled={linked ? !(bucket ?? buckets[lastMeasured])?.href : undefined}
           aria-describedby={`${id}-instructions${bucket && points.length ? ` ${id}-tooltip` : ""}`}
           onPointerMove={pointAt} onPointerDown={pointAt}
+          onClick={linked ? event => { const href = buckets[indexAt(event.clientX, event.currentTarget)]?.href; if (href) location.assign(href); } : undefined}
           onPointerLeave={event => { if (event.pointerType !== "touch" && document.activeElement !== event.currentTarget) setActive(null); }}
           onFocus={() => setActive(current => current ?? lastMeasured)} onBlur={() => setActive(null)} onKeyDown={navigate}>
           <svg role="img" aria-label={t("chart.accessibleDescription", { label, unit: unitLabel })} viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -93,10 +104,11 @@ export function Chart({ buckets, measure, icon: Icon, label, total, hint, note, 
         <span className="hosted-chart-tooltip-time">{bucket.interval}</span>
         <dl>{points.map(item => <div key={item.tone} className={`is-${item.tone}`}>
           <dt><i aria-hidden="true" />{item.label}</dt>
-          <dd>{item.values[active!] === null ? "—" : item.percentage ? formatPercent(item.values[active!]! / 100) : `${item.values[active!]!.toLocaleString(locale, { maximumFractionDigits: unit === "tok/s" ? 2 : 6 })}${unit === "tokens" || unit === "requests" ? "" : ` ${unitLabel}`}`}</dd>
+          <dd>{exact && !series ? exact(bucket) : item.values[active!] === null ? "—" : item.percentage ? formatPercent(item.values[active!]! / 100) : `${item.values[active!]!.toLocaleString(locale, { maximumFractionDigits: unit === "tok/s" ? 2 : 6 })}${unit === "tokens" || unit === "requests" ? "" : ` ${unitLabel}`}`}</dd>
         </div>)}</dl>
+        {bucket.href && <span className="hosted-chart-next">{t("report.openInterval")}</span>}
       </div>}
     </div>
-    <span id={`${id}-instructions`} className="sr-only">{t("chart.keyboardHelp")}</span>
+    <span id={`${id}-instructions`} className="sr-only">{t("chart.keyboardHelp")}{linked && ` ${t("report.chartKeyboard")}`}</span>
   </article>;
 }

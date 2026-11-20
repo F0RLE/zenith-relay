@@ -7,6 +7,7 @@ import type { OwnerModelRules } from "../../src/features/owner/modelRules";
 import type { OwnerConnection } from "../../src/features/owner/model";
 import { previewModels } from "../../src/preview/models";
 import type { CustomerModel } from "../../src/features/models/model";
+import retailRates from "../../../server/tests/fixtures/retail-rates.json";
 
 const model = previewModels[0]!;
 const member: OwnerConnection = { id: "test-account", name: "Test account", family: "common.account", kind: "account", models: [model.id], inPool: true, paused: false, trashed: false };
@@ -22,27 +23,27 @@ describe("pool-wide model rules", () => {
     expect(poolRuleModels([], connections)).toEqual([]);
   });
 
-  test("parses exact microUSD and distinguishes zero from unpublished", () => {
-    expect(parseModelRate("0")).toBe(0n);
+  test("seller edits round-trip the server rate precision and distinguish zero from unpublished", () => {
+    expect(parseModelRate("0")).toBe("0.000000000000");
     expect(parseModelRate(" ")).toBeNull();
-    expect(parseModelRate("0,123456")).toBe(123456n);
-    expect(parseModelRate("1000000")).toBe(1000000000000n);
-    expect(parseModelRate("1.")).toBe(1000000n);
-    for (const value of ["-1", "1e3", "1.0000001", "1,2.3", "Infinity", "1000000.000001", "9".repeat(64)]) expect(parseModelRate(value)).toBeUndefined();
-    for (const value of [0n, 1n, 10n, 1234567n, 999999999999n, 1000000000000n]) expect(parseModelRate(modelRateInput(value))).toBe(value);
+    expect(parseModelRate("0,123456789012")).toBe("0.123456789012");
+    expect(parseModelRate("1000000")).toBe("1000000.000000000000");
+    expect(parseModelRate("1.")).toBe("1.000000000000");
+    for (const value of ["-1", "1e3", "1.0000000000001", "1,2.3", "Infinity", "9".repeat(19), "9".repeat(64)]) expect(parseModelRate(value)).toBeUndefined();
+    for (const { wire } of retailRates.valid) expect(parseModelRate(modelRateInput(wire))).toBe(wire);
     expect(modelRateInput(null)).toBe("");
   });
 
   test("price edits retain enablement, other components, variants and original inventory", () => {
     const original = structuredClone(model);
     let rules: OwnerModelRules = { [model.id]: { enabled: false }, untouched: { enabled: false } };
-    rules = setOwnerModelRate(rules, model, "standard-short", "input", 123456n);
-    rules = setOwnerModelRate(rules, model, "flex-short", "output", 0n);
+    rules = setOwnerModelRate(rules, model, "standard-short", "input", "0.123456");
+    rules = setOwnerModelRate(rules, model, "flex-short", "output", "0");
     const result = applyOwnerModelRule(model, rules[model.id]);
-    expect(result.rates.input).toBe(123456n);
+    expect(result.rates.input).toBe("0.123456000000");
     expect(result.rates.output).toBe(model.rates.output);
-    expect(result.pricingVariants?.find(variant => variant.id === "standard-short")?.rates.input).toBe(123456n);
-    expect(result.pricingVariants?.find(variant => variant.id === "flex-short")?.rates.output).toBe(0n);
+    expect(result.pricingVariants?.find(variant => variant.id === "standard-short")?.rates.input).toBe("0.123456000000");
+    expect(result.pricingVariants?.find(variant => variant.id === "flex-short")?.rates.output).toBe("0.000000000000");
     expect(result.pricingVariants?.find(variant => variant.id === "standard-long")).toBe(model.pricingVariants?.find(variant => variant.id === "standard-long"));
     expect(result.comparison).toBeUndefined();
     expect(result.pricingVariants?.find(variant => variant.id === "standard-short")?.comparison).toBeUndefined();
@@ -52,16 +53,16 @@ describe("pool-wide model rules", () => {
   });
 
   test("server-supplied defaults apply to the featured offer without discarding other prices", () => {
-    const result = applyOwnerModelRule(model, { rates: { input: null, output: 0n } });
+    const result = applyOwnerModelRule(model, { rates: { input: null, output: "0" } });
     expect(result.rates.input).toBeNull();
     expect(result.pricingVariants?.[0]?.rates.input).toBeNull();
-    expect(result.pricingVariants?.[0]?.rates.output).toBe(0n);
+    expect(result.pricingVariants?.[0]?.rates.output).toBe("0");
     expect(result.pricingVariants?.[1]).toBe(model.pricingVariants?.[1]);
     expect(applyOwnerModelRule(model, { enabled: false })).toBe(model);
     const rules = {};
-    expect(setOwnerModelRate(rules, model, "unknown", "input", 1n)).toBe(rules);
-    expect(setOwnerModelRate(rules, model, undefined, "input", -1n)).toBe(rules);
-    expect(setOwnerModelRate(rules, model, undefined, "input", 1000000000001n)).toBe(rules);
+    expect(setOwnerModelRate(rules, model, "unknown", "input", "1")).toBe(rules);
+    expect(setOwnerModelRate(rules, model, undefined, "input", "-1")).toBe(rules);
+    expect(setOwnerModelRate(rules, model, undefined, "input", "9999999999999999999")).toBe(rules);
   });
 
   test("company groups start expanded with inline prices and separate drag handles", () => {
@@ -114,7 +115,7 @@ describe("pool-wide model rules", () => {
   });
 
   test("cache write durations stay visible and independently labeled", () => {
-    const ttlModel = { ...model, pricingVariants: undefined, rates: { input: 1n, output: 2n, cacheRead: 3n, cacheWrite5m: 4n, cacheWrite1h: 5n } };
+    const ttlModel = { ...model, pricingVariants: undefined, rates: { input: "1", output: "2", cacheRead: "3", cacheWrite5m: "4", cacheWrite1h: "5" } };
     const html = renderToStaticMarkup(<LocaleProvider><OwnerModelRulesView models={[ttlModel]} connections={[member]} rules={{}} onChange={() => {}} /></LocaleProvider>);
     expect(html.match(/type="text"/g)).toHaveLength(5);
     expect(html).toContain('aria-label="Cache write · 5 min price for GPT"');

@@ -1,5 +1,6 @@
+import type { StatusInterval } from "../../api/modelStatus";
+
 export type StatusPeriod = "day" | "week";
-export interface StatusInterval { startMs: number; endMs: number }
 
 /** Empty monitoring windows, not synthesized measurements or request aggregates. */
 export function statusIntervals(period: StatusPeriod, endMs: number): StatusInterval[] {

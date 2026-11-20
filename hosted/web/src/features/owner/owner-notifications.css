@@ -1,13 +1,13 @@
 .hosted-app .owner-notifications-page { min-width: 0; }
 .hosted-app .owner-notifications-page .page-heading { gap: 16px; flex-wrap: wrap; }
 .hosted-app .owner-notices-surface { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
-.hosted-app .owner-notices-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.hosted-app .owner-notices-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .hosted-app .owner-notices-toolbar > span:first-child { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
-.hosted-app .owner-notices-toolbar svg { width: 16px; height: 16px; color: var(--secondary); }
+.hosted-app .owner-notices-toolbar > span:first-child > svg { width: 16px; height: 16px; color: var(--secondary); }
 .hosted-app .owner-notices-state, .hosted-app .owner-notice-draft-label { font-size: 12px; color: var(--secondary); }
 .hosted-app .owner-notices-boundary { margin: 0; padding: 12px 20px; color: var(--secondary); font-size: 12px; line-height: 1.6; background: var(--subtle); }
 .hosted-app .owner-notices-empty { display: grid; justify-items: center; gap: 12px; padding: 64px 20px; color: var(--secondary); text-align: center; }
-.hosted-app .owner-notices-empty > svg { width: 24px; height: 24px; }
+.hosted-app .owner-notices-empty > svg.relay-icon { width: 24px; height: 24px; }
 .hosted-app .owner-notices-empty h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 500; }
 .hosted-app .owner-notice-editor { display: grid; padding: 24px 20px; }
 .hosted-app .owner-notice-editor > label { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
@@ -27,12 +27,32 @@
 .hosted-app .owner-notice-row > .owner-notice-actions { align-content: flex-start; flex-shrink: 0; }
 .hosted-app .owner-notice-delete-question { font-size: 13px; color: var(--text); }
 .hosted-app .owner-notice-delete { color: var(--error); }
+.entry-owner-notices { width: 100%; min-width: 0; container: notices / inline-size; }
+.hosted-entry .owner-notices-heading { font-size: 28px; line-height: 36px; color: var(--text); }
+.landing .entry-owner-notices .key-primary:hover > svg { transform: none; }
+.entry-owner-notices .key-button { min-height: 44px; white-space: normal; }
+.entry-owner-notices .owner-notice-editor > input { min-height: 44px; }
+.entry-owner-notices .owner-notice-editor :is(input, textarea) { font-size: 16px; }
+.entry-owner-notices .owner-notice-editor > .owner-notice-actions { justify-content: end; margin-block-start: 16px; }
+.entry-owner-notices .owner-notice-row > .owner-notice-actions { max-width: min(100%, 16rem); align-self: start; justify-content: end; }
+.entry-owner-notices .owner-notice-actions p { flex-basis: 100%; font-size: 13px; text-align: end; }
+.entry-owner-notices .owner-notice-actions .text-button { min-height: 44px; padding-inline: 8px; }
+.entry-owner-notices .notice-feedback { max-width: none; padding: 12px 20px; font-size: 14px; }
+.entry-owner-notices [role="alert"] { color: var(--error); }
+.entry-owner-notices .notice-feedback > .key-button { margin-block-start: 8px; }
+@container notices (max-width: 580px) {
+  .entry-owner-notices .owner-notice-row { flex-direction: column; gap: 12px; }
+  .entry-owner-notices .owner-notice-row > .owner-notice-actions { max-width: none; justify-content: start; }
+  .entry-owner-notices .owner-notice-actions p { text-align: start; }
+}
 @container relay-page (max-width: 760px) {
   .hosted-app .owner-notice-row { flex-direction: column; gap: 16px; }
 }
 @media (max-width: 639px) {
+  .hosted-entry .owner-notices-heading { font-size: 24px; line-height: 32px; }
   .hosted-app .owner-notices-toolbar, .hosted-app .owner-notices-boundary { padding: 12px 16px; }
   .hosted-app .owner-notice-editor, .hosted-app .owner-notice-row { padding: 20px 16px; }
+  .entry-owner-notices .notice-feedback { padding-inline: 16px; }
   .hosted-app .owner-notice-actions > .relay-button { min-height: 44px; }
   .hosted-app .owner-notice-editor-footer > .owner-notice-actions { width: 100%; }
 }

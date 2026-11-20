@@ -92,16 +92,16 @@ test("inline prices preserve exact values and isolate existing price variants", 
   const editor = rules.locator('.owner-model-row[data-model-id="demo-gpt"]');
   const input = editor.getByRole("textbox", { name: "Цена Вход для GPT", exact: true });
   await expect(input).toHaveValue("0.4");
-  await input.fill("0,123456");
+  await input.fill("0,000000400001");
   await input.press("Enter");
-  await expect(input).toHaveValue("0.123456");
+  await expect(input).toHaveValue("0.000000400001");
   await input.fill("-1");
   await input.press("Tab");
   await expect(input).toHaveAttribute("aria-invalid", "true");
   await expect(editor.getByRole("alert")).toBeVisible();
   await input.focus();
   await input.press("Escape");
-  await expect(input).toHaveValue("0.123456");
+  await expect(input).toHaveValue("0.000000400001");
   await expect(editor.getByRole("alert")).toHaveCount(0);
   await editor.locator(".option-trigger").click();
   await page.getByRole("option", { name: "Flex", exact: true }).click();
@@ -111,7 +111,7 @@ test("inline prices preserve exact values and isolate existing price variants", 
   await expect(input).toHaveValue("0");
   await editor.locator(".option-trigger").click();
   await page.getByRole("option", { name: /^≤/ }).click();
-  await expect(input).toHaveValue("0.123456");
+  await expect(input).toHaveValue("0.000000400001");
   const output = editor.getByRole("textbox", { name: "Цена Выход для GPT", exact: true });
   await output.fill("");
   await output.press("Tab");
@@ -120,7 +120,7 @@ test("inline prices preserve exact values and isolate existing price variants", 
   await page.screenshot({ path: info.outputPath("model-prices.png"), animations: "disabled" });
   await navigateOwner(page, "Модели");
   const catalog = page.locator('.catalog-row[data-model-id="demo-gpt"]');
-  await expect(catalog.locator('[data-component="input"] strong')).toHaveText("$0,123456");
+  await expect(catalog.locator('[data-component="input"] strong')).toHaveText("$0,000000400001");
   await expect(catalog.locator('[data-component="output"] strong')).toHaveText("—");
   await expect(catalog.locator(".catalog-saving")).toHaveCount(0);
 });
@@ -150,13 +150,13 @@ test("context labels show supplied bounds and leave missing context blank", asyn
 test("new catalog models appear without hardcoding and disabled rows stay editable", async ({ page }) => {
   await page.route("**/src/preview/snapshot.ts", async route => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: `${await response.text()}\nconst added = { id: "new-model", name: "New discovered model with a long descriptive name", publisher: "New provider", protocols: [], description: "", revision: "test", rates: { input: 9223372036854775807n, output: null } }; previewSnapshot.models.push(added); previewSnapshot.owner.connections[0].models.push(added.id); previewSnapshot.owner.connections[0].paused = true; previewSnapshot.owner.modelRules = { "new-model": { enabled: false } };` });
+    await route.fulfill({ response, body: `${await response.text()}\nconst added = { id: "new-model", name: "New discovered model with a long descriptive name", publisher: "New provider", protocols: [], description: "", revision: "test", rates: { input: "9007199254740993.123456789012", output: null } }; previewSnapshot.models.push(added); previewSnapshot.owner.connections[0].models.push(added.id); previewSnapshot.owner.connections[0].paused = true; previewSnapshot.owner.modelRules = { "new-model": { enabled: false } };` });
   });
   const rules = await openRules(page);
   const row = rules.locator('[data-model-id="new-model"]');
   await expect(row).toBeVisible();
   await expect(row.getByRole("switch")).not.toBeChecked();
-  await expect(rules.getByRole("textbox", { name: /Цена Вход для New discovered/ })).toHaveValue("9223372036854.775807");
+  await expect(rules.getByRole("textbox", { name: /Цена Вход для New discovered/ })).toHaveValue("9007199254740993.123456789012");
   await expectFits(rules);
 });
 
@@ -173,7 +173,7 @@ test("an empty pool does not manufacture model rows", async ({ page }) => {
 test("cache write durations remain directly editable without expanding a row", async ({ page }, info) => {
   await page.route("**/src/preview/snapshot.ts", async route => {
     const response = await route.fetch();
-    await route.fulfill({ response, body: `${await response.text()}\nconst ttl = previewSnapshot.models.find(model => model.id === "demo-claude"); ttl.pricingVariants = undefined; ttl.rates = { input: 600000n, output: 2000000n, cacheRead: 120000n, cacheWrite5m: 750000n, cacheWrite1h: 1500000n };` });
+    await route.fulfill({ response, body: `${await response.text()}\nconst ttl = previewSnapshot.models.find(model => model.id === "demo-claude"); ttl.pricingVariants = undefined; ttl.rates = { input: "0.6", output: "2", cacheRead: "0.12", cacheWrite5m: "0.75", cacheWrite1h: "1.5" };` });
   });
   const rules = await openRules(page);
   const row = rules.locator('.owner-model-row[data-model-id="demo-claude"]');

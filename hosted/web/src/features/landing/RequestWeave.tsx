@@ -13,8 +13,8 @@ function strand(band: typeof bands[number], index: number) {
 }
 
 /** An illustrative connection, never a measurement of live traffic. */
-export function RequestWeave({ description, inputLabel, outputLabel }: {
-  description: string; inputLabel: string; outputLabel: string;
+export function RequestWeave({ brand, description, inputLabel, outputLabel }: {
+  brand: string; description: string; inputLabel: string; outputLabel: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -43,6 +43,6 @@ export function RequestWeave({ description, inputLabel, outputLabel }: {
         <path className={`weave-request weave-request-${index}`} d={strand(band, 11)} pathLength="100" />
       </g>)}
     </svg>
-    <div className="weave-labels" aria-hidden="true"><span>{inputLabel}</span><strong>Relay</strong><span>{outputLabel}</span></div>
+    <div className="weave-labels" aria-hidden="true"><span>{inputLabel}</span><strong>{brand}</strong><span>{outputLabel}</span></div>
   </div>;
 }

@@ -6,10 +6,12 @@ import { CatalogChoice } from "../../src/features/models/CatalogChoice";
 import { formatModelPrice, modelContextRanges, modelRate, modelTierVariant, pricePresentation, selectedModelVariant } from "../../src/features/models/model";
 import type { CustomerModel } from "../../src/features/models/model";
 import { previewModels } from "../../src/preview/models";
+import retailRates from "../../../server/tests/fixtures/retail-rates.json";
+import { canonicalRetailRate } from "../../src/features/models/retailRate";
 
 const base: CustomerModel = {
   id: "test-model", name: "Test model", description: "", protocols: [], revision: "test-v1",
-  rates: { input: 400000n, output: 1200000n },
+  rates: { input: "0.4", output: "1.2" },
 };
 const render = (models: CustomerModel[]) => renderToStaticMarkup(<LocaleProvider><ModelsPage models={models} /></LocaleProvider>);
 
@@ -18,58 +20,61 @@ describe("Server-owned model pricing", () => {
     expect(modelRate(undefined)).toBeNull();
     expect(modelRate(null)).toBeNull();
     expect(modelRate(-1n)).toBeNull();
-    expect(modelRate(0n)).toBe(0n);
+    expect(modelRate(0n)).toBeNull();
+    expect(modelRate("0")).toBe("0");
     expect(pricePresentation(base, "cacheRead")).toEqual({ price: null, official: null, discount: null });
-    const html = render([{ ...base, rates: { input: 0n, output: null } }]);
+    const html = render([{ ...base, rates: { input: "0", output: null } }]);
     expect(html).toContain("Our price: $0");
     expect(html.match(/Price not published/g)).toHaveLength(3);
     expect(html).not.toContain('class="catalog-saving"');
   });
 
   test("the server percentage is displayed, never derived from price arithmetic", () => {
-    const model: CustomerModel = { ...base, comparison: { officialRates: { input: 2000000n }, savingsPercent: { input: 73.125 } } };
+    const model: CustomerModel = { ...base, comparison: { officialRates: { input: "2" }, savingsPercent: { input: 73.125 } } };
     expect(pricePresentation(model, "input").discount).toBe(73.125);
     expect(render([model])).toContain("−73.125%");
     expect(render([model])).not.toContain("−80%");
   });
 
   test("a reference price alone never invents a percentage", () => {
-    const model: CustomerModel = { ...base, comparison: { officialRates: { input: 2000000n } } };
-    expect(pricePresentation(model, "input")).toEqual({ price: 400000n, official: 2000000n, discount: null });
+    const model: CustomerModel = { ...base, comparison: { officialRates: { input: "2" } } };
+    expect(pricePresentation(model, "input")).toEqual({ price: "0.4", official: "2", discount: null });
     const html = render([model]);
     expect(html).toContain("Official");
     expect(html).not.toContain('class="catalog-saving"');
   });
 
   test("a lower input price never claims an output or model-wide discount", () => {
-    const model: CustomerModel = { ...base, comparison: { officialRates: { input: 2000000n }, savingsPercent: { input: 80, output: 98 } } };
+    const model: CustomerModel = { ...base, comparison: { officialRates: { input: "2" }, savingsPercent: { input: 80, output: 98 } } };
     expect(pricePresentation(model, "input").discount).toBe(80);
-    expect(pricePresentation(model, "output")).toEqual({ price: 1200000n, official: null, discount: null });
+    expect(pricePresentation(model, "output")).toEqual({ price: "1.2", official: null, discount: null });
     expect(render([model]).match(/class="catalog-saving"/g)).toHaveLength(1);
   });
 
   test("invalid, negative or misleading comparison values cannot become badges", () => {
     for (const value of [0, -2, 101, Infinity, NaN, 100]) {
-      const model: CustomerModel = { ...base, comparison: { officialRates: { input: 2000000n }, savingsPercent: { input: value } } };
+      const model: CustomerModel = { ...base, comparison: { officialRates: { input: "2" }, savingsPercent: { input: value } } };
       expect(pricePresentation(model, "input").discount).toBeNull();
     }
-    for (const official of [null, -1n, 0n, 400000n, 200000n]) {
+    for (const official of [null, "-1", "0", "0.4", "0.2"]) {
       const model: CustomerModel = { ...base, comparison: { officialRates: { input: official }, savingsPercent: { input: 98 } } };
       expect(pricePresentation(model, "input").official).toBeNull();
       expect(pricePresentation(model, "input").discount).toBeNull();
     }
-    const free: CustomerModel = { ...base, rates: { input: 0n }, comparison: { officialRates: { input: 1n }, savingsPercent: { input: 100 } } };
+    const free: CustomerModel = { ...base, rates: { input: "0" }, comparison: { officialRates: { input: "0.000001" }, savingsPercent: { input: 100 } } };
     expect(pricePresentation(free, "input").discount).toBe(100);
   });
 
-  test("prices stay exact to micro-USD and use the active locale", () => {
+  test("PostgreSQL and Rust rate vectors display without rounding or conversion to Number", () => {
     expect(formatModelPrice(null, "en")).toBe("—");
-    expect(formatModelPrice(0n, "en")).toBe("$0");
-    expect(formatModelPrice(1n, "en")).toBe("$0.000001");
-    expect(formatModelPrice(125000n, "en")).toBe("$0.125");
-    expect(formatModelPrice(125000n, "ru")).toBe("$0,125");
-    expect(formatModelPrice(125000n, "zh-CN")).toBe("$0.125");
-    expect(formatModelPrice(9007199254740993123456n, "en")).toBe("$9,007,199,254,740,993.123456");
+    for (const { input, wire, display_en } of retailRates.valid) {
+      expect(canonicalRetailRate(input)).toBe(wire);
+      expect(formatModelPrice(wire, "en")).toBe(display_en);
+    }
+    for (const value of retailRates.invalid) expect(canonicalRetailRate(value)).toBeNull();
+    expect(formatModelPrice("0.000001", "en")).toBe("$0.000001");
+    expect(formatModelPrice("0.125", "ru")).toBe("$0,125");
+    expect(formatModelPrice("0.125", "zh-CN")).toBe("$0.125");
   });
 
   test("published variants choose their own prices without inventing tier-context combinations", () => {
@@ -77,10 +82,10 @@ describe("Server-owned model pricing", () => {
     expect(selectedModelVariant(model)!.id).toBe("standard-short");
     expect(selectedModelVariant(model, "missing")!.id).toBe("standard-short");
     const long = selectedModelVariant(model, "standard-long")!;
-    expect(long.rates.input).toBe(800000n);
+    expect(long.rates.input).toBe("0.8");
     const flex = modelTierVariant(model, long, "flex")!;
     expect(flex.id).toBe("flex-short");
-    expect(pricePresentation(flex, "input")).toEqual({ price: 200000n, official: null, discount: null });
+    expect(pricePresentation(flex, "input")).toEqual({ price: "0.2", official: null, discount: null });
     expect(pricePresentation(flex, "cacheWrite")).toEqual({ price: null, official: null, discount: null });
     expect(modelTierVariant(model, long, "unpublished")).toBeUndefined();
     expect(selectedModelVariant(base)).toBeUndefined();
@@ -148,7 +153,7 @@ describe("Server-owned model pricing", () => {
   test("ultrafast is a published core tier, not a frontend-invented multiplier", () => {
     const model = previewModels[0]!;
     const selected = modelTierVariant(model, selectedModelVariant(model)!, "ultrafast")!;
-    expect(selected.rates.input).toBe(1000000n);
+    expect(selected.rates.input).toBe("1");
     expect(pricePresentation(selected, "cacheWrite").price).toBeNull();
     expect(pricePresentation(selected, "input").discount).toBeNull();
     const html = render([{ ...model, defaultPricingVariantId: selected.id }]);
@@ -159,7 +164,7 @@ describe("Server-owned model pricing", () => {
   });
 
   test("core cache-write TTL rates stay distinct and explicit zero is preserved", () => {
-    const html = render([{ ...base, rates: { ...base.rates, cacheWrite5m: 125000n, cacheWrite1h: 0n } }]);
+    const html = render([{ ...base, rates: { ...base.rates, cacheWrite5m: "0.125", cacheWrite1h: "0" } }]);
     expect(html).toContain('data-component="cacheWrite5m"');
     expect(html).toContain('data-component="cacheWrite1h"');
     expect(html).toContain("5 min");

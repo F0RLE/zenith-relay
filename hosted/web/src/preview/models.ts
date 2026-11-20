@@ -7,9 +7,9 @@ const gptStandardShort = {
   id: "standard-short",
   tier: "standard" as const,
   contextBand: "base" as const,
-  rates: { input: 400000n, output: 1200000n, cacheRead: 100000n, cacheWrite: 500000n },
+  rates: { input: "0.4", output: "1.2", cacheRead: "0.1", cacheWrite: "0.5" },
   comparison: {
-    officialRates: { input: 2000000n, output: 6000000n, cacheRead: 500000n, cacheWrite: 2500000n },
+    officialRates: { input: "2", output: "6", cacheRead: "0.5", cacheWrite: "2.5" },
     savingsPercent: { input: 80, output: 80, cacheRead: 80, cacheWrite: 80 },
   },
 };
@@ -26,43 +26,43 @@ export const previewModels: CustomerModel[] = [
       gptStandardShort,
       {
         id: "standard-long", tier: "standard", contextBand: "above100k",
-        rates: { input: 800000n, output: 2400000n, cacheRead: 200000n, cacheWrite: 1000000n },
+        rates: { input: "0.8", output: "2.4", cacheRead: "0.2", cacheWrite: "1" },
         comparison: {
-          officialRates: { input: 4000000n, output: 12000000n, cacheRead: 1000000n, cacheWrite: 5000000n },
+          officialRates: { input: "4", output: "12", cacheRead: "1", cacheWrite: "5" },
           savingsPercent: { input: 80, output: 80, cacheRead: 80, cacheWrite: 80 },
         },
       },
       {
         id: "flex-short", tier: "flex", contextBand: "base",
-        rates: { input: 200000n, output: 600000n, cacheRead: 50000n, cacheWrite: null },
+        rates: { input: "0.2", output: "0.6", cacheRead: "0.05", cacheWrite: null },
       },
       {
         id: "priority-short", tier: "priority", contextBand: "base",
-        rates: { input: 600000n, output: 1800000n, cacheRead: 150000n, cacheWrite: 750000n },
+        rates: { input: "0.6", output: "1.8", cacheRead: "0.15", cacheWrite: "0.75" },
       },
       {
         id: "ultrafast-short", tier: "ultrafast", contextBand: "base",
-        rates: { input: 1000000n, output: 3000000n, cacheRead: 250000n },
+        rates: { input: "1", output: "3", cacheRead: "0.25" },
       },
     ],
   },
   {
     id: "demo-claude", name: "Claude", publisher: "Anthropic", protocols: ["Messages"],
     description: "modelCatalog.exampleAnalysis", contextTokens: 200000, featured: true,
-    rates: { input: 600000n, output: 2000000n, cacheRead: 120000n, cacheWrite: 750000n },
+    rates: { input: "0.6", output: "2", cacheRead: "0.12", cacheWrite: "0.75" },
     revision: "demo-catalog-v1",
     comparison: {
-      officialRates: { input: 30000000n, output: 100000000n, cacheRead: 6000000n, cacheWrite: 37500000n },
+      officialRates: { input: "30", output: "100", cacheRead: "6", cacheWrite: "37.5" },
       savingsPercent: { input: 98, output: 98, cacheRead: 98, cacheWrite: 98 },
     },
   },
   {
     id: "demo-gemini", name: "Gemini", publisher: "Google", protocols: ["Chat Completions"],
     description: "modelCatalog.exampleContext", contextTokens: 1000000, featured: true,
-    rates: { input: 200000n, output: 800000n, cacheRead: 50000n, cacheWrite: null },
+    rates: { input: "0.2", output: "0.8", cacheRead: "0.05", cacheWrite: null },
     revision: "demo-catalog-v1",
     comparison: {
-      officialRates: { input: 500000n, output: 2000000n, cacheRead: 125000n },
+      officialRates: { input: "0.5", output: "2", cacheRead: "0.125" },
       savingsPercent: { input: 60, output: 60, cacheRead: 60 },
     },
   },

@@ -2,9 +2,36 @@
 
 [Russian translation](README.ru.md)
 
-The Hosted customer and owner UI is a **preview, not a working Hosted service**.
-Authentication, server persistence, real keys, payments and API integration are
-not implemented. Their delivery and acceptance remain in the
+The production landing reads public configuration from the [Hosted server](../server/README.md).
+Its footer links to the public API guide (`/docs`) and the operator's policies
+and support (`/legal`). Neither requires a session or an API key.
+The local setup command also uses this web build for first-owner passkey enrollment.
+On the normal server `/admin` opens passkey sign-in or the authenticated Overview.
+Its charts show platform requests, recorded tokens and posted API charges for a
+rolling period or All time over retained history.
+Select a chart interval to open the same UTC bounds in owner `/admin/usage`.
+Requests and Errors share filters; an exact request ID opens its retained
+timeline and separates the posted customer charge from the supplier valuation.
+Errors shows the observed stage and explanation when retained, with filters for
+stage, origin, category, severity and code.
+With [customer OIDC configured](../server/README.md#restricted-customer-sign-in),
+the owner can confirm a set of testers or pause access. `/login` verifies their
+identities; `/app/overview` shows the customer's rolling usage and current wallet. `/app/keys`
+issues personal keys with one-time disclosure, replacement and revocation.
+`/admin/connections` lists stored API sources, proxy assignment and current verified models for the owner.
+Its **Paired devices** section lets the owner [grant or revoke read-only Desktop access](../server/README.md#pair-a-desktop).
+In `/admin/pools` the owner admits a verified model, saves its price draft and
+publishes or withdraws it for the approved testers. `/app/models` reads their
+effective catalog without probing a provider or exposing connection details.
+In `/admin/notifications`, the owner saves and confirms
+[in-app notices](../server/README.md#in-app-service-notices) for qualified customers,
+who see them in the header bell.
+From the customer Overview, open a chart interval to see the same report in `/app/usage`. `/app/billing`
+shows the current wallet and links each charge or correction to its request.
+The current receipt can explain a failure and offer status refresh or support
+copy. Saved reports and CSV retain only the receipt and its accounting data.
+The [report limits](../server/README.md#customer-reports)
+apply to server data, not development fixtures. Checkout remains on the
 [Hosted roadmap](../../docs/hosted/HOSTED_RELAY_ROADMAP.md).
 
 This React/TypeScript/Vite package has its own entry point, dependencies and build.
@@ -43,10 +70,12 @@ trashed connection does not rejoin the pool or resume a paused connection.
 Reloading resets window-local changes. Catalog edits can also reach other open
 preview tabs, as described below.
 
-The production entry shows disconnected or unavailable data. `/login` and
-`/admin/login` do not authenticate anyone; opening an owner route grants no
-permissions. Static hosting must serve `index.html` for application routes,
-including `/app/*` and `/admin/*`. This only serves the UI, not a backend.
+The production entry fetches `/api/hosted/v1/public/config` on its own origin.
+A closed installation shows its name and closed state; with an incompatible or
+unavailable API it shows a connection error, not a dashboard. `/login` and
+`/admin/login` use only the running server's customer and owner sessions. Only
+the separate local setup command serves `/setup/owner`. Use `serve --web-dist` for the ordinary built site; an
+external static host must not rewrite API routes to `index.html`.
 
 ## Catalog and connections
 
@@ -64,8 +93,9 @@ including `/app/*` and `/admin/*`. This only serves the UI, not a backend.
 - Unknown quota, price, balance and usage stay unknown, not zero. Expired quota
   does not become a fresh full allowance. A catalog entry is not availability
   evidence; service-status history stays neutral without monitoring data.
-- `src/features/models/model.ts` defines the displayed offers. Rates are integer
-  microUSD per million tokens. Published tiers, context bands and comparisons
+- `src/features/models/model.ts` defines the displayed offers. Catalog and editor
+  rates are decimal USD per million tokens with up to 12 fractional digits;
+  wallet amounts are integer microUSD. Published tiers, context bands and comparisons
   belong to the server contract; the UI does not infer them from model names,
   maximum context or request history. Missing rates are not borrowed from another
   tier, and cache-write durations remain separate.

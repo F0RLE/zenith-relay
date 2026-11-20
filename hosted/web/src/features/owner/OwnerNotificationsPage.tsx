@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Bell, Plus } from "../../components/Icons";
 import { useLocale } from "../../i18n/LocaleProvider";
+import { NoticeFields } from "./NoticeFields";
 import "./owner-notifications.css";
 
 interface NotificationDraft {
@@ -43,10 +44,7 @@ export function OwnerNotificationsPage() {
         setDrafts(current => current.some(item => item.id === next.id) ? current.map(item => item.id === next.id ? next : item) : [next, ...current]);
         finishEditor();
       }}>
-        <label htmlFor="owner-notice-title">{t("ownerNotices.title")}</label>
-        <input id="owner-notice-title" autoFocus required maxLength={120} value={editor.title} onChange={event => setEditor({ ...editor, title: event.target.value })} />
-        <label htmlFor="owner-notice-message">{t("ownerNotices.message")}</label>
-        <textarea id="owner-notice-message" required maxLength={4000} rows={7} value={editor.message} onChange={event => setEditor({ ...editor, message: event.target.value })} />
+        <NoticeFields title={editor.title} message={editor.message} onChange={fields => setEditor({ ...editor, ...fields })} />
         <div className="owner-notice-editor-footer">
           <p id="owner-notice-delivery">{t("ownerNotices.deliveryUnavailable")}</p>
           <div className="owner-notice-actions">
