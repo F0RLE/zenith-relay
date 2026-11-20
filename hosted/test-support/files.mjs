@@ -67,3 +67,11 @@ export function fixtureOrigin(value, { secure = false, numeric = false } = {}) {
     || Number(url.port) < 1 || Number(url.port) > 65535) throw new Error("Expected an isolated loopback origin");
   return `${secure ? "https" : "http"}://${numeric ? "127.0.0.1" : "localhost"}:${Number(url.port)}`;
 }
+
+export function fixtureJourney(name) {
+  switch (name) {
+    case "identity": return false;
+    case "funded": return true;
+    default: throw new Error("Unknown customer fixture journey");
+  }
+}

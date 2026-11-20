@@ -1,7 +1,7 @@
 import { chromium, expect } from "@playwright/test";
 import { createHash, X509Certificate } from "node:crypto";
 import { dirname } from "node:path";
-import { readFixture, writeFixture, fixtureOrigin } from "../../test-support/files.mjs";
+import { readFixture, writeFixture, fixtureOrigin, fixtureJourney } from "../../test-support/files.mjs";
 
 const [rawOrigin, file, mode, otherOrigin, otherFile, journey] = process.argv.slice(2);
 const sourceCopy = mode === "source-copy";
@@ -65,7 +65,7 @@ try {
   } else if (mode === "customer-identity") {
     expect(await prove(page)).toBe(200);
     const { checkCustomerJourney } = await import("./customer-journey.mjs");
-    await checkCustomerJourney({ browser, owner: page, origin, issuer: otherOrigin, exchange: otherFile, funded:journey==="funded" });
+    await checkCustomerJourney({ browser, owner: page, origin, issuer: otherOrigin, exchange: otherFile, funded: fixtureJourney(journey) });
   } else if (sourceCopy) {
     expect(await prove(page)).toBe(200);
     const { checkSourceCopy } = await import("./source-copy.mjs");

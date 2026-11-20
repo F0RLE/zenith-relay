@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fixtureExists, fixtureOrigin, fixturePath, readFixture, writeFixture } from "../../../test-support/files.mjs";
+import { fixtureExists, fixtureOrigin, fixturePath, fixtureJourney, readFixture, writeFixture } from "../../../test-support/files.mjs";
 
 test("browser fixture channels accept only bounded regular files in isolated roots", () => {
   const root = mkdtempSync(join(tmpdir(), "relay-hosted-"));
@@ -36,4 +36,10 @@ test("fixture URLs retain explicit loopback origins and reject credentials and r
   for (const origin of ["http://example.test:1443", "http://localhost:0", "http://localhost:1443/x",
     "http://user@localhost:1443", "http://localhost:1443?x", "http://localhost:1443#x", "file:///tmp/test"])
     expect(() => fixtureOrigin(origin)).toThrow();
+});
+
+test("customer fixtures explicitly select a known journey", () => {
+  expect(fixtureJourney("funded")).toBe(true);
+  expect(fixtureJourney("identity")).toBe(false);
+  for (const name of [undefined, "", "typo", "__proto__", "constructor"]) expect(() => fixtureJourney(name)).toThrow();
 });
