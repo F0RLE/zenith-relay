@@ -32,21 +32,7 @@ pub fn setup_code(root: &Path) -> PathBuf {
 
 #[allow(dead_code)] // Shared by the TLS fixtures, not every integration binary.
 pub fn openssl() -> Command {
-    let Some(path) = std::env::var_os("RELAY_TEST_OPENSSL") else {
-        return Command::new("openssl");
-    };
-    let path = Path::new(&path);
-    assert!(path.is_absolute() && !path.components().any(|c| c == Component::ParentDir));
-    let directory = path.parent().unwrap().canonicalize().unwrap();
-    let executable = if cfg!(windows) {
-        "openssl.exe"
-    } else {
-        "openssl"
-    };
-    assert_eq!(path.file_name().unwrap(), executable);
-    let path = directory.join(executable);
-    assert!(path.starts_with(&directory) && path.is_file());
-    Command::new(path)
+    Command::new("openssl")
 }
 
 #[test]

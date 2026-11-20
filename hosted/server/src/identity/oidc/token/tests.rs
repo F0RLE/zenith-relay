@@ -17,25 +17,27 @@ fn fixture() -> (EncodingKey, JwkSet, Value, Header) {
         .unwrap()
         .as_secs();
     let claims = json!({"iss":"https://issuer.example", "aud":"fixture-client", "sub":"synthetic",
-        "iat":now, "exp":now+300, "nonce":"fixture-nonce", "azp":"fixture-client"});
+        "iat":now, "exp":now+300, "nonce":oauth2::CsrfToken::new_random().secret(), "azp":"fixture-client"});
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some("test".into());
     (key, keys, claims, header)
 }
 
-fn check(token: &str, keys: &JwkSet) -> Result<String, Failure> {
+fn check(token: &str, keys: &JwkSet, nonce: &str) -> Result<String, Failure> {
     subject(
         token,
         keys,
         "https://issuer.example",
         "fixture-client",
-        "fixture-nonce",
+        nonce,
     )
 }
 
 #[test]
 fn verified_identity_requires_exact_claims_and_live_validity() {
     let (key, keys, claims, header) = fixture();
+    let nonce = claims["nonce"].as_str().unwrap().to_owned();
+    let check = |token: &str, keys: &JwkSet| check(token, keys, &nonce);
     let sign = |claims: &Value| encode(&header, claims, &key).unwrap();
     assert_eq!(
         check(&sign(&claims), &keys).ok().as_deref(),
@@ -75,6 +77,8 @@ fn verified_identity_requires_exact_claims_and_live_validity() {
 #[test]
 fn verifier_rejects_wrong_keys_algorithms_and_ambiguous_jwks() {
     let (key, keys, claims, mut header) = fixture();
+    let nonce = claims["nonce"].as_str().unwrap();
+    let check = |token: &str, keys: &JwkSet| check(token, keys, nonce);
     let token = encode(&header, &claims, &key).unwrap();
     let (_, foreign, _, _) = fixture();
     assert!(check(&token, &foreign).is_err());

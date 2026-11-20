@@ -785,7 +785,7 @@ not measure off-host WAL delivery, recovery time or recoverable data loss.
 
 With the web build and Chromium, run
 `cargo test --locked --manifest-path hosted/server/Cargo.toml --test desktop_source_copy -- --ignored`.
-The TLS fixture needs `openssl` on PATH or `RELAY_TEST_OPENSSL` pointing to it.
+The TLS fixture needs `openssl` on PATH.
 The tests cover passkey approval over HTTPS, atomic vault writes, restart recovery
 and a qualification run through the copied authenticated proxy. A rejected proxy
 produces no direct traffic.

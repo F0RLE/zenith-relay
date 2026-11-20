@@ -96,11 +96,24 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
     for entry in fs::read_dir(&source_vault).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name();
-        let source = crate::support::fixture_files::child(&source_vault, &name);
-        let target = copied_vault.join(name);
-        assert!(target.starts_with(&copied_vault));
-        assert!(!target.exists());
-        fs::copy(source, target).unwrap();
+        let name = if name == "installation.zhv" {
+            "installation.zhv".to_owned()
+        } else {
+            let id = Uuid::parse_str(name.to_str().unwrap().strip_suffix(".zhv").unwrap()).unwrap();
+            format!("{id}.zhv")
+        };
+        let source =
+            crate::support::fixture_files::child(&source_vault, std::ffi::OsStr::new(&name));
+        let mut input = fs::File::open(source).unwrap();
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(copied_vault.join(name)).unwrap();
+        std::io::copy(&mut input, &mut output).unwrap();
     }
 
     // All three effects commit AFTER the backup. The merchant's effect
