@@ -55,6 +55,9 @@ fn diagnostic_root(args: &[std::ffi::OsString]) -> Result<Option<&Path>, &'stati
     if args.len() != 3
         || !matches!(args[1].to_str(), Some(FLAG | AUTHORIZATION_FLAG))
         || !Path::new(&args[2]).is_absolute()
+        || Path::new(&args[2])
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
     {
         return Err("expected_absolute_relay_data_root");
     }
@@ -65,6 +68,13 @@ async fn compare(root: &Path) -> Result<serde_json::Value, &'static str> {
     let metadata = std::fs::symlink_metadata(root).map_err(|_| "data_root_unavailable")?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("data_root_unsafe");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("data_root_unsafe");
+        }
     }
     let vault_root = StoragePaths::from_root(root).vault_root();
     let pool = ProxyPool::load_read_only(&vault_root).map_err(|_| "proxy_pool_unavailable")?;
@@ -195,6 +205,9 @@ mod tests {
             root.clone().into_os_string(),
         ];
         assert_eq!(diagnostic_root(&args).unwrap(), Some(root.as_path()));
+        let mut traversal = args.clone();
+        traversal[2] = root.join("../other").into_os_string();
+        assert!(diagnostic_root(&traversal).is_err());
         let authorization_args = vec![
             OsString::from("relay"),
             OsString::from(AUTHORIZATION_FLAG),

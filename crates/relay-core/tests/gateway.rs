@@ -555,7 +555,7 @@ async fn upstream_image_generation(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = zenith_relay_core::bounded_json::from_slice(&body).unwrap();
     state.bodies.lock().unwrap().push(request);
     Json(json!({
         "created": 7,
@@ -609,7 +609,7 @@ async fn upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = zenith_relay_core::bounded_json::from_slice(&body).unwrap();
     if request.get("stream").and_then(Value::as_bool) != Some(true) {
         return Json(json!({
             "id": "resp_test",
@@ -790,7 +790,7 @@ async fn recording_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = zenith_relay_core::bounded_json::from_slice(&body).unwrap();
     state.bodies.lock().unwrap().push(request.clone());
     Json(json!({
         "id": "resp_test",
@@ -809,7 +809,7 @@ async fn native_replay_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -953,7 +953,7 @@ async fn strict_function_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -997,7 +997,7 @@ async fn strict_custom_tool_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1041,7 +1041,7 @@ async fn strict_message_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1085,7 +1085,7 @@ async fn strict_missing_call_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1229,7 +1229,7 @@ async fn upstream_messages(
     if !has_messages_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1410,7 +1410,7 @@ async fn upstream_gemini_generate_content(
     if !has_gemini_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1439,7 +1439,7 @@ async fn upstream_gemini_stream_generate_content(
     if !has_gemini_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match zenith_relay_core::bounded_json::from_slice(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };

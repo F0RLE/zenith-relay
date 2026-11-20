@@ -3,7 +3,9 @@ use crate::local_pool::error::{LocalPoolError, Result};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
-use std::{collections::HashSet, fs, path::Path};
+#[cfg(test)]
+use std::fs;
+use std::{collections::HashSet, path::Path};
 use zenith_relay_core::model_metadata::ModelMetadataCatalog;
 use zenith_relay_core::{
     CODEX_RELAY_CATALOG_HASH, codex_catalog_entry_is_compatible, codex_model_display_name,

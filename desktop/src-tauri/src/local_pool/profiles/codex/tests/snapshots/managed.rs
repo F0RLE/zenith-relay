@@ -84,7 +84,9 @@ fn restored_account_binding_refreshes_tokens_and_retains_reusable_undo() {
             .unwrap(),
             1
         );
-        let auth: Value = serde_json::from_slice(&fs::read(home.join(AUTH_FILE)).unwrap()).unwrap();
+        let auth: Value =
+            zenith_relay_core::bounded_json::from_slice(&fs::read(home.join(AUTH_FILE)).unwrap())
+                .unwrap();
         assert_eq!(auth["tokens"]["access_token"], "synthetic-refreshed");
         restore_account_with(&home, &backups, &secrets).unwrap();
         assert_eq!(fs::read_to_string(home.join(AUTH_FILE)).unwrap(), original);

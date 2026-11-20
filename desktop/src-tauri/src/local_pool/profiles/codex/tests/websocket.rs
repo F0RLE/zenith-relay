@@ -116,7 +116,8 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
     );
     let backup_file = backup_path(&backups);
     let backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_file).unwrap())
+            .unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], false);
 
     set_local_gateway_websockets_with_backend(&home, &backups, true, None, &secrets).unwrap();
@@ -126,7 +127,8 @@ fn local_gateway_websocket_setting_updates_managed_config_and_backup() {
             .contains("supports_websockets = true")
     );
     let backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_file).unwrap())
+            .unwrap();
     assert_eq!(backup["managedSupportsWebsockets"], true);
 
     restore_with(&home, &backups, &secrets).unwrap();
@@ -256,7 +258,8 @@ fn legacy_backup_without_websocket_field_does_not_block_restore() {
     .unwrap();
     let backup_file = backup_path(&backups);
     let mut backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_file).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_file).unwrap())
+            .unwrap();
     backup
         .as_object_mut()
         .unwrap()

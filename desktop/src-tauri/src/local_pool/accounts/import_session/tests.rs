@@ -342,7 +342,8 @@ fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
 
     let started = store.start(&fixture(), None, &[]).unwrap();
     let path = snapshot_path(&root, &started.session_id).unwrap();
-    let mut snapshot: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut snapshot: Value =
+        zenith_relay_core::bounded_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     snapshot["preview"]["access_token"] = Value::String(ACCESS_TOKEN.to_string());
     fs::write(&path, serde_json::to_vec_pretty(&snapshot).unwrap()).unwrap();
     assert_eq!(

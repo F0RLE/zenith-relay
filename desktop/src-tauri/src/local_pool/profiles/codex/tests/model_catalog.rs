@@ -134,7 +134,8 @@ fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
         Some(portable_path_string(&catalog_path).as_ref())
     );
     let managed_catalog: Value =
-        serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&catalog_path).unwrap())
+            .unwrap();
     let models = managed_catalog["models"].as_array().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0]["slug"], "vendor/claude-opus-4-8");
@@ -482,7 +483,8 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), attached_auth);
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let catalog: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(catalog_path).unwrap())
+            .unwrap();
     let refreshed = catalog["models"]
         .as_array()
         .unwrap()
@@ -628,7 +630,7 @@ fn repeated_oauth_pool_attach_refreshes_missing_and_empty_speed_tiers() {
     assert!(!home.join(MODELS_CACHE_FILE).exists());
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let saved = fs::read(&catalog_path).unwrap();
-    let catalog: Value = serde_json::from_slice(&saved).unwrap();
+    let catalog: Value = zenith_relay_core::bounded_json::from_slice(&saved).unwrap();
     for (index, model) in catalog["models"].as_array().unwrap().iter().enumerate() {
         assert_eq!(model["slug"], models[index]["slug"]);
         assert_eq!(model["service_tiers"], tiers);
@@ -718,7 +720,8 @@ fn first_catalog_upgrade_preserves_legacy_user_catalog() {
     .unwrap();
     let backup_path = backup_path(&backups);
     let mut legacy: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     let object = legacy.as_object_mut().unwrap();
     object.remove("previousModelCatalogJson");
     object.remove("managedModelCatalogPath");
@@ -763,7 +766,8 @@ fn legacy_relay_catalog_metadata_is_adopted_without_overwriting_an_external_cata
 
     let backup_path = backup_path(&backups);
     let mut legacy: Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     let object = legacy.as_object_mut().unwrap();
     for field in [
         "previousModelCatalogJson",
@@ -820,7 +824,8 @@ fn legacy_catalog_without_the_relay_marker_is_not_adopted() {
 
     let backup_path = backup_path(&backups);
     let mut legacy: Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     let object = legacy.as_object_mut().unwrap();
     for field in [
         "managedModelCatalogPath",
@@ -834,7 +839,8 @@ fn legacy_catalog_without_the_relay_marker_is_not_adopted() {
 
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     let mut catalog: Value =
-        serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&catalog_path).unwrap())
+            .unwrap();
     for model in catalog["models"].as_array_mut().unwrap() {
         model["comp_hash"] = Value::String("external-catalog".into());
     }
@@ -982,7 +988,8 @@ fn invalid_catalog_backup_path_still_requires_recovery() {
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
     fs::write(&catalog_path, "externally changed").unwrap();
     let backup_path = backup_path(&backups);
-    let mut backup: Value = serde_json::from_slice(&fs::read(&backup_path).unwrap()).unwrap();
+    let mut backup: Value =
+        zenith_relay_core::bounded_json::from_slice(&fs::read(&backup_path).unwrap()).unwrap();
     backup["managedModelCatalogPath"] = Value::String("other-catalog.json".into());
     fs::write(&backup_path, serde_json::to_vec(&backup).unwrap()).unwrap();
 

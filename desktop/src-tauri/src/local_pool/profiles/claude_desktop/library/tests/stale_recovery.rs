@@ -125,7 +125,7 @@ fn explicit_reconnect_preserves_external_preferences_and_the_original_snapshot()
         let after = recovery(&fixture.recovery, &fixture.library)
             .unwrap()
             .unwrap();
-        let before: Recovery = serde_json::from_slice(&before).unwrap();
+        let before: Recovery = zenith_relay_core::bounded_json::from_slice(&before).unwrap();
         assert_eq!(after.snapshot_name, before.snapshot_name);
         assert_eq!(after.created_at_ms, before.created_at_ms);
         assert_eq!(after.previous_applied_id, before.previous_applied_id);

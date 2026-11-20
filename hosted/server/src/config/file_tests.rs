@@ -2,6 +2,17 @@ use super::read_limited;
 use std::fs;
 
 #[test]
+fn parser_limit_applies_to_direct_callers() {
+    let text = " ".repeat(65_536);
+    assert!(super::checked_text(&text).is_ok());
+    assert_eq!(
+        super::checked_text(&(text + " ")),
+        Err("configuration exceeds 64 KiB")
+    );
+    assert!(super::Config::parse(&" ".repeat(65_537)).is_err());
+}
+
+#[test]
 fn explicit_regular_files_are_bounded() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("config.toml");

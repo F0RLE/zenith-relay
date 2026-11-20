@@ -1,7 +1,8 @@
 use super::*;
 
 fn backdate_manifest(path: &Path) -> Vec<u8> {
-    let mut record: RepairManifest = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let mut record: RepairManifest =
+        zenith_relay_core::bounded_json::from_slice(&fs::read(path).unwrap()).unwrap();
     record.created_at_ms = now_ms().saturating_sub(5_000);
     let bytes = serde_json::to_vec_pretty(&record).unwrap();
     fs::write(path, &bytes).unwrap();
@@ -66,7 +67,7 @@ fn oversized_rollback_manifest_is_rejected_without_changing_destinations() {
     let mut bytes = fs::read(&manifest_path).unwrap();
     assert!(bytes.len() as u64 <= MAX_REPAIR_MANIFEST_BYTES);
     bytes.resize(MAX_REPAIR_MANIFEST_BYTES as usize + 1, b' ');
-    let _: RepairManifest = serde_json::from_slice(&bytes).unwrap();
+    let _: RepairManifest = zenith_relay_core::bounded_json::from_slice(&bytes).unwrap();
     fs::write(&manifest_path, &bytes).unwrap();
 
     let result = rollback(&backups, &applied.backup_id);

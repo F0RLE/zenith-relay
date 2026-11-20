@@ -148,6 +148,13 @@ fn read_limited(path: &Path, limit: u64, _private: bool) -> Option<Zeroizing<Str
     (text.len() as u64 <= limit).then_some(text)
 }
 
+fn checked_text(text: &str) -> Result<&str, &'static str> {
+    if text.len() > 65_536 {
+        return Err("configuration exceeds 64 KiB");
+    }
+    Ok(text)
+}
+
 impl Config {
     pub fn load() -> Result<Self, &'static str> {
         let path = env::var_os("ZENITH_RELAY_HOSTED_CONFIG").ok_or("configuration path missing")?;
@@ -157,7 +164,8 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self, &'static str> {
-        let mut c: Self = toml::from_str(text).map_err(|_| "invalid configuration")?;
+        let mut c: Self =
+            toml::from_str(checked_text(text)?).map_err(|_| "invalid configuration")?;
         if !c.server.bind.ip().is_loopback() || c.server.bind.port() == 0 {
             return Err("bind must be a loopback address with a nonzero port");
         }

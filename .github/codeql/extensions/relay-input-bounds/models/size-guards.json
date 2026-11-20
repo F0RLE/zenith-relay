@@ -1,0 +1,11 @@
+{
+  "extensions": [{
+    "addsTo": { "pack": "codeql/rust-all", "extensible": "barrierModel" },
+    "data": [
+      ["zenith_relay_core::bounded_json::checked_input", "ReturnValue", "unsafe-deserialization", "manual"],
+      ["zenith_relay_core::bounded_json::checked_input", "ReturnValue.Field[core::result::Result::Ok(0)]", "unsafe-deserialization", "manual"],
+      ["zenith_relay_hosted::config::checked_text", "ReturnValue", "unsafe-deserialization", "manual"],
+      ["zenith_relay_hosted::config::checked_text", "ReturnValue.Field[core::result::Result::Ok(0)]", "unsafe-deserialization", "manual"]
+    ]
+  }]
+}

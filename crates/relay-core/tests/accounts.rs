@@ -674,7 +674,7 @@ async fn upstream(
     uri: Uri,
     body: Bytes,
 ) -> Response<Body> {
-    let body_value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let body_value = zenith_relay_core::bounded_json::from_slice(&body).unwrap_or(Value::Null);
     state.requests.lock().unwrap().push(ObservedRequest {
         path: uri.path().to_string(),
         authorization: header(&headers, AUTHORIZATION.as_str()),
@@ -781,7 +781,7 @@ async fn held_stream_upstream(
         session_id: header(&headers, "x-session-id"),
         turn_state: header(&headers, "x-codex-turn-state"),
         image_turn_id: header(&headers, "x-codex-image-turn-id"),
-        body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        body: zenith_relay_core::bounded_json::from_slice(&body).unwrap_or(Value::Null),
     });
     held_stream_response(state.release)
 }
@@ -803,7 +803,7 @@ async fn held_then_json_upstream(
             session_id: header(&headers, "x-session-id"),
             turn_state: header(&headers, "x-codex-turn-state"),
             image_turn_id: header(&headers, "x-codex-image-turn-id"),
-            body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+            body: zenith_relay_core::bounded_json::from_slice(&body).unwrap_or(Value::Null),
         });
         requests.len()
     };
@@ -916,8 +916,10 @@ async fn upstream_websocket(
     websocket.on_upgrade(move |mut socket| async move {
         while let Some(Ok(message)) = socket.recv().await {
             let request = match message {
-                AxumWsMessage::Text(text) => serde_json::from_slice(text.as_bytes()),
-                AxumWsMessage::Binary(bytes) => serde_json::from_slice(&bytes),
+                AxumWsMessage::Text(text) => {
+                    zenith_relay_core::bounded_json::from_slice(text.as_bytes())
+                }
+                AxumWsMessage::Binary(bytes) => zenith_relay_core::bounded_json::from_slice(&bytes),
                 AxumWsMessage::Close(_) => break,
                 AxumWsMessage::Ping(payload) => {
                     if socket.send(AxumWsMessage::Pong(payload)).await.is_err() {

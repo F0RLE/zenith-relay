@@ -148,7 +148,7 @@ fn matching_history_does_not_consume_the_rewrite_budget() {
     assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
     assert_eq!(database_provider(&database), "zenith_relay_local");
     assert_eq!(fs::read_to_string(&matching).unwrap(), matching_content);
-    let manifest: RepairManifest = serde_json::from_slice(
+    let manifest: RepairManifest = zenith_relay_core::bounded_json::from_slice(
         &fs::read(backups.join(&applied.backup_id).join("manifest.json")).unwrap(),
     )
     .unwrap();

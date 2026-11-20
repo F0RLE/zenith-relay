@@ -110,7 +110,7 @@ fn backup_created_at_ms(directory: &Path) -> Option<u64> {
         MAX_REPAIR_MANIFEST_BYTES,
     )
     .ok()?;
-    let manifest: RepairManifest = serde_json::from_slice(&bytes).ok()?;
+    let manifest: RepairManifest = zenith_relay_core::bounded_json::from_slice(&bytes).ok()?;
     if manifest.version != SNAPSHOT_VERSION
         || manifest.backup_id != directory.file_name()?.to_str()?
         || snapshot::validate_manifest_paths(&manifest, directory).is_err()

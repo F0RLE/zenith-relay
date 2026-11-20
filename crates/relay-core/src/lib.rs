@@ -34,6 +34,7 @@ macro_rules! define_usage_request_contract {
 
 pub mod accounts;
 pub mod automations;
+pub mod bounded_json;
 pub mod catalog;
 mod catalog_io;
 mod error;

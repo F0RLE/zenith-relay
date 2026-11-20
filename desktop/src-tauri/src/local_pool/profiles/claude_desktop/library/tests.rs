@@ -79,7 +79,7 @@ fn attach_preserves_foreign_metadata_and_restore_removes_only_owned_profile() {
         .unwrap()
     );
     let metadata = fs::read(fixture.library.join("_meta.json")).unwrap();
-    let metadata_value: Value = serde_json::from_slice(&metadata).unwrap();
+    let metadata_value: Value = zenith_relay_core::bounded_json::from_slice(&metadata).unwrap();
     assert_eq!(metadata_value["custom"], json!({ "theme": "dark" }));
     assert_eq!(
         metadata_value["entries"][0]["custom"],
@@ -94,9 +94,11 @@ fn attach_preserves_foreign_metadata_and_restore_removes_only_owned_profile() {
             .any(|entry| entry["id"] == "other")
     );
     assert!(restore(&fixture.library, &fixture.recovery).unwrap());
-    let restored: Value =
-        serde_json::from_slice(&fs::read(fixture.library.join("_meta.json")).unwrap()).unwrap();
-    let original: Value = serde_json::from_slice(&original_meta).unwrap();
+    let restored: Value = zenith_relay_core::bounded_json::from_slice(
+        &fs::read(fixture.library.join("_meta.json")).unwrap(),
+    )
+    .unwrap();
+    let original: Value = zenith_relay_core::bounded_json::from_slice(&original_meta).unwrap();
     assert_eq!(restored, original);
     assert_eq!(fs::read(foreign_path).unwrap(), foreign_bytes);
     assert!(!fixture.profile().exists());
@@ -116,8 +118,10 @@ fn inactive_refresh_does_not_overwrite_a_newer_manual_selection() {
         )
         .unwrap()
     );
-    let mut meta: Value =
-        serde_json::from_slice(&fs::read(fixture.library.join("_meta.json")).unwrap()).unwrap();
+    let mut meta: Value = zenith_relay_core::bounded_json::from_slice(
+        &fs::read(fixture.library.join("_meta.json")).unwrap(),
+    )
+    .unwrap();
     meta["appliedId"] = json!("other");
     fs::write(
         fixture.library.join("_meta.json"),

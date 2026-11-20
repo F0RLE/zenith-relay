@@ -138,10 +138,10 @@ impl fmt::Debug for ProcessAccountGuard {
 
 impl Drop for ProcessAccountGuard {
     fn drop(&mut self) {
-        let Ok(bytes) = fs::read(&self.path) else {
+        let Ok(bytes) = crate::files::read_regular_file_bounded(&self.path, MAX_LOCK_BYTES) else {
             return;
         };
-        let Ok(owner) = serde_json::from_slice::<LockOwner>(&bytes) else {
+        let Ok(owner) = zenith_relay_core::bounded_json::from_slice::<LockOwner>(&bytes) else {
             return;
         };
         if owner.owner_token == self.owner_token {
@@ -208,15 +208,17 @@ fn recover_stale_lock(path: &Path, stale_after_ms: u64) -> Result<bool, ProcessL
     {
         return Err(ProcessLockError::UnsafePath);
     }
-    let first = fs::read(path).map_err(|_| ProcessLockError::Io)?;
-    let owner: LockOwner =
-        serde_json::from_slice(&first).map_err(|_| ProcessLockError::UnsafePath)?;
+    let first = crate::files::read_regular_file_bounded(path, MAX_LOCK_BYTES)
+        .map_err(|_| ProcessLockError::UnsafePath)?;
+    let owner: LockOwner = zenith_relay_core::bounded_json::from_slice(&first)
+        .map_err(|_| ProcessLockError::UnsafePath)?;
     if Uuid::parse_str(&owner.owner_token).is_err()
         || now_ms().saturating_sub(owner.created_at_ms) <= stale_after_ms
     {
         return Ok(false);
     }
-    let second = fs::read(path).map_err(|_| ProcessLockError::Io)?;
+    let second = crate::files::read_regular_file_bounded(path, MAX_LOCK_BYTES)
+        .map_err(|_| ProcessLockError::UnsafePath)?;
     if first != second {
         return Ok(false);
     }

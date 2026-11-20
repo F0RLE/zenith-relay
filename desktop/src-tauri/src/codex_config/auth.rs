@@ -13,8 +13,10 @@ pub(crate) fn load_api_key_for_launch() -> Option<String> {
 
 fn load_zenith_auth_key_if_configured() -> Option<String> {
     let config_path = default_codex_home().join(CONFIG_FILE);
-    let config_text = std::fs::read_to_string(config_path).ok()?;
-    zenith_auth_key_if_configured(&config_text, load_codex_auth_key())
+    let config_bytes =
+        crate::files::read_regular_file_bounded(&config_path, 4 * 1024 * 1024).ok()?;
+    let config_text = std::str::from_utf8(&config_bytes).ok()?;
+    zenith_auth_key_if_configured(config_text, load_codex_auth_key())
 }
 
 pub(super) fn zenith_auth_key_if_configured(
@@ -49,8 +51,12 @@ fn load_zenith_key_from_codex_config() -> Option<String> {
 }
 
 fn load_codex_auth_key() -> Option<String> {
-    let auth_text = std::fs::read_to_string(default_codex_home().join(AUTH_FILE)).ok()?;
-    let auth: serde_json::Value = serde_json::from_str(&auth_text).ok()?;
+    let auth_bytes = crate::files::read_regular_file_bounded(
+        &default_codex_home().join(AUTH_FILE),
+        4 * 1024 * 1024,
+    )
+    .ok()?;
+    let auth: serde_json::Value = zenith_relay_core::bounded_json::from_slice(&auth_bytes).ok()?;
     let api_key = auth.get("OPENAI_API_KEY")?.as_str()?.trim().to_string();
     (!api_key.is_empty()).then_some(api_key)
 }

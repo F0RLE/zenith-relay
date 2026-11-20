@@ -366,7 +366,9 @@ fn repeated_attach_applies_changed_reasoning_catalog_to_an_active_profile() {
     .unwrap();
 
     let catalog_path = managed_model_catalog_path(&backups).unwrap();
-    let catalog: Value = serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+    let catalog: Value =
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(catalog_path).unwrap())
+            .unwrap();
     assert_eq!(catalog["models"][0]["default_reasoning_level"], "low");
     assert_eq!(
         catalog["models"][0]["supported_reasoning_levels"]

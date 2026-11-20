@@ -92,8 +92,10 @@ model = "gpt-native"
     assert!(!account_config.contains("profile-relay-catalog.json"));
     assert!(account_config.contains("[profiles.native]"));
     assert!(account_config.contains("[model_providers.custom]"));
-    let account_auth: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+    let account_auth: serde_json::Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(account_auth["OPENAI_API_KEY"], serde_json::Value::Null);
     assert_eq!(account_auth["tokens"]["refresh_token"], "refresh-secret");
     assert_eq!(account_auth["auth_mode"], "chatgpt");
@@ -612,7 +614,8 @@ fn local_gateway_projects_and_syncs_a_bound_oauth_profile() {
     let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
     assert!(projected.contains("bound-access"));
     assert!(!projected.contains("zlr_key"));
-    let projected_value = serde_json::from_str::<serde_json::Value>(&projected).unwrap();
+    let projected_value =
+        zenith_relay_core::bounded_json::from_str::<serde_json::Value>(&projected).unwrap();
     assert!(projected_value["OPENAI_API_KEY"].is_null());
     assert_eq!(projected_value["auth_mode"], "chatgpt");
     assert_eq!(projected_value["tokens"]["account_id"], "provider-account");
@@ -861,8 +864,10 @@ fn oauth_account_restore_preserves_a_fresh_manual_login() {
         &secrets,
     )
     .unwrap();
-    let auth: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+    let auth: serde_json::Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+    )
+    .unwrap();
     assert!(auth["tokens"].get("refresh_token").is_none());
     fs::write(
         home.join(AUTH_FILE),
@@ -987,8 +992,10 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         Some("priority")
     );
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
-    let state: Value =
-        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    let state: Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(state["other"], 1);
     assert_eq!(state[PERSISTED_ATOM_STATE_KEY]["theme"], "dark");
     assert_eq!(
@@ -1013,8 +1020,10 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
         config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(),
         Some("ultrafast")
     );
-    let state: Value =
-        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    let state: Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY],
         "ultrafast"
@@ -1034,8 +1043,10 @@ fn sync_default_service_tier_preserves_codex_profile_state() {
     );
     assert_eq!(config[TOP_LEVEL_SERVICE_TIER_KEY].as_str(), Some("default"));
     assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
-    let state: Value =
-        serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap()).unwrap();
+    let state: Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(state["other"], 1);
     assert!(state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY].is_null());
     assert_eq!(

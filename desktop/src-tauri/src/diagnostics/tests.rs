@@ -140,3 +140,30 @@ fn interrupted_stage_marker_survives_and_is_cleared_after_clean_shutdown() {
     assert!(read_latest_stage(&root).is_none());
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[test]
+fn oversized_stage_is_ignored_without_hiding_a_valid_slot() {
+    let root = test_root("stage-size");
+    assert!(ensure_layout(&root));
+    let value = Breadcrumb {
+        timestamp: "2026-11-20T12:00:00Z".into(),
+        operation: "account-subscription-probe".into(),
+        stage: "started".into(),
+        details: BTreeMap::new(),
+    };
+    persist::Writers::default().stage.write(&root, &value);
+    let path = root
+        .join(LOGS_DIRECTORY)
+        .join(OPERATIONS_DIRECTORY)
+        .join("last-stage-slot-0.json");
+    fs::write(&path, vec![b' '; MAX_STAGE_BYTES + 65]).unwrap();
+    assert_eq!(read_latest_stage(&root).unwrap().stage, "started");
+    fs::remove_file(
+        root.join(LOGS_DIRECTORY)
+            .join(OPERATIONS_DIRECTORY)
+            .join("last-stage-slot-1.json"),
+    )
+    .unwrap();
+    assert!(read_latest_stage(&root).is_none());
+    fs::remove_dir_all(root).unwrap();
+}

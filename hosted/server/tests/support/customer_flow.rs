@@ -209,7 +209,8 @@ pub async fn journey(with_inference: bool) {
     };
     checkpoint(&mut browser, &exchange.join("customers")).await;
     let [a, b]: [Uuid; 2] =
-        serde_json::from_slice(&fs::read(exchange.join("customers")).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_slice(&fs::read(exchange.join("customers")).unwrap())
+            .unwrap();
     assert_ne!(a, b);
     assert_eq!(counts().await.unwrap(), (3, 2, 2, 0));
     payment::assert_wallet(&admin, a, 0, 0).await;

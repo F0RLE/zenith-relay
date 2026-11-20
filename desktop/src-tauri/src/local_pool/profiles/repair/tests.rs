@@ -81,7 +81,7 @@ fn rollout_provider_from_file(path: &Path) -> String {
     BufReader::new(File::open(path).unwrap())
         .read_line(&mut line)
         .unwrap();
-    let value: Value = serde_json::from_str(&line).unwrap();
+    let value: Value = zenith_relay_core::bounded_json::from_str(&line).unwrap();
     value["payload"]["model_provider"]
         .as_str()
         .unwrap()

@@ -34,7 +34,7 @@ impl Fixture {
         native::Config::load(&self.0).unwrap().unwrap()
     }
     fn value(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.path()).unwrap()).unwrap()
+        zenith_relay_core::bounded_json::from_slice(&fs::read(self.path()).unwrap()).unwrap()
     }
 }
 impl Drop for Fixture {

@@ -106,7 +106,9 @@ fn explicit_restore_returns_account_and_preserves_newer_preferences() {
         config["mcp_servers"]["synthetic"]["command"].as_str(),
         Some("synthetic-command")
     );
-    let auth: Value = serde_json::from_slice(&fs::read(home.join(AUTH_FILE)).unwrap()).unwrap();
+    let auth: Value =
+        zenith_relay_core::bounded_json::from_slice(&fs::read(home.join(AUTH_FILE)).unwrap())
+            .unwrap();
     assert_eq!(auth["auth_mode"], "chatgpt");
     assert_eq!(auth["tokens"]["access_token"], "synthetic-saved");
     assert!(auth.get("OPENAI_API_KEY").is_none());

@@ -110,7 +110,8 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>, ConnectionError> {
 }
 
 fn parse(bytes: &[u8]) -> Result<Value, ConnectionError> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| ConnectionError::Unavailable)?;
+    let value: Value = zenith_relay_core::bounded_json::from_slice(bytes)
+        .map_err(|_| ConnectionError::Unavailable)?;
     if !value.is_object() {
         return Err(ConnectionError::Unavailable);
     }

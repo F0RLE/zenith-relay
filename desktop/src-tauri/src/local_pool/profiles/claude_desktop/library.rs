@@ -97,7 +97,7 @@ fn read(path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 fn parse(bytes: &[u8]) -> Result<Value> {
-    serde_json::from_slice(bytes).map_err(|_| invalid_config())
+    zenith_relay_core::bounded_json::from_slice(bytes).map_err(|_| invalid_config())
 }
 
 pub(super) fn uses_model_identity(library: &Path) -> Result<bool> {
@@ -194,7 +194,7 @@ fn safe_id(id: &str) -> bool {
 
 fn recovery(path: &Path, library: &Path) -> Result<Option<Recovery>> {
     let value: Option<Recovery> = read(path)?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| invalid()))
+        .map(|bytes| zenith_relay_core::bounded_json::from_slice(&bytes).map_err(|_| invalid()))
         .transpose()?;
     if value.as_ref().is_some_and(|record| {
         record.profile_id != PROFILE_ID

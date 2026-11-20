@@ -153,7 +153,8 @@ fn authoritative_empty_refresh_clears_only_owned_catalog_and_can_recover() {
     assert_eq!(fs::read(&catalog_path).unwrap(), before_catalog);
     let empty = r#"{"models":[]}"#;
     assert!(refresh_managed_model_catalog(&home, &backups, empty, None).unwrap());
-    let cleared: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+    let cleared: Value =
+        zenith_relay_core::bounded_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
     assert_eq!(cleared["models"], json!([]));
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), before_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), before_auth);

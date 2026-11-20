@@ -131,10 +131,13 @@ pub(in crate::local_pool::profiles::codex) fn is_native_catalog_entry(
 }
 
 pub(super) fn cached_native_catalog_models(codex_home: &Path) -> Vec<Value> {
-    let Ok(content) = fs::read_to_string(codex_home.join(MODELS_CACHE_FILE)) else {
+    let Ok(content) = crate::files::read_regular_file_bounded(
+        &codex_home.join(MODELS_CACHE_FILE),
+        super::MAX_MODEL_CATALOG_BYTES as u64,
+    ) else {
         return Vec::new();
     };
-    let Ok(cache) = serde_json::from_str::<Value>(&content) else {
+    let Ok(cache) = zenith_relay_core::bounded_json::from_slice::<Value>(&content) else {
         return Vec::new();
     };
     cache

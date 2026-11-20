@@ -123,18 +123,14 @@ pub(in crate::diagnostics) fn read_latest_stage(root: &Path) -> Option<Breadcrum
 }
 
 fn read_stage(path: &Path) -> Option<(Option<u64>, Breadcrumb)> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() > MAX_STAGE_RECORD_BYTES as u64
+    let bytes =
+        crate::files::read_regular_file_bounded(path, MAX_STAGE_RECORD_BYTES as u64).ok()?;
+    if let Ok(record) =
+        zenith_relay_core::bounded_json::from_slice::<StoredStage<Breadcrumb>>(&bytes)
     {
-        return None;
-    }
-    let bytes = fs::read(path).ok()?;
-    if let Ok(record) = serde_json::from_slice::<StoredStage<Breadcrumb>>(&bytes) {
         return sanitize_breadcrumb(record.breadcrumb).map(|value| (Some(record.sequence), value));
     }
-    sanitize_breadcrumb(serde_json::from_slice::<Breadcrumb>(&bytes).ok()?)
+    sanitize_breadcrumb(zenith_relay_core::bounded_json::from_slice::<Breadcrumb>(&bytes).ok()?)
         .map(|value| (None, value))
 }
 

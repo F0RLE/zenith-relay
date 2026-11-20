@@ -145,7 +145,9 @@ pub async fn check(
     if bytes.len() > 8192 {
         return Err("invalid qualification profile");
     }
-    let spec = match serde_json::from_slice(&bytes).map_err(|_| "invalid qualification profile")? {
+    let spec = match zenith_relay_core::bounded_json::from_slice(&bytes)
+        .map_err(|_| "invalid qualification profile")?
+    {
         CheckProfile::Stream(profile) => {
             return stream::check(scope, vault, profile, outbound_policy).await;
         }

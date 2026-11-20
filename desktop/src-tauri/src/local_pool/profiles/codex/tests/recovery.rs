@@ -216,7 +216,8 @@ fn invalid_backup_metadata_reports_which_invariant_failed_without_writing() {
         let config = fs::read(home.join(CONFIG_FILE)).unwrap();
         let auth = fs::read(home.join(AUTH_FILE)).unwrap();
         let path = backup_path(&backups);
-        let mut backup: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut backup: Value =
+            zenith_relay_core::bounded_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         backup[field] = replacement;
         let corrupted = serde_json::to_vec(&backup).unwrap();
         fs::write(&path, &corrupted).unwrap();
@@ -354,7 +355,8 @@ fn repeated_attach_upgrades_a_profile_without_managed_bearer_metadata() {
     fs::write(home.join(CONFIG_FILE), config).unwrap();
     let backup_path = backup_path(&backups);
     let mut backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     backup
         .as_object_mut()
         .unwrap()
@@ -720,7 +722,8 @@ fn repeated_attach_rebases_external_takeover_and_restores_latest_profile() {
         .replace("supports_websockets = false", "supports_websockets = true");
     let backup_path = backup_path(&backups);
     let mut legacy_backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     legacy_backup["managedSupportsWebsockets"] = serde_json::Value::Bool(true);
     fs::write(
         &backup_path,
@@ -756,7 +759,8 @@ fn repeated_attach_rebases_external_takeover_and_restores_latest_profile() {
             .contains("supports_websockets = true")
     );
     let upgraded_backup: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        zenith_relay_core::bounded_json::from_str(&fs::read_to_string(&backup_path).unwrap())
+            .unwrap();
     assert_eq!(upgraded_backup["managedSupportsWebsockets"], true);
 
     restore_with(&home, &backups, &secrets).unwrap();
@@ -934,8 +938,10 @@ fn failed_reattach_restores_previous_backup_metadata() {
     assert!(error.message.contains("injected atomic write failure"));
     assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
     assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
-    let pending: Value =
-        serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
+    let pending: Value = zenith_relay_core::bounded_json::from_str(
+        &fs::read_to_string(backup_path(&backups)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(pending["restorePending"], true);
     restore_with(&home, &backups, &secrets).unwrap();
     assert_eq!(

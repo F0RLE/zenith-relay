@@ -12,7 +12,6 @@ use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     path::Path,
 };
 use zenith_relay_core::{
@@ -106,11 +105,12 @@ fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<
     // path is retained in the recovery snapshot, while the active Relay
     // catalog can use the native cache or its own validated template. Treat a
     // missing optional source as empty; surface other filesystem failures.
-    let content = match fs::read(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(io_error_at(&path, error)),
-    };
+    let content =
+        match crate::files::read_regular_file_bounded(&path, MAX_MODEL_CATALOG_BYTES as u64) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error_at(&path, error)),
+        };
     read_catalog_values(&content, false)
 }
 
@@ -124,9 +124,10 @@ pub(in crate::local_pool::profiles::codex) fn read_catalog_values(
             "ChatGPT model catalog exceeds 4 MiB",
         ));
     }
-    let catalog_document: Value = serde_json::from_slice(content).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
-    })?;
+    let catalog_document: Value =
+        zenith_relay_core::bounded_json::from_slice(content).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
+        })?;
     let models = catalog_document
         .get("models")
         .and_then(Value::as_array)

@@ -37,7 +37,7 @@ pub fn initialize(root: &Path) {
     let Ok(bytes) = crate::files::read_regular_file_bounded(&path, 16 * 1024) else {
         return;
     };
-    let Ok(saved) = serde_json::from_slice::<SavedLanguage>(&bytes) else {
+    let Ok(saved) = zenith_relay_core::bounded_json::from_slice::<SavedLanguage>(&bytes) else {
         return;
     };
     let _ = set(saved.language, saved.messages);
@@ -161,7 +161,7 @@ mod tests {
         persist(&root, "en", &messages()).unwrap();
         let path = crate::storage_paths::StoragePaths::from_root(&root).ui_language_file();
         let original = std::fs::read(&path).unwrap();
-        let saved: SavedLanguage = serde_json::from_slice(&original).unwrap();
+        let saved: SavedLanguage = zenith_relay_core::bounded_json::from_slice(&original).unwrap();
         assert_eq!(saved.language, "en");
         assert_eq!(saved.messages.quit, "Quit");
         assert_eq!(validate(&saved.language, &saved.messages), Ok("ltr"));

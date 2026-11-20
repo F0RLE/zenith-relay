@@ -227,7 +227,7 @@ async fn refresh_without_rotation(headers: HeaderMap, body: Bytes) -> impl IntoR
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
     );
-    let body: Value = serde_json::from_slice(&body).unwrap();
+    let body: Value = crate::bounded_json::from_slice(&body).unwrap();
     assert_eq!(body["client_id"], CODEX_OAUTH_CLIENT_ID);
     assert_eq!(body["grant_type"], "refresh_token");
     assert_eq!(body["refresh_token"], "refresh-secret");
