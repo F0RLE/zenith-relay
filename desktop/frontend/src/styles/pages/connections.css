@@ -1085,7 +1085,7 @@
 
 .oauth-workspace {
   display: grid;
-  grid-template-columns: clamp(282px, 33%, 338px) minmax(0, 1fr);
+  grid-template-columns: clamp(304px, 33%, 338px) minmax(0, 1fr);
   gap: 16px;
   height: 100%;
   min-height: 0;
