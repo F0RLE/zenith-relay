@@ -201,16 +201,16 @@ test(`BPS reauthentication keeps manual and automatic actions on ${platform}`, a
   await login.click();
   await expect(page.getByRole("dialog", { name: "Войти", exact: true })).toBeVisible();
   const calls = () => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "start_codex_oauth").map((call) => call.args));
-  expect((await calls())[0]).toMatchObject({ openBrowser: false });
+  expect((await calls())[0]).toMatchObject({ presentation: { openWindow: false, embedded: true } });
   expect((await calls())[0]).not.toHaveProperty("automaticLogin");
   await page.getByRole("dialog", { name: "Войти", exact: true }).getByRole("button", { name: "Закрыть", exact: true }).click();
   await login.click({ button: "right" });
   await expect(page.locator(".app-context-menu")).toHaveCount(0);
   await expect.poll(async () => (await calls()).length).toBe(2);
   const started = await calls();
-  expect(started[1]).toMatchObject({ openBrowser: true, accountId: started[0].accountId, automaticLogin: true });
+  expect(started[1]).toMatchObject({ presentation: { openWindow: true, embedded: true }, accountId: started[0].accountId, automaticLogin: true });
   await expect(page.getByText("Пробуем сохранённые почту", { exact: false })).toHaveCount(0);
-  await page.getByRole("button", { name: "Открыть окно входа", exact: true }).click();
+  await page.getByRole("button", { name: platform === "windows" ? "Войти вручную" : "Открыть окно входа", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "resume_codex_oauth"))).toBe(true);
   await expect(page.getByText("Пробуем сохранённые почту", { exact: false })).toHaveCount(0);
 });
@@ -227,7 +227,7 @@ test("native fallback keeps manual sign-in available and ignores unrelated statu
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "pending", automaticLogin: false });
   await expect(page.getByText("Пробуем сохранённые почту", { exact: false })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Открыть окно входа", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Перейти к форме", exact: true })).toBeEnabled();
 });
 
 test("a native stop arriving before start resolves leaves manual sign-in available without a description", async ({ page }) => {
@@ -249,7 +249,7 @@ test("a native stop arriving before start resolves leaves manual sign-in availab
   await page.getByRole("button", { name: "Требуется вход", exact: true }).first().click({ button: "right" });
   await expect(page.getByRole("dialog", { name: "Войти", exact: true })).toBeVisible();
   await expect(page.getByText("Пробуем сохранённые почту", { exact: false })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Открыть окно входа", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Перейти к форме", exact: true })).toBeEnabled();
 });
 
 for (const options of [{ platform: "macos", accountOAuthClientKind: "codex" }, { platform: "linux", accountOAuthClientKind: "siwc" }, { platform: "windows", accountOAuthClientKind: "codex" }, { platform: "windows", accountOAuthClientKind: "siwc" }] as const) {

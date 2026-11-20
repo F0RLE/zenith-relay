@@ -31,6 +31,8 @@ pub struct ConfirmAccountImportInput {
     pub(in crate::local_pool::accounts) session_id: String,
     pub(in crate::local_pool::accounts) selected_item_ids: Vec<String>,
     #[serde(default)]
+    pub(in crate::local_pool::accounts) use_bundle_proxies: Option<bool>,
+    #[serde(default)]
     pub(in crate::local_pool::accounts) add_to_pool: bool,
     #[serde(default = "default_true")]
     pub(in crate::local_pool::accounts) discover_models: bool,

@@ -17,6 +17,55 @@ use std::collections::BTreeSet;
 mod siwc_models;
 
 #[test]
+fn sign_in_presentation_accepts_the_renderer_contract() {
+    use super::SignInPresentationRequest;
+    use serde_json::{from_value, json};
+
+    let request =
+        from_value::<SignInPresentationRequest>(json!({ "embedded": true, "openWindow": false }))
+            .unwrap();
+    assert!(request.embedded);
+    assert!(!request.open_window);
+    assert!(!request.should_open_page(false));
+    assert!(request.should_open_page(true));
+    assert_eq!(
+        super::window::Presentation::requested(request.embedded).is_embedded(),
+        cfg!(windows)
+    );
+    let request =
+        from_value::<SignInPresentationRequest>(json!({ "embedded": true, "openWindow": true }))
+            .unwrap();
+    assert!(request.should_open_page(false));
+}
+
+#[test]
+fn prepared_sign_in_reports_a_closed_page_without_changing_flow_status() {
+    use super::{OAuthStartResponse, SignInPageState};
+    use crate::local_pool::accounts::oauth::OAuthClientKind;
+
+    let response = OAuthStartResponse {
+        flow: OAuthFlowStart {
+            login_id: "synthetic-login".into(),
+            authorization_url: "https://auth.example.test/authorize".into(),
+            redirect_uri: "http://localhost:1455/auth/callback".into(),
+            expires_at_ms: 60_000,
+            status: OAuthFlowStatus::Pending,
+            client_kind: OAuthClientKind::Codex,
+            target_account_id: None,
+            notes_account_id: None,
+            automatic_login: None,
+        },
+        embedded: true,
+        page_state: SignInPageState::Closed,
+    };
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["embedded"], true);
+    assert_eq!(value["pageState"], "closed");
+    assert_eq!(value["loginId"], "synthetic-login");
+    assert_eq!(value["status"], "pending");
+}
+
+#[test]
 fn automatic_login_request_preserves_legacy_bool_and_rejects_extra_route_fields() {
     use super::AutomaticLoginRequest;
     use serde_json::{from_value, json};

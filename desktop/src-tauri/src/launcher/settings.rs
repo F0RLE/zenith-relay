@@ -89,6 +89,10 @@ pub(crate) struct LaunchPathSetting {
 struct Preferences {
     #[serde(default)]
     launch_paths: BTreeMap<Application, PathBuf>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    connection_ids: BTreeMap<Application, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    native_connections: BTreeMap<Application, super::connection::Record>,
 }
 
 struct PreferenceStore {
@@ -111,7 +115,58 @@ fn store() -> Result<&'static PreferenceStore> {
         .ok_or_else(|| "Application launch settings are unavailable".to_string())
 }
 
+pub(super) fn connection_preferences(
+    application: Application,
+) -> Result<(Option<String>, Option<super::connection::Record>)> {
+    let store = store()?;
+    let _guard = store.lock.lock().map_err(|_| settings_io_error())?;
+    let mut preferences = store.read()?;
+    Ok((
+        preferences.connection_ids.remove(&application),
+        preferences.native_connections.remove(&application),
+    ))
+}
+
+pub(super) fn save_native_connection(
+    application: Application,
+    record: Option<super::connection::Record>,
+    expected: &(Option<String>, Option<super::connection::Record>),
+) -> Result<bool> {
+    store()?.set_native_connection(application, record, expected)
+}
+
 impl PreferenceStore {
+    fn set_native_connection(
+        &self,
+        application: Application,
+        record: Option<super::connection::Record>,
+        expected: &(Option<String>, Option<super::connection::Record>),
+    ) -> Result<bool> {
+        if application != Application::ClaudeDesktop
+            || record.as_ref().is_some_and(|record| !record.valid())
+        {
+            return Err(settings_io_error());
+        }
+        let _guard = self.lock.lock().map_err(|_| settings_io_error())?;
+        let mut preferences = self.read()?;
+        if preferences.connection_ids.get(&application) != expected.0.as_ref()
+            || preferences.native_connections.get(&application) != expected.1.as_ref()
+        {
+            return Ok(false);
+        }
+        preferences.connection_ids.remove(&application);
+        match record {
+            Some(record) => {
+                preferences.native_connections.insert(application, record);
+            }
+            None => {
+                preferences.native_connections.remove(&application);
+            }
+        }
+        self.write(&preferences)?;
+        Ok(true)
+    }
+
     fn read(&self) -> Result<Preferences> {
         let metadata = match fs::symlink_metadata(&self.path) {
             Ok(metadata) => metadata,
@@ -123,8 +178,21 @@ impl PreferenceStore {
         if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 32 * 1024 {
             return Err(settings_io_error());
         }
-        serde_json::from_slice(&fs::read(&self.path).map_err(|_| settings_io_error())?)
-            .map_err(|_| settings_io_error())
+        let preferences: Preferences =
+            serde_json::from_slice(&fs::read(&self.path).map_err(|_| settings_io_error())?)
+                .map_err(|_| settings_io_error())?;
+        if !preferences
+            .native_connections
+            .values()
+            .all(super::connection::Record::valid)
+            || !preferences
+                .connection_ids
+                .values()
+                .all(|id| crate::local_pool::accounts::proxy::is_proxy_id(id))
+        {
+            return Err(settings_io_error());
+        }
+        Ok(preferences)
     }
 
     fn path(&self, application: Application) -> Result<Option<PathBuf>> {
@@ -147,7 +215,51 @@ impl PreferenceStore {
                 preferences.launch_paths.remove(&application);
             }
         }
-        let content = serde_json::to_vec_pretty(&preferences).map_err(|_| settings_io_error())?;
+        self.write(&preferences)?;
+        Ok(path)
+    }
+
+    #[cfg(test)]
+    fn connection_id(&self, application: Application) -> Result<Option<String>> {
+        let _guard = self.lock.lock().map_err(|_| settings_io_error())?;
+        Ok(self.read()?.connection_ids.remove(&application))
+    }
+
+    #[cfg(test)]
+    fn set_connection(
+        &self,
+        application: Application,
+        proxy_id: Option<&str>,
+        expected_proxy_id: Option<&str>,
+    ) -> Result<bool> {
+        let _guard = self.lock.lock().map_err(|_| settings_io_error())?;
+        let mut preferences = self.read()?;
+        if preferences
+            .connection_ids
+            .get(&application)
+            .map(String::as_str)
+            != expected_proxy_id
+        {
+            return Ok(false);
+        }
+        if proxy_id != expected_proxy_id {
+            if let Some(id) = proxy_id {
+                preferences
+                    .connection_ids
+                    .insert(application, id.to_owned());
+            } else {
+                preferences.connection_ids.remove(&application);
+            }
+            self.write(&preferences)?;
+        }
+        Ok(true)
+    }
+
+    fn write(&self, preferences: &Preferences) -> Result<()> {
+        let content = serde_json::to_vec_pretty(preferences).map_err(|_| settings_io_error())?;
+        if content.len() > 32 * 1024 {
+            return Err(settings_io_error());
+        }
         let parent = self.path.parent().ok_or_else(settings_io_error)?;
         crate::platform::ensure_real_directory(parent).map_err(|_| settings_io_error())?;
         let temporary = parent.join(format!(".application-launch-{}.tmp", uuid::Uuid::new_v4()));
@@ -169,7 +281,7 @@ impl PreferenceStore {
             let _ = fs::remove_file(&temporary);
             return Err(settings_io_error());
         }
-        Ok(path)
+        Ok(())
     }
 }
 

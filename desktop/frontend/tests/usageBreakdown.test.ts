@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { usageBreakdown } from "../src/features/relay/pages/usage/usageBreakdown";
 
 describe("usageBreakdown", () => {
-  test("keeps cache inside input and reasoning inside output", () => {
+  test("keeps reads inside input but does not price the remainder as regular when writes are unknown", () => {
     expect(usageBreakdown({
       inputTokens: 84_507,
       cachedInputTokens: 3_840,
@@ -12,7 +12,7 @@ describe("usageBreakdown", () => {
       totalTokens: 85_298,
     })).toEqual({
       inputTotal: 84_507,
-      uncachedInput: 80_667,
+      uncachedInput: null,
       cacheRead: 3_840,
       cacheWrite: null,
       outputTotal: 791,
@@ -51,7 +51,7 @@ describe("usageBreakdown", () => {
     })).toMatchObject({ total: 20, reasoning: 8, visibleOutput: 0 });
   });
 
-  test("recovers input total when only cache components were reported", () => {
+  test("cache components alone do not establish an input total or regular input", () => {
     expect(usageBreakdown({
       inputTokens: null,
       cachedInputTokens: 40,
@@ -59,6 +59,13 @@ describe("usageBreakdown", () => {
       outputTokens: 10,
       reasoningTokens: null,
       totalTokens: null,
-    })).toMatchObject({ inputTotal: 60, uncachedInput: 0, total: 70 });
+    })).toMatchObject({ inputTotal: null, uncachedInput: null, cacheRead: 40, cacheWrite: 20, total: null });
+  });
+
+  test("a cache counter larger than the entire input is not rendered as a full cache hit", () => {
+    expect(usageBreakdown({
+      inputTokens: 8, cachedInputTokens: 10, cacheWriteInputTokens: null,
+      outputTokens: 2, reasoningTokens: null, totalTokens: 10,
+    })).toMatchObject({ inputTotal: 8, cacheRead: null, uncachedInput: null, total: 10 });
   });
 });

@@ -122,6 +122,7 @@ impl ImportHost for DesktopImport<'_> {
     ) -> ItemResult<ResolvedImport<Self::Account>> {
         let proxy = import_proxy(self.state, self.credential_store, &self.settings, &item)?;
         ensure_account_proxy(&self.settings, proxy.as_ref()).map_err(proxy_item_error)?;
+        let bundle_proxy_url = item.bundle_proxy_url().map(str::to_owned);
         let material = build_import_credential_material(
             item,
             issued_at_ms,
@@ -138,6 +139,7 @@ impl ImportHost for DesktopImport<'_> {
             &self.settings,
             issued_at_ms,
             material,
+            bundle_proxy_url,
         )
     }
 

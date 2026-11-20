@@ -1,16 +1,14 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
-async function expectRequestMetricsCentered(page: Page) {
-  const offCenter = await page.locator(".request-details-metric").evaluateAll((metrics) => metrics.flatMap((metric) => {
-    const rect = metric.getBoundingClientRect();
-    const center = rect.left + rect.width / 2;
-    return Array.from(metric.children).filter((child) => {
-      const bounds = child.getBoundingClientRect();
-      return Math.abs(bounds.left + bounds.width / 2 - center) > 1 || getComputedStyle(child).textAlign !== "center";
-    }).map((child) => child.tagName);
+async function expectTimingAligned(page: Page) {
+  const fits = await page.locator(".request-details-metric").evaluateAll((metrics) => metrics.every((metric) => {
+    const value = metric.querySelector("dd")!.getBoundingClientRect();
+    const label = metric.querySelector("dt")!.getBoundingClientRect();
+    return value.top >= label.bottom && Math.abs(value.left - label.left) < 1
+      && value.right <= metric.getBoundingClientRect().right + 1;
   }));
-  expect(offCenter).toEqual([]);
+  expect(fits).toBe(true);
 }
 
 async function expectReportFits(page: Page) {
@@ -102,7 +100,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
       const dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
       await expect(dialog.getByRole("tab")).toHaveCount(0);
-      await expectRequestMetricsCentered(page);
+      await expectTimingAligned(page);
       await page.screenshot({ path: `output/playwright/usage-details-${theme}-${width}.png` });
       for (const technicalExpanded of [false, true]) {
         if (technicalExpanded) await dialog.locator(".request-technical-details > summary").click();
@@ -140,7 +138,7 @@ for (const theme of ["light", "dark"] as const) {
 
 for (const locale of ["ru", "en"] as const) {
   for (const width of [1160, 390]) {
-    test(`request headline metrics stay centered: ${locale} ${width}`, async ({ page }) => {
+    test(`request metrics align each value with its label: ${locale} ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await installTauriMock(page, { mode: "local", locale, populated: true, theme: width === 1160 ? "dark" : "light" });
       await page.goto("/");
@@ -148,9 +146,9 @@ for (const locale of ["ru", "en"] as const) {
       await page.getByRole("button", { name: `${locale === "ru" ? "Сведения о запросе" : "Request details"}: req_synthetic_local`, exact: true }).click();
       const metrics = page.locator(".request-details-metrics");
       await expect(metrics.locator(".request-details-metric")).toHaveCount(4);
-      await expectRequestMetricsCentered(page);
+      await expectTimingAligned(page);
       expect(await metrics.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
-      await metrics.screenshot({ path: `output/playwright/request-metrics-centered-${locale}-${width}.png` });
+      await metrics.screenshot({ path: `output/playwright/request-timing-${locale}-${width}.png` });
     });
   }
 }

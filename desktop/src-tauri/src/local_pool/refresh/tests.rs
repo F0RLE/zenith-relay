@@ -396,7 +396,8 @@ fn reset_due_uses_reported_future_window_and_bounded_stable_jitter() {
         .as_mut()
         .unwrap()
         .observed_at_ms = 120_000;
-    assert_eq!(reset_due_delay(&response, 120_000), None);
+    assert_eq!(reset_due_delay(&response, 120_000), Some(30_000));
+    assert_eq!(reset_due_delay(&response, 400_000), None);
     response.quota = AccountQuotaOutcome::Skipped;
     assert_eq!(reset_due_delay(&response, 90_000), None);
 }

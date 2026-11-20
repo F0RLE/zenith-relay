@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolUseDiagnostics } from "../src/features/relay/api/types";
-import { formatContextBytes, missingRequiredToolCall } from "../src/features/relay/pages/usage/usageReportFormat";
+import { missingRequiredToolCall } from "../src/features/relay/pages/usage/usageReportFormat";
 
 const greeting: ToolUseDiagnostics = {
   clientToolCount: 291, forwardedToolCount: 291, toolChoice: "auto",
@@ -21,11 +21,4 @@ describe("request context diagnostics", () => {
     expect(missingRequiredToolCall(undefined)).toBe(false);
   });
 
-  test("JSON byte sizes stay localized sizes rather than invented token counts", () => {
-    expect(formatContextBytes(346145, "en")).toContain("346.1");
-    expect(formatContextBytes(346145, "ru")).toContain("346,1");
-    expect(formatContextBytes(0, "en")).toStartWith("0");
-    expect(formatContextBytes(20, "en")).toContain("20");
-    for (const value of [undefined, -1, NaN, Infinity]) expect(formatContextBytes(value, "en")).toBe("—");
-  });
 });

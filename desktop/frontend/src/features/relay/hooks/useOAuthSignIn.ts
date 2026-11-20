@@ -5,7 +5,7 @@ import type { OAuthClientKind, OAuthCompletion, OAuthFlow, OAuthFlowEvent } from
 import { useRelayState } from "../state/RelayStateProvider";
 import { applyOAuthFlowEvent } from "../oauthFlowEvent";
 
-export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>) {
+export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>, embedded = false) {
   const { perform } = useRelayState();
   const [flow, setFlow] = useState<OAuthFlow | null>(null);
   const [starting, setStarting] = useState(false);
@@ -98,7 +98,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     if (event.automaticLogin === undefined && event.diagnostic === undefined && event.status === "callback_received") void finishRef.current(event.loginId).catch(() => undefined);
   };
 
-  const start = useCallback(async (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string) => {
+  const start = useCallback(async (openWindow = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string) => {
     if (!mountedRef.current || startingRef.current || completingRef.current || flowRef.current?.status === "callback_received") return false;
     const lifecycle = lifecycleRef.current;
     const isCurrent = () => mountedRef.current && lifecycleRef.current === lifecycle;
@@ -127,7 +127,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
             forgetAccountLoginDraft(previous.loginId);
           }
           if (!isCurrent()) return;
-          const issued = await relayCommands.startOAuth(openBrowser, accountId, proxyId, clientKind, automaticLogin, notesAccountId);
+          const issued = await relayCommands.startOAuth(openWindow, accountId, proxyId, clientKind, automaticLogin, notesAccountId, embedded);
           started = automaticLogin ? { ...issued, automaticLogin: issued.automaticLogin ?? true } : issued;
         },
         undefined, { backgroundRefresh: true },
@@ -167,7 +167,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     setFlow(startedFlow);
     if (startedFlow.status === "callback_received") void finishRef.current(startedFlow.loginId).catch(() => undefined);
     return true;
-  }, [ensureListener, perform]);
+  }, [embedded, ensureListener, perform]);
 
   const cancel = useCallback(async () => {
     if (completingRef.current) return;

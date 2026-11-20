@@ -290,8 +290,7 @@ fn direct_profiles_keep_numeric_limits_scoped_to_the_selected_source_endpoint() 
             json!({"context":256000,"input":192000,"output":64000}),
         )];
         apply_source(&mut config, &source, "synthetic", &metadata, false).unwrap();
-        // Existing smaller windows are user-editable preferences, not proof
-        // that a fresh profile must retain the old source ceiling.
+        // Fresh profiles use the current ceiling; existing windows stay editable.
         assert_eq!(
             config["provider"][provider_id]["models"]["opaque-model"]["limit"],
             restricted

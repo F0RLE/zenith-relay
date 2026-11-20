@@ -75,8 +75,7 @@ pub(super) fn cleanup_history_repair_backups_preserving(
             continue;
         }
         let Some(created_at_ms) = backup_created_at_ms(&directory_entry.path()) else {
-            // A directory name or timestamp is not proof that backup creation
-            // completed. Preserve unknown data without displacing recovery.
+            // Preserve backups without a completed-creation record.
             continue;
         };
         backups.push((created_at_ms, name, directory_entry.path()));

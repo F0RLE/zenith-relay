@@ -6,6 +6,7 @@ mod client_auth_watchdog;
 pub mod commands;
 mod error;
 mod host;
+pub(crate) mod hosted_copy;
 mod models;
 pub(crate) mod profiles;
 mod refresh;

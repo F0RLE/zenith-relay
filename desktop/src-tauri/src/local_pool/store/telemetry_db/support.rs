@@ -26,43 +26,95 @@ pub(super) fn document_with_comparison(
     comparison: Option<Value>,
 ) -> Value {
     let salt = uuid::Uuid::new_v4().to_string();
+    let summary = summary::summarize(final_request, attempts, truncated);
+    let mut sends = attempts
+        .iter()
+        .map(|row| observation(row, &salt))
+        .collect::<Vec<_>>();
+    let mut local_observation = None;
+    let final_request = final_request.map(|row| {
+        let observed = observation(row, &salt);
+        let latest_attempt = (row.attempt > 0).then_some(row.attempt);
+        let usage = summary["consumption"]
+            .as_object()
+            .expect("consumption object")
+            .iter()
+            .map(|(key, counter)| (key.clone(), counter["observedTotal"].clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let final_row = json!({
+            "requestRef": observed["requestRef"],
+            "outcome": observed["outcome"],
+            "httpStatus": observed["httpStatus"],
+            "errorOrigin": observed["errorOrigin"],
+            "errorCode": observed["errorCode"],
+            "errorCategoryRef": observed["errorCategoryRef"],
+            "requestOrigin": observed["requestOrigin"],
+            "latestAttempt": latest_attempt,
+            "latencyMs": row.latency_ms,
+            "generationMs": row.generation_ms,
+            "usage": usage,
+        });
+        if let Some(number) = latest_attempt {
+            if let Some(attempt) = sends
+                .iter_mut()
+                .find(|attempt| attempt["attempt"] == number)
+            {
+                let mut detail = projection_details(observed);
+                detail.retain(|key, value| attempt.get(key.as_str()) != Some(value));
+                if !detail.is_empty() {
+                    attempt["finalObservation"] = Value::Object(detail);
+                }
+            } else {
+                // Retention and older databases may leave only the projection.
+                let mut attempt = observed;
+                attempt["fromFinalProjection"] = json!(true);
+                sends.push(attempt);
+                sends.sort_by_key(|attempt| attempt["attempt"].as_u64());
+            }
+        } else {
+            local_observation = Some(Value::Object(projection_details(observed)));
+        }
+        final_row
+    });
+    let retained_attempt_count = sends.len();
     let mut report = json!({
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "reasoningLatencyComparison": comparison,
         "appVersion": env!("CARGO_PKG_VERSION"),
         "exportedAt": chrono::Utc::now().to_rfc3339(),
         "privacy": "No prompts, tool arguments, provider messages, credentials, URLs or raw identifiers. References are report-local.",
-        "summary": summary::summarize(final_request, attempts, truncated),
+        "summary": summary,
         "semantics": {
-            "attempts": "Physical sends/observations, not separate client requests. Tool discovery and retries are intermediate steps, not a failed final request. HTTP 200 alone does not establish client success.",
-            "finalRequest": "Latest retained logical-request projection. Its usage can duplicate one attempt; never add it to attempts. A retained intermediate outcome does not establish final success or failure.",
-            "consumption": "Summary sums each retained send once, including a final projection only when its send is missing. Unknown counters remain null. complete describes coverage through the latest observation, not proof of completed execution.",
-            "timestamps": "observedAt is the database observation/update time (UTC, second precision), not request start time.",
-            "timings": "Milliseconds. Attempt durations and response/tool-ready offsets can share an executor clock, including discovery rounds: do not add them. Response milestones are offsets, not stage durations or client receipt. requestPreparationMs is an elapsed wall clock, not a sum. schemaValidationMs is inside bodyMs. preparationAccounting.unattributedMs is the remainder outside measured non-overlapping phases, including gaps and rounding; it is not another schema-validation duration.",
-            "codexServerTiming": "Optional provider-reported native WebSocket measurements in milliseconds, correlated to the active response. Overhead, inference, engine TTFT and inter-token intervals are not additive phases, Relay TTFT, end-user latency or cache-hit evidence. Missing metrics stay absent. ID-less events are accepted only on the first response of a new connection; late or uncorrelated events are ignored.",
-            "sessionWait": "Optional sessionWaitMs measures local SIWC lane acquisition before dispatch, not provider TTFT or an additive latency phase. session_wait_timeout means the retained lane stayed busy; session_capacity_exceeded means no retained slot could be acquired. Historical session_unavailable cannot distinguish these causes.",
-            "tools": "policyCatalog describes tools after client policy, before transport encoding. In BPS, catalog schemas are prompt text, so upstreamContext.toolCatalogBytes can be zero. loadedToolCount counts loaded contracts; renderedSchemaBytes counts rendered parameter schemas, not the full prompt or wire payload. upstreamToolCallCount counts native calls before translation; toolCallCount counts client-visible calls. Batch expansion can make them differ without an error.",
-            "history": "clientHistory compares current and previous completed client inputs; upstreamHistory compares current and previous completed upstream inputs. relayHistory compares upstream and client inputs within the same request. sharedPrefixItems is the literal positional prefix. leadingContextAlignment, when present, separately compares the remaining items after leading developer/system messages; skipped messages are not proven cache-reusable and the literal prefix is preserved.",
-            "cache": "cachedInputTokens and cacheWriteInputTokens are parts of inputTokens; reasoningTokens are part of outputTokens. History comparisons are structural, not proof of provider cache eviction or residency.",
-            "providerBackoff": "Normalized provider deadline and scope, not configured recovery/circuit delays, current readiness or durable credential ownership. Times are Unix milliseconds at observation. Model scope uses report-local references. Missing evidence stays null; reports cannot restore admission.",
-            "reasoningLatency": "protocol.requestedReasoningEffort and effectiveReasoningEffort describe the requested and Relay-mapped setting, not the provider's internal reasoning time. TTFT is an observed first-output milestone, not pure reasoning duration. reasoningLatencyComparison uses bounded retained same-route observations only, not a controlled experiment; it never changes reasoning or sends model requests.",
-            "payload": "requestPayload describes the final encoded HTTP body or WebSocket JSON text, after ownership guards. bodyBytes excludes HTTP/WebSocket framing and TLS, and is not an acknowledgement of delivered bytes. Continuation means a nonempty previous_response_id, not proof of delta-only input or provider cache reuse. fullRequestReason describes transport/payload facts, not an inferred cache-miss cause. compressionUs (legacy compressionMs) measures encoding wall time including preparation and blocking-pool scheduling within the executor clock, not an additional requestPreparation phase. httpSendToHeadersMs starts at HTTP execute after encoding; it includes connection setup and upstream waiting, not isolated upload time, and overlaps responseHeadersMs/TTFT. connectionReused describes only the observed native WebSocket connection.",
-            "missing": "Null means unavailable, unobserved or excluded by the privacy allowlist, not zero. Current settings and provider usage payloads are not reconstructed from historical observations.",
-            "imageDiagnostics": "routing.images is opt-in: requested options, final sent payload options and provider-reported metadata are separate observations. Known public model names only; custom IDs and unknown option strings are omitted. Output dimensions come from bounded raster headers, not full image validation. sentSizeMatches compares exact sent dimensions, not quality. Preview frames are excluded, URLs are not fetched. These observations do not prove the serving model or authorize resizing or replay.",
-            "images": "imageUsage contains provider-reported rendering modality subsets, rendering cachedInputTokens and separate svgUsage authoring counters. Rendering and SVG stages are included once in ordinary totals when both report the applicable counter; missing components remain unknown. Whole-request cached input is unknown when SVG authoring does not report cache coverage. generatedImages counts observed completed images, not partial previews. These counters are not an account credit debit. Token-only pricing cannot value mixed image/text inputs or multiple models and remains unpriced.",
+            "attempts": "Physical sends, including discovery and retries. If the send row is missing, fromFinalProjection marks reconstructed evidence; its timing is logical. finalObservation stores only differing detail fields from the final projection.",
+            "finalRequest": "Logical outcome; latestAttempt references an exported attempt number. Usage sums observed physical sends; coverage is in summary.consumption. localObservation holds details of a request rejected without a send.",
+            "consumption": "Each retained send is counted once; the final projection is used only if its send is missing. Unknown counters stay null. complete measures observation coverage.",
+            "timestamps": "observedAt is the database update time in UTC, with second precision.",
+            "timings": "Milliseconds. preAttemptMs ends at the first observed executor start. priorAttemptsMs is wall time from the first to the latest executor start, including gaps; discovery rounds can share a clock. Older retry records have only legacyPreFinalAttemptMs. preAttemptUnattributedMs excludes measured first-attempt preparation. bpsAccessRefreshMs measures the ingress access check, not token renewal alone. SIWC handshakeMs and sessionWaitMs are within the attempt clock. postAttemptMs starts at the latest attempt's latency milestone; afterClientReadyMs starts at readiness, not receipt. Output excludes lifecycle events. schemaValidationMs is within bodyMs.",
+            "codexServerTiming": "Provider-reported WebSocket metrics for the active response are not additive. A missing event is not observed on WebSocket and unsupported on HTTP. Late or uncorrelated events cannot be used.",
+            "sessionWait": "sessionWaitMs measures local SIWC lane acquisition before dispatch, separately from provider TTFT; do not add overlapping clocks. session_wait_timeout means the retained lane stayed busy; session_capacity_exceeded means no retained slot was available. Historical session_unavailable combines these causes.",
+            "tools": "policyCatalog is after client policy and before encoding. BPS schemas are prompt text, so upstreamContext.toolCatalogBytes can be zero. loadedToolCount counts contracts; renderedSchemaBytes counts parameter schemas only. upstreamToolCallCount counts native calls; toolCallCount counts translated client calls, including batch expansion.",
+            "history": "clientHistory and upstreamHistory compare with the prior completed request. relayHistory compares the two sides of one request. leadingContextAlignment skips leading developer/system messages and proven Relay catalog wrappers; the literal prefix stays separate.",
+            "cache": "cachedInputTokens and cacheWriteInputTokens are subsets of inputTokens; reasoningTokens are a subset of outputTokens. History alignment measures structure; cache usage comes from provider counters.",
+            "providerBackoff": "Observed provider deadline and scope, with Unix-millisecond times and report-local model references. Missing evidence stays null. Runtime readiness, credential ownership and admission are evaluated separately.",
+            "reasoningLatency": "protocol.requestedReasoningEffort and effectiveReasoningEffort are requested and Relay-mapped settings. TTFT measures first output. reasoningLatencyComparison summarizes retained same-route observations; provider-internal reasoning duration is unknown.",
+            "payload": "jsonBytes measures JSON; bodyBytes measures encoded payload, excluding framing/TLS, and is not an acknowledgement. socketOutputReconciled marks allowlisted replay normalization. authorizationMs covers credential/access preparation; httpDispatchPreparationMs covers subsequent setup, including compressionUs (legacy compressionMs) and blocking-pool scheduling. httpSendToHeadersMs starts at HTTP execute; all three phases overlap responseHeadersMs/TTFT. connectionReused is native WebSocket only.",
+            "missing": "Null means unavailable, unobserved or privacy-excluded; never zero. Historical observations cannot reconstruct current settings or provider payloads.",
+            "imageDiagnostics": "Opt-in routing.images separates requested, sent and provider-reported options. Only known public model names and option values are retained. Dimensions use bounded raster headers; sentSizeMatches compares exact sent dimensions. Preview frames are excluded and URLs are never fetched. Serving-model identity remains unverified; resizing and replay require separate authorization.",
+            "images": "imageUsage records rendering modality subsets, cachedInputTokens and separate svgUsage authoring counters. Rendering/SVG counters enter totals once when reported; missing components and absent SVG cache coverage stay unknown. generatedImages counts completed images. Actual account debits are tracked separately. Mixed image/text inputs and multi-model requests remain unpriced without applicable rates.",
         },
         "availability": {
             "finalRequestMissing": final_request.is_none(),
             "attemptHistoryMissing": attempts.is_empty()
-                && final_request.is_none_or(|row| row.attempt > 0),
+                && final_request.as_ref().is_none_or(|row| !row["latestAttempt"].is_null()),
             "attemptsTruncated": truncated,
-            "exportedAttemptRows": attempts.len(),
+            "exportedAttemptRows": retained_attempt_count,
             "summaryIncludesOmittedAttempts": false,
             "rawProviderUsage": "not_retained_separately",
             "configuration": "not_exported",
         },
-        "finalRequest": final_request.map(|row| observation(row, &salt)),
-        "attempts": attempts.iter().map(|row| observation(row, &salt)).collect::<Vec<_>>(),
+        "finalRequest": final_request,
+        "localObservation": local_observation,
+        "attempts": sends,
     });
     while serde_json::to_vec_pretty(&report).map_or(usize::MAX, |bytes| bytes.len())
         > MAX_REPORT_BYTES
@@ -70,22 +122,68 @@ pub(super) fn document_with_comparison(
         let rows = report["attempts"]
             .as_array_mut()
             .expect("report attempts are an array");
-        if rows.is_empty() {
-            // Preserve the final outcome; omit oversized optional comparisons.
-            report["finalRequest"]["routing"] = Value::Null;
-            report["availability"]["finalRoutingTruncated"] = json!(true);
+        if !rows.is_empty() {
+            let omitted = rows.remove(0);
+            let exported_rows = rows.len();
+            if report["finalRequest"]["latestAttempt"].is_number()
+                && omitted["attempt"] == report["finalRequest"]["latestAttempt"]
+            {
+                report["availability"]["omittedLatestAttempt"] = omitted["attempt"].clone();
+                report["finalRequest"]["latestAttempt"] = Value::Null;
+            }
+            report["availability"]["attemptsTruncated"] = json!(true);
+            report["availability"]["exportedAttemptRows"] = json!(exported_rows);
+            report["availability"]["summaryIncludesOmittedAttempts"] = json!(true);
+        } else if !report["localObservation"].is_null() {
+            report["localObservation"] = Value::Null;
+            report["availability"]["localObservationTruncated"] = json!(true);
+        } else {
+            report["reasoningLatencyComparison"] = Value::Null;
             break;
         }
-        rows.remove(0);
-        let exported_rows = rows.len();
-        report["availability"]["attemptsTruncated"] = json!(true);
-        report["availability"]["exportedAttemptRows"] = json!(exported_rows);
-        report["availability"]["summaryIncludesOmittedAttempts"] = json!(true);
     }
     report
 }
 
+fn projection_details(observed: Value) -> serde_json::Map<String, Value> {
+    let Value::Object(mut detail) = observed else {
+        unreachable!("observation object");
+    };
+    for key in [
+        "requestRef",
+        "attempt",
+        "outcome",
+        "httpStatus",
+        "errorOrigin",
+        "errorCode",
+        "errorCategoryRef",
+        "requestOrigin",
+        "latencyMs",
+        "ttftMs",
+        "generationMs",
+    ] {
+        detail.remove(key);
+    }
+    detail
+}
+
 fn observation(row: &UsageLog, salt: &str) -> Value {
+    let request_origin = row
+        .success
+        .then_some(row.error_category.as_deref())
+        .flatten()
+        .and_then(|category| match category {
+            "codex_memory_extraction" => Some("memory_extraction"),
+            "codex_memory_consolidation" => Some("memory_consolidation"),
+            "codex_task_title" => Some("task_title"),
+            "codex_activity_summary" => Some("activity_summary"),
+            "codex_wake" => Some("wake"),
+            _ => None,
+        });
+    let error_category = row
+        .error_category
+        .as_deref()
+        .filter(|_| request_origin.is_none());
     let reference = |value: &str| {
         let digest = Sha256::digest(format!("{salt}:{value}").as_bytes());
         format!("ref_{}", &hex::encode(digest)[..16])
@@ -110,7 +208,8 @@ fn observation(row: &UsageLog, salt: &str) -> Value {
         json!({
             "reason": routing.reason, "eligibleCandidates": routing.eligible_candidates,
             "inFlightBefore": routing.in_flight_before, "attemptOutcome": routing.attempt_outcome,
-            "transport": routing.transport.as_ref().map(transport::document), "cacheContext": routing.cache_context,
+            "transport": routing.transport.as_ref().map(transport::document),
+            "cacheContext": routing.cache_context.as_ref().map(transport::cache_context),
             "cacheAffinity": routing.cache_affinity,
             "images": routing.images.as_ref().map(zenith_relay_core::usage::ImageDiagnostics::sanitized),
             "providerBackoff": routing.provider_backoff.as_ref().map(|backoff| json!({
@@ -133,8 +232,9 @@ fn observation(row: &UsageLog, salt: &str) -> Value {
         "resolvedModelRef": row.resolved_model.as_deref().map(reference),
         "outcome": summary::outcome(row),
         "httpStatus": row.http_status, "errorOrigin": row.error_origin,
-        "errorCode": row.error_category.as_deref().and_then(zenith_relay_core::error_codes::definition).map(|definition| definition.code),
-        "errorCategoryRef": row.error_category.as_deref().map(reference),
+        "errorCode": error_category.and_then(zenith_relay_core::error_codes::definition).map(|definition| definition.code),
+        "errorCategoryRef": error_category.map(reference),
+        "requestOrigin": request_origin,
         "protocol": protocol,
         "latencyMs": row.latency_ms, "ttftMs": row.ttft_ms, "generationMs": row.generation_ms,
         "usage": usage, "routing": routing,

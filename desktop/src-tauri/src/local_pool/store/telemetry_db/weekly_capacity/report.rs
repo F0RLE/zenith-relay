@@ -9,6 +9,12 @@ pub(crate) struct WeeklyCapacityQuery {
     pub account_id: Option<String>,
 }
 
+impl WeeklyCapacityQuery {
+    fn includes_account(&self, ids: &[String]) -> bool {
+        self.account_id.as_ref().is_none_or(|id| ids.contains(id))
+    }
+}
+
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WeeklyCapacityReport {
@@ -51,7 +57,6 @@ pub(crate) struct WeeklyCapacityGroup {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WeeklyCapacitySummary {
     pub plan: String,
-    pub pricing_revision: String,
     pub points: Vec<WeeklyCapacityPoint>,
     pub current: Option<WeeklyCapacityPoint>,
     pub stale: bool,
@@ -79,6 +84,7 @@ impl TelemetryDb {
         &self,
         query: WeeklyCapacityQuery,
         now_ms: u64,
+        observations: &[CapacityObservation<'_>],
     ) -> Result<WeeklyCapacityReport> {
         let from = query
             .from_ms
@@ -90,7 +96,7 @@ impl TelemetryDb {
         } else {
             HOUR_MS
         };
-        let rows = {
+        let (rows, current) = {
             // Persisted capacity shares the WAL reader; usage-revision and
             // in-memory totals synchronization belongs to usage reports.
             let connection = self.lock_snapshot_connection()?;
@@ -100,11 +106,7 @@ impl TelemetryDb {
             ).map_err(db_error)?;
             let rows = statement
                 .query_map(
-                    params![
-                        sql_u64(from.min(now_ms.saturating_sub(MAX_ANCHOR_AGE))),
-                        sql_u64(to),
-                        MAX_HISTORY as i64
-                    ],
+                    params![sql_u64(from), sql_u64(to), MAX_HISTORY as i64],
                     |row| row.get::<_, String>(0),
                 )
                 .map_err(db_error)?;
@@ -112,17 +114,24 @@ impl TelemetryDb {
             for row in rows {
                 let value: Measurement =
                     serde_json::from_str(&row.map_err(db_error)?).map_err(json_error)?;
-                if query
-                    .account_id
-                    .as_ref()
-                    .is_none_or(|id| value.account_ids.contains(id))
-                {
+                if query.includes_account(&value.account_ids) {
                     values.push(value);
                 }
             }
-            values
+            let current = if to == now_ms && !observations.is_empty() {
+                let scoped = observations
+                    .iter()
+                    .filter(|obs| query.includes_account(obs.account_ids));
+                projection::calibrated_samples(&connection, scoped)?
+                    .into_values()
+                    .map(|(_, sample)| sample)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (values, current)
         };
-        Ok(build_report(rows, from, to, bucket, now_ms))
+        Ok(build_report(&rows, &current, from, to, bucket, now_ms))
     }
 }
 
@@ -161,7 +170,7 @@ pub(super) fn point(at_ms: u64, values: &[&Measurement]) -> Option<WeeklyCapacit
             .map(|value| {
                 value
                     .reset_at_ms
-                    .min(value.at_ms.saturating_add(MAX_ANCHOR_AGE))
+                    .min(value.from_ms.saturating_add(MAX_ANCHOR_AGE))
             })
             .min()
             .unwrap_or(at_ms),
@@ -173,117 +182,116 @@ pub(super) fn point(at_ms: u64, values: &[&Measurement]) -> Option<WeeklyCapacit
     })
 }
 
+#[derive(Default)]
+struct SeriesSamples<'a> {
+    history: Vec<&'a Measurement>,
+    current: Vec<&'a Measurement>,
+}
+
+impl<'a> SeriesSamples<'a> {
+    fn add(&mut self, value: &'a Measurement, current: bool) {
+        if current {
+            self.current.push(value);
+        } else {
+            self.history.push(value);
+        }
+    }
+}
+
 fn build_report(
-    rows: Vec<Measurement>,
+    rows: &[Measurement],
+    calibrated: &[Measurement],
     from: u64,
     to: u64,
     bucket: u64,
     now: u64,
 ) -> WeeklyCapacityReport {
-    let mut groups = BTreeMap::<String, Vec<&Measurement>>::new();
-    let mut plans = BTreeMap::<(String, String), Vec<&Measurement>>::new();
-    let mut models = BTreeMap::<(String, String, String), Vec<&Measurement>>::new();
+    let mut groups = BTreeMap::<_, SeriesSamples<'_>>::new();
+    let mut plans = BTreeMap::<_, SeriesSamples<'_>>::new();
+    let mut models = BTreeMap::<_, SeriesSamples<'_>>::new();
     let mut events =
         BTreeMap::<(u64, String, CapacityEventKind), std::collections::BTreeSet<&str>>::new();
-    let mut latest_event = HashMap::<&str, u64>::new();
-    for value in &rows {
+    for (value, current) in rows
+        .iter()
+        .map(|v| (v, false))
+        .chain(calibrated.iter().map(|v| (v, true)))
+    {
         if let Some(kind) = value.event {
-            latest_event
-                .entry(&value.ledger)
-                .and_modify(|at| *at = (*at).max(value.at_ms))
-                .or_insert(value.at_ms);
-            if (from..=to).contains(&value.at_ms) {
+            if !current && (from..=to).contains(&value.at_ms) {
                 let at = from + (value.at_ms - from) / bucket * bucket;
                 events
                     .entry((at, value.plan.clone(), kind))
                     .or_default()
                     .insert(&value.ledger);
             }
-        }
-        if value.pricing_coverage_basis_points < 10_000 {
             continue;
         }
-        if let Some(workload) = &value.workload
-            && value.micro_usd.is_some()
+        if value.pricing_coverage_basis_points != 10_000
+            || value.micro_usd.is_none()
+            || (!current && !(from..=to).contains(&value.at_ms))
         {
-            let key = fingerprint(&format!(
-                "{}\0{}\0{}",
-                value.plan, workload.key, value.pricing_revision
-            ));
-            groups.entry(key).or_default().push(value);
-            plans
-                .entry((value.plan.clone(), value.pricing_revision.clone()))
-                .or_default()
-                .push(value);
-            if let Some(model) = workload.single_model() {
-                models
-                    .entry((
-                        value.plan.clone(),
-                        model.to_owned(),
-                        value.pricing_revision.clone(),
-                    ))
-                    .or_default()
-                    .push(value);
-            }
+            continue;
+        }
+        let Some(workload) = &value.workload else {
+            continue;
+        };
+        let plan = value.plan.as_str();
+        plans.entry(plan).or_default().add(value, current);
+        groups
+            .entry((plan, workload.key.as_str(), value.pricing_revision.as_str()))
+            .or_default()
+            .add(value, current);
+        if let Some(model) = workload.single_model() {
+            models.entry((plan, model)).or_default().add(value, current);
         }
     }
     let mut result = Vec::new();
-    for (id, values) in groups {
-        let Some(first) = values.first() else {
-            continue;
-        };
-        let Some(workload) = &first.workload else {
-            continue;
-        };
-        let Some(summary) = summarize_measurements(&values, &latest_event, from, to, bucket, now)
+    for ((plan, key, revision), samples) in groups {
+        let Some(workload) = samples
+            .history
+            .first()
+            .or(samples.current.first())
+            .and_then(|v| v.workload.as_ref())
         else {
             continue;
         };
+        let summary = summarize_measurements(plan, &samples, from, bucket, now);
         result.push(WeeklyCapacityGroup {
-            id,
-            plan: first.plan.clone(),
+            id: fingerprint(&format!("{plan}\0{key}\0{revision}")),
+            plan: plan.to_owned(),
             workload: workload.label.clone(),
             cache_band: workload.cache_band,
             output_band: workload.output_band,
-            pricing_revision: first.pricing_revision.clone(),
+            pricing_revision: revision.to_owned(),
             points: summary.points,
             current: summary.current,
             stale: summary.stale,
         });
     }
-    // Aggregate raw observations before truncating model choices. Averaging the
-    // model medians would overweight small groups and count linked ledgers again.
+    // Bound actual plan/model choices, not the number of price changes that fit in history.
     let mut summaries = plans
-        .into_values()
-        .filter_map(|values| {
-            let latest = values.iter().map(|value| value.at_ms).max()?;
-            let summary = summarize_measurements(&values, &latest_event, from, to, bucket, now)?;
-            Some((latest, summary))
-        })
+        .into_iter()
+        .map(|(plan, samples)| summarize_measurements(plan, &samples, from, bucket, now))
         .collect::<Vec<_>>();
-    summaries.sort_by_key(|(latest, _)| std::cmp::Reverse(*latest));
+    summaries.sort_by_key(|s| report_order(s.current.as_ref(), &s.points));
     summaries.truncate(32);
     // Combine raw single-model observations, not already-aggregated workload
     // medians. Mixed-model intervals remain in the all-model plan summary.
     let mut models = models
         .into_iter()
-        .filter_map(|((_, model, _), values)| {
-            let latest = values.iter().map(|value| value.at_ms).max()?;
-            let summary = summarize_measurements(&values, &latest_event, from, to, bucket, now)?;
-            Some((latest, WeeklyCapacityModel { model, summary }))
+        .map(|((plan, model), samples)| WeeklyCapacityModel {
+            model: model.to_owned(),
+            summary: summarize_measurements(plan, &samples, from, bucket, now),
         })
         .collect::<Vec<_>>();
-    models.sort_by_key(|(latest, _)| std::cmp::Reverse(*latest));
+    models.sort_by_key(|m| report_order(m.summary.current.as_ref(), &m.summary.points));
     models.truncate(32);
-    // Bound renderer work; prefer groups with the newest actual measurements.
-    result.sort_by_key(|group| {
-        std::cmp::Reverse(group.points.last().map_or(0, |point| point.observed_at_ms))
-    });
+    result.sort_by_key(|g| report_order(g.current.as_ref(), &g.points));
     result.truncate(32);
     WeeklyCapacityReport {
         generated_at_ms: now,
-        summaries: summaries.into_iter().map(|(_, summary)| summary).collect(),
-        models: models.into_iter().map(|(_, model)| model).collect(),
+        summaries,
+        models,
         groups: result,
         events: events
             .into_iter()
@@ -297,52 +305,70 @@ fn build_report(
     }
 }
 
+fn report_order(
+    current: Option<&WeeklyCapacityPoint>,
+    history: &[WeeklyCapacityPoint],
+) -> std::cmp::Reverse<(bool, u64)> {
+    std::cmp::Reverse((
+        current.is_some(),
+        current
+            .into_iter()
+            .chain(history.last())
+            .map(|point| point.observed_at_ms)
+            .max()
+            .unwrap_or(0),
+    ))
+}
+
 fn summarize_measurements(
-    values: &[&Measurement],
-    latest_event: &HashMap<&str, u64>,
+    plan: &str,
+    samples: &SeriesSamples<'_>,
     from: u64,
-    to: u64,
     bucket: u64,
     now: u64,
-) -> Option<WeeklyCapacitySummary> {
-    let first = values.first()?;
-    let mut buckets = BTreeMap::<u64, HashMap<&str, &Measurement>>::new();
-    let mut current = HashMap::<&str, &Measurement>::new();
-    for &value in values {
-        if (from..=to).contains(&value.at_ms) {
-            let at = from + (value.at_ms - from) / bucket * bucket;
-            keep_latest(buckets.entry(at).or_default(), value);
-        }
-        if value.at_ms >= now.saturating_sub(MAX_ANCHOR_AGE)
-            && value.reset_at_ms > now
-            && latest_event
-                .get(value.ledger.as_str())
-                .is_none_or(|event| *event < value.at_ms)
-        {
-            keep_latest(&mut current, value);
-        }
+) -> WeeklyCapacitySummary {
+    let mut buckets = BTreeMap::<u64, Vec<&Measurement>>::new();
+    for &value in &samples.history {
+        let at = from + (value.at_ms - from) / bucket * bucket;
+        buckets.entry(at).or_default().push(value);
     }
-    let fresh = current
-        .values()
+    let mut current: Vec<_> = samples
+        .current
+        .iter()
         .copied()
-        .filter(|value| value.from_ms >= now.saturating_sub(DAY_MS))
-        .collect::<Vec<_>>();
-    let stale = fresh.is_empty();
-    let current = if stale {
-        current.values().copied().collect::<Vec<_>>()
-    } else {
-        fresh
-    };
-    Some(WeeklyCapacitySummary {
-        plan: first.plan.clone(),
-        pricing_revision: first.pricing_revision.clone(),
+        .filter(|v| {
+            v.at_ms <= now && v.reset_at_ms > now && v.from_ms.saturating_add(MAX_ANCHOR_AGE) > now
+        })
+        .collect();
+    let fresh = |v: &&Measurement| v.from_ms.saturating_add(DAY_MS) > now;
+    let stale = !current.iter().any(fresh);
+    if !stale {
+        current.retain(fresh);
+    }
+    WeeklyCapacitySummary {
+        plan: plan.to_owned(),
         points: buckets
             .into_iter()
-            .filter_map(|(at, values)| point(at, &values.values().copied().collect::<Vec<_>>()))
+            .filter_map(|(at, values)| comparable_point(at, &values))
             .collect(),
-        current: point(now, &current),
+        current: comparable_point(now, &current),
         stale,
-    })
+    }
+}
+
+/// A day/hour retains its last observed price revision, never a median of incompatible prices.
+fn comparable_point(at: u64, values: &[&Measurement]) -> Option<WeeklyCapacityPoint> {
+    let latest = values
+        .iter()
+        .max_by_key(|v| (v.at_ms, v.pricing_revision.as_str()))?;
+    let mut ledgers = HashMap::new();
+    for &value in values
+        .iter()
+        .filter(|v| v.pricing_revision == latest.pricing_revision)
+    {
+        keep_latest(&mut ledgers, value);
+    }
+    point(at, &ledgers.into_values().collect::<Vec<_>>())
 }
 
 fn keep_latest<'a>(values: &mut HashMap<&'a str, &'a Measurement>, value: &'a Measurement) {
@@ -382,6 +408,16 @@ mod tests {
         }
     }
 
+    fn observed(
+        rows: &[Measurement],
+        from: u64,
+        to: u64,
+        bucket: u64,
+        now: u64,
+    ) -> WeeklyCapacityReport {
+        build_report(rows, rows, from, to, bucket, now)
+    }
+
     #[test]
     fn medians_have_one_vote_per_ledger_not_one_vote_per_request() {
         let rows = vec![
@@ -390,7 +426,7 @@ mod tests {
             measurement("b", 200, NOW),
             measurement("c", 300, NOW),
         ];
-        let report = build_report(rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
+        let report = observed(&rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
         let point = report.groups[0].current.as_ref().unwrap();
         assert_eq!(point.account_count, 3);
         assert_eq!(point.median_micro_usd, 200);
@@ -415,7 +451,7 @@ mod tests {
             value.workload.as_mut().unwrap().key = "another-model".into();
             rows.push(value);
         }
-        let report = build_report(rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
+        let report = observed(&rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
         assert_eq!(report.groups.len(), 2);
         assert_eq!(report.summaries.len(), 1);
         let summary = &report.summaries[0];
@@ -427,7 +463,8 @@ mod tests {
         assert_eq!(summary.points[0].median_micro_usd, 250);
         // A mean of the two model medians would be 450, not this ledger median.
         let json = serde_json::to_value(report).unwrap();
-        assert_eq!(json["summaries"][0]["pricingRevision"], "v1");
+        assert!(json["summaries"][0].get("pricingRevision").is_none());
+        assert_eq!(json["groups"][0]["pricingRevision"], "v1");
         assert_eq!(json["summaries"][0]["current"]["medianMicroUsd"], 250);
         assert_eq!(json["models"][0]["model"], "model");
         assert_eq!(json["models"][0]["plan"], "plus");
@@ -444,8 +481,8 @@ mod tests {
                 value.workload.as_mut().unwrap().key = format!("model-{index}");
                 value
             })
-            .collect();
-        let report = build_report(rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
+            .collect::<Vec<_>>();
+        let report = observed(&rows, NOW - HOUR_MS, NOW, HOUR_MS, NOW);
         assert_eq!(report.groups.len(), 32);
         let point = report.summaries[0].current.as_ref().unwrap();
         assert_eq!(point.account_count, 33);
@@ -463,44 +500,86 @@ mod tests {
     }
 
     #[test]
-    fn separates_plans_workloads_and_price_revisions() {
-        let original = measurement("a", 100, NOW);
-        let mut plan = measurement("b", 200, NOW);
+    fn plan_and_model_history_use_each_buckets_own_prices() {
+        let original = measurement("a", 100, NOW - DAY_MS);
+        let mut plan = measurement("b", 200, NOW - 1_000);
         plan.plan = "pro".into();
-        let mut workload = measurement("c", 300, NOW);
+        let mut workload = measurement("c", 300, NOW - 2_000);
         workload.workload.as_mut().unwrap().key = "other-model".into();
-        let mut price = measurement("d", 400, NOW);
+        let mut price = measurement("d", 400, NOW - 1_000);
         price.pricing_revision = "v2".into();
+        let current = [price.clone(), plan.clone()];
         let report = build_report(
-            vec![original, plan, workload, price],
-            NOW - DAY_MS,
+            &[original, plan, workload, price],
+            &current,
+            NOW - 2 * DAY_MS,
             NOW,
             HOUR_MS,
             NOW,
         );
         assert_eq!(report.groups.len(), 4);
-        assert!(
-            report
-                .groups
-                .iter()
-                .all(|group| group.current.as_ref().unwrap().account_count == 1)
-        );
-        assert_eq!(report.summaries.len(), 3);
-        assert_eq!(report.models.len(), 3);
-        let plus = report
-            .summaries
+        assert_eq!(report.summaries.len(), 2);
+        assert_eq!(report.models.len(), 2);
+        let plus = report.summaries.iter().find(|s| s.plan == "plus").unwrap();
+        let model = report
+            .models
             .iter()
-            .find(|summary| summary.plan == "plus" && summary.pricing_revision == "v1")
+            .find(|m| m.summary.plan == "plus")
             .unwrap();
-        assert_eq!(plus.current.as_ref().unwrap().median_micro_usd, 200);
-        assert_eq!(plus.current.as_ref().unwrap().account_count, 2);
-        assert!(
-            report
-                .summaries
+        for series in [plus, &model.summary] {
+            assert_eq!(series.points.len(), 2);
+            assert_eq!(series.points[0].median_micro_usd, 100);
+            assert_eq!(series.points[1].median_micro_usd, 400);
+            assert_eq!(series.points[1].account_count, 1);
+            assert_eq!(series.current.as_ref().unwrap().median_micro_usd, 400);
+        }
+        let pro = report.summaries.iter().find(|s| s.plan == "pro").unwrap();
+        assert_eq!(pro.points.len(), 1);
+        assert_eq!(pro.points[0].median_micro_usd, 200);
+    }
+
+    #[test]
+    fn month_keeps_daily_history_and_gaps_beyond_the_detail_limit() {
+        let from = NOW - 30 * DAY_MS;
+        let mut rows = Vec::new();
+        for day in (0..30).filter(|&day| day != 13) {
+            for change in 1..=3 {
+                let cost = 100 + day * 3 + change;
+                let mut value = measurement("a", cost, from + day * DAY_MS + change * HOUR_MS);
+                value.pricing_revision = format!("price-{cost}");
+                rows.push(value);
+            }
+        }
+        rows.reverse();
+        let report = build_report(&rows, &[], from, NOW, DAY_MS, NOW);
+        assert_eq!(report.groups.len(), 32);
+        assert_eq!(report.summaries.len(), 1);
+        assert_eq!(report.models.len(), 1);
+        for series in [&report.summaries[0], &report.models[0].summary] {
+            let points: Vec<_> = series
+                .points
                 .iter()
-                .filter(|summary| summary.plan != "plus" || summary.pricing_revision != "v1")
-                .all(|summary| summary.current.as_ref().unwrap().account_count == 1)
-        );
+                .map(|p| (p.at_ms, p.median_micro_usd))
+                .collect();
+            let expected: Vec<_> = (0..30)
+                .filter(|&d| d != 13)
+                .map(|d| (from + d * DAY_MS, 103 + d * 3))
+                .collect();
+            assert_eq!(points, expected);
+            assert!(series.current.is_none());
+        }
+    }
+
+    #[test]
+    fn simultaneous_price_revisions_choose_one_regardless_of_row_order() {
+        let a = measurement("a", 100, NOW);
+        let mut b = measurement("b", 900, NOW);
+        b.pricing_revision = "v2".into();
+        for rows in [[&a, &b], [&b, &a]] {
+            let point = comparable_point(NOW, &rows).unwrap();
+            assert_eq!(point.account_count, 1);
+            assert_eq!(point.median_micro_usd, 900);
+        }
     }
 
     #[test]
@@ -516,7 +595,7 @@ mod tests {
         workload.key = "other".into();
         workload.label = "other · standard · short · high".into();
         workload.models = vec!["other".into()];
-        let report = build_report(vec![single, mixed, other], NOW - HOUR_MS, NOW, HOUR_MS, NOW);
+        let report = observed(&[single, mixed, other], NOW - HOUR_MS, NOW, HOUR_MS, NOW);
         assert_eq!(
             report.summaries[0].current.as_ref().unwrap().account_count,
             3
@@ -559,8 +638,8 @@ mod tests {
     fn prefers_fresh_evidence_then_expires_stale_values_and_resets() {
         let stale = measurement("a", 900, NOW - 2 * DAY_MS);
         let fresh = measurement("b", 100, NOW);
-        let report = build_report(
-            vec![stale.clone(), fresh.clone()],
+        let report = observed(
+            &[stale.clone(), fresh.clone()],
             NOW - 30 * DAY_MS,
             NOW,
             DAY_MS,
@@ -580,7 +659,13 @@ mod tests {
             100
         );
         assert!(!report.summaries[0].stale);
-        let report = build_report(vec![stale.clone()], NOW - 30 * DAY_MS, NOW, DAY_MS, NOW);
+        let report = observed(
+            std::slice::from_ref(&stale),
+            NOW - 30 * DAY_MS,
+            NOW,
+            DAY_MS,
+            NOW,
+        );
         assert!(report.groups[0].stale);
         assert_eq!(
             report.groups[0].current.as_ref().unwrap().median_micro_usd,
@@ -595,13 +680,7 @@ mod tests {
                 .median_micro_usd,
             900
         );
-        let report = build_report(
-            vec![stale],
-            NOW - 30 * DAY_MS,
-            NOW,
-            DAY_MS,
-            NOW + 2 * DAY_MS,
-        );
+        let report = observed(&[stale], NOW - 30 * DAY_MS, NOW, DAY_MS, NOW + 2 * DAY_MS);
         assert!(report.groups[0].current.is_none());
         assert!(report.summaries[0].current.is_none());
         let mut reset = fresh.clone();
@@ -610,7 +689,8 @@ mod tests {
         reset.micro_usd = None;
         reset.workload = None;
         let report = build_report(
-            vec![fresh, reset.clone(), reset],
+            &[fresh, reset.clone(), reset],
+            &[],
             NOW - DAY_MS,
             NOW + 1,
             HOUR_MS,

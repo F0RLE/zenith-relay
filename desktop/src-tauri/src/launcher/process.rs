@@ -1,3 +1,4 @@
+use super::settings::Application;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,7 +18,7 @@ const CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const OPENCODE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "windows")]
 const CODEX_STOP_STABLE_WINDOW: Duration = Duration::from_millis(750);
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 mod identity;
@@ -270,10 +271,7 @@ pub(super) fn windows_taskkill_arguments(pid: u32, force: bool) -> Vec<String> {
 }
 
 pub(super) fn launch_codex_checked() -> Result<(), String> {
-    let executable = super::settings::configured_path(super::settings::Application::Chatgpt)?;
-    // Opening an already running desktop app is a no-op. Besides avoiding a
-    // duplicate process, this prevents Chromium from reinitializing its
-    // profile and touching the large on-disk cache on every click.
+    let executable = super::settings::configured_path(Application::Chatgpt)?;
     if is_codex_running()? {
         return Ok(());
     }
@@ -310,7 +308,8 @@ pub(super) fn launch_codex_checked() -> Result<(), String> {
 fn launch_configured_chatgpt(executable: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        windows_hidden_command(executable)
+        let mut command = windows_hidden_command(executable);
+        command
             .spawn()
             .map_err(|_| "Could not start the selected ChatGPT desktop application".to_string())?;
         if wait_for_codex_state(true, CODEX_START_TIMEOUT)? {

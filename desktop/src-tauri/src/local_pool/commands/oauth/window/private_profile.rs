@@ -39,9 +39,8 @@ impl PrivateProfile {
 impl Drop for PrivateProfile {
     fn drop(&mut self) {
         let path = self.path.clone();
-        // Destroyed does not mean Chromium has released the directory: its
-        // browser/GPU processes can still write caches during shutdown. Keep
-        // cleanup bounded and off the UI thread, without unsafe native FFI.
+        // Chromium processes may still write caches during shutdown.
+        // Keep cleanup bounded and off the UI thread, without unsafe native FFI.
         tauri::async_runtime::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
             while webview_uses_profile(&path).unwrap_or(true) {

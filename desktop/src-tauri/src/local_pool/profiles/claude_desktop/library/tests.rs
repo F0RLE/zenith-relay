@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 mod budgets;
 mod catalog_refresh;
+mod connections;
 mod identity;
 mod stale_recovery;
 

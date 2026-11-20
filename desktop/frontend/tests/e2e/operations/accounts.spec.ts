@@ -130,7 +130,7 @@ test("confirmed local reset delegates protected restoration to Rust", async ({ p
 test("local pool reset is hidden outside Computer mode", async ({ page }) => {
   await installTauriMock(page, { mode: "hosted", locale: "en", populated: true });
   await page.goto("/");
-  await expect(page.getByText("In development", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   await expect(page.getByText("Reset local pool data", { exact: true })).toHaveCount(0);
 });
 
@@ -266,7 +266,8 @@ test("account export supports bulk copy and per-account download", async ({ page
   await expect(dialog.getByRole("radio", { name: "Zenith" })).toHaveAttribute("aria-checked", "true");
   await expect(dialog.getByRole("button", { name: "Copy JSON" })).toBeEnabled();
   await expect(dialog).not.toContainText("Reusable credentials");
-  await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+  await expect(dialog.locator(".account-export-methods")).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox")).not.toBeChecked();
   const markdownDescription = "# Seller package\n\n- Two Business accounts";
   await dialog.locator('input[type="file"][accept*=".md"]').setInputFiles({ name: "offer.md", mimeType: "text/markdown", buffer: Buffer.from(markdownDescription) });
   await expect(dialog.getByRole("heading", { name: "Seller package" })).toBeVisible();
@@ -332,10 +333,10 @@ for (const locale of ["en", "ru"] as const) {
     await page.locator(".account-bulk-menu summary").click();
     await page.getByRole("menuitem", { name: locale === "en" ? "Export all" : "Экспортировать все", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: locale === "en" ? "Export accounts" : "Экспорт учётных записей" });
-    await expect(dialog.getByRole("alert")).toContainText(locale === "en" ? "Sign in after import" : "После импорта войдите заново");
+    await expect(dialog.getByRole("alert")).toContainText(locale === "en" ? "Sign in to SIWC again after import" : "После импорта SIWC войдите заново");
     await expect(dialog.getByRole("alert")).toContainText(locale === "en"
-      ? "never use copied refresh tokens on two devices"
-      : "копию refresh-токена нельзя использовать на двух устройствах");
+      ? "do not use the same token on two devices"
+      : "один токен нельзя использовать на двух устройствах");
     await expect(dialog.getByRole("radio")).toHaveCount(1);
     await expect(dialog.getByRole("radio", { name: "Zenith", exact: true })).toHaveAttribute("aria-checked", "true");
     await dialog.getByRole("button", { name: locale === "en" ? "Download JSON" : "Скачать JSON", exact: true }).click();
@@ -577,7 +578,7 @@ test("runtime retry hints do not turn available accounts into quota pauses", asy
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const member = page.locator('[data-member-label="Personal Plus"]');
-  await expect(member.locator('.pool-member-kind-icon')).toHaveAttribute("aria-label", /^Retry after .+ · In rotation$/);
+  await expect(member.locator('.pool-member-kind-icon')).toHaveAttribute("aria-label", /^In rotation · Retry after .+$/);
   await expect(member.locator('.pool-member-kind-icon')).toHaveAttribute("data-status", "ready");
   await expect(member.getByText("Waiting for quota", { exact: true })).toHaveCount(0);
   await expect(member.locator(".pool-member-kind-icon")).not.toHaveAttribute("title", /^Retry after /);

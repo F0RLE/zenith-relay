@@ -9,14 +9,14 @@ import { CodexMemoryModelControl } from "../../components/CodexMemoryModelContro
 import { CodexWebsocketsControl } from "../../components/CodexWebsocketsControl";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
-import { ApplicationLaunchPath } from "./ApplicationLaunchPath";
+import { ApplicationLaunchSettings } from "./ApplicationLaunchPath";
 import { ApplicationProtocolControl } from "./ApplicationProtocolControl";
 
 export function ChatGPTApplicationSettings() {
   const { t } = useTranslation();
   const { mode } = useRelayState();
   return <section className="gateway-tab-panel" role="tabpanel" aria-label={t("gateway.tabs.chatgpt")}>
-    <ApplicationLaunchPath application="chatgpt" />
+    <ApplicationLaunchSettings application="chatgpt" />
     <div className="integration-chatgpt-settings">
       <ChatGPTSetup />
       {mode === "local" ? <div className="gateway-settings-panel gateway-application-panel">

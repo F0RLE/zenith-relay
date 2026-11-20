@@ -55,6 +55,153 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn connection_preferences_keep_paths_and_other_applications_unchanged() {
+    let fixture = Fixture::new();
+    let application = Application::Opencode;
+    let executable = fixture.executable(application);
+    fixture.store.set(application, executable.to_str()).unwrap();
+    assert!(fixture.store.connection_id(application).unwrap().is_none());
+    assert!(
+        fixture
+            .store
+            .set_connection(application, Some("proxy_example"), None)
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .store
+            .set_connection(Application::Chatgpt, Some("other_proxy"), None)
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .store
+            .set_connection(application, None, None)
+            .unwrap()
+    );
+    assert_eq!(
+        fixture.store.connection_id(application).unwrap().as_deref(),
+        Some("proxy_example")
+    );
+    assert_eq!(fixture.store.path(application).unwrap(), Some(executable));
+    fixture.store.set(Application::Chatgpt, None).unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .connection_id(Application::Chatgpt)
+            .unwrap()
+            .as_deref(),
+        Some("other_proxy")
+    );
+    assert!(
+        fixture
+            .store
+            .set_connection(application, None, Some("proxy_example"))
+            .unwrap()
+    );
+    assert!(fixture.store.connection_id(application).unwrap().is_none());
+}
+
+#[test]
+fn non_claude_native_connections_cannot_modify_saved_preferences() {
+    let fixture = Fixture::new();
+    for application in [Application::Chatgpt, Application::Opencode] {
+        fixture
+            .store
+            .set_connection(application, Some("proxy_legacy"), None)
+            .unwrap();
+        let before = fs::read(&fixture.store.path).unwrap();
+        assert!(
+            fixture
+                .store
+                .set_native_connection(application, None, &(Some("proxy_legacy".into()), None))
+                .is_err()
+        );
+        assert_eq!(fs::read(&fixture.store.path).unwrap(), before);
+    }
+}
+
+#[test]
+fn native_connection_journal_uses_cas_and_preserves_other_applications() {
+    let fixture = Fixture::new();
+    let app = Application::ClaudeDesktop;
+    let executable = fixture.executable(app);
+    fixture.store.set(app, executable.to_str()).unwrap();
+    fixture
+        .store
+        .set_connection(app, Some("proxy_legacy"), None)
+        .unwrap();
+    fixture
+        .store
+        .set_connection(Application::Opencode, Some("proxy_other"), None)
+        .unwrap();
+    let record: super::super::connection::Record = serde_json::from_value(serde_json::json!({
+        "proxyId": "proxy_native",
+        "library": fixture.root.join("client/configLibrary"),
+        "profileId": "926fb7ef-9742-4bf3-ad3a-a58dd082c68a",
+        "original": {},
+        "previous": {},
+        "applied": {"egressProxyUrl": "http://proxy.example.test:8080/"},
+        "pending": true,
+    }))
+    .unwrap();
+    assert!(
+        !fixture
+            .store
+            .set_native_connection(app, Some(record.clone()), &(None, None))
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .store
+            .set_native_connection(
+                app,
+                Some(record.clone()),
+                &(Some("proxy_legacy".into()), None)
+            )
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .store
+            .set_native_connection(app, None, &(Some("proxy_legacy".into()), None))
+            .unwrap()
+    );
+    assert_eq!(fixture.store.path(app).unwrap(), Some(executable));
+    assert_eq!(
+        fixture
+            .store
+            .connection_id(Application::Opencode)
+            .unwrap()
+            .as_deref(),
+        Some("proxy_other")
+    );
+    assert!(
+        fixture
+            .store
+            .set_native_connection(app, None, &(None, Some(record)))
+            .unwrap()
+    );
+    assert!(fixture.store.read().unwrap().native_connections.is_empty());
+}
+
+#[test]
+fn connection_preferences_reject_urls_instead_of_returning_them_as_ids() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.store.path.parent().unwrap()).unwrap();
+    fs::write(
+        &fixture.store.path,
+        r#"{"launchPaths":{},"connectionIds":{"chatgpt":"https://example-user:example-password@proxy.example.test:8443"}}"#,
+    )
+    .unwrap();
+    let error = fixture
+        .store
+        .connection_id(Application::Chatgpt)
+        .unwrap_err();
+    assert!(!error.contains("example-password"));
+}
+
+#[test]
 fn picker_starts_beside_the_executable_or_in_the_selected_directory() {
     let fixture = Fixture::new();
     for application in [

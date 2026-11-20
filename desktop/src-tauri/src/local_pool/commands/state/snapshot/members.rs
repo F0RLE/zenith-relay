@@ -23,6 +23,7 @@ pub(super) fn project_quota_window_usages(
     let ledgers = crate::local_pool::background::weekly_capacity::subscription_ledgers(
         &inputs.accounts,
         &inputs.account_facts,
+        now_ms,
     );
     // Account calibration shares the collector's pricing contract, not custom
     // API-source overrides or a per-account lifetime usage extrapolation.

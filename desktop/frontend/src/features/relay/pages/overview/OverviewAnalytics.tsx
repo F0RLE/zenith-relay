@@ -203,6 +203,7 @@ export function OverviewChart({
   details,
   emptyLabel,
   summaryHint,
+  connectGaps,
 }: {
   icon: ReactNode;
   title: string;
@@ -218,13 +219,14 @@ export function OverviewChart({
   details?: (index: number) => ReactNode;
   emptyLabel?: string;
   summaryHint?: string;
+  connectGaps?: boolean;
 }) {
   const { t } = useTranslation();
   const measured = seriesValues.filter((chartValue): chartValue is number => chartValue != null);
   const max = Math.max(0, ...measured) || 1;
   const axisLabels = [formatAxis(max), formatAxis(max / 2), "0"];
-  const hasData = measured.some((chartValue) => chartValue > 0);
-  const segments = lineSegments(seriesValues, max);
+  const hasData = measured.length > 0;
+  const segments = variant === "line" ? lineSegments(seriesValues, max, connectGaps) : [];
   return <article className={`overview-chart ${tone}`}>
     <header><div className="overview-chart-title">{icon}<span><strong>{title}</strong></span></div>{controls}<strong className="overview-chart-summary" data-relay-tooltip={summaryHint} tabIndex={summaryHint ? 0 : undefined} aria-label={summaryHint ? `${summary}: ${summaryHint}` : undefined}>{summary}</strong></header>
     <div className="overview-chart-body">
@@ -233,7 +235,7 @@ export function OverviewChart({
         <div className="overview-chart-canvas">
           <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none">
             <path className="overview-chart-grid" d="M0 0H100 M0 50H100 M0 100H100" />
-            {variant === "line" ? segments.map((path, index) => <path className="overview-chart-line" d={path} key={index} />) : null}
+            {segments.map((path, index) => <path className="overview-chart-line" d={path} key={index} />)}
           </svg>
           <ol className={`overview-chart-points ${variant}`} style={{ gridTemplateColumns: `repeat(${seriesValues.length}, minmax(0, 1fr))` }}>
             {seriesValues.map((chartValue, index) => {

@@ -4,10 +4,10 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { WeeklyCapacityReport } from "../../api/types/weeklyCapacity";
 import { OptionMenu } from "../../components/Ui";
-import { formatApproximateUsd, formatScaledUsd } from "../../currencyFormatting";
+import { formatScaledUsd } from "../../currencyFormatting";
 import { OverviewChart } from "./OverviewAnalytics";
 import { DAY_MS, HOUR_MS, type WindowBucket } from "./overviewAnalyticsModel";
-import { cachedCapacity, capacityCurrent, capacityModelOptions, loadCapacity, nextCapacityExpiry } from "./weeklyCapacityModel";
+import { cachedCapacity, capacityCurrent, capacityModelOptions, formatCapacityEstimate, loadCapacity, nextCapacityExpiry } from "./weeklyCapacityModel";
 
 type Props = { windows: WindowBucket[]; revision: number; accountId?: string };
 
@@ -40,11 +40,10 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
     const timer = window.setTimeout(() => setNow(Date.now()), Math.max(1, at - Date.now() + 1));
     return () => window.clearTimeout(timer);
   }, [report, now]);
-  const plans = useMemo(() => [...new Set([...(report?.summaries.map((summary) => summary.plan) ?? []), ...(report?.groups.map((group) => group.plan) ?? []), ...(report?.events.map((event) => event.plan) ?? [])])], [report]);
+  const plans = report?.summaries.map((summary) => summary.plan) ?? [];
   const plan = plans.includes(planChoice) ? planChoice : plans[0] ?? "";
   const models = useMemo(() => report?.models?.filter((model) => model.plan === plan) ?? [], [report, plan]);
   const modelOptions = useMemo(() => capacityModelOptions(models), [models]);
-  // Native model series are newest-first; never average workload medians here.
   const selectedModel = models.find((entry) => entry.model === modelChoice);
   const series = selectedModel ?? report?.summaries.find((summary) => summary.plan === plan);
   const points = useMemo(() => {
@@ -52,16 +51,18 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
     return windows.map((window) => byTime.get(window.startMs) ?? null);
   }, [series, windows]);
   const current = capacityCurrent(series, Date.now());
-  const values = points.map((point) => point ? point.medianMicroUsd / 1_000_000 : null);
-  const money = (value: number) => formatApproximateUsd(value, locale);
-  const date = (at: number) => new Date(at).toLocaleString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const values = points.map((point) => point?.medianMicroUsd ?? null);
+  const money = (microUsd: number) => formatCapacityEstimate(microUsd, locale);
+  const date = useMemo(() => new Intl.DateTimeFormat(locale, {
+    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  }).format, [locale]);
   return <OverviewChart
     icon={<ChartNoAxesCombined aria-hidden />}
     title={t("overview.capacity.title")}
-    summary={current ? money(current.point.medianMicroUsd / 1_000_000) : "—"}
+    summary={current ? money(current.point.medianMicroUsd) : "—"}
     summaryHint={current ? t(current.stale ? "overview.capacity.stale" : "overview.capacity.current", { date: date(current.point.observedAtMs) }) : t("overview.capacity.waiting")}
-    seriesValues={values} windows={windows} variant="line" tone="weekly-capacity"
-    formatValue={money} formatAxis={(value) => formatScaledUsd(value, locale)}
+    seriesValues={values} windows={windows} variant="line" tone="weekly-capacity" connectGaps
+    formatValue={money} formatAxis={(value) => formatScaledUsd(value / 1_000_000, locale)}
     pointLabel={(index) => {
       const point = points[index];
       return point ? date(point.observedAtMs) : undefined;
@@ -76,7 +77,7 @@ function WeeklyCapacityChart({ windows, revision, accountId }: Props) {
     details={(index) => {
       const point = points[index];
       return point && point.accountCount > 1 && point.lowMicroUsd < point.highMicroUsd
-        ? <small>{t("overview.capacity.spread", { low: money(point.lowMicroUsd / 1_000_000), high: money(point.highMicroUsd / 1_000_000) })}</small>
+        ? <small>{t("overview.capacity.spread", { low: money(point.lowMicroUsd), high: money(point.highMicroUsd) })}</small>
         : null;
     }}
   />;

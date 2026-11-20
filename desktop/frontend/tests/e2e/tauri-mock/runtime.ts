@@ -625,6 +625,14 @@ export function initializeTauriMock(input: MockOptions) {
       return true;
     };
     const applicationLaunchPaths: Record<string, string | null> = {};
+    let claudeConnectionId: string | null = null;
+    let claudeConnectionVersion = 0;
+    const applicationConnection = (application: string) => {
+      if (application !== "claude-desktop") throw { code: "connection_unsupported" };
+      const nativeSupported = input.claudeConnectionSupported ?? true;
+      return { proxyId: claudeConnectionId, nativeSupported, revision: String(claudeConnectionVersion),
+        status: claudeConnectionId ? "saved" : nativeSupported ? "default" : "unsupported" };
+    };
     const applicationProtocols: Record<string, string> = {};
     const applicationProtocolOptions = ["auto", "responses", "chat_completions", "messages", "gemini"];
     const detectedApplicationPaths: Record<string, string> = {
@@ -691,7 +699,9 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "get_local_weekly_capacity": {
             if (input.weeklyCapacityError) throw { code: "io", message: "Synthetic capacity error" };
-            return structuredClone(input.weeklyCapacity ?? { generatedAtMs: Date.now(), summaries: [], models: [], groups: [], events: [] });
+            const query = args.input as { bucketMs: number };
+            const report = (query.bucketMs === 86_400_000 ? input.dailyWeeklyCapacity : undefined) ?? input.weeklyCapacity;
+            return structuredClone(report ?? { generatedAtMs: Date.now(), summaries: [], models: [], groups: [], events: [] });
           }
           case "get_local_usage_page": {
             const historyQuery = args.input as { requestId?: string; page?: number } | undefined;
@@ -1228,7 +1238,9 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "reveal_local_account_identity": return { accountId: String(args.accountId), identity: "person@example.test" };
           case "start_codex_oauth": {
-            const flow = { loginId: "oauth_synthetic", clientKind: String(args.clientKind ?? (args.accountId ? account.oauthClientKind : "codex")), ...(args.accountId ? { targetAccountId: String(args.accountId) } : {}), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
+            const presentation = args.presentation as { embedded?: boolean; openWindow?: boolean } | undefined;
+            const pageState = presentation?.openWindow !== false || args.automaticLogin ? "opened" : "closed";
+            const flow = { loginId: "oauth_synthetic", embedded: presentation?.embedded === true && (input.platform ?? "windows") === "windows", pageState, clientKind: String(args.clientKind ?? (args.accountId ? account.oauthClientKind : "codex")), ...(args.accountId ? { targetAccountId: String(args.accountId) } : {}), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
             if (input.oauthCallbackBeforeStartReturns) {
               for (const [id, listener] of eventListeners) {
                 if (listener.event === "relay-oauth-status") callbacks.get(listener.handler)?.({ event: listener.event, id, payload: { loginId: flow.loginId, status: "callback_received" } });
@@ -1237,6 +1249,7 @@ export function initializeTauriMock(input: MockOptions) {
             return flow;
           }
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
+          case "update_codex_oauth_view": return true;
           case "cancel_codex_oauth": return null;
           case "complete_codex_oauth": {
             if (input.oauthCompletionDeferred) {
@@ -1293,6 +1306,18 @@ export function initializeTauriMock(input: MockOptions) {
           case "restore_full_codex_profile_snapshot":
           case "delete_codex_profile_snapshot": return null;
           case "get_application_launch_path": return { path: applicationLaunchPaths[String(args.application)] ?? null, detectedPath: detectedApplicationPaths[String(args.application)] ?? null };
+          case "get_application_connection": return applicationConnection(String(args.application));
+          case "set_application_connection": {
+            const application = String(args.application);
+            const before = applicationConnection(application);
+            if (before.revision !== args.expectedRevision) throw { code: "connection_changed" };
+            const id = args.proxyId == null ? null : String(args.proxyId);
+            if (id && !proxyEntries.some((entry) => entry.id === id)) throw { code: "connection_not_found" };
+            if (id && !before.nativeSupported) throw { code: "connection_unsupported" };
+            claudeConnectionId = id;
+            claudeConnectionVersion++;
+            return applicationConnection(application);
+          }
           case "get_application_upstream_protocol": return {
             policy: applicationProtocols[String(args.application)] ?? "auto",
             available: input.populated ? applicationProtocolOptions : ["auto"],
@@ -1311,6 +1336,7 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "launch_application": return null;
           case "open_hosted_preview": return null;
+          case "get_hosted_device": return null;
           case "pick_application_launch_path": return detectedApplicationPaths[String(args.application)] ?? null;
           case "get_opencode_config_status": return structuredClone(openCodeStatus);
           case "create_opencode_snapshot": return captureOpenCodeSnapshot(String(args.name).trim());
@@ -1405,7 +1431,9 @@ export function initializeTauriMock(input: MockOptions) {
         { itemId: "import_1111222233334444", label: "Second imported account", identity: "se••••nd", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "k12", defaultSelected: true, selectable: true, existing: false, warnings: [] },
         { itemId: "import_fedcba9876543210", label: "Existing account", identity: "ex••••ng", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "existing", plan: "k12", defaultSelected: false, selectable: true, existing: true, warnings: [] },
         ...(input.importPreviewError ? [{ itemId: "import_invalid_refresh_exchange", label: "Invalid imported account", identity: "in••••id", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "skipped", status: "invalid", plan: null, defaultSelected: false, selectable: false, existing: false, warnings: [], error: { code: "refresh_exchange_failed", message: "synthetic import validation failure" } }] : []),
-      ].map((row) => ({ ...row, oauthClientKind: input.accountOAuthClientKind ?? "codex" })), warnings: [] } };
+      ].map((row, i) => ({ ...row, oauthClientKind: input.accountOAuthClientKind ?? "codex",
+        ...(input.importBundleProxy && i === 0 ? { bundleProxyEndpoint: "http://proxy.example.test:8123" } : {}),
+      })), warnings: [] } };
     }
 
     function importConfirmation(sessionId: string, itemIds: string[]) {

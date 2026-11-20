@@ -281,11 +281,11 @@ fn image_diagnostics_reopen_export_and_expire_without_losing_usage() {
     );
     let report = super::super::support::document(rows.first(), &rows, false);
     assert_eq!(
-        report["finalRequest"]["routing"]["images"]["outputs"][0]["dimensions"]["width"],
+        report["attempts"][0]["routing"]["images"]["outputs"][0]["dimensions"]["width"],
         1672
     );
     assert_eq!(
-        report["finalRequest"]["routing"]["images"]["sent"]["size"],
+        report["attempts"][0]["routing"]["images"]["sent"]["size"],
         "3840x2160"
     );
     assert!(!report.to_string().contains("synthetic-private"));

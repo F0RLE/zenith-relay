@@ -20,7 +20,16 @@ pub(super) fn attached_profile(
     let preserve = record.is_some_and(|record| record.preserve_profile_on_restore);
     let edited = profile.is_some() && !record.is_some_and(|record| owns_profile(record, profile));
     if !preserve && !edited {
-        return serialize(config).map(|bytes| (bytes, false));
+        let mut config = config.clone();
+        if let Some(profile) = profile.map(parse).transpose()? {
+            let fields = config.as_object_mut().ok_or_else(invalid_config)?;
+            for key in CONNECTION_FIELDS {
+                if let Some(value) = profile.get(key) {
+                    fields.insert(key.into(), value.clone());
+                }
+            }
+        }
+        return serialize(&config).map(|bytes| (bytes, false));
     }
     let mut merged = profile
         .map(parse)

@@ -1,5 +1,6 @@
 import { expect, test } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+import { receiptField } from "./request-details-fixture";
 
 test("hidden activity is coalesced without rendering and reconciles on return", async ({ page }) => {
   await installTauriMock(page, { locale: "en", accountCount: 1, quotaAvailable: true, usagePresent: false });
@@ -89,7 +90,7 @@ test("countdown ticks reuse date formatters across account cards", async ({ page
   expect(await constructions()).toBe(before);
 });
 
-test("request cache countdown pauses while hidden and catches up after expiry", async ({ page }) => {
+test("viewing an old send never turns its reported retention into a live eviction clock", async ({ page }) => {
   await page.clock.install();
   await installTauriMock(page, {
     mode: "local", locale: "en", populated: true,
@@ -98,21 +99,24 @@ test("request cache countdown pauses while hidden and catches up after expiry", 
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
-  const retention = page.locator(".request-cache-retention dd");
-  await expect(retention).toHaveText("≈ 2 min left");
+  const dialog = page.getByRole("dialog");
+  const retention = receiptField(dialog, "Cache retention").locator("dd");
+  await expect(retention).toBeHidden();
+  await dialog.locator(".request-technical-details > summary").click();
+  await expect(retention).toHaveText("2 min");
   await page.clock.runFor(46_000);
-  await expect(retention).toHaveText("≈ 1 min left");
+  await expect(retention).toHaveText("2 min");
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
   await page.clock.runFor(180_000);
-  expect(await retention.textContent()).toBe("≈ 1 min left");
+  expect(await retention.textContent()).toBe("2 min");
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await expect(retention).toHaveText("estimated window elapsed");
+  await expect(retention).toHaveText("2 min");
   await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
   await page.clock.runFor(30_000);
   await expect(page.getByRole("dialog")).toHaveCount(0);

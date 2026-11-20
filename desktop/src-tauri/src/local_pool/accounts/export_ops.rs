@@ -67,6 +67,7 @@ pub fn export_local_accounts(
         &account_ids,
         export_input.format,
         export_input.description.as_deref(),
+        export_input.include_proxies,
         &state,
     )?;
     finish_account_export(document, export_input.destination, &app)
@@ -76,18 +77,26 @@ pub(crate) fn build_local_account_export_document(
     account_ids: &[String],
     format: AccountExportFormat,
     description: Option<&str>,
+    include_proxies: bool,
     state: &DesktopState,
 ) -> LocalResult<AccountExportDocument> {
-    let account_records = {
+    if include_proxies && format != AccountExportFormat::Zenith {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "proxy transfer requires a Zenith account bundle",
+        ));
+    }
+    let (account_records, settings) = {
         let store = state.store()?;
-        account_ids
+        let records = account_ids
             .iter()
             .map(|account_id| {
                 store.account(account_id).cloned().ok_or_else(|| {
                     LocalPoolError::new(ErrorCode::NotFound, "account export item was not found")
                 })
             })
-            .collect::<LocalResult<Vec<_>>>()?
+            .collect::<LocalResult<Vec<_>>>()?;
+        (records, store.gateway().clone())
     };
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let accounts = account_records
@@ -97,6 +106,11 @@ pub(crate) fn build_local_account_export_document(
                 .require(&account_record.account.id)
                 .map_err(credential_local_error)?;
             Ok(AccountExportCredential {
+                transfer_proxy_url: if include_proxies {
+                    super::proxy::saved_account_proxy_url(&settings, &credentials)?
+                } else {
+                    None
+                },
                 oauth_client_kind: credentials.oauth_client_kind(),
                 siwc_registration: credentials.siwc_registration().cloned(),
                 basis_points_headers: credentials.basis_points_headers().cloned(),

@@ -295,7 +295,7 @@ export function useRelayRuntime({
     };
     if (enteredRuntimeRefreshPage) refreshVisibleRuntime();
     const interval = window.setInterval(() => {
-      // Events are an optimization, not proof that the backend is unchanged.
+      // Refresh backend state in case runtime events were missed.
       if (document.visibilityState === "visible") runBackgroundRefresh(true);
     }, RUNTIME_REFRESH_INTERVAL_MS);
     window.addEventListener("focus", refreshVisibleRuntime);

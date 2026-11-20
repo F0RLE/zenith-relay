@@ -180,8 +180,7 @@ pub(super) async fn prepare_account_preview_item(
     )
     .map_err(import_item_command_error)?;
     if existing_account.is_some() {
-        row.existing = true;
-        row.status = ImportPreviewStatus::Existing;
+        row.mark_existing();
     }
     if probe_quota && material.siwc_registration.is_none() {
         probe_account_preview_quota(

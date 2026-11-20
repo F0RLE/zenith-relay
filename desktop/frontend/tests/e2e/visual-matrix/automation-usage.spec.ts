@@ -15,24 +15,39 @@ test("automation list fits the standard window without horizontal scrolling", as
   expect(await table.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
-test("weekly quota reset confirmation stays concise in the compact dark window", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, resetCreditsAvailable: 1 });
-  await page.setViewportSize({ width: 840, height: 560 });
+for (const theme of ["dark", "light"] as const) {
+for (const width of [840, 420]) {
+test(`weekly quota reset confirmation stays concise (${theme}, ${width})`, async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, resetCreditsAvailable: 1 });
+  await page.setViewportSize({ width, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  const now = new Date("2026-11-20T12:00:00Z");
+  await page.clock.install({ time: now });
+  await page.clock.pauseAt(new Date(now.getTime() + 1_000));
   await page.getByRole("button", { name: "Доступен сброс: 1 · Сбросить недельную квоту", exact: true }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Сбросить недельную квоту" });
-  await expect(dialog.getByText("Сбросить недельную квоту для этой учётной записи?", { exact: true })).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "Вы хотите сбросить недельную квоту?" });
+  await expect(dialog.getByRole("heading", { name: "Вы хотите сбросить недельную квоту?", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button")).toHaveCount(2);
+  await expect(dialog.locator(".relay-dialog-body")).toBeHidden();
   await expect(dialog.getByRole("button", { name: "Нет", exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Да, сбросить", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Да (3)", exact: true })).toBeDisabled();
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
+      && rect.width <= 380 && rect.height <= 180
       && element.scrollWidth <= element.clientWidth;
   })).toBe(true);
-  await page.screenshot({ path: "output/playwright/reset-confirm-after-ru-dark-840x560.png" });
+  const before = await dialog.boundingBox();
+  await page.screenshot({ path: `output/playwright/reset-confirm-countdown-ru-${theme}-${width}x560.png`, animations: "disabled" });
+  await page.clock.runFor(3_000);
+  await expect(dialog.getByRole("button", { name: "Да", exact: true })).toBeEnabled();
+  expect(await dialog.boundingBox()).toEqual(before);
+  await page.screenshot({ path: `output/playwright/reset-confirm-ready-ru-${theme}-${width}x560.png`, animations: "disabled" });
 });
+}
+}
 
 test("automation editor fits the compact window without hidden controls", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
@@ -120,8 +135,9 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.getByRole("button", { name: "Использование", exact: true }).click();
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
-  await expect(dialog).toContainText("РазмышлениеМаксимальное→Низкое");
+  await expect(dialog.locator(".request-details-parameters")).toHaveCount(0);
   await dialog.locator(".request-technical-details > summary").click();
+  await expect(dialog.locator(".request-details-parameters")).toContainText("РазмышлениеМаксимальное→Низкое");
   await expect(dialog).toContainText("req_synthetic_local");
   await expect(dialog.locator(".request-route-section")).toHaveCount(0);
   await expect(dialog.locator(".request-context-section")).toHaveCount(0);

@@ -404,6 +404,31 @@
   white-space: pre-line;
 }
 
+.relay-dialog.confirm-dialog-compact {
+  width: min(380px, 100%);
+  grid-template-rows: auto auto;
+}
+
+.confirm-dialog-compact > header {
+  padding: 24px 24px 16px;
+}
+
+.confirm-dialog-compact > header > .relay-icon-button,
+.confirm-dialog-compact > .relay-dialog-body {
+  display: none;
+}
+
+.confirm-dialog-compact > footer {
+  min-height: 0;
+  gap: 8px;
+  padding: 0 24px 24px;
+}
+
+.confirm-dialog-compact > footer .relay-button {
+  min-width: 80px;
+  font-variant-numeric: tabular-nums;
+}
+
 .update-dialog {
   width: min(600px, 100%);
 }
@@ -986,6 +1011,25 @@
 .import-after .settings-group-body {
   display: grid;
   gap: 6px;
+}
+
+.import-bundle-route {
+  margin: 0;
+  min-width: 0;
+  padding: 8px 16px;
+  border: 0;
+}
+
+.import-bundle-route legend {
+  color: var(--relay-text);
+  font-weight: 650;
+}
+
+.import-bundle-route label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
 }
 
 .import-after .import-after-toggle:hover,

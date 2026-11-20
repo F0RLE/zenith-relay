@@ -3,26 +3,33 @@
 use crate::local_pool::{
     accounts::{
         pool_resources::{weekly_reset_member, weekly_reset_rule_matches},
-        quota_refresh::{AccountQuotaOutcome, AccountQuotaRefreshResponse},
+        quota_refresh::{
+            AccountQuotaOutcome, AccountQuotaRefreshResponse, read_account_quota_once,
+        },
         refresh_observations::AccountRefreshScope,
-        reset_credits::consume_reset_credit_when,
+        reset_credits::{ResetAttempt, ResetOrigin, consume_reset_credit_when},
     },
     background::codex_wake_policy,
     error::{ErrorCode, LocalPoolError, Result},
+    models::LocalAccountRecord,
     runtime::current_time_ms,
     state::DesktopState,
     store::AccountRefreshFence,
 };
 use zenith_relay_core::{
-    automations::WakeTrigger,
+    automations::{
+        WakeTask, reset_policy,
+        reset_resources::{
+            fresh_weekly_reset_window, subscription_allows_reset, weekly_reset_window,
+        },
+    },
     providers::chatgpt::CodexQuotaClient,
-    quota::{QuotaTransition, QuotaWindowKind},
+    quota::{QuotaTransition, QuotaWindow, QuotaWindowKind},
     scheduler::refresh::{RefreshIdentity, RefreshKind, recently_active},
 };
 
 #[cfg(test)]
 mod reserve_tests;
-use zenith_relay_core::automations::reset_policy;
 mod weekly_threshold;
 
 pub(super) fn evaluate_updated_transitions(
@@ -104,21 +111,27 @@ pub(super) async fn evaluate_weekly_exhaustions(
     response: &AccountQuotaRefreshResponse,
     fence: &AccountRefreshFence,
 ) -> Result<Option<AccountQuotaRefreshResponse>> {
+    let now_ms = current_time_ms();
+    let account = &response.account.account;
+    if !matches!(response.quota, AccountQuotaOutcome::Updated { .. })
+        || fresh_weekly_reset_window(&account.quota, now_ms).is_none()
+    {
+        return Ok(None);
+    }
     weekly_threshold::confirm_redemption(state, response, fence)?;
     if weekly_threshold::has_matching_rule(state, response)? {
         return weekly_threshold::evaluate(state, response, fence).await;
     }
     if response.account.recovery.is_some()
-        || response
-            .account
-            .account
-            .quota
-            .reset_credits_available
-            .is_some_and(|available| available == 0)
+        || account.quota.reset_credits_available == Some(0)
+        || !subscription_allows_reset(&account.subscription, now_ms)
     {
         return Ok(None);
     }
-    let (tasks, member_fence) = {
+    let Some(fingerprint) = weekly_exhaustion_fingerprint(response, now_ms) else {
+        return Ok(None);
+    };
+    let member_fence = {
         let store = state.store()?;
         store.ensure_account_refresh_current(fence)?;
         if store
@@ -136,118 +149,112 @@ pub(super) async fn evaluate_weekly_exhaustions(
         ) else {
             return Ok(None);
         };
-        let (_, member_fence) = store.account_refresh_scope(&selected.account.id)?;
-        let tasks = store
-            .automations()
-            .tasks
-            .iter()
-            .filter(|task| weekly_reset_rule_matches(task, &response.account, selected))
-            .cloned()
-            .collect::<Vec<_>>();
-        (tasks, member_fence)
+        if !has_weekly_reserve_rule(&store.automations().tasks, &response.account, selected) {
+            return Ok(None);
+        }
+        store.account_refresh_scope(&selected.account.id)?.1
     };
-    let has_weekly_task = tasks.iter().any(|task| {
-        task.enabled
-            && task.trigger == WakeTrigger::Weekly
-            && task.weekly_reset_remaining_basis_points.is_none()
-    });
-    if !has_weekly_task {
-        return Ok(None);
-    }
-    let member_fence = &member_fence;
-    let transitions = weekly_exhaustion_candidates(response);
-    if transitions.is_empty() || !fresh_weekly_exhaustion(response, current_time_ms()) {
-        return Ok(None);
-    }
     // Hold only the reset coordinator across redemption and verification.
     // Other quota jobs and all request execution remain independent.
     let _reset = state.reset_redemption_guard().await;
-    for transition in &transitions {
-        let fingerprint = response
-            .account
-            .account
-            .quota
-            .secondary
-            .as_ref()
-            .and_then(|window| window.exhaustion_transition_fingerprint.as_deref())
-            .unwrap_or(&transition.fingerprint);
-        if transition.window_kind != zenith_relay_core::quota::QuotaWindowKind::Secondary
-            || state.weekly_reset_was_applied(&response.account.account.id, fingerprint)?
-        {
-            continue;
-        }
-        let redeemed =
-            consume_reset_credit_when(state, fence, Some(fingerprint), |expiry| async move {
+    let member_fence = &member_fence;
+    if state.weekly_reset_was_applied(&account.id, &fingerprint)?
+        || !weekly_reset_still_current(state, response, fence, &member_fence.account_id)?
+    {
+        return Ok(None);
+    }
+    let attempt = ResetAttempt::new(ResetOrigin::WeeklyReserve(&account.quota));
+    let redeemed = consume_reset_credit_when(
+        state,
+        fence,
+        Some(&fingerprint),
+        &attempt,
+        |expiry| async move {
+            state
+                .store()?
+                .ensure_account_refresh_current(member_fence)?;
+            if !weekly_reset_still_current(state, response, fence, &member_fence.account_id)? {
+                return Ok(false);
+            }
+            let now_ms = current_time_ms();
+            let subscription_deadline =
                 state
                     .store()?
-                    .ensure_account_refresh_current(member_fence)?;
-                if !weekly_reset_still_current(state, response, fence, &member_fence.account_id)? {
-                    return Ok(false);
-                }
-                let now_ms = current_time_ms();
-                let subscription_deadline =
-                    state
-                        .store()?
-                        .account(&fence.account_id)
-                        .and_then(|record| {
-                            zenith_relay_core::quota::QuotaSpendDeadline::from_subscription(
-                        &record.account.subscription, now_ms,
-                        zenith_relay_core::providers::chatgpt::SUBSCRIPTION_REFRESH_INTERVAL_MS,
-                    )
-                        });
-                let ordinary_capacity = state.gateway.runtime().await.and_then(|runtime| {
-                    runtime.ordinary_quota_alternative_available(&member_fence.account_id, now_ms)
-                });
-                let cadence = RefreshKind::Quota
-                    .interval_ms(recently_active(
-                        response.account.account.last_used_at_ms,
-                        now_ms,
-                    ))
-                    .expect("quota reads have a periodic cadence");
-                let next_check_at_ms = now_ms.saturating_add(
-                    super::reset_due_delay(response, now_ms)
-                        .unwrap_or(cadence)
-                        .min(cadence),
-                );
-                let natural_reset =
-                    response
-                        .account
-                        .account
-                        .quota
-                        .secondary
-                        .as_ref()
-                        .and_then(|window| {
-                            window
-                                .reset_at_ms
-                                .filter(|reset| *reset > window.observed_at_ms)
-                        });
-                Ok(reset_policy::should_redeem(
-                    ordinary_capacity,
-                    natural_reset,
-                    expiry,
-                    subscription_deadline,
-                    next_check_at_ms,
-                    now_ms,
-                ))
-            })
-            .await;
-        if redeemed.is_ok_and(|redeemed| redeemed) {
-            {
-                let _mutation = state.setup_guard().await;
-                state.store()?.ensure_account_refresh_current(fence)?;
-            }
-            let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-            if scope.fence != *fence {
-                return Ok(None);
-            }
-            return crate::local_pool::accounts::quota_refresh::read_account_quota_once(
-                state, &scope, false,
-            )
-            .await
-            .map(Some);
-        }
+                    .account(&fence.account_id)
+                    .and_then(|record| {
+                        zenith_relay_core::quota::QuotaSpendDeadline::from_subscription(
+                            &record.account.subscription,
+                            now_ms,
+                            zenith_relay_core::providers::chatgpt::SUBSCRIPTION_REFRESH_INTERVAL_MS,
+                        )
+                    });
+            let ordinary_capacity = state.gateway.runtime().await.and_then(|runtime| {
+                runtime.ordinary_quota_alternative_available(&member_fence.account_id, now_ms)
+            });
+            let cadence = RefreshKind::Quota
+                .interval_ms(recently_active(account.last_used_at_ms, now_ms))
+                .expect("quota reads have a periodic cadence");
+            let next_check_at_ms = now_ms.saturating_add(
+                super::reset_due_delay(response, now_ms)
+                    .unwrap_or(cadence)
+                    .min(cadence),
+            );
+            let natural_reset = account.quota.secondary.as_ref().and_then(|w| w.reset_at_ms);
+            Ok(reset_policy::should_redeem(
+                ordinary_capacity,
+                natural_reset,
+                expiry,
+                subscription_deadline,
+                next_check_at_ms,
+                now_ms,
+            ))
+        },
+    )
+    .await;
+    if !redeemed.is_ok_and(|redeemed| redeemed) {
+        return Ok(None);
     }
-    Ok(None)
+    verify_automatic_weekly_reset(state, fence, &attempt).await
+}
+
+async fn verify_automatic_weekly_reset(
+    state: &DesktopState,
+    fence: &AccountRefreshFence,
+    attempt: &ResetAttempt<'_>,
+) -> Result<Option<AccountQuotaRefreshResponse>> {
+    let verification = async {
+        let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
+        if scope.fence != *fence {
+            return Ok(None);
+        }
+        read_account_quota_once(state, &scope, false)
+            .await
+            .map(Some)
+    }
+    .await;
+    attempt.record_verification(
+        &fence.account_id,
+        verification.as_ref().ok().and_then(Option::as_ref),
+    );
+    verification
+}
+
+fn has_weekly_reserve_rule(
+    tasks: &[WakeTask],
+    reader: &LocalAccountRecord,
+    selected: &LocalAccountRecord,
+) -> bool {
+    let mut reserve = false;
+    for task in tasks
+        .iter()
+        .filter(|task| weekly_reset_rule_matches(task, reader, selected))
+    {
+        if task.weekly_reset_remaining_basis_points.is_some() {
+            return false;
+        }
+        reserve = true;
+    }
+    reserve
 }
 
 fn weekly_reset_still_current(
@@ -298,15 +305,10 @@ fn weekly_reset_current(
     selected.account.id == selected_id
         && !awaiting_confirmation
         && account.recovery.is_none()
-        && weekly_threshold::subscription_allows_reset(&account.account.subscription, now_ms)
-        && fresh_weekly_exhaustion(response, now_ms)
+        && subscription_allows_reset(&account.account.subscription, now_ms)
+        && fresh_weekly_exhaustion(response, now_ms).is_some()
         && account.account.quota == response.account.account.quota
-        && store.automations().tasks.iter().any(|task| {
-            task.enabled
-                && task.trigger == WakeTrigger::Weekly
-                && task.weekly_reset_remaining_basis_points.is_none()
-                && weekly_reset_rule_matches(task, account, selected)
-        })
+        && has_weekly_reserve_rule(&store.automations().tasks, account, selected)
 }
 
 pub(super) fn schedule_weekly_reserve_checks(
@@ -331,76 +333,70 @@ fn weekly_reserve_targets(
     let store = state.store()?;
     let credentials = state.cached_account_credential_facts(store.accounts())?;
     let mut identities = Vec::new();
-    for account in store.accounts().iter().filter(|account| {
-        account.account.id != response.account.account.id
-            && account.recovery.is_none()
-            && weekly_reset_member(store.gateway(), store.accounts(), account, &credentials)
-                .is_some()
-            && account.account.quota.reset_credits_available != Some(0)
-            && account
-                .account
-                .quota
-                .secondary
-                .as_ref()
-                .is_some_and(|window| window.available_basis_points == Some(0))
-            && store.automations().tasks.iter().any(|task| {
-                task.enabled
-                    && task.trigger == WakeTrigger::Weekly
-                    && weekly_reset_member(store.gateway(), store.accounts(), account, &credentials)
-                        .is_some_and(|selected| weekly_reset_rule_matches(task, account, selected))
-            })
-    }) {
-        let (_, fence) = store.account_refresh_scope(&account.account.id)?;
-        identities.push(fence.identity());
+    let now_ms = current_time_ms();
+    for reader in store.accounts() {
+        let account = &reader.account;
+        if account.id == response.account.account.id
+            || account.quota.reset_credits_available == Some(0)
+            || !subscription_allows_reset(&account.subscription, now_ms)
+            || !weekly_reset_window(&account.quota, now_ms).is_some_and(is_weekly_exhausted)
+        {
+            continue;
+        }
+        if let Some(selected) =
+            weekly_reset_member(store.gateway(), store.accounts(), reader, &credentials)
+            && has_weekly_reserve_rule(&store.automations().tasks, reader, selected)
+        {
+            let (_, fence) = store.account_refresh_scope(&account.id)?;
+            identities.push(fence.identity());
+        }
     }
     Ok(identities)
 }
 
-fn fresh_weekly_exhaustion(response: &AccountQuotaRefreshResponse, now_ms: u64) -> bool {
-    response
-        .account
-        .account
-        .quota
-        .secondary
-        .as_ref()
-        .is_some_and(|window| {
-            window.kind == QuotaWindowKind::Secondary
-                && window.available_basis_points == Some(0)
-                && now_ms
-                    .checked_sub(window.observed_at_ms)
-                    .is_some_and(|age| age <= zenith_relay_core::scheduler::QUOTA_STALE_AFTER_MS)
-        })
+fn is_weekly_exhausted(window: &QuotaWindow) -> bool {
+    window.is_exhausted() && window.explicitly_full != Some(true)
 }
 
-fn weekly_exhaustion_candidates(
+fn fresh_weekly_exhaustion(
     response: &AccountQuotaRefreshResponse,
-) -> Vec<zenith_relay_core::quota::QuotaTransition> {
+    now_ms: u64,
+) -> Option<&QuotaWindow> {
     if !matches!(response.quota, AccountQuotaOutcome::Updated { .. }) {
-        return Vec::new();
+        return None;
     }
-    let mut transitions = response.exhaustion_transitions.clone();
-    if !transitions.iter().any(|transition| {
-        transition.window_kind == zenith_relay_core::quota::QuotaWindowKind::Secondary
-    }) && let Some(transition) = response
-        .account
-        .account
-        .quota
-        .secondary
-        .as_ref()
-        .and_then(zenith_relay_core::quota::QuotaWindow::exhaustion_transition)
-    {
-        transitions.push(transition);
-    }
-    transitions
+    fresh_weekly_reset_window(&response.account.account.quota, now_ms)
+        .filter(|w| is_weekly_exhausted(w))
+}
+
+fn weekly_exhaustion_fingerprint(
+    response: &AccountQuotaRefreshResponse,
+    now_ms: u64,
+) -> Option<String> {
+    let window = fresh_weekly_exhaustion(response, now_ms)?;
+    window
+        .exhaustion_transition_fingerprint
+        .clone()
+        .or_else(|| {
+            response
+                .exhaustion_transitions
+                .iter()
+                .find(|transition| transition.window_kind == QuotaWindowKind::Secondary)
+                .map(|transition| transition.fingerprint.clone())
+        })
+        .or_else(|| {
+            window
+                .exhaustion_transition()
+                .map(|event| event.fingerprint)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::local_pool::refresh::tests::{account, cleanup, state};
-    use zenith_relay_core::{
-        automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask},
-        quota::{QuotaWindow, QuotaWindowKind},
+    use zenith_relay_core::automations::{
+        AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTrigger,
     };
 
     #[tokio::test]
@@ -534,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn weekly_exhaustion_candidates_recover_a_missed_secondary_transition() {
+    fn weekly_exhaustion_recovers_a_missed_secondary_transition() {
         let mut account = account();
         account.account.quota.reset_credits_available = None;
         account.account.quota.secondary = Some(QuotaWindow {
@@ -544,7 +540,7 @@ mod tests {
             available_basis_points: Some(0),
             explicitly_full: Some(false),
             reset_at_ms: Some(3_601_000),
-            window_minutes: Some(60),
+            window_minutes: Some(10_080),
             observed_at_ms: 1_000,
             full_transition_fingerprint: None,
             exhaustion_transition_fingerprint: Some("weekly-fingerprint".into()),
@@ -558,16 +554,16 @@ mod tests {
             exhaustion_transitions: Vec::new(),
         };
 
-        let candidates = weekly_exhaustion_candidates(&response);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].window_kind, QuotaWindowKind::Secondary);
-        assert_eq!(candidates[0].fingerprint, "weekly-fingerprint");
+        assert_eq!(
+            weekly_exhaustion_fingerprint(&response, 1_000).as_deref(),
+            Some("weekly-fingerprint")
+        );
         response.quota = AccountQuotaOutcome::Skipped;
-        assert!(weekly_exhaustion_candidates(&response).is_empty());
+        assert!(weekly_exhaustion_fingerprint(&response, 1_000).is_none());
     }
 
     #[test]
-    fn weekly_exhaustion_candidates_keep_provider_transition_identity() {
+    fn weekly_exhaustion_uses_the_provider_edge_if_no_fingerprint_was_saved() {
         let mut response = AccountQuotaRefreshResponse {
             account: account(),
             quota: AccountQuotaOutcome::Updated {
@@ -589,15 +585,16 @@ mod tests {
             window_start_ms: None,
             available_basis_points: Some(0),
             explicitly_full: Some(false),
-            reset_at_ms: None,
-            window_minutes: Some(60),
+            reset_at_ms: Some(60_300),
+            window_minutes: Some(10_080),
             observed_at_ms: 300,
             full_transition_fingerprint: None,
-            exhaustion_transition_fingerprint: Some("derived-fingerprint".into()),
+            exhaustion_transition_fingerprint: None,
         });
 
-        let candidates = weekly_exhaustion_candidates(&response);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].fingerprint, "provider-fingerprint");
+        assert_eq!(
+            weekly_exhaustion_fingerprint(&response, 300).as_deref(),
+            Some("provider-fingerprint")
+        );
     }
 }

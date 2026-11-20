@@ -32,14 +32,14 @@ for (const locale of ["en", "ru"] as const) {
     await expect(page.getByRole("menuitemradio")).toHaveText([computer, hosted]);
     await page.getByRole("menuitemradio", { name: hosted, exact: true }).click();
     await expect(page.getByRole("heading", { name: hosted, exact: true })).toBeVisible();
-    await expect(page.getByText(locale === "ru" ? "В разработке" : "In development", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: locale === "ru" ? "Проверить сервер" : "Review server" })).toBeDisabled();
     await expect(page.locator(".sidebar-main-nav button")).toHaveCount(0);
     await expect(page.locator(".sidebar-nav-utilities button")).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("hosted");
-    expect((await calls(page)).some(({ command }) => command === "stop_local_gateway" || command.startsWith("get_remote_") || command === "execute_remote_server_action")).toBe(false);
+    expect((await calls(page)).some(({ command }) => ["stop_local_gateway","execute_remote_server_action","read_hosted_connections","prepare_hosted_device"].includes(command) || command.startsWith("get_remote_"))).toBe(false);
     await page.screenshot({ path: `output/playwright/hosted-${locale}.png` });
 
-    await expect(page.locator(".relay-empty button")).toHaveCount(0);
+    await expect(page.getByRole("button", {name:locale === "ru" ? "Открыть демо" : "Open demo"})).toHaveCount(0);
     await page.locator(".mode-picker-trigger").click();
     await page.getByRole("menuitemradio", { name: computer, exact: true }).click();
     await expect(page.getByRole("button", { name: locale === "ru" ? "Остановить API" : "Stop API", exact: true })).toBeVisible();
@@ -49,9 +49,9 @@ for (const locale of ["en", "ru"] as const) {
 test("Hosted startup does not load either runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "hosted", locale: "en", populated: true });
   await page.goto("/");
-  await expect(page.getByText("In development", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Open demo", exact: true })).toHaveCount(0);
-  expect((await calls(page)).some(({ command }) => command === "get_local_runtime_state" || command.startsWith("get_remote_"))).toBe(false);
+  expect((await calls(page)).some(({ command }) => ["get_local_runtime_state","read_hosted_connections","prepare_hosted_device"].includes(command) || command.startsWith("get_remote_"))).toBe(false);
 });
 
 test("network sharing is opt-in, confirmed, and has a separate key", async ({ page }) => {

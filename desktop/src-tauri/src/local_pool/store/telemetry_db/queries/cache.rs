@@ -3,8 +3,7 @@ use super::super::*;
 impl TelemetryDb {
     /// Cache activity scoped to a chat, connection, and upstream model.
     ///
-    /// A pure miss does not move the touch. The chat start and the latest
-    /// earlier reported retention stay available outside the selected period.
+    /// A miss does not move the touch. A hit does not inherit another send's TTL.
     pub fn cache_sessions(
         &self,
         query: &UsageQuery,
@@ -18,7 +17,7 @@ impl TelemetryDb {
         ];
         let mut sql_parameters = Vec::new();
         // Restrict the history before window functions and the result limit.
-        // Period filters stay outside: earlier starts and TTLs still matter.
+        // Period filters stay outside so earlier starts still count.
         let history_filter = if let Some(scope) = scope {
             sql_parameters.push(SqlValue::Text(scope.client_context_id.clone()));
             sql_parameters.push(SqlValue::Text(scope.candidate_id.clone()));
@@ -84,22 +83,7 @@ impl TelemetryDb {
                 strftime('%Y-%m-%dT%H:%M:%SZ', latest.started_at),
                 strftime('%Y-%m-%dT%H:%M:%SZ', latest.touched_at),
                 latest.model,
-                (
-                    SELECT prior.cache_write_ttl
-                    FROM history AS prior
-                    WHERE prior.client_context_id = latest.client_context_id
-                        AND prior.account_id IS latest.account_id
-                        AND prior.source_id = latest.source_id
-                        AND prior.model IS latest.model
-                        AND (prior.created_at < latest.touched_at
-                            OR (prior.created_at = latest.touched_at AND prior.id <= latest.id))
-                        AND (COALESCE(prior.cached_input_tokens, 0) > 0
-                            OR COALESCE(prior.cache_write_input_tokens, 0) > 0)
-                        AND prior.cache_write_ttl IS NOT NULL
-                        AND prior.cache_write_ttl <> ''
-                    ORDER BY prior.created_at DESC, prior.id DESC
-                    LIMIT 1
-                ),
+                latest.cache_write_ttl,
                 CASE WHEN latest.account_id IS NULL THEN 'source' ELSE 'account' END,
                 COALESCE(latest.account_id, latest.source_id)
             FROM latest

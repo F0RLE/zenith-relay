@@ -5,12 +5,13 @@ use crate::{
     files::atomic_write,
     local_pool::{
         accounts::{
-            NativeSecretBackend, credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF,
+            NativeSecretBackend,
+            credentials::CredentialStore,
+            proxy::{ProxyPool, common_proxy_url},
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::ProviderSourceRecord,
         state::DesktopState,
-        store::secret_store,
     },
 };
 use tauri::{AppHandle, State};
@@ -23,6 +24,7 @@ use zenith_relay_core::protocol::{
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
+const MAX_PRESET_BYTES: usize = 1024 * 1024;
 
 pub fn export_local_configuration_preset(
     app: AppHandle,
@@ -44,7 +46,7 @@ pub(super) fn local_configuration_preset(
         )
     };
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let sources = sources
+    let mut sources: Vec<_> = sources
         .into_iter()
         .map(|source_record| SourcePresetRule {
             legacy_protocol_mode: None,
@@ -66,6 +68,13 @@ pub(super) fn local_configuration_preset(
             model_price_overrides: source_record.model_price_overrides,
         })
         .collect();
+    if sources.iter().any(|source| source.proxy_id.is_some()) {
+        let pool = ProxyPool::load()?;
+        for source in &mut sources {
+            source.proxy_id =
+                proxy_reference(pool.source_url(source.proxy_id.as_deref())?.as_deref())?;
+        }
+    }
     let accounts = accounts
         .into_iter()
         .map(|account_record| {
@@ -74,11 +83,7 @@ pub(super) fn local_configuration_preset(
                 .map_err(|error| {
                     LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
                 })?;
-            let proxy_id = credential.as_ref().and_then(|credential| {
-                credential
-                    .proxy_url()
-                    .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
-            });
+            let proxy_id = proxy_reference(credential.as_ref().and_then(|v| v.proxy_url()))?;
             Ok(AccountPresetRule {
                 id: account_record.account.id,
                 identity_hint: account_record
@@ -100,13 +105,7 @@ pub(super) fn local_configuration_preset(
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;
-    let common_proxy_id = if gateway.common_proxy_configured {
-        secret_store::load(COMMON_PROXY_SECRET_REF)?
-            .as_deref()
-            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
-    } else {
-        None
-    };
+    let common_proxy_id = proxy_reference(common_proxy_url(&gateway)?.as_deref())?;
     let mut preset = ConfigurationPreset {
         format: CONFIGURATION_PRESET_FORMAT.to_string(),
         schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
@@ -143,6 +142,12 @@ pub(super) fn local_configuration_preset(
 
 mod resolve;
 
+fn proxy_reference(url: Option<&str>) -> LocalResult<Option<String>> {
+    url.map(zenith_relay_core::proxy_reference_id)
+        .transpose()
+        .map_err(LocalPoolError::invalid_state)
+}
+
 use resolve::{
     local_configuration_diff, local_preset_revision, prepare_local_configuration_preset,
 };
@@ -162,16 +167,10 @@ pub fn preview_local_configuration_preset(
     let path = path.into_path().map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "selected preset path is invalid")
     })?;
-    let content = std::fs::read(&path).map_err(|_| {
-        LocalPoolError::new(ErrorCode::Io, "configuration preset could not be read")
-    })?;
-    if content.len() > 1024 * 1024 {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "configuration preset is too large",
-        )
-        .into());
-    }
+    let content =
+        crate::files::read_regular_file_bounded(&path, MAX_PRESET_BYTES as u64).map_err(|_| {
+            LocalPoolError::new(ErrorCode::Io, "configuration preset could not be read")
+        })?;
     let preset: ConfigurationPreset = serde_json::from_slice(&content).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -246,11 +245,7 @@ pub async fn apply_local_configuration_preset(
         let credential = credentials.load(&account.account.id).map_err(|error| {
             LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
         })?;
-        let current_proxy_id = credential.as_ref().and_then(|credential| {
-            credential
-                .proxy_url()
-                .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
-        });
+        let current_proxy_id = proxy_reference(credential.as_ref().and_then(|v| v.proxy_url()))?;
         let current_bypass = credential
             .as_ref()
             .is_some_and(|credential| credential.bypass_common_proxy());
@@ -270,13 +265,7 @@ pub async fn apply_local_configuration_preset(
         account.weight = rule.weight.max(1);
     }
     let settings = &prepared.target.settings;
-    let current_proxy_id = if old_gateway.common_proxy_configured {
-        secret_store::load(COMMON_PROXY_SECRET_REF)?
-            .as_deref()
-            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok())
-    } else {
-        None
-    };
+    let current_proxy_id = proxy_reference(common_proxy_url(&old_gateway)?.as_deref())?;
     if settings.quota.common_proxy_id != current_proxy_id {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -393,6 +382,13 @@ pub(super) fn write_configuration_preset(
             "configuration preset could not be serialized",
         )
     })?;
+    if content.len() >= MAX_PRESET_BYTES {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset is too large",
+        )
+        .into());
+    }
     atomic_write(&path, &format!("{content}\n"))
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     Ok(Some(path.to_string_lossy().into_owned()))

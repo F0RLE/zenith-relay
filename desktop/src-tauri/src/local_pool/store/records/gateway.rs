@@ -47,7 +47,8 @@ impl LocalPoolStore {
             ));
         }
         self.database.replace_state_json(&state_entries)?;
-        let refresh_changed = revisions != self.refresh_revisions;
+        let refresh_changed = revisions != self.refresh_revisions
+            || gateway.account_routes != self.gateway.account_routes;
         self.gateway = gateway;
         self.refresh_revisions = revisions;
         if refresh_changed {

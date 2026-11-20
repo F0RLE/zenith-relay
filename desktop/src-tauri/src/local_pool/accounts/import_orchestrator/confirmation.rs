@@ -46,6 +46,17 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
+    if input.use_bundle_proxies.is_none()
+        && session.items.iter().any(|item| {
+            selected.contains(item.item_id.as_str()) && item.bundle_proxy_url().is_some()
+        })
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "choose whether to use the proxies in this account bundle",
+        )
+        .into());
+    }
     let refresh_exchange_required = !session.prepared
         && session.items.iter().any(|import_item| {
             selected.contains(import_item.item_id.as_str())
@@ -88,7 +99,12 @@ pub(in crate::local_pool::accounts) async fn confirm_local_account_import_inner(
     let mut import_items_by_id = session
         .items
         .into_iter()
-        .map(|import_item| (import_item.item_id.clone(), import_item))
+        .map(|mut item| {
+            if input.use_bundle_proxies != Some(true) {
+                item.discard_bundle_proxy();
+            }
+            (item.item_id.clone(), item)
+        })
         .collect::<HashMap<_, _>>();
     let mut results = Vec::with_capacity(selected_item_ids.len());
     let total = selected_item_ids.len();

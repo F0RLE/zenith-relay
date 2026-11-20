@@ -1,4 +1,12 @@
-import type { Page } from "../bun-playwright";
+import type { Locator, Page } from "../bun-playwright";
+
+export function receiptCacheShare(dialog: Locator) {
+  return dialog.locator(".request-details-metric").filter({ hasText: /^(?:Input from cache|Вход из кэша)/ });
+}
+
+export function receiptField(dialog: Locator, label: string | RegExp) {
+  return dialog.locator(".request-id-list > div").filter({ has: dialog.page().getByText(label, { exact: true }) });
+}
 
 export const noOutputUsage = {
   ttftMs: null, generationMs: null, inputTokens: null, outputTokens: null,

@@ -34,6 +34,7 @@ import type {
   OAuthClientKind,
   OAuthFlowEvent,
   OAuthCompletion,
+  OAuthViewBounds,
   ProfileActivation,
   ProxyPoolImportResult,
   ProxyCheckResult,
@@ -64,12 +65,19 @@ export type LocalNetworkAccess = {
   addresses: Array<{ interface: string; baseUrl: string }>;
 };
 
+export type ApplicationConnectionSetting = {
+  proxyId: string | null;
+  status: "default" | "saved" | "legacy" | "changed" | "not_saved" | "unsupported";
+  nativeSupported: boolean;
+  revision: string;
+};
+
 /**
  * Keep the command surface typed while making every rejected IPC call
  * observable in the native error log.  The reporter itself uses the raw
  * invoke function to avoid an error-reporting loop.
  */
-function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Promise<T> {
+export function invoke<T>(command: string, commandArgs?: Record<string, unknown>): Promise<T> {
   return measureCommand(
     command,
     () => tauriInvoke<T>(command, commandArgs),
@@ -103,8 +111,10 @@ export const relayCommands = {
   localNetworkAccess: () => invoke<LocalNetworkAccess>("get_local_network_access"),
   setLocalNetworkAccess: (enabled: boolean, expectedEnabled: boolean) => invoke<LocalNetworkAccess>("update_local_network_access", { enabled, expectedEnabled }),
   launchApplication: (application: LaunchApplication) => invoke<void>("launch_application", { application }),
-  openHostedPreview: () => invoke<void>("open_hosted_preview"),
   getApplicationLaunchPath: (application: LaunchApplication) => invoke<LaunchPathSetting>("get_application_launch_path", { application }),
+  getApplicationConnection: (application: "claude-desktop") => invoke<ApplicationConnectionSetting>("get_application_connection", { application }),
+  setApplicationConnection: (application: "claude-desktop", proxyId: string | null, expectedRevision: string) =>
+    invoke<ApplicationConnectionSetting>("set_application_connection", { application, proxyId, expectedRevision }),
   getApplicationUpstreamProtocol: (application: LaunchApplication) => invoke<ApplicationProtocolSetting>("get_application_upstream_protocol", { application }),
   setApplicationUpstreamProtocol: (application: LaunchApplication, policy: UpstreamProtocolPolicy, expected: UpstreamProtocolPolicy) =>
     invoke<ApplicationProtocolSetting>("set_application_upstream_protocol", { application, policy, expected }),
@@ -137,7 +147,7 @@ export const relayCommands = {
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),
   previewImportFiles: (paths?: string[]) => invoke<ImportSession | null>("preview_local_account_import_files", paths ? { paths } : {}),
   prepareImport: (sessionId: string, probeQuota = false) => invoke<ImportSession>("prepare_local_account_import", { input: { sessionId, probeQuota } }),
-  confirmImport: (sessionId: string, selectedItemIds: string[], addToPool = false) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: false, probeQuota: false, models: [], addToPool } }),
+  confirmImport: (sessionId: string, selectedItemIds: string[], addToPool = false, useBundleProxies?: boolean) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: false, probeQuota: false, models: [], addToPool, ...(useBundleProxies !== undefined ? { useBundleProxies } : {}) } }),
   onImportProgress: (callback: (event: AccountImportProgress) => void) => listen<AccountImportProgress>("relay-account-import-progress", (event) => callback(event.payload)),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
@@ -175,8 +185,15 @@ export const relayCommands = {
   updateAccountLogin: (loginUpdate: AccountLoginUpdate) => invoke<AccountLoginDetails>("update_local_account_login", { input: loginUpdate }),
   previewTotpCode: (secret: string) => invoke<AccountTotpPreview>("preview_totp_code", { secret }),
 
-  startOAuth: (openBrowser = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string) => invoke<OAuthFlow>("start_codex_oauth", { openBrowser, ...(accountId ? { accountId } : {}), ...(proxyId ? { proxyId } : {}), ...(clientKind ? { clientKind } : {}), ...(automaticLogin ? { automaticLogin: notesAccountId ? { notesAccountId } : true } : {}) }),
-  resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
+  startOAuth: (openWindow = true, accountId?: string, proxyId?: string, clientKind?: OAuthClientKind, automaticLogin = false, notesAccountId?: string, embedded = false) => invoke<OAuthFlow>("start_codex_oauth", {
+    presentation: { embedded, openWindow },
+    ...(accountId ? { accountId } : {}),
+    ...(proxyId ? { proxyId } : {}),
+    ...(clientKind ? { clientKind } : {}),
+    ...(automaticLogin ? { automaticLogin: notesAccountId ? { notesAccountId } : true } : {}),
+  }),
+  resumeOAuth: (loginId: string, embedded = false) => invoke<OAuthFlow>("resume_codex_oauth", { loginId, ...(embedded ? { embedded } : {}) }),
+  placeOAuthView: (loginId: string, revision: number, bounds: OAuthViewBounds | null) => invoke<boolean>("update_codex_oauth_view", { loginId, revision, bounds }),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
   cancelOAuth: (loginId: string) => invoke("cancel_codex_oauth", { loginId }),

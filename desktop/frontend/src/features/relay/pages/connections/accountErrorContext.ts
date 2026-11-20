@@ -1,6 +1,6 @@
 import type { AccountSummary } from "../../api/types";
 
-/** A saved error is not evidence that a request used today's proxy settings. */
+/** Compare saved error context with current proxy settings. */
 export function accountErrorContext(account: AccountSummary, code: string) {
   const quotaError = account.quota.error;
   const matchesQuota = quotaError?.code.trim() === code;

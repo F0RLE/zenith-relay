@@ -22,61 +22,61 @@ impl TelemetryDb {
         // At most one indexed history lookup per known ledger. Never scan request
         // telemetry or the full capacity history during a UI snapshot.
         let connection = self.lock_snapshot_connection()?;
-        let mut statement = connection.prepare(PROJECTION_SQL).map_err(db_error)?;
-        let mut samples = BTreeMap::new();
-        for observation in observations.iter().take(MAX_LEDGERS) {
-            if !valid_window(observation) {
-                continue;
-            }
-            let row = statement
-                .query_row(
-                    params![observation.ledger, sql_u64(observation.now_ms)],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .optional()
-                .map_err(db_error)?;
-            let Some((anchor, measurement)) = row else {
-                continue;
-            };
-            let anchor: Anchor = serde_json::from_str(&anchor).map_err(json_error)?;
-            let measurement = match &anchor.calibration {
-                Some(calibration) if calibration.valid => calibration.sample.clone(),
-                Some(_) => None,
-                None => measurement
-                    .as_deref()
-                    .map(serde_json::from_str::<Measurement>)
-                    .transpose()
-                    .map_err(json_error)?,
-            };
-            let Some(measurement) = measurement else {
-                continue;
-            };
-            if compatible_sample(&anchor, &measurement, observation) {
-                samples.insert(observation.ledger, (observation, measurement));
-            }
-        }
-        drop(statement);
+        let samples = calibrated_samples(&connection, observations)?;
         drop(connection);
         Ok(project(observations, &samples))
     }
 }
 
+type LedgerSamples<'a> = BTreeMap<&'a str, (&'a CapacityObservation<'a>, Measurement)>;
+
+pub(super) fn calibrated_samples<'a>(
+    connection: &Connection,
+    observations: impl IntoIterator<Item = &'a CapacityObservation<'a>>,
+) -> Result<LedgerSamples<'a>> {
+    let mut statement = connection.prepare(PROJECTION_SQL).map_err(db_error)?;
+    let mut samples = BTreeMap::new();
+    for observation in observations
+        .into_iter()
+        .filter(|obs| valid_window(obs))
+        .take(MAX_LEDGERS)
+    {
+        let row = statement
+            .query_row(
+                params![observation.ledger, sql_u64(observation.now_ms)],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some((anchor, measurement)) = row else {
+            continue;
+        };
+        let anchor: Anchor = serde_json::from_str(&anchor).map_err(json_error)?;
+        let measurement = match &anchor.calibration {
+            Some(calibration) if calibration.valid => {
+                calibration.paired_sample(anchor.from_ms).cloned()
+            }
+            Some(_) => None,
+            None => measurement
+                .as_deref()
+                .map(serde_json::from_str::<Measurement>)
+                .transpose()
+                .map_err(json_error)?
+                .filter(|sample| sample.at_ms == anchor.from_ms),
+        };
+        if let Some(measurement) = measurement
+            && compatible_sample(&anchor, &measurement, observation)
+        {
+            samples.insert(observation.ledger, (observation, measurement));
+        }
+    }
+    Ok(samples)
+}
+
 fn valid_window(value: &CapacityObservation<'_>) -> bool {
-    let window = value.window;
     !value.ledger.is_empty()
         && !value.account_ids.is_empty()
-        && !value.plan.trim().is_empty()
-        && !value.plan.trim().eq_ignore_ascii_case("unknown")
-        && window
-            .window_minutes
-            .is_some_and(|minutes| (6 * 1440..=8 * 1440).contains(&minutes))
-        && window.available_basis_points.is_some_and(|bp| bp <= 10_000)
-        && window
-            .window_start_ms
-            .is_some_and(|start| start <= window.observed_at_ms)
-        && window.reset_at_ms.is_some_and(|reset| reset > value.now_ms)
-        && window.observed_at_ms <= value.now_ms
-        && value.now_ms - window.observed_at_ms < MAX_ANCHOR_AGE
+        && CapacityObservation::usable_weekly_source(value.plan, value.window, value.now_ms)
 }
 
 fn compatible_sample(
@@ -99,9 +99,10 @@ fn compatible_sample(
         && anchor.members == next.members
         && anchor.window == next.window;
     // Current inventory fences persisted samples even before the background
-    // collector records a reset, plan change, unlink, or corrected observation.
+    // collector records a reset, correction or newly completed interval.
     if anchor.pricing_revision != next.pricing_revision
         || current.window.observed_at_ms < anchor.window.observed_at_ms
+        || anchor.settled_consumption(&next).is_some()
         || (!unchanged && discontinuity(anchor, &next).is_some())
     {
         return false;
@@ -155,7 +156,7 @@ fn cohort(value: &CapacityObservation<'_>) -> (String, u32, String) {
 
 fn project(
     observations: &[CapacityObservation<'_>],
-    samples: &BTreeMap<&str, (&CapacityObservation<'_>, Measurement)>,
+    samples: &LedgerSamples<'_>,
 ) -> BTreeMap<String, QuotaWindowUsage> {
     let mut cohorts = BTreeMap::<_, BTreeMap<&str, Vec<&Measurement>>>::new();
     for (observation, sample) in samples.values() {

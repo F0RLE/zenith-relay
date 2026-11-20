@@ -158,7 +158,7 @@ for (const client of [
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
     }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args))
-      .toEqual({ openBrowser: false, ...(client.kind !== "codex" ? { clientKind: client.kind } : {}) });
+      .toEqual({ presentation: { openWindow: false, embedded: true }, ...(client.kind !== "codex" ? { clientKind: client.kind } : {}) });
     await dialog.getByRole("button", { name: "Copy sign-in link", exact: true }).click();
     await expect(dialog.getByRole("button", { name: "Link copied", exact: true })).toBeVisible();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("https://auth.example.invalid/authorize");

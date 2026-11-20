@@ -1,94 +1,12 @@
 import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
-import { completedUsage, noOutputUsage, setUsageEventOverrides } from "./request-details-fixture";
+import { completedUsage, noOutputUsage, receiptCacheShare, setUsageEventOverrides } from "./request-details-fixture";
 
 const desktopModelAliases = [
   "claude-sonnet-5-relay-a1b2-c3d4-e5f6-7890",
   "claude-fable-5-relay-a1b2-c3d4-e5f6-7890",
   `claude-fable-5-zenith-${Array(32).fill("ab").join("-")}`,
 ];
-
-for (const locale of ["en", "ru"] as const) {
-  for (const policy of [true, false, undefined]) {
-    test(`BPS parallel diagnostics preserve ${String(policy)} policy in ${locale}`, async ({ page }) => {
-      await page.setViewportSize({ width: 390, height: 900 });
-      await installTauriMock(page, { mode: "local", locale, populated: true, diagnosticDebug: true });
-      await page.goto("/");
-      await setUsageEventOverrides(page, {
-        ...completedUsage,
-        routing: {
-          reason: "only_eligible", eligibleCandidates: 1, quotaRemainingBasisPoints: null,
-          inFlightBefore: 0, dispatchesBefore: 0, endpointKind: "excel_basis_points",
-          transport: {
-            upstream: "http", mode: "basis_points", responseHeadersMs: 0,
-            ...(policy == null ? {} : {
-              requestPreparationMs: policy ? 0 : 125,
-              requestPreparation: {
-                bodyMs: policy ? 0 : 65,
-                schemaValidationMs: policy ? 0 : 40,
-                catalogMs: policy ? 0 : 25,
-                attachmentsMs: policy ? 0 : 30,
-              },
-              upstreamResponseMs: policy ? 0 : 250,
-              clientFirstOutputMs: policy ? 0 : 500,
-              clientResponseReadyMs: policy ? 0 : 750,
-            }),
-          },
-        },
-        toolUse: {
-          clientToolCount: 2, forwardedToolCount: 2, toolChoice: "auto",
-          toolCallCount: policy === true ? 2 : 0, textOutput: false, terminalOutput: "tool_call",
-          requestedParallelToolCalls: policy,
-          upstreamToolCallCount: policy == null ? undefined : 3,
-          toolCallsReadyMs: policy === true ? 0 : undefined,
-        },
-      });
-      await page.getByRole("button", { name: locale === "en" ? "Usage" : "Использование", exact: true }).click();
-      await page.getByRole("button", {
-        name: `${locale === "en" ? "Request details" : "Сведения о запросе"}: req_synthetic_local`, exact: true,
-      }).click();
-      const dialog = page.getByRole("dialog");
-      await dialog.locator(".request-technical-details > summary").click();
-      const parallel = dialog.locator("dl > div").filter({ has: page.locator("dt", {
-        hasText: locale === "en" ? "Client explicitly allows parallel calls" : "Клиент явно разрешает параллельные вызовы",
-      }) });
-      if (policy == null) {
-        await expect(parallel).toHaveCount(0);
-      } else {
-        await expect(parallel.locator("dd")).toHaveText(locale === "en" ? (policy ? "Yes" : "No") : (policy ? "Да" : "Нет"));
-      }
-      const ready = dialog.locator("dl > div").filter({ has: page.locator("dt", {
-        hasText: locale === "en" ? "Validated calls ready after dispatch" : "Готовность проверенных вызовов после отправки",
-      }) });
-      if (policy === true) await expect(ready.locator("dd")).toHaveText(locale === "en" ? "+0 ms" : "+0 мс");
-      else await expect(ready).toHaveCount(0);
-      for (const [english, russian, milliseconds, prefix] of [
-        ["Preparation before dispatch", "Подготовка до отправки", 125, ""],
-        ["Upstream response collected", "Ответ источника собран", 250, "+"],
-        ["First Relay output", "Первый вывод Relay", 500, "+"],
-        ["Relay response ready", "Ответ Relay готов", 750, "+"],
-        ["Request building", "Сборка запроса", 65, ""],
-        ["Of which: schema checks", "В т. ч. проверка схем", 40, ""],
-        ["Catalog preparation", "Подготовка каталога", 25, ""],
-        ["Attachments", "Вложения", 30, ""],
-      ] as const) {
-        const stage = dialog.locator("dl > div").filter({ has: page.locator("dt", {
-          hasText: locale === "en" ? english : russian,
-        }) });
-        if (policy == null) await expect(stage).toHaveCount(0);
-        else await expect(stage.locator("dd")).toHaveText(`${prefix}${policy ? 0 : milliseconds} ${locale === "en" ? "ms" : "мс"}`);
-      }
-      if (policy === false) {
-        await expect(dialog.locator(".request-timing-metrics dd")).toHaveText(
-          [0, 250, 500, 750].map((milliseconds) => `+${milliseconds} ${locale === "en" ? "ms" : "мс"}`),
-        );
-      }
-      await expect(dialog.locator(".request-technical-details p, .request-technical-details .form-note")).toHaveCount(0);
-      expect(await dialog.locator(".request-details-list dd").evaluateAll((cells) =>
-        cells.every((cell) => cell.scrollWidth <= cell.clientWidth + 1))).toBe(true);
-    });
-  }
-}
 
 for (const mode of ["local"] as const) {
   for (const alias of desktopModelAliases) {
@@ -104,9 +22,10 @@ for (const mode of ["local"] as const) {
       await page.getByRole("button", { name: `Request details: req_synthetic_${mode}`, exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Request details" });
       await expect(dialog.getByRole("heading", { name: "provider/model", exact: true })).toBeVisible();
-      await expect(dialog.locator(".request-details-parameters")).not.toContainText(alias);
+      await expect(dialog.locator(".request-details-parameters")).toHaveCount(0);
       await expect(dialog.getByText(alias, { exact: true })).toBeHidden();
       await dialog.locator(".request-technical-details > summary").click();
+      await expect(dialog.locator(".request-details-parameters")).not.toContainText(alias);
       await expect(dialog.getByText(alias, { exact: true })).toBeVisible();
       await dialog.getByRole("button", { name: "Copy model ID", exact: true }).click();
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(alias);
@@ -168,9 +87,8 @@ for (const theme of ["dark", "light"] as const) {
       await expect(dialog.getByRole("tab")).toHaveCount(0);
       await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeHidden();
       await expect(dialog.getByText("model_not_available", { exact: true })).toBeHidden();
-      await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
-      await expect(dialog.getByText("HTTP", { exact: true })).toBeVisible();
-      await expect(dialog.getByText("Максимальное", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-details-parameters, .request-token-details")).toHaveCount(0);
+      await expect(receiptCacheShare(dialog)).toHaveCount(0);
       await expect(dialog.locator(".request-technical-details .form-note")).toBeHidden();
       await expect(dialog.locator(".request-execution")).toHaveCount(0);
       const bounds = await dialog.boundingBox();
@@ -182,15 +100,13 @@ for (const theme of ["dark", "light"] as const) {
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()))
         .toBe("Provider: Synthetic provider: the selected model is temporarily unavailable.");
       await dialog.locator(".request-technical-details > summary").click();
-      await expect(dialog.getByRole("region", { name: "Идентификаторы", exact: true })).toBeVisible();
-      await expect(dialog.getByRole("region", { name: "Причина ошибки", exact: true })).toBeVisible();
-      await expect(dialog.getByRole("region", { name: "Маршрут", exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-id-list")).toBeVisible();
+      await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("HTTP", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("Максимальное", { exact: true })).toBeVisible();
       await expect(dialog.getByText("req_provider_synthetic", { exact: true })).toBeVisible();
       await expect(dialog.getByText("model_not_available", { exact: true })).toBeVisible();
-      const toolDetails = dialog.getByRole("region", { name: "Инструменты", exact: true });
-      await expect(toolDetails).toContainText("Инструменты клиента80");
-      await expect(toolDetails).toContainText("Вызовы инструментов0");
-      await expect(toolDetails).toContainText("Итоговый выводНеизвестно");
+      await expect(dialog.getByText("Инструменты клиента", { exact: true })).toHaveCount(0);
       await dialog.getByRole("button", { name: "Копировать ID запроса", exact: true }).click();
       await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("req_synthetic_local");
       expect(await dialog.locator(".relay-dialog-body, .request-details-list dd, .request-upstream-message")
@@ -199,7 +115,7 @@ for (const theme of ["dark", "light"] as const) {
       await dialog.screenshot({ path: `output/playwright/request-report-error-expanded-${theme}-${width}.png` });
     });
 
-    test(`successful request shows tokens and keeps tools in technical details in ${theme} ${width}`, async ({ page }) => {
+    test(`successful request shows measured cache share and support IDs in ${theme} ${width}`, async ({ page }) => {
       await page.setViewportSize({ width, height: 1000 });
       const dialog = await openRequest(page, theme, false);
       await expect(dialog.locator('.request-details-status[data-status="success"]')).toHaveAccessibleName("Успешно");
@@ -208,16 +124,16 @@ for (const theme of ["dark", "light"] as const) {
       await expect(dialog.locator(".request-execution")).toHaveCount(0);
       await expect(dialog.getByText("640 мс", { exact: true })).toBeVisible();
       await expect(dialog.locator(".request-details-metrics dt")).toHaveText([
-        "Первый вывод", "Время ответа", "Скорость генерации", "Эквивалент API",
+        "Время ответа", "Первый вывод", "Скорость генерации", "Вход из кэша",
       ]);
-      await expect(dialog.getByText("Responses", { exact: true })).toBeVisible();
+      await expect(dialog.locator(".request-details-parameters")).toHaveCount(0);
       await expect(dialog.getByText("Обычные входные", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Прочитано из кэша", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Видимый вывод", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Рассуждения", { exact: true })).toBeVisible();
-      await expect(dialog.getByRole("region", { name: "Токены", exact: true })).toBeVisible();
-      await expect(dialog.locator(".request-token-total dt")).toHaveText("Всего токенов");
-      await expect(dialog.locator(".request-token-total dd")).toHaveText(/19\s340/);
+      await expect(dialog.getByRole("table", { name: "Токены и стоимость" })).toBeVisible();
+      await expect(dialog.locator(".request-ledger tfoot th")).toHaveText("Итого");
+      await expect(dialog.locator(".request-token-total")).toHaveText(/19\s340/);
       await expect(dialog.locator(".request-tool-details")).toBeHidden();
       await expect(dialog.getByText("req_synthetic_local", { exact: true })).toBeHidden();
       expect(await dialog.locator(".relay-dialog-body, .request-details-parameters > div, .request-details-list dd")
@@ -228,14 +144,14 @@ for (const theme of ["dark", "light"] as const) {
       await page.mouse.wheel(0, 1000);
       await expect(dialog.locator(".request-technical-details > summary")).toBeInViewport({ ratio: 1 });
       await dialog.locator(".request-technical-details > summary").click();
-      const toolDetails = dialog.locator(".request-technical-details .request-tool-details");
-      await expect(toolDetails).toBeVisible();
-      await expect(toolDetails).toContainText("Вызовы инструментов2");
-      expect(await toolDetails.locator("dd")
+      await expect(receiptCacheShare(dialog).locator("dd")).toHaveText(/83,4\s*%/);
+      const support = dialog.locator(".request-id-list");
+      await expect(support).toContainText("req_synthetic_local");
+      expect(await support.locator("dd")
         .evaluateAll((elements) => elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
       await dialog.screenshot({ path: `output/playwright/request-report-technical-${theme}-${width}.png` });
       await dialog.locator(".request-technical-details > summary").click();
-      await expect(toolDetails).toBeHidden();
+      await expect(support).toHaveCount(0);
     });
   }
 }

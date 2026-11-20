@@ -1,8 +1,6 @@
 use super::*;
 use crate::local_pool::models::AutomationRecords;
-use zenith_relay_core::quota::QuotaWindow;
 
-pub(super) use zenith_relay_core::automations::reset_resources::subscription_allows_reset;
 use zenith_relay_core::automations::reset_resources::{
     PENDING_SUFFIX as PENDING, THRESHOLD_PREFIX as PREFIX,
 };
@@ -42,7 +40,8 @@ fn due_window<'a>(
     )
 }
 
-pub(super) fn has_pending_redemption(
+#[cfg(test)]
+fn has_pending_redemption(
     records: &AutomationRecords,
     settings: &crate::local_pool::models::GatewaySettings,
     account_id: &str,
@@ -89,20 +88,12 @@ pub(super) fn confirm_redemption(
     fence: &AccountRefreshFence,
 ) -> Result<()> {
     if !matches!(response.quota, AccountQuotaOutcome::Updated { .. })
-        || response
-            .account
-            .account
-            .quota
-            .secondary
-            .as_ref()
-            .is_none_or(|window| {
-                !window.is_fully_available()
-                    || !current_time_ms()
-                        .checked_sub(window.observed_at_ms)
-                        .is_some_and(|age| {
-                            age <= zenith_relay_core::scheduler::QUOTA_STALE_AFTER_MS
-                        })
-            })
+        || fresh_weekly_reset_window(&response.account.account.quota, current_time_ms()).is_none_or(
+            |window| {
+                window.available_basis_points != Some(10_000)
+                    || window.explicitly_full == Some(false)
+            },
+        )
     {
         return Ok(());
     }
@@ -147,14 +138,17 @@ pub(super) async fn evaluate(
         let Some(window) = due_window(response, store.automations(), selected, now_ms) else {
             return Ok(None);
         };
-        if has_pending_redemption(store.automations(), store.gateway(), &fence.account_id)
-            || already_attempted(
-                store.automations(),
-                store.gateway(),
-                &fence.account_id,
-                now_ms,
-            )
-        {
+        if has_pending_confirmation(
+            store.automations(),
+            store.accounts(),
+            store.gateway(),
+            &fence.account_id,
+        ) || already_attempted(
+            store.automations(),
+            store.gateway(),
+            &fence.account_id,
+            now_ms,
+        ) {
             return Ok(None);
         }
         let (_, member_fence) = store.account_refresh_scope(&selected.account.id)?;
@@ -167,8 +161,15 @@ pub(super) async fn evaluate(
         )
     };
     let member_fence = &member_fence;
-    let redeemed =
-        consume_reset_credit_when(state, fence, Some(&fingerprint), |expiry| async move {
+    let attempt = ResetAttempt::new(ResetOrigin::WeeklyThreshold(
+        &response.account.account.quota,
+    ));
+    let redeemed = consume_reset_credit_when(
+        state,
+        fence,
+        Some(&fingerprint),
+        &attempt,
+        |expiry| async move {
             if expiry.is_some_and(|expiry| expiry <= current_time_ms()) {
                 return Ok(false);
             }
@@ -208,18 +209,15 @@ pub(super) async fn evaluate(
                     current_time_ms(),
                 )
                 .is_some())
-        })
-        .await;
+        },
+    )
+    .await;
     if !redeemed.is_ok_and(|redeemed| redeemed) {
         return Ok(None);
     }
-    let scope = AccountRefreshScope::capture(state, &fence.account_id).await?;
-    if scope.fence != *fence {
+    let Some(refreshed) = verify_automatic_weekly_reset(state, fence, &attempt).await? else {
         return Ok(None);
-    }
-    let refreshed =
-        crate::local_pool::accounts::quota_refresh::read_account_quota_once(state, &scope, false)
-            .await?;
+    };
     confirm_redemption(state, &refreshed, fence)?;
     Ok(Some(refreshed))
 }

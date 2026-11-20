@@ -46,9 +46,11 @@ export function emptyUsageTotals(): UsageTotals {
 
 /** Token-weighted rate for valid paired cache measurements, excluding unknowns. */
 export function cacheHitRate(totals: UsageTotals): number | null {
-  const input = totals.cacheRateInputTokens;
-  const cached = totals.cacheRateCachedInputTokens;
-  if (!Number.isFinite(input) || !Number.isFinite(cached)
+  return measuredCacheHitRate(totals.cacheRateInputTokens, totals.cacheRateCachedInputTokens);
+}
+
+export function measuredCacheHitRate(input: number | null, cached: number | null): number | null {
+  if (input == null || cached == null || !Number.isFinite(input) || !Number.isFinite(cached)
     || input <= 0 || cached < 0 || cached > input) return null;
   return cached / input * 100;
 }

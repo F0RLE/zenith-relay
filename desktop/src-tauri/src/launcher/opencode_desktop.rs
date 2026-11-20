@@ -10,7 +10,7 @@ use super::process::{
 };
 
 #[cfg(target_os = "windows")]
-pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
+fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
     let is_script = executable.extension().is_some_and(|extension| {
         extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
     });
@@ -24,7 +24,6 @@ pub(super) fn spawn_opencode_windows(executable: &Path) -> Result<(), String> {
     } else {
         windows_hidden_command(executable)
     };
-
     command
         .spawn()
         .map(|_| ())
@@ -355,7 +354,8 @@ pub(super) fn launch_opencode(restart: bool) -> Result<(), String> {
 
         #[cfg(not(target_os = "macos"))]
         {
-            Command::new(executable)
+            let mut command = Command::new(executable);
+            command
                 .spawn()
                 .map(|_| ())
                 .map_err(|error| format!("failed to start OpenCode: {error}"))?;

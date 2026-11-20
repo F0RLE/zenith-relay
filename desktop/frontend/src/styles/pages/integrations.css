@@ -296,6 +296,7 @@
 
 .codex-memory-model-menu .relay-option-trigger,
 .application-protocol-options .relay-option-trigger,
+.application-connection .relay-option-trigger,
 .integration-chatgpt-settings .oauth-binding-account-control .relay-option-trigger {
   min-width: 0;
   min-height: 36px;
@@ -307,6 +308,7 @@
 
 .codex-memory-model-menu .relay-option-trigger:hover:not(:disabled),
 .application-protocol-options .relay-option-trigger:hover:not(:disabled),
+.application-connection .relay-option-trigger:hover:not(:disabled),
 .integration-chatgpt-settings .oauth-binding-account-control .relay-option-trigger:hover:not(:disabled) {
   border-color: var(--relay-border-strong);
 }
@@ -346,15 +348,60 @@
   gap: 16px;
 }
 
+.application-launch-settings {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border-radius: 10px;
+  background: var(--relay-surface);
+}
+
 .application-launch-path {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 10px 14px;
-  padding: 20px;
-  border-radius: 10px;
-  background: var(--relay-surface);
+}
+
+.gateway-setting-row.application-connection {
+  min-width: 0;
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 270px);
+  align-items: center;
+  gap: 12px 24px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.application-connection .codex-feature-heading,
+.application-connection h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.application-connection .gateway-config-icon {
+  flex-shrink: 0;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.application-connection-status.is-error {
+  color: var(--relay-danger);
+}
+
+.application-connection-status.is-ready {
+  color: var(--relay-success);
+}
+
+.application-connection-status.is-unverified,
+.application-connection-status.is-pending {
+  color: var(--relay-warning);
+}
+
+.application-connection-status.is-default {
+  color: var(--relay-muted);
 }
 
 .application-launch-path .relay-field,
@@ -386,13 +433,27 @@
 }
 
 @container (max-width: 620px) {
-  .application-launch-path {
-    grid-template-columns: minmax(0, 1fr);
+  .application-launch-settings {
     padding: 16px;
+  }
+
+  .application-launch-path,
+  .gateway-setting-row.application-connection {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @container (max-width: 280px) {
+  .application-connection .relay-option-trigger {
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
+  .application-connection .relay-option-trigger > span {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .application-launch-path-actions {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

@@ -1,4 +1,5 @@
 import { expect, test } from "../../bun-playwright";
+import { receiptCacheShare } from "../request-details-fixture";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 import { chooseOption } from "./helpers";
 
@@ -22,7 +23,7 @@ for (const narrow of [false, true]) {
     ]) {
       await expect(dialog.locator(".request-id-list > div").filter({ has: page.getByText(label, { exact: true }) }).locator("dd")).toHaveText(model);
     }
-    await expect(dialog.locator(".request-identifiers-section p, .request-identifiers-section .form-note")).toHaveCount(0);
+    await expect(dialog.locator(".request-id-list dt")).toContainText(["Requested model", "Sent to source", "Model declared by upstream"]);
     expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   });
 }
@@ -167,11 +168,11 @@ test("usage shows request speed while keeping protocol, service tier and identif
   await expect(page.locator('.usage-request-table tbody [data-column="speed"]')).toHaveText("6.7 tok/s");
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
-  await expect(details.locator(".request-details-parameters > div").filter({ hasText: "Protocol" })).toHaveText("ProtocolResponses");
-  await expect(details.locator(".request-details-parameters > div").filter({ hasText: "Service tier" })).toHaveText("Service tierStandard");
   await expect(details).toContainText("Generation speed6.7 tok/s");
   await expect(details.locator(".request-technical-details")).not.toHaveAttribute("open");
   await details.locator(".request-technical-details > summary").click();
+  await expect(details.locator(".request-details-parameters > div").filter({ hasText: "Protocol" })).toHaveText("ProtocolResponses");
+  await expect(details.locator(".request-details-parameters > div").filter({ hasText: "Service tier" })).toHaveText("Service tierStandard");
   await expect(details.getByRole("button", { name: "Copy request ID", exact: true })).toBeVisible();
   await expect(details).toContainText("req_synthetic_local");
   await page.keyboard.press("Escape");
@@ -251,10 +252,10 @@ test("usage details accept a text-only response with automatic tool choice", asy
   await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeHidden();
   await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeHidden();
   await dialog.locator(".request-technical-details > summary").click();
-  await expect(dialog.getByText("Client tools", { exact: true })).toBeVisible();
-  await expect(dialog.locator(".request-tool-details").getByText("3", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Client tools", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
   await expect(dialog.getByText("Tools sent", { exact: true })).toHaveCount(0);
-  await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-tool-warning")).toHaveCount(0);
   await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toHaveCount(0);
 });
 
@@ -307,19 +308,16 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Generation speed6.7 tok/s");
   await expect(details).toContainText("Response time428 ms");
   await expect(details.locator(".request-details-metrics > div")).toHaveCount(4);
-  await expect(details).toContainText("API equivalent≈$0.0001");
   await expect(details.getByText("Input tokens", { exact: true })).toBeVisible();
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Cache reads12");
   await expect(details).toContainText("Cache writes4");
   await expect(details).toContainText("Reasoning tokens5");
-  await expect(details).toContainText("Total tokens28");
-  await expect(details).toContainText("API equivalent≈$0.0001");
+  await expect(details.locator(".request-ledger tfoot td")).toHaveText(["28", "≈$0.000148"]);
   await details.locator(".request-technical-details > summary").click();
-  await expect(details).toContainText("Selection reasonFresh quota headroom band");
-  await expect(details).toContainText("Eligible participants4");
-  await expect(details).toContainText("Quota at selection63.00%");
+  await expect(receiptCacheShare(details).locator("dd")).toHaveText("60%");
+  await expect(details).not.toContainText("Quota at selection");
 });
 
 test("partial API equivalents show coverage only in the tooltip without an asterisk", async ({ page }) => {

@@ -207,7 +207,8 @@ impl LocalPoolStore {
         }
 
         let refresh_changed = self.refresh_registration_changed(&revisions, &accounts)
-            || source_revisions != self.source_refresh_revisions;
+            || source_revisions != self.source_refresh_revisions
+            || gateway.account_routes != self.gateway.account_routes;
         self.source_refresh_revisions = source_revisions;
         self.sources = sources;
         self.accounts = accounts;

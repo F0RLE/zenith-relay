@@ -149,6 +149,10 @@ fn on_main_window_event(window: &tauri::Window<tauri::Wry>, event: &WindowEvent)
         api.prevent_close();
         close_main_window(window.app_handle());
     }
+    #[cfg(windows)]
+    if matches!(event, WindowEvent::Destroyed) {
+        local_pool::commands::oauth::close_embedded_sign_in();
+    }
 }
 
 fn on_app_event(app_handle: &tauri::AppHandle<tauri::Wry>, event: RunEvent) {
@@ -184,9 +188,21 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         set_ui_language,
         crate::launcher::launch_application,
         crate::launcher::hosted_preview::open_hosted_preview,
+        crate::launcher::hosted_device::get_hosted_device,
+        crate::launcher::hosted_device::prepare_hosted_device,
+        crate::launcher::hosted_device::forget_hosted_device,
+        crate::launcher::hosted_device::read_hosted_connections,
+        crate::launcher::hosted_device::copy::list_hosted_copy_sources,
+        crate::launcher::hosted_device::copy::get_hosted_copy,
+        crate::launcher::hosted_device::copy::prepare_hosted_copy,
+        crate::launcher::hosted_device::copy::hosted_copy_status,
+        crate::launcher::hosted_device::copy::confirm_hosted_copy,
+        crate::launcher::hosted_device::copy::clear_hosted_copy,
         crate::launcher::settings::get_application_launch_path,
         crate::launcher::settings::set_application_launch_path,
         crate::launcher::settings::pick_application_launch_path,
+        crate::launcher::connection::get_application_connection,
+        crate::launcher::connection::set_application_connection,
         crate::portable_update::get_portable_update_target,
         crate::portable_update::install_portable_update,
         open_api_key_page,
@@ -239,6 +255,8 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::accounts::reset_credits::consume_local_reset_credit,
         local_pool::commands::oauth::start_codex_oauth,
         local_pool::commands::oauth::resume_codex_oauth,
+        #[cfg(windows)]
+        local_pool::commands::oauth::update_codex_oauth_view,
         local_pool::commands::oauth::cancel_codex_oauth,
         local_pool::commands::oauth::complete_codex_oauth,
         local_pool::commands::automations::create_quota_wake_automation,

@@ -64,6 +64,8 @@ export type {
   OAuthClientKind,
   OAuthFlow,
   OAuthFlowEvent,
+  OAuthPageState,
+  OAuthViewBounds,
   OAuthCompletion,
 } from "./types/account";
 

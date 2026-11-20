@@ -125,14 +125,18 @@ async function blockClipboardPermissionApi(page: Page) {
   });
 }
 
-test("masked notes copy full and partial selections and copy buttons without clipboard permission prompts", async ({ page }) => {
+test("notes copy email, password and 2FA code without offering a copy action for the seed", async ({ page }) => {
   const passwordValue = "synthetic-password";
   const totpValue = "JBSWY3DPEHPK3PXP";
   await installNotesMock(page, { values: { password: passwordValue, totpSecret: totpValue } });
   await page.goto("/");
   const dialog = await openNotes(page);
   await blockClipboardPermissionApi(page);
-  for (const [label, value] of [["Пароль", passwordValue], ["Секрет 2FA", totpValue]] as const) {
+  await expect(dialog.getByRole("button", { name: /^Копировать: Секрет 2FA/ })).toHaveCount(0);
+  await expect(dialog.getByLabel("Секрет 2FA", { exact: true })).toHaveAttribute("type", "password");
+  await dialog.getByRole("button", { name: "Копировать: Почта", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("person@example.test");
+  for (const [label, value] of [["Пароль", passwordValue]] as const) {
     const field = dialog.getByLabel(label, { exact: true });
     await expect(field).toHaveAttribute("type", "password");
     await field.focus();
@@ -156,6 +160,8 @@ test("masked notes copy full and partial selections and copy buttons without cli
     await expect(field).toHaveValue(value);
     await expect(dialog.getByRole("button", { name: `Показать: ${label}`, exact: true })).toHaveAttribute("aria-pressed", "false");
   }
+  await dialog.locator(".account-login-copy").click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("123456");
   await expectSecretGeometry(dialog);
   expect(await page.evaluate(() => (window as NotesTestWindow).__LOGIN_NOTES_TEST__.browserClipboardWrites)).toBe(0);
   await expect(page.locator("body > textarea[aria-hidden='true']")).toHaveCount(0);
@@ -200,10 +206,10 @@ async function expectSecretGeometry(container: Locator) {
     const inputBox = input.getBoundingClientRect();
     const style = getComputedStyle(input);
     const boxes = buttons.map((button) => button.getBoundingClientRect());
-    return boxes.length === 2 && boxes.every((buttonBox) => buttonBox.width >= 32 && buttonBox.height >= 32
+    return boxes.length > 0 && boxes.every((buttonBox) => buttonBox.width >= 32 && buttonBox.height >= 32
       && buttonBox.left >= inputBox.left && buttonBox.right <= inputBox.right
       && buttonBox.top >= inputBox.top && buttonBox.bottom <= inputBox.bottom)
-      && boxes[0].right <= boxes[1].left
+      && (boxes.length !== 2 || boxes[0].right <= boxes[1].left)
       && Number.parseFloat(style.paddingRight) >= boxes.reduce((sum, box) => sum + box.width, 0) + 10
       && style.borderTopLeftRadius === style.borderTopRightRadius;
   }))).toBe(true);
@@ -357,7 +363,7 @@ test("notes disable both secret controls until loading finishes", async ({ page 
   await expect(dialog.getByRole("button", { name: "Показать: Пароль", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Показать: Секрет 2FA", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Копировать: Пароль", exact: true })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: "Копировать: Секрет 2FA", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Копировать: Секрет 2FA", exact: true })).toHaveCount(0);
   await expectSecretGeometry(dialog);
   await page.evaluate(() => (window as NotesTestWindow).__LOGIN_NOTES_TEST__.resolveLoad());
   await expect(dialog.getByLabel("Пароль", { exact: true })).toHaveValue("synthetic-password");
@@ -649,7 +655,7 @@ test("cancelling pre-login notes does not change an account or leak into the nex
   await expect(dialog).toHaveCount(0);
   await page.getByRole("button", { name: "Войти", exact: true }).first().click();
   dialog = page.getByRole("dialog", { name: "Войти", exact: true });
-  await dialog.getByRole("button", { name: "Заметки", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Заметки", exact: true })).toHaveAttribute("aria-expanded", "true");
   await expect(dialog.getByLabel("Пароль", { exact: true })).toHaveValue("");
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
   await expect(dialog).toHaveCount(0);

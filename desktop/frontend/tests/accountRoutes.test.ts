@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountResetCreditsSource, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, linkedAccountQuotaIndicator, linkedAccountQuotaState, preferredAccountRouteConnection, visibleAccounts } from "../src/features/relay/accountRoutes";
+import { accountMetadataIsStale, accountMetadataObservation, accountMetadataSources, accountResetCreditsSource, accountRouteConnections, accountSubscriptionSource, expandAccountRouteIds, linkedAccountQuotaState, preferredAccountRouteConnection, visibleAccounts } from "../src/features/relay/accountRoutes";
+import { accountSurfaceTone } from "../src/features/relay/accountStatus";
 import type { AccountSummary } from "../src/features/relay/api/types";
 
 const accounts = [
@@ -13,7 +14,7 @@ describe("account route inventory", () => {
     expect(visibleAccounts(accounts).map((a) => a.id)).toEqual(["siwc", "separate"]);
     expect(accountRouteConnections(accounts[1]!, accounts).map((a) => a.id)).toEqual(["codex", "siwc"]);
   });
-  test("explicit export and removal include the whole group exactly once", () => {
+  test("group removal includes the whole group exactly once", () => {
     expect(expandAccountRouteIds(["siwc", "codex", "separate"], accounts)).toEqual(["codex", "siwc", "separate"]);
     expect(expandAccountRouteIds(["removed"], accounts)).toEqual(["removed"]);
   });
@@ -320,18 +321,15 @@ describe("linked quota presentation", () => {
     expect(inventory).toEqual(before);
     expect(siwc.quota.limitReached).toBe(false);
     expect(siwc.operationalStatus).toBe("rotation");
-    expect(linkedAccountQuotaIndicator(siwc, source, now, "ready")).toEqual({ tone: "warning", warning: true });
+    expect(accountSurfaceTone(siwc)).toBe("ready");
   });
 
-  test("linked warnings preserve errors, disabled state and recovery priority", () => {
-    const siwc = metadataAccount("siwc", "siwc");
-    for (const tone of ["error", "disabled", "info"] as const) {
-      expect(linkedAccountQuotaIndicator(siwc, source, now, tone)).toEqual({ tone, warning: false });
-    }
-    expect(linkedAccountQuotaIndicator(source, source, now, "ready")).toEqual({ tone: "ready", warning: false });
-    expect(linkedAccountQuotaIndicator(siwc, source, now + 60_000, "ready")).toEqual({ tone: "warning", warning: true });
-    const available = { ...source, quota: { ...source.quota, secondary: null } };
-    expect(linkedAccountQuotaIndicator(siwc, available, now, "ready")).toEqual({ tone: "ready", warning: false });
+  test("stale linked evidence does not change the selected route's status", () => {
+    const siwc = metadataAccount("siwc", "siwc", { enabled: true, operationalStatus: "rotation" });
+    expect(linkedAccountQuotaState(source, now + 60_000)).toBe("stale");
+    expect(accountSurfaceTone(siwc)).toBe("ready");
+    expect(accountSurfaceTone({ ...siwc, enabled: false })).toBe("disabled");
+    expect(accountSurfaceTone({ ...siwc, authState: { state: "requires_reauth" } })).toBe("error");
   });
 
   test("stale, failed, future and expired zeroes are not current exhaustion", () => {

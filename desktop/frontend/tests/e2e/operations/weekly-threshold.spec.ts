@@ -38,7 +38,7 @@ for (const locale of ["en", "ru"] as const) {
   });
 }
 
-test("terminal failure keeps client and upstream HTTP envelopes separate", async ({ page }) => {
+test("successful HTTP envelopes do not turn a terminal failure into a successful receipt", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local", locale: "en", theme: "dark", populated: true, usageFailure: true,
     diagnosticDebug: true,
@@ -51,13 +51,9 @@ test("terminal failure keeps client and upstream HTTP envelopes separate", async
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.locator(".usage-request-table .request-link").first().click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByText("Technical details", { exact: true }).click();
-  for (const label of ["Client HTTP response", "Upstream HTTP response"]) {
-    const field = dialog.locator("dt").filter({ hasText: label }).locator("..");
-    await expect(field.locator("dd")).toHaveText("200");
-  }
-  const evidence = dialog.locator("dt").filter({ hasText: "Failure evidence" }).locator("..");
-  await expect(evidence.locator("dd")).toHaveText("Upstream response");
-  await evidence.scrollIntoViewIfNeeded();
+  await expect(dialog.locator(".request-details-status")).toHaveAttribute("data-status", "error");
+  await expect(dialog.getByRole("region", { name: "Error", exact: true })).toContainText("502");
+  await dialog.getByText("Request parameters and IDs", { exact: true }).click();
+  await expect(dialog.locator(".request-id-list")).not.toContainText("200");
   await page.screenshot({ path: "output/playwright/http-failure-evidence-en.png" });
 });

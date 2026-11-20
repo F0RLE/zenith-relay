@@ -45,14 +45,16 @@ test("browser mock reload retains preferences and explicit startup failures", as
 
 test("renderer IPC calls reference registered desktop commands", () => {
   const native = readFileSync(new URL("../../src-tauri/src/desktop.rs", import.meta.url), "utf8");
-  const registry = /tauri::generate_handler!\[([\s\S]*?)\]/u.exec(native)?.[1];
+  // A command may have an inline #[cfg(...)] before it; that bracket does not end the handler.
+  const registry = /tauri::generate_handler!\[([\s\S]*?)^\s*\]/mu.exec(native)?.[1];
   if (!registry) throw new Error("Desktop command registry was not found");
-  const registered = new Set(registry.split(",").map(path => path.trim().split("::").at(-1)));
+  const registered = new Set([...registry.matchAll(/^\s*(?:\w+::)*(\w+),\s*$/gmu)].map(match => match[1]));
   const commands = new Set<string>();
   const transpiler = new Bun.Transpiler({ loader: "ts" });
 
   for (const file of [
     new URL("../src/features/relay/api/commands.ts", import.meta.url),
+    new URL("../src/features/relay/api/hostedDevice.ts", import.meta.url),
     new URL("../src/platform/desktop.ts", import.meta.url),
   ]) {
     const source = transpiler.transformSync(readFileSync(file, "utf8"));

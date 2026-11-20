@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
@@ -6,28 +6,33 @@ import type { AccountSummary } from "../api/types";
 import { accountResetCreditsSource } from "../accountRoutes";
 import { sanitizeFeedbackError } from "../state/feedback";
 import { useRelayState } from "../state/RelayStateProvider";
-import { useConfirm } from "./Ui";
+import { ResetQuotaDialog } from "./ResetQuotaDialog";
 
 type ResetCreditsControlProps = {
   account: AccountSummary;
   onCompleted?: () => Promise<void> | void;
 };
 
+function canResetQuota(account: AccountSummary) {
+  return account.authState.state === "active" && account.secretAvailable
+    && account.routingBlockReason !== "reauth_required" && !account.recoveryRequired;
+}
+
 export function ResetCreditsControl({ account, onCompleted }: ResetCreditsControlProps) {
   const { t } = useTranslation();
   const { runtime } = useRelayState();
-  const confirm = useConfirm();
+  const [confirming, setConfirming] = useState(false);
   const [consuming, setConsuming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const feedback = error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
 
   const source = accountResetCreditsSource(account, runtime?.accounts ?? []);
   const availableFromQuota = source?.quota.resetCreditsAvailable;
-  if (account.authState.state !== "active" || !account.secretAvailable
-    || account.routingBlockReason === "reauth_required" || account.recoveryRequired
-    || !source || source.authState.state !== "active" || !source.secretAvailable
-    || source.routingBlockReason === "reauth_required" || source.recoveryRequired
-    || availableFromQuota == null || availableFromQuota <= 0) {
-    return error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null;
+  const available = canResetQuota(account) && source && canResetQuota(source)
+    && availableFromQuota != null && availableFromQuota > 0;
+  useEffect(() => { setConfirming(false); }, [Boolean(available), source?.id]);
+  if (!available || !source) {
+    return feedback;
   }
 
   const linked = source.id !== account.id;
@@ -40,19 +45,12 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
 
   const consume = async () => {
     if (consuming) return;
-    const accepted = await confirm(t(linked ? "accounts.resetCreditsLinkedConfirm" : "accounts.resetCreditsConfirm", { client }), {
-      title,
-      cancelLabel: t("accounts.resetCreditsConfirmNo"),
-      confirmLabel: t("accounts.resetCreditsConfirmYes"),
-    });
-    if (!accepted) return;
+    setConfirming(false);
     setConsuming(true);
     setError(null);
     try {
       const resetCreditResult = await relayCommands.consumeResetCredit(source.id);
-      // Set the partial-success diagnostic before refreshing the account. The
-      // refresh can consume the last available credit and temporarily remove
-      // the button from the card; the error must survive that state change.
+      // Preserve partial success even when refresh removes the last-credit control.
       if (resetCreditResult.refreshError) {
         setError(t("accounts.resetCreditsRefreshFailed", { error: errorMessage(resetCreditResult.refreshError) }));
       }
@@ -77,7 +75,7 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
       disabled={consuming}
       aria-label={`${t("accounts.resetCreditsAvailable", { count: availableFromQuota })} · ${title}`}
       data-relay-tooltip={title}
-      onClick={() => void consume()}
+      onClick={() => setConfirming(true)}
     >
       <span className="reset-credits-copy">
         {consuming ? <Loader2 className="reset-credits-status-icon spin" aria-hidden /> : <RotateCcw className="reset-credits-status-icon" aria-hidden />}
@@ -85,6 +83,7 @@ export function ResetCreditsControl({ account, onCompleted }: ResetCreditsContro
         <span className="reset-credits-count" aria-hidden>{availableFromQuota}</span>
       </span>
     </button>
-    {error ? <span className="reset-credits-inline-error" role="alert">{error}</span> : null}
+    {confirming ? <ResetQuotaDialog onClose={() => setConfirming(false)} onConfirm={() => void consume()} /> : null}
+    {feedback}
   </>;
 }

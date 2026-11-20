@@ -1,4 +1,7 @@
-use crate::local_pool::accounts::{oauth::OAuthClientKind, oauth_flow::OAuthFlowStart};
+use crate::local_pool::accounts::{
+    oauth::OAuthClientKind,
+    oauth_flow::{OAuthFlowStart, OAuthFlowStatus},
+};
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
 use crate::local_pool::state::DesktopState;
 use std::sync::{
@@ -6,30 +9,117 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tauri::{
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, utils::config::WindowConfig,
-    webview::NewWindowResponse,
+    AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    utils::config::WindowConfig, webview::NewWindowResponse,
 };
 use url::Url;
 
 pub(super) mod automatic_login;
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
+mod embedded;
+#[cfg(windows)]
 mod private_profile;
 mod proxy;
 
+#[cfg(windows)]
+pub use embedded::SignInBounds;
 use proxy::{ProxyBridge, webview_proxy};
 
 const SIGN_IN_WINDOW: &str = "codex-sign-in";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Presentation {
+    Detached,
+    #[cfg(windows)]
+    Embedded,
+}
+
+impl Presentation {
+    pub(super) fn requested(_embedded: bool) -> Self {
+        #[cfg(windows)]
+        if _embedded {
+            return Self::Embedded;
+        }
+        Self::Detached
+    }
+
+    pub(super) fn is_embedded(self) -> bool {
+        self != Self::Detached
+    }
+}
+
+#[derive(Clone)]
+enum SignInSurface {
+    Detached(Arc<WebviewWindow>),
+    #[cfg(windows)]
+    Embedded(embedded::SignInView),
+}
+
+impl SignInSurface {
+    fn close(&self) {
+        match self {
+            Self::Detached(window) => {
+                let _ = window.destroy();
+            }
+            #[cfg(windows)]
+            Self::Embedded(view) => view.close(),
+        }
+    }
+
+    fn reveal(&self) {
+        match self {
+            Self::Detached(window) => {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            #[cfg(windows)]
+            Self::Embedded(_) => {} // The renderer owns pane visibility and layout.
+        }
+    }
+
+    async fn url(&self) -> Option<Url> {
+        match self {
+            Self::Detached(window) => window.url().ok(),
+            #[cfg(windows)]
+            Self::Embedded(view) => view.url().await,
+        }
+    }
+
+    fn evaluate(&self, script: String, callback: impl Fn(String) + Send + 'static) -> bool {
+        match self {
+            Self::Detached(window) => window.eval_with_callback(script, callback).is_ok(),
+            #[cfg(windows)]
+            Self::Embedded(view) => view.evaluate(script, callback),
+        }
+    }
+}
+
+struct SignInAttempt {
+    login_id: String,
+    _bridge: Option<ProxyBridge>,
+    surface: Option<SignInSurface>,
+    automation: Option<Arc<AtomicBool>>,
+    #[cfg(windows)]
+    presentation: Presentation,
+}
+
+impl Drop for SignInAttempt {
+    fn drop(&mut self) {
+        if let Some(active) = self.automation.take() {
+            active.store(false, Ordering::Release);
+        }
+    }
+}
+
 struct SignInSession {
     generation: u64,
-    bridge: Option<ProxyBridge>,
-    automation: Option<(String, Arc<AtomicBool>)>,
+    attempt: Option<SignInAttempt>,
 }
 
 fn sign_in_session() -> std::sync::MutexGuard<'static, SignInSession> {
     static SESSION: Mutex<SignInSession> = Mutex::new(SignInSession {
         generation: 0,
-        bridge: None,
-        automation: None,
+        attempt: None,
     });
     zenith_relay_core::poison::mutex(&SESSION)
 }
@@ -40,64 +130,106 @@ pub(super) async fn open_sign_in_window(
     start: &OAuthFlowStart,
     proxy_url: Option<&str>,
     automatic_login: Option<automatic_login::LoginNotes>,
+    presentation: Presentation,
 ) -> Result<(), LocalPoolError> {
     static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _opening = OPENING.lock().await;
-    let (webview_proxy, bridge) = webview_proxy(proxy_url).await?;
-    let generation = begin_sign_in_session();
-    if let Err(error) = destroy_previous_sign_in_window(app).await {
-        release_sign_in_session(generation);
-        return Err(error);
+    #[cfg(windows)]
+    if !tauri::webview_version().is_ok_and(|version| supports_private_sign_in(&version)) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "Update Microsoft Edge WebView2 Runtime to open a private sign-in page.",
+        ));
     }
-    if let Some(bridge) = bridge {
-        if !store_sign_in_bridge(generation, bridge) {
+    let authorization_url = Url::parse(authorization_url).map_err(|_| window_open_error())?;
+    let navigation = SignInNavigation::new(app, start)?;
+    let (webview_proxy, bridge) = webview_proxy(proxy_url).await?;
+    let automation = automatic_login
+        .as_ref()
+        .map(|_| Arc::new(AtomicBool::new(true)));
+    let generation = begin_sign_in_session(SignInAttempt {
+        login_id: start.login_id.clone(),
+        _bridge: bridge,
+        surface: None,
+        automation: automation.clone(),
+        #[cfg(windows)]
+        presentation,
+    });
+    let surface = async {
+        destroy_previous_sign_in_window(app).await?;
+        if !session_is_current(generation) || !navigation.is_pending() {
             return Err(window_open_error());
         }
-    } else if !session_is_current(generation) {
-        return Err(window_open_error());
+        match presentation {
+            Presentation::Detached => {
+                let window = build_sign_in_window(
+                    app,
+                    authorization_url,
+                    navigation,
+                    webview_proxy,
+                    automatic_login.is_some(),
+                )?;
+                window.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+                    ) {
+                        take_sign_in_attempt(|current, _| current == generation);
+                    }
+                });
+                Ok(SignInSurface::Detached(Arc::new(window)))
+            }
+            #[cfg(windows)]
+            Presentation::Embedded => embedded::SignInView::open(
+                app,
+                generation,
+                authorization_url,
+                navigation,
+                webview_proxy,
+            )
+            .await
+            .map(SignInSurface::Embedded),
+        }
     }
-    let window = match build_sign_in_window(
-        app,
-        authorization_url,
-        start,
-        webview_proxy,
-        automatic_login.is_some(),
-    ) {
-        Ok(window) => window,
+    .await;
+    let surface = match surface {
+        Ok(surface) => surface,
         Err(error) => {
-            release_sign_in_session(generation);
+            close_sign_in_attempt(|current, _| current == generation);
             return Err(error);
         }
     };
-    window.on_window_event(move |event| {
-        if matches!(
-            event,
-            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
-        ) {
-            release_sign_in_session(generation);
-        }
-    });
-    if !session_is_current(generation) {
-        let _ = window.destroy();
-        return Err(window_open_error());
-    }
-    if let Some(notes) = automatic_login {
-        let active = Arc::new(AtomicBool::new(true));
-        {
-            let mut session = sign_in_session();
-            if session.generation != generation {
+    {
+        let mut session = sign_in_session();
+        let is_current = session.generation == generation;
+        match session.attempt.as_mut().filter(|_| is_current) {
+            Some(attempt) => attempt.surface = Some(surface.clone()),
+            None => {
+                drop(session);
+                surface.close();
                 return Err(window_open_error());
             }
-            session.automation = Some((start.login_id.clone(), active.clone()));
         }
-        let login_id = start.login_id.clone();
+    }
+    if let (Some(notes), Some(active)) = (automatic_login, automation) {
         tauri::async_runtime::spawn(automatic_login::run(
-            window, generation, login_id, active, notes,
+            app.clone(),
+            surface,
+            generation,
+            start.login_id.clone(),
+            active,
+            notes,
         ));
     } else {
-        let _ = window.show();
-        let _ = window.set_focus();
+        surface.reveal();
     }
+    let remaining = start
+        .expires_at_ms
+        .saturating_sub(crate::local_pool::commands::current_time_ms());
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
+        close_sign_in_attempt(|current, _| current == generation);
+    });
     Ok(())
 }
 
@@ -117,94 +249,125 @@ async fn destroy_previous_sign_in_window(app: &AppHandle) -> Result<(), LocalPoo
     .map_err(|_| window_open_error())
 }
 
-pub(crate) fn close_sign_in_window(app: &AppHandle) {
-    let _generation = begin_sign_in_session();
-    if let Some(window) = app.get_webview_window(SIGN_IN_WINDOW) {
-        let _ = window.destroy();
-    }
+pub(super) fn close_sign_in_window(login_id: &str) {
+    close_sign_in_attempt(|_, attempt| attempt.login_id == login_id);
 }
 
-fn begin_sign_in_session() -> u64 {
-    let mut session = sign_in_session();
-    session.generation = session.generation.wrapping_add(1);
-    session.bridge.take();
-    stop_automation(&mut session);
-    session.generation
+#[cfg(windows)]
+pub(super) fn close_embedded_sign_in() {
+    close_sign_in_attempt(|_, attempt| attempt.presentation.is_embedded());
+}
+
+fn begin_sign_in_session(attempt: SignInAttempt) -> u64 {
+    let (generation, previous) = {
+        let mut session = sign_in_session();
+        session.generation = session.generation.wrapping_add(1);
+        (session.generation, session.attempt.replace(attempt))
+    };
+    if let Some(previous) = previous {
+        // The detached window is removed (and awaited) by the opening path.
+        #[cfg(windows)]
+        if let Some(SignInSurface::Embedded(view)) = &previous.surface {
+            view.close();
+        }
+        drop(previous);
+    }
+    generation
 }
 
 fn session_is_current(generation: u64) -> bool {
-    sign_in_session().generation == generation
+    let session = sign_in_session();
+    session.generation == generation && session.attempt.is_some()
 }
 
-fn store_sign_in_bridge(generation: u64, bridge: ProxyBridge) -> bool {
+fn take_sign_in_attempt(
+    matches: impl FnOnce(u64, &SignInAttempt) -> bool,
+) -> Option<SignInAttempt> {
     let mut session = sign_in_session();
-    if session.generation != generation {
-        drop(bridge);
-        return false;
+    if session
+        .attempt
+        .as_ref()
+        .is_some_and(|attempt| matches(session.generation, attempt))
+    {
+        return session.attempt.take();
     }
-    session.bridge = Some(bridge);
-    true
+    None
 }
 
-fn release_sign_in_session(generation: u64) {
-    let mut session = sign_in_session();
-    if session.generation == generation {
-        session.bridge.take();
-        stop_automation(&mut session);
-    }
-}
-
-fn stop_automation(session: &mut SignInSession) {
-    if let Some((_, active)) = session.automation.take() {
-        active.store(false, Ordering::Release);
+fn close_sign_in_attempt(matches: impl FnOnce(u64, &SignInAttempt) -> bool) {
+    if let Some(attempt) = take_sign_in_attempt(matches)
+        && let Some(surface) = &attempt.surface
+    {
+        surface.close();
     }
 }
 
 pub(super) fn continue_automatic_login_manually(app: &AppHandle, login_id: &str) -> bool {
-    {
-        let session = sign_in_session();
-        let Some((current, active)) = &session.automation else {
-            return false;
-        };
-        if current != login_id {
-            return false;
-        }
-        active.store(false, Ordering::Release);
-    }
-    let Some(window) = app.get_webview_window(SIGN_IN_WINDOW) else {
+    let Some(surface) = ({
+        let mut session = sign_in_session();
+        session
+            .attempt
+            .as_mut()
+            .filter(|attempt| attempt.login_id == login_id)
+            .and_then(|attempt| {
+                let surface = attempt.surface.clone()?;
+                attempt.automation.take()?.store(false, Ordering::Release);
+                Some(surface)
+            })
+    }) else {
         return false;
     };
     automatic_login::notify_manual(app, login_id);
-    let _ = window.show();
-    let _ = window.set_focus();
+    surface.reveal();
+    #[cfg(windows)]
+    if let SignInSurface::Embedded(view) = &surface {
+        view.focus();
+    }
     true
 }
 
-pub(super) fn cancel_automatic_login(app: &AppHandle, login_id: &str) {
-    let matches = sign_in_session()
-        .automation
+#[cfg(windows)]
+fn embedded_view(login_id: &str) -> Option<embedded::SignInView> {
+    match sign_in_session()
+        .attempt
         .as_ref()
-        .is_some_and(|(current, _)| current == login_id);
-    if matches {
-        close_sign_in_window(app);
+        .filter(|attempt| attempt.login_id == login_id)?
+        .surface
+        .as_ref()?
+    {
+        SignInSurface::Embedded(view) => Some(view.clone()),
+        SignInSurface::Detached(_) => None,
     }
+}
+
+pub(super) fn focus_embedded_sign_in(_login_id: &str) -> bool {
+    #[cfg(windows)]
+    if let Some(view) = embedded_view(_login_id) {
+        view.focus();
+        return true;
+    }
+    false
+}
+
+#[cfg(windows)]
+pub(super) async fn place_embedded_sign_in(
+    login_id: &str,
+    revision: u64,
+    bounds: Option<SignInBounds>,
+) -> Result<bool, LocalPoolError> {
+    let Some(view) = embedded_view(login_id) else {
+        return Ok(false);
+    };
+    view.place(revision, bounds).await
 }
 
 fn build_sign_in_window(
     app: &AppHandle,
-    authorization_url: &str,
-    start: &OAuthFlowStart,
+    authorization_url: Url,
+    navigation: SignInNavigation,
     webview_proxy: Option<Url>,
     automatic_login: bool,
-) -> Result<tauri::WebviewWindow, LocalPoolError> {
-    #[cfg(target_os = "windows")]
-    if !tauri::webview_version().is_ok_and(|version| supports_private_sign_in(&version)) {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "Update Microsoft Edge WebView2 Runtime to open a private sign-in window.",
-        ));
-    }
-    let authorization_url = Url::parse(authorization_url).map_err(|_| window_open_error())?;
+) -> Result<WebviewWindow, LocalPoolError> {
     let mut builder =
         WebviewWindowBuilder::from_config(app, &sign_in_window_config(authorization_url))
             .map_err(|_| window_prepare_error())?
@@ -219,34 +382,14 @@ fn build_sign_in_window(
             .visible(!automatic_login)
             .enable_clipboard_access()
             .devtools(false)
-            .on_new_window(|_url, _features| NewWindowResponse::Deny);
-    let redirect = Url::parse(&start.redirect_uri).map_err(|_| window_open_error())?;
-    let flow = app.state::<DesktopState>().oauth_flow();
-    let login_id = start.login_id.clone();
-    let client_kind = start.client_kind;
-    builder = builder.on_navigation(move |url| {
-        if !captures_callback_url(client_kind, &redirect, url) {
-            return true;
-        }
-        let flow = flow.clone();
-        let login_id = login_id.clone();
-        let callback_url = url.to_string();
-        tauri::async_runtime::spawn(async move {
-            let _ = flow.submit_manual_callback(&login_id, &callback_url).await;
-        });
-        false
-    });
+            .on_new_window(|_url, _features| NewWindowResponse::Deny)
+            .on_navigation(move |url| !navigation.intercept_callback(url));
     if let Some(proxy) = webview_proxy {
         builder = builder.proxy_url(proxy);
     }
     #[cfg(target_os = "windows")]
     let profile = {
-        let cache = app
-            .path()
-            .app_cache_dir()
-            .map_err(|_| window_prepare_error())?;
-        let profile =
-            private_profile::PrivateProfile::create(&cache).map_err(|_| window_prepare_error())?;
+        let profile = create_private_profile(app)?;
         // WebView2 shares an InPrivate profile when its data directory matches.
         // A unique directory also isolates us from any open Hosted preview.
         builder = builder.data_directory(profile.path().to_path_buf());
@@ -256,6 +399,59 @@ fn build_sign_in_window(
     #[cfg(target_os = "windows")]
     profile.attach(&window);
     Ok(window)
+}
+
+#[cfg(windows)]
+fn create_private_profile(
+    app: &AppHandle,
+) -> Result<private_profile::PrivateProfile, LocalPoolError> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| window_prepare_error())?;
+    private_profile::PrivateProfile::create(&cache).map_err(|_| window_prepare_error())
+}
+
+struct SignInNavigation {
+    app: AppHandle,
+    login_id: String,
+    redirect: Url,
+    client_kind: OAuthClientKind,
+}
+
+impl SignInNavigation {
+    fn new(app: &AppHandle, start: &OAuthFlowStart) -> Result<Self, LocalPoolError> {
+        Ok(Self {
+            app: app.clone(),
+            login_id: start.login_id.clone(),
+            redirect: Url::parse(&start.redirect_uri).map_err(|_| window_open_error())?,
+            client_kind: start.client_kind,
+        })
+    }
+
+    fn is_pending(&self) -> bool {
+        self.app
+            .state::<DesktopState>()
+            .oauth_flow()
+            .status(&self.login_id)
+            .is_ok_and(|start| {
+                start.status == OAuthFlowStatus::Pending
+                    && start.expires_at_ms > crate::local_pool::commands::current_time_ms()
+            })
+    }
+
+    fn intercept_callback(&self, url: &Url) -> bool {
+        if !captures_callback_url(self.client_kind, &self.redirect, url) {
+            return false;
+        }
+        let flow = self.app.state::<DesktopState>().oauth_flow();
+        let login_id = self.login_id.clone();
+        let callback_url = url.to_string();
+        tauri::async_runtime::spawn(async move {
+            let _ = flow.submit_manual_callback(&login_id, &callback_url).await;
+        });
+        true
+    }
 }
 
 fn sign_in_window_config(authorization_url: Url) -> WindowConfig {
@@ -304,18 +500,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stopping_automation_revokes_the_task_without_changing_the_proxy_session() {
+    fn dropping_the_attempt_revokes_automation() {
         let active = Arc::new(AtomicBool::new(true));
-        let mut session = SignInSession {
-            generation: 42,
-            bridge: None,
-            automation: Some(("synthetic-login".into(), active.clone())),
+        let attempt = SignInAttempt {
+            login_id: "synthetic-login".into(),
+            _bridge: None,
+            surface: None,
+            automation: Some(active.clone()),
+            #[cfg(windows)]
+            presentation: Presentation::Embedded,
         };
-        stop_automation(&mut session);
+        drop(attempt);
         assert!(!active.load(Ordering::Acquire));
-        assert!(session.automation.is_none());
-        assert_eq!(session.generation, 42);
-        stop_automation(&mut session);
     }
 
     #[test]

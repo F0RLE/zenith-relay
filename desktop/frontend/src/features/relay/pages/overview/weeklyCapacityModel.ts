@@ -1,21 +1,33 @@
-import type { WeeklyCapacityModel, WeeklyCapacityReport, WeeklyCapacitySeries } from "../../api/types/weeklyCapacity";
+import type { WeeklyCapacityModel, WeeklyCapacityPoint, WeeklyCapacityReport, WeeklyCapacitySeries } from "../../api/types/weeklyCapacity";
+import { formatUsd } from "../../currencyFormatting";
 import { DAY_MS } from "./overviewAnalyticsModel";
+
+export function formatCapacityEstimate(microUsd: number, locale: string) {
+  // Pass exact decimal dollars to Intl, even at the upper end of safe integer microUSD.
+  const dollars = `${microUsd}e-6` as `${number}`;
+  return `≈${formatUsd(dollars, locale, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+}
 
 export function capacityModelOptions(models: WeeklyCapacityModel[]) {
   return [...new Set(models.map(({ model }) => model))].sort()
     .map((model) => ({ value: model, label: model }));
 }
 
+function expiresAt(point: WeeklyCapacityPoint) {
+  return Math.min(point.validUntilMs, point.sampleStartMs + 3 * DAY_MS);
+}
+
 export function capacityCurrent(group: WeeklyCapacitySeries | undefined, nowMs: number) {
   const point = group?.current;
-  if (!point || point.observedAtMs > nowMs || point.validUntilMs <= nowMs || nowMs - point.observedAtMs >= 3 * DAY_MS) return null;
+  if (!point || point.observedAtMs > nowMs || expiresAt(point) <= nowMs) return null;
   return { point, stale: Boolean(group?.stale) || nowMs - point.sampleStartMs >= DAY_MS };
 }
 
 export function nextCapacityExpiry(report: WeeklyCapacityReport, nowMs: number) {
-  const deadlines = [...report.summaries, ...(report.models ?? []), ...report.groups].flatMap((group) => group.current
-    ? [group.current.sampleStartMs + DAY_MS, group.current.validUntilMs, group.current.observedAtMs + 3 * DAY_MS]
-    : []).filter((at) => at > nowMs);
+  const deadlines = [...report.summaries, ...(report.models ?? []), ...report.groups].flatMap(({ current }) => {
+    if (!current || expiresAt(current) <= nowMs) return [];
+    return [current.sampleStartMs + DAY_MS, expiresAt(current)];
+  }).filter((at) => at > nowMs);
   return deadlines.length ? Math.min(...deadlines) : null;
 }
 

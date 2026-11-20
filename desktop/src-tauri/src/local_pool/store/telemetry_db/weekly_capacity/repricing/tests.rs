@@ -79,6 +79,63 @@ fn seeded() -> (std::path::PathBuf, TelemetryDb, PricingCatalog, QuotaWindow) {
 }
 
 #[test]
+fn unpaired_quota_drop_retires_current_calibration_but_keeps_history() {
+    let (root, database, catalog, _) = seeded();
+    let next = window(NOW + 120_000, 9000);
+    assert!(projected(&database, &catalog, &next, next.observed_at_ms).is_none());
+
+    let revision = database.weekly_capacity_revision();
+    observe(&database, &catalog, &next, next.observed_at_ms);
+    assert!(database.weekly_capacity_revision() > revision);
+    assert!(projected(&database, &catalog, &next, next.observed_at_ms).is_none());
+    let history = database
+        .weekly_capacity_report(WeeklyCapacityQuery::default(), next.observed_at_ms, &[])
+        .unwrap();
+    assert_eq!(history.summaries[0].points[0].median_micro_usd, 5600);
+
+    usage(&database, "new-paired-send", "a", NOW + 150_000, Some(80));
+    let paired = window(NOW + 180_000, 8500);
+    observe(&database, &catalog, &paired, paired.observed_at_ms);
+    assert_eq!(
+        projected(&database, &catalog, &paired, paired.observed_at_ms)
+            .unwrap()
+            .median_micro_usd,
+        Some(5600)
+    );
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn persisted_calibration_behind_the_quota_baseline_cannot_be_repriced() {
+    let (root, database, old, _) = seeded();
+    let quota = window(NOW + 120_000, 9000);
+    {
+        let connection = database.lock_connection().unwrap();
+        // Reproduce a stored anchor from before unpaired intervals retired the sample.
+        connection
+            .execute(
+                "UPDATE weekly_capacity_anchors SET observed_at_ms = ?1,
+                 payload_json = json_set(payload_json, '$.from_ms', ?1, '$.remaining', 9000,
+                                         '$.window', json(?2))",
+                params![
+                    sql_u64(quota.observed_at_ms),
+                    serde_json::to_string(&quota).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    drop(database);
+    let database = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
+    assert!(projected(&database, &old, &quota, quota.observed_at_ms).is_none());
+    let changed = catalog(2.0, false);
+    observe(&database, &changed, &quota, quota.observed_at_ms);
+    assert!(projected(&database, &changed, &quota, quota.observed_at_ms).is_none());
+    drop(database);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn irrelevant_catalog_edits_keep_capacity_and_do_not_invent_new_measurements() {
     let (root, database, old, quota) = seeded();
     let before = projected(&database, &old, &quota, NOW + 60_000).unwrap();
@@ -128,23 +185,50 @@ fn relevant_prices_revalue_the_same_interval_without_refreshing_its_age_or_histo
     let (root, database, old, quota) = seeded();
     let before = projected(&database, &old, &quota, NOW + 60_000).unwrap();
     let doubled = catalog(2.0, false);
-    observe(&database, &doubled, &quota, NOW + HOUR_MS);
-    let after = projected(&database, &doubled, &quota, NOW + HOUR_MS).unwrap();
+    let now = NOW + HOUR_MS;
+    let observation = CapacityObservation {
+        ledger: LEDGER,
+        account_ids: &["a".into(), "b".into()],
+        plan: "plus",
+        window: &quota,
+        pricing_revision: &PricingContext::default().revision_key(&doubled),
+        now_ms: now,
+    };
+    let report = |from, to| {
+        database
+            .weekly_capacity_report(
+                WeeklyCapacityQuery {
+                    from_ms: Some(from),
+                    to_ms: Some(to),
+                    bucket_ms: Some(DAY_MS),
+                    account_id: Some("b".into()),
+                },
+                now,
+                std::slice::from_ref(&observation),
+            )
+            .unwrap()
+    };
+    assert!(report(NOW, now).summaries[0].current.is_none());
+    observe(&database, &doubled, &quota, now);
+    let after = projected(&database, &doubled, &quota, now).unwrap();
     assert_eq!(after.median_micro_usd, Some(11_200));
     assert_eq!(after.observed_at_ms, before.observed_at_ms);
     assert_eq!(after.valid_until_ms, before.valid_until_ms);
-    let history: String = database
-        .lock_connection()
-        .unwrap()
-        .query_row(
-            "SELECT payload_json FROM weekly_capacity_history",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let sample: Measurement = serde_json::from_str(&history).unwrap();
-    assert_eq!(sample.micro_usd, Some(5600));
-    assert_eq!(sample.from_ms, NOW);
+    let both = report(NOW, now);
+    for series in [&both.summaries[0], &both.models[0].summary] {
+        let current = series.current.as_ref().unwrap();
+        assert_eq!(current.median_micro_usd, 11_200);
+        assert_eq!(current.observed_at_ms, before.observed_at_ms);
+        assert_eq!(series.points.len(), 1);
+        assert_eq!(series.points[0].median_micro_usd, 5600);
+        assert_eq!(series.points[0].sample_start_ms, NOW);
+    }
+    let past = report(NOW, now - 1);
+    assert_eq!(past.summaries[0].points[0].median_micro_usd, 5600);
+    assert!(past.summaries[0].current.is_none());
+    let current_only = report(now - 1, now);
+    assert!(current_only.summaries[0].points.is_empty());
+    assert!(current_only.summaries[0].current.is_some());
     assert!(projected(&database, &doubled, &quota, NOW + MAX_ANCHOR_AGE + 1).is_none());
     drop(database);
     std::fs::remove_dir_all(root).unwrap();

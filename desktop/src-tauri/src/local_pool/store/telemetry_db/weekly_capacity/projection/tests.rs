@@ -66,7 +66,7 @@ fn anchor(current: &CapacityObservation<'_>) -> Anchor {
 #[test]
 fn different_workloads_share_the_observed_median_not_a_range_midpoint() {
     let window = window();
-    let a = vec!["a-codex".into(), "a-bps".into(), "a-siwc".into()];
+    let a = vec!["a-codex".into(), "a-bps".into()];
     let b = vec!["b".into()];
     let c = vec!["c".into()];
     let d = vec!["different-workload".into()];
@@ -96,7 +96,7 @@ fn different_workloads_share_the_observed_median_not_a_range_midpoint() {
         })
         .collect();
     let result = project(&observations, &samples);
-    assert_eq!(result.len(), 7);
+    assert_eq!(result.len(), 6);
     for value in result.values() {
         assert_eq!(value.calibration.median_micro_usd, Some(250));
         assert_eq!(value.calibration.account_count, 4);
@@ -110,7 +110,7 @@ fn different_workloads_share_the_observed_median_not_a_range_midpoint() {
         );
         assert_eq!(value.available_basis_points, 8400);
     }
-    assert_eq!(result["a-codex"], result["a-siwc"]);
+    assert_eq!(result["a-codex"], result["a-bps"]);
     let json = serde_json::to_value(&result["a-codex"]).unwrap();
     assert_eq!(json["ledgerKey"], "a");
     assert_eq!(json["availableBasisPoints"], 8400);

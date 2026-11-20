@@ -39,7 +39,7 @@ pub use selection::{
     effective_proxy_config, effective_proxy_url, ensure_account_proxy, proxy_route_is_usable,
     proxy_route_status,
 };
-pub(crate) use selection::{account_proxy_pool_id, common_proxy_pool_id};
+pub(crate) use selection::{account_proxy_pool_id, common_proxy_pool_id, saved_account_proxy_url};
 
 #[cfg(test)]
 mod tests {

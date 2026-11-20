@@ -12,7 +12,7 @@ fn latest_sample(
     now_ms: u64,
 ) -> Result<Option<Measurement>> {
     if let Some(calibration) = &previous.calibration {
-        return Ok(calibration.sample.clone());
+        return Ok(calibration.paired_sample(previous.from_ms).cloned());
     }
     // Legacy versions ended every catalog change with an empty pricing event.
     // Skip only those events, never a reset, plan/membership change or correction.
@@ -34,6 +34,7 @@ fn latest_sample(
             |row| row.get::<_, String>(0),
         )
         .map_err(db_error)?;
+    let mut legacy_pricing_boundary = false;
     for row in rows {
         let sample: Measurement =
             serde_json::from_str(&row.map_err(db_error)?).map_err(json_error)?;
@@ -47,10 +48,15 @@ fn latest_sample(
                         .abs_diff(previous.window.reset_at_ms.unwrap_or_default())
                         <= 120_000 =>
             {
+                legacy_pricing_boundary |= sample.at_ms == previous.from_ms;
                 continue;
             }
-            Some(_) => return Ok(None),
-            None => return Ok(Some(sample)),
+            None if sample.at_ms == previous.from_ms
+                || (sample.at_ms < previous.from_ms && legacy_pricing_boundary) =>
+            {
+                return Ok(Some(sample));
+            }
+            _ => return Ok(None),
         }
     }
     Ok(None)
@@ -72,9 +78,11 @@ pub(super) fn refresh(
     // Ignore the old price revision only while validating the non-price fences;
     // no projection is published until the actual interval is priced again.
     sample.pricing_revision.clone_from(&next.pricing_revision);
+    let legacy_pricing_baseline_ms = (sample.at_ms < previous.from_ms).then_some(previous.from_ms);
     let invalid = Calibration {
         sample: Some(original),
         valid: false,
+        legacy_pricing_baseline_ms,
     };
     if !projection::compatible_measurement(&sample, next, ledger, now_ms) {
         return Ok(invalid);
@@ -116,5 +124,6 @@ pub(super) fn refresh(
     Ok(Calibration {
         sample: Some(sample),
         valid: true,
+        legacy_pricing_baseline_ms,
     })
 }

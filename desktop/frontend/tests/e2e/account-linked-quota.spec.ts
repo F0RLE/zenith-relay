@@ -12,7 +12,7 @@ async function openSiwc(page: Page, locale = "en") {
 
 for (const locale of ["en", "ru"] as const) {
   for (const donor of ["codex", "excel_bps"] as const) {
-    test(`linked weekly quota warns without blocking SIWC ${donor} ${locale}`, async ({ page }) => {
+    test(`linked weekly quota stays separate from SIWC status ${donor} ${locale}`, async ({ page }) => {
       const theme = locale === "ru" ? "dark" : "light";
       await installTauriMock(page, {
         populated: true, usageActive: false, locale, theme,
@@ -21,12 +21,12 @@ for (const locale of ["en", "ru"] as const) {
       });
       await openSiwc(page, locale);
       const client = donor === "codex" ? "Codex" : "Excel / BPS";
-      const text = locale === "ru" ? `Недельная квота ${client} исчерпана` : `${client} weekly quota exhausted`;
+      const text = locale === "ru" ? "В ротации" : "In rotation";
       for (const surface of ["connections", "pool"] as const) {
         if (surface === "pool") await page.getByRole("button", { name: locale === "ru" ? "Пул" : "Pool", exact: true }).click();
         const card = page.locator(surface === "pool" ? '.pool-member-card[data-member-kind="account"]' : ".account-card");
         const indicator = card.locator(".account-kind-icon, .pool-member-kind-icon");
-        await expect(indicator).toHaveAttribute("data-status", "warning");
+        await expect(indicator).toHaveAttribute("data-status", "ready");
         await expect(indicator).toHaveAttribute("aria-label", new RegExp(text));
         await expect(card.locator(".account-linked-quota-state")).toHaveCount(0);
         await indicator.hover();
@@ -42,6 +42,7 @@ for (const locale of ["en", "ru"] as const) {
         await page.mouse.move(1, 1);
         await expect(page.getByRole("tooltip")).toHaveCount(0);
         await expect(card.locator(".quota-stack")).toHaveAttribute("data-stale", "false");
+        await expect(card.locator(".quota-stack")).toHaveAttribute("data-relay-tooltip", new RegExp(client));
         await expect(card.locator(".quota-meter strong").last()).toHaveText("0%");
         await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
         for (const width of [480, 1160]) {
@@ -65,7 +66,7 @@ for (const locale of ["en", "ru"] as const) {
   }
 }
 
-for (const condition of ["stale", "failed", "small_positive"] as const) {
+for (const condition of ["stale", "stale_positive", "failed", "small_positive"] as const) {
   test(`linked quota ${condition} does not become current exhaustion`, async ({ page }) => {
     await installTauriMock(page, {
       populated: true, usageActive: false, accountRouteKinds: ["codex", "siwc"],
@@ -78,9 +79,14 @@ for (const condition of ["stale", "failed", "small_positive"] as const) {
         const result = await original(command, args, options);
         if (command === "get_local_runtime_state") {
           const source = (result as { accounts: AccountSummary[] }).accounts.find((account) => account.oauthClientKind === "codex")!;
-          if (condition === "stale") {
+          if (condition === "stale" || condition === "stale_positive") {
             for (const window of [source.quota.primary, source.quota.secondary]) {
               if (window) window.observedAtMs = Date.now() - 21 * 60_000;
+            }
+            if (condition === "stale_positive") {
+              source.quota.primary!.availableBasisPoints = 10_000;
+              source.quota.secondary!.availableBasisPoints = 6_800;
+              source.quota.limitReached = false;
             }
           } else if (condition === "failed") {
             source.quotaRefreshStatus = "failed";
@@ -98,14 +104,11 @@ for (const condition of ["stale", "failed", "small_positive"] as const) {
       const card = page.locator(surface === "pool" ? '.pool-member-card[data-member-kind="account"]' : ".account-card");
       const indicator = card.locator(".account-kind-icon, .pool-member-kind-icon");
       await expect(card.locator(".account-linked-quota-state")).toHaveCount(0);
-      await expect(indicator).toHaveAttribute("data-status", condition === "small_positive" ? "ready" : "warning");
-      if (condition === "small_positive") {
-        await expect(indicator).not.toHaveAttribute("aria-label", /quota exhausted|Stale/);
-      } else {
-        await expect(indicator).toHaveAttribute("aria-label", /Source: Codex.*Stale/);
-        await expect(indicator).not.toHaveAttribute("aria-label", /quota exhausted/);
-      }
+      await expect(indicator).toHaveAttribute("data-status", "ready");
+      await expect(indicator).toHaveAttribute("aria-label", /In rotation/);
+      await expect(indicator).not.toHaveAttribute("aria-label", /quota exhausted|Stale|Source:/);
       await expect(card.locator(".quota-stack")).toHaveAttribute("data-stale", condition === "small_positive" ? "false" : "true");
+      if (condition !== "small_positive") await expect(card.locator(".quota-stack")).toHaveAttribute("data-relay-tooltip", /Source: Codex.*Stale/);
       await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
     }
   });

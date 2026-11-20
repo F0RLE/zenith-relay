@@ -95,13 +95,15 @@ export function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
   return windows.map((window) => byStart.get(window.startMs) ?? emptyUsageTotals());
 }
 
-export function lineSegments(points: Array<number | null>, max: number) {
+export function lineSegments(points: Array<number | null>, max: number, connectGaps = false) {
   const segments: string[] = [];
   let pathSegment = "";
   points.forEach((pointValue, index) => {
     if (pointValue == null) {
-      if (pathSegment) segments.push(pathSegment);
-      pathSegment = "";
+      if (!connectGaps && pathSegment) {
+        segments.push(pathSegment);
+        pathSegment = "";
+      }
       return;
     }
     const xPercent = (index + 0.5) / points.length * 100;

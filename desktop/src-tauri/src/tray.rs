@@ -241,6 +241,12 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
     let builder = WebviewWindowBuilder::from_config(app, window_config)?
         .data_directory(webview_data)
         .visible(false);
+    #[cfg(windows)]
+    let builder = builder.on_page_load(|_, payload| {
+        if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+            crate::local_pool::commands::oauth::close_embedded_sign_in();
+        }
+    });
     #[cfg(target_os = "macos")]
     let builder = builder
         .decorations(true)
@@ -257,6 +263,8 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// process, tray, and local pool keep running. The next open creates a new
 /// window; a failed destroy still hides the current one instead of exiting.
 pub fn close_main_window(app: &AppHandle) {
+    #[cfg(windows)]
+    crate::local_pool::commands::oauth::close_embedded_sign_in();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
         && window.destroy().is_err()
     {

@@ -1,12 +1,11 @@
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { AccountSummary, OAuthClientKind } from "../api/types";
-import { accountRouteConnections, preferredAccountRouteConnection } from "../accountRoutes";
+import { accountRouteConnections, accountRouteNames as names, preferredAccountRouteConnection } from "../accountRoutes";
 import { useAccountSignIn } from "../hooks/useAccountSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
 import { OptionMenu } from "./Ui";
 
-const names: Record<OAuthClientKind, string> = { codex: "Codex", siwc: "SIWC", excel_bps: "Excel / BPS" };
 const kinds = Object.keys(names) as OAuthClientKind[];
 
 export function AccountRouteSelector({ account }: { account: AccountSummary }) {

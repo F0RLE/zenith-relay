@@ -35,8 +35,9 @@ age = { version = "0.11.5", default-features = false }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 chrono = "0.4.45"
-chacha20poly1305 = "0.11.0"
 hex = "0.4.3"
+hyper = { version = "1.12.0", default-features = false, features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 keyring-core = "1.0.1"
 rand = "0.10.4"
 reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls", "stream"] }
@@ -49,16 +50,25 @@ sys-locale = "0.3.2"
 sysinfo = "0.40.3"
 tauri = { version = "2.12.5", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
 open = "5.4.5"
+percent-encoding = "2.3.2"
+rustls-platform-verifier = "0.7.1"
 tauri-plugin-dialog = "2.8.4"
 tauri-plugin-process = "2.4.0"
 tauri-plugin-updater = "2.14.1"
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 tower = { version = "0.5.3", features = ["util"] }
 toml_edit = "0.25.19"
 url = "2.5.8"
 uuid = { version = "1.29.2", features = ["v4"] }
 zenith-relay-core = { path = "../../crates/relay-core" }
+zenith-relay-vault-envelope = { path = "../../crates/relay-vault-envelope" }
+zenith-relay-hosted-device = { path = "../../crates/relay-hosted-device" }
+zeroize = "1.9.1"
+
+[dev-dependencies]
+chacha20poly1305 = "0.11.0"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2.5.5"
@@ -76,6 +86,7 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 windows-native-keyring-store = "1.1.0"
+wry = { version = "0.57.2", default-features = false }
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2.1.0"

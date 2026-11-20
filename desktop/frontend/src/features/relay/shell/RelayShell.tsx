@@ -10,7 +10,6 @@ import { useRelayState, type Feedback } from "../state/RelayStateProvider";
 import { Button, EmptyState, ErrorDetailsDialog, IconButton } from "../components/Ui";
 import { useAppUpdates, type UpdateCheckState } from "../hooks/useAppUpdates";
 import { UpdateDialog } from "./UpdateDialog";
-import { HostedDevelopmentPage } from "../pages/hosted/HostedDevelopmentPage";
 
 function lazyNamed<P extends object>(load: () => Promise<ComponentType<P>>) {
   let pending: Promise<{ default: ComponentType<P> }> | undefined;
@@ -32,6 +31,7 @@ function lazyNamed<P extends object>(load: () => Promise<ComponentType<P>>) {
 }
 
 const connectionsPage = lazyNamed(async () => (await import("../pages/connections/ConnectionsPage")).ConnectionsPage);
+const hostedPage = lazyNamed(async () => (await import("../pages/hosted/HostedServerPage")).HostedServerPage);
 const importDialog = lazyNamed(async () => (await import("../pages/connections/ImportDialog")).ImportDialog);
 const poolPage = lazyNamed(async () => (await import("../pages/pool/PoolPage")).PoolPage);
 const integrationsPage = lazyNamed(async () => (await import("../pages/integrations/IntegrationsPage")).IntegrationsPage);
@@ -211,6 +211,8 @@ export function RelayShell() {
                 <button
                   className="relay-popover-item"
                   role="menuitemradio"
+                  onFocus={modeOption === "hosted" ? hostedPage.preload : undefined}
+                  onPointerEnter={modeOption === "hosted" ? hostedPage.preload : undefined}
                   aria-checked={mode === modeOption}
                   key={modeOption}
                   type="button"
@@ -406,7 +408,7 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {
   const { mode } = useRelayState();
-  if (mode === "hosted" && page !== "help") return <HostedDevelopmentPage />;
+  if (mode === "hosted" && page !== "help") return <hostedPage.Component />;
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;

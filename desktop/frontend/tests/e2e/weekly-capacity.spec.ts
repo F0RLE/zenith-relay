@@ -1,6 +1,6 @@
 import { expect, test } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
-import { chartWindows } from "../../src/features/relay/pages/overview/overviewAnalyticsModel";
+import { chartWindows, HOUR_MS } from "../../src/features/relay/pages/overview/overviewAnalyticsModel";
 import type { WeeklyCapacityReport } from "../../src/features/relay/api/types/weeklyCapacity";
 
 function fixture(now: number): WeeklyCapacityReport {
@@ -22,12 +22,13 @@ function fixture(now: number): WeeklyCapacityReport {
     ...point, medianMicroUsd: point.medianMicroUsd + 50_000_000,
     lowMicroUsd: point.lowMicroUsd + 50_000_000, highMicroUsd: point.highMicroUsd + 50_000_000,
   }));
+  const modelSeries = { plan: group.plan, points, current: latest, stale: false };
   return { generatedAtMs: now,
     summaries: [
-      { plan: "plus", pricingRevision: group.pricingRevision, points: summaryPoints, current: summaryPoints.at(-1)!, stale: false },
-      { plan: "pro", pricingRevision: group.pricingRevision, points, current: group.current, stale: false },
+      { plan: "plus", points: summaryPoints, current: summaryPoints.at(-1)!, stale: false },
+      { ...modelSeries, plan: "pro" },
     ],
-    models: [{ ...group, model: "model" }, { ...group, model: "other-model" }, { ...group, model: "model", plan: "pro" }],
+    models: [{ ...modelSeries, model: "model" }, { ...modelSeries, model: "other-model" }, { ...modelSeries, model: "model", plan: "pro" }],
     groups: [group, { ...group, id: "plus-other", workload: "other-model · standard · short · high" }, { ...group, id: "pro-model", plan: "pro" }],
     events: [{ atMs: windows.at(-4)!.startMs, plan: "plus", kind: "reset", count: 1 }] };
 }
@@ -62,7 +63,7 @@ for (const locale of ["ru", "en"] as const) {
     const sampledTooltip = sampledDot.getByRole("tooltip");
     await expect(sampledTooltip).toBeVisible();
     const observedAt = new Date(report.summaries[0]!.points[0]!.observedAtMs).toLocaleString(locale, {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+      year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
     });
     await expect(sampledDot).toHaveAccessibleName(new RegExp(`^${observedAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`));
     await expect(sampledTooltip).toContainText(observedAt);
@@ -116,7 +117,7 @@ for (const locale of ["ru", "en"] as const) {
   });
 }
 
-test("model menu collapses workload variants and pricing revisions into plain names", async ({ page }, testInfo) => {
+test("model menu uses the plan's model series, not its detailed pricing groups", async ({ page }, testInfo) => {
   const now = Date.now();
   await page.clock.install({ time: now });
   const report = fixture(now);
@@ -124,11 +125,11 @@ test("model menu collapses workload variants and pricing revisions into plain na
   const base = report.groups[0]!;
   report.groups = Array.from({ length: 20 }, (_, index) => ({
     ...base, id: `variant-${index}`, cacheBand: index % 4 * 25,
+    pricingRevision: `price-${index}`,
     workload: `example-model · standard · ${index % 2 ? "long" : "short"} · high${index % 3 ? "" : " + other-model · priority · long · high"}`,
   }));
   report.models = [
     { ...report.models[0]!, model: "example-model" },
-    { ...report.models[0]!, model: "example-model", pricingRevision: "older", current: { ...base.current!, medianMicroUsd: 900_000_000 } },
     { ...report.models[1]!, model: "other-model" },
   ];
   await installTauriMock(page, { locale: "ru", theme: "dark", weeklyCapacity: report });
@@ -155,6 +156,73 @@ test("model menu collapses workload variants and pricing revisions into plain na
   await expect(chart.locator(".overview-chart-summary")).toContainText("170");
 });
 
+test("Month connects daily weekly quota estimates into one line and keeps the current estimate separate", async ({ page }, testInfo) => {
+  const now = new Date(2026, 10, 18, 12).getTime();
+  await page.clock.setFixedTime(now);
+  const today = fixture(now);
+  const days = chartWindows("month", "en", new Date(now));
+  const point = (atMs: number, microUsd: number) => ({
+    atMs, observedAtMs: atMs + 60_000, sampleStartMs: atMs, validUntilMs: atMs + 86_400_000,
+    medianMicroUsd: microUsd, lowMicroUsd: microUsd, highMicroUsd: microUsd,
+    accountCount: 1, consumedBasisPoints: 500,
+  });
+  const observations = [[0, 150_743_219], [1, 54_912_347], [18, 76_123_456], [29, 27_456_789]] as const;
+  const points = observations.map(([day, value]) => point(days[day]!.startMs, value));
+  points[1]!.observedAtMs = days[1]!.startMs + 17 * HOUR_MS;
+  const current = { ...point(points.at(-1)!.atMs, 205_123_456), atMs: now };
+  const summary = { plan: "plus", points, current, stale: false };
+  const month: WeeklyCapacityReport = { generatedAtMs: now, summaries: [summary], groups: [], events: [],
+    models: [{ ...summary, model: "model", points: points.slice(0, 2), current: null }] };
+  await installTauriMock(page, { locale: "en", theme: "dark", populated: true, weeklyCapacity: today, dailyWeeklyCapacity: month,
+    usageSummaryTotals: { apiEquivalent: { microUsd: 0, pricedTokens: 1, unpricedTokens: 0 } } });
+  await page.goto("/");
+  const chart = page.locator(".weekly-capacity");
+  await expect(chart.locator(".overview-chart-summary")).toHaveText("≈$170.00");
+  await page.getByRole("tab", { name: "Month" }).click();
+  await expect(chart.locator(".overview-chart-summary")).toHaveText("≈$205.123456");
+  const buckets = chart.locator(".overview-chart-points > li");
+  const line = chart.locator("path.overview-chart-line");
+  await expect(buckets).toHaveCount(30);
+  await expect(chart.locator(".overview-chart-dot")).toHaveCount(4);
+  for (const [day] of observations) {
+    await expect(buckets.nth(day).locator(".overview-chart-dot")).toHaveCount(1);
+  }
+  await expect(buckets.nth(8).locator(".overview-chart-dot")).toHaveCount(0);
+  await expect(line).toHaveCount(1);
+  await expect(line).toHaveAttribute("d", /^M[\d.]+ [\d.]+(?: L[\d.]+ [\d.]+){3}$/);
+  await expect(chart.locator("details, table, svg text")).toHaveCount(0);
+  await expect(page.locator(".overview-chart.requests .overview-chart-bar")).toHaveCount(1);
+  await expect(page.locator(".overview-token-trend-dot.is-input")).toHaveCount(1);
+  await expect(page.locator(".overview-chart.cost .overview-chart-empty")).toHaveCount(0);
+  await expect(page.locator(".overview-chart.cost .overview-chart-bar")).toHaveAttribute("aria-label", /\$0\.00$/);
+  const dot = buckets.nth(1).locator(".overview-chart-dot");
+  const observedAt = new Date(points[1]!.observedAtMs).toLocaleString("en", {
+    year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+  await expect(chart.getByRole("tooltip")).toHaveCount(0);
+  await page.setViewportSize({ width: 860, height: 760 });
+  await chart.screenshot({ path: testInfo.outputPath("monthly-quota-line.png") });
+  await chart.locator(".overview-chart-summary").focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(dot).toBeFocused();
+  const tooltip = dot.getByRole("tooltip");
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText(observedAt);
+  await expect(tooltip.locator("strong")).toHaveText("≈$54.912347");
+  await page.getByRole("tab", { name: "Month" }).focus();
+  await expect(chart.getByRole("tooltip")).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await chart.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await chart.screenshot({ path: testInfo.outputPath("monthly-quota-line-narrow.png") });
+  await chart.locator(".relay-option-trigger").click();
+  await page.getByRole("option", { name: "model", exact: true }).click();
+  await expect(chart.locator(".overview-chart-dot")).toHaveCount(2);
+  await expect(chart.locator(".overview-chart-summary")).toHaveText("—");
+  await expect(line).toHaveCount(1);
+  await expect(chart).not.toContainText("No measurements");
+});
+
 test("empty and failed measurements never become a zero-dollar estimate", async ({ page }) => {
   await installTauriMock(page, { locale: "en", weeklyCapacityError: true });
   await page.goto("/");
@@ -174,7 +242,7 @@ test("calibration events alone do not render measurements or a zero-dollar estim
   const chart = page.locator(".weekly-capacity");
   await expect(chart).toContainText("No measurements");
   await expect(chart.locator(".overview-chart-summary")).toHaveText("—");
-  await expect(chart.locator(".overview-chart-dot, .overview-capacity-band, .overview-capacity-event")).toHaveCount(0);
+  await expect(chart.locator(".overview-chart-dot, .overview-chart-line, .overview-capacity-band, .overview-capacity-event")).toHaveCount(0);
 });
 
 test("historical measurements remain visible without a current estimate", async ({ page }) => {

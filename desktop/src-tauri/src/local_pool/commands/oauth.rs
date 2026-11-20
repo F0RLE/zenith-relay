@@ -40,17 +40,52 @@ pub enum AutomaticLoginRequest {
     },
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SignInPresentationRequest {
+    embedded: bool,
+    open_window: bool,
+}
+
+impl SignInPresentationRequest {
+    fn should_open_page(&self, automatic_ready: bool) -> bool {
+        self.open_window || automatic_ready
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SignInPageState {
+    Closed,
+    Opened,
+    Failed,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthStartResponse {
+    #[serde(flatten)]
+    flow: OAuthFlowStart,
+    embedded: bool,
+    page_state: SignInPageState,
+}
+
 #[tauri::command]
 pub async fn start_codex_oauth(
     app: AppHandle,
-    open_browser: Option<bool>,
+    presentation: Option<SignInPresentationRequest>,
     account_id: Option<String>,
     proxy_id: Option<String>,
     client_kind: Option<OAuthClientKind>,
     automatic_login: Option<AutomaticLoginRequest>,
     state: State<'_, DesktopState>,
-) -> CommandResult<OAuthFlowStart> {
+) -> CommandResult<OAuthStartResponse> {
     let _mutation = state.setup_guard().await;
+    let requested = presentation.unwrap_or(SignInPresentationRequest {
+        embedded: false,
+        open_window: true,
+    });
+    let presentation = window::Presentation::requested(requested.embedded);
     crate::diagnostics::breadcrumb(
         "oauth",
         "start",
@@ -141,36 +176,55 @@ pub async fn start_codex_oauth(
         start.automatic_login = Some(automatic_login.is_some());
     }
     let authorization_url = validated_authorization_url(&start)?;
-    let proxy_url = match sign_in_flow_proxy_url(&state, &start) {
-        Ok(url) => url,
-        Err(error) => {
-            if start.status == OAuthFlowStatus::Pending {
+    let page_state = if start.status == OAuthFlowStatus::Pending
+        && requested.should_open_page(automatic_login.is_some())
+    {
+        let proxy_url = match sign_in_flow_proxy_url(&state, &start) {
+            Ok(url) => url,
+            Err(error) => {
                 let _ = flow.cancel(&start.login_id).await;
+                return Err(error.into());
             }
-            return Err(error.into());
-        }
-    };
-    if (open_browser.unwrap_or(true) || automatic_login.is_some())
-        && start.status == OAuthFlowStatus::Pending
-        && let Err(error) = window::open_sign_in_window(
+        };
+        match window::open_sign_in_window(
             &app,
             &authorization_url,
             &start,
             proxy_url.as_deref(),
             automatic_login,
+            presentation,
         )
         .await
-    {
-        let _ = flow.cancel(&start.login_id).await;
-        return Err(error.into());
-    }
-    Ok(start)
+        {
+            Ok(()) => SignInPageState::Opened,
+            Err(error) => {
+                let callback_received = flow
+                    .status(&start.login_id)
+                    .is_ok_and(|current| current.status == OAuthFlowStatus::CallbackReceived);
+                if !presentation.is_embedded() && !callback_received {
+                    let _ = flow.cancel(&start.login_id).await;
+                    return Err(error.into());
+                }
+                // Keep the issued attempt available for retry or copying its link.
+                start.automatic_login = Some(false);
+                SignInPageState::Failed
+            }
+        }
+    } else {
+        SignInPageState::Closed
+    };
+    Ok(OAuthStartResponse {
+        flow: start,
+        embedded: presentation.is_embedded(),
+        page_state,
+    })
 }
 
 #[tauri::command]
 pub async fn resume_codex_oauth(
     app: AppHandle,
     login_id: String,
+    embedded: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
@@ -186,12 +240,22 @@ pub async fn resume_codex_oauth(
         .map_err(flow_error)?;
     let authorization_url = validated_authorization_url(&start)?;
     if start.status == OAuthFlowStatus::Pending {
-        if window::continue_automatic_login_manually(&app, &login_id) {
+        let presentation = window::Presentation::requested(embedded.unwrap_or(false));
+        if window::continue_automatic_login_manually(&app, &login_id)
+            || (presentation.is_embedded() && window::focus_embedded_sign_in(&login_id))
+        {
             return Ok(start);
         }
         let proxy_url = sign_in_flow_proxy_url(&state, &start)?;
-        window::open_sign_in_window(&app, &authorization_url, &start, proxy_url.as_deref(), None)
-            .await?;
+        window::open_sign_in_window(
+            &app,
+            &authorization_url,
+            &start,
+            proxy_url.as_deref(),
+            None,
+            presentation,
+        )
+        .await?;
     }
     Ok(start)
 }
@@ -336,18 +400,45 @@ fn parsed_proxy(proxy_url: Option<&str>) -> Result<Option<ProxyConfig>, LocalPoo
         .transpose()
 }
 
-pub(crate) fn close_sign_in_window(app: &AppHandle) {
-    window::close_sign_in_window(app);
+pub(crate) fn close_sign_in_window(login_id: &str) {
+    window::close_sign_in_window(login_id);
+}
+
+#[cfg(windows)]
+pub(crate) fn close_embedded_sign_in() {
+    window::close_embedded_sign_in();
+}
+
+#[cfg(windows)]
+pub use window::SignInBounds;
+
+#[cfg(windows)]
+#[tauri::command]
+pub async fn update_codex_oauth_view(
+    window: tauri::WebviewWindow,
+    login_id: String,
+    revision: u64,
+    bounds: Option<SignInBounds>,
+) -> CommandResult<bool> {
+    if !crate::tray::is_main_window_label(window.label()) {
+        return Err(LocalPoolError::new(
+            crate::local_pool::error::ErrorCode::InvalidState,
+            "The embedded sign-in page belongs to the main window.",
+        )
+        .into());
+    }
+    window::place_embedded_sign_in(&login_id, revision, bounds)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn cancel_codex_oauth(
-    app: AppHandle,
     login_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
-    window::cancel_automatic_login(&app, &login_id);
+    window::close_sign_in_window(&login_id);
     crate::diagnostics::breadcrumb(
         "oauth",
         "cancel",

@@ -592,9 +592,8 @@ for (const viewport of viewports) {
     dialog = page.getByRole("dialog", { name: "Request details" });
     await dialog.locator(".request-technical-details > summary").click();
     await expect(dialog).toContainText("req_synthetic_local");
-    await expect(dialog).toContainText("Selection reasonFresh quota headroom band");
-    await expect(dialog).toContainText("Eligible participants4");
-    await expect(dialog).toContainText("Quota at selection63.00%");
+    await expect(dialog.getByRole("button", { name: "Copy request ID", exact: true })).toBeVisible();
+    await expect(dialog).not.toContainText("Eligible participants");
     expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();

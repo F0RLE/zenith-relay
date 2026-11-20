@@ -5,7 +5,7 @@ import { rotationModeName } from "./rotationModes";
 import { poolMemberDisplayStatus } from "./poolMembersModel";
 import { accountQuotaRefreshState, accountSurfaceTone, currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
-import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource, linkedAccountQuotaIndicator } from "../../accountRoutes";
+import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource } from "../../accountRoutes";
 import { ResetCreditsControl } from "../../components/ResetCreditsControl";
 import { AccountBadges, IconButton, StatusIcon, accountErrorLabel } from "../../components/Ui";
 import { AccountValueStrip } from "../../components/AccountValueStrip";
@@ -93,14 +93,9 @@ export function PoolMemberCard({
   const surfaceTone = member.kind === "account"
     ? accountSurfaceTone(member)
     : visibleMemberErrorCode ? "error" : statusTone;
-  const baseIndicatorTone = statusKey === "disabled" || statusKey === "draining" || statusKey === "cooldown" || statusKey === "busy" || statusKey === "unavailable"
+  const indicatorTone = statusKey === "disabled" || statusKey === "draining" || statusKey === "cooldown" || statusKey === "busy" || statusKey === "unavailable"
     ? statusTone
     : surfaceTone === "ready" ? runtimeTone ?? statusTone : surfaceTone;
-  const quotaIndicator = member.kind === "account"
-    ? linkedAccountQuotaIndicator(member, metadata!.quota, nowMs, baseIndicatorTone)
-    : { tone: baseIndicatorTone, warning: false };
-  const indicatorTone = quotaIndicator.tone;
-  const linkedQuotaHint = quotaIndicator.warning ? accountMetadataHint(metadata!.quota, "quota", nowMs, t, i18n.language) : null;
   const runtimeHint = runtimeState?.halfOpen
     ? t("pool.recoveryProbe")
     : modelRetryHint
@@ -119,9 +114,7 @@ export function PoolMemberCard({
   const indicatorLabel = errorLabel
     ? statusKey === "rotation" || statusKey === "unavailable" ? errorLabel : `${statusLabel} · ${errorLabel}`
     : quotaStatus === "updated" || quotaStatus === "not_available" ? statusLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${statusLabel}`;
-  const indicatorHint = member.kind === "source"
-    ? [indicatorLabel, runtimeHint].filter(Boolean).join(" · ")
-    : [runtimeHint, indicatorLabel, linkedQuotaHint].filter(Boolean).join(" · ");
+  const indicatorHint = [indicatorLabel, runtimeHint].filter(Boolean).join(" · ");
 
   return (
     <article

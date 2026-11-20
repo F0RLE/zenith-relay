@@ -265,7 +265,7 @@ for (const donor of ["codex", "excel_bps"] as const) {
     await page.keyboard.press("Shift+Tab");
     await expect(card.locator(".account-plan-badge")).toBeFocused();
     await expect(page.getByRole("tooltip")).toContainText(source);
-    await expect(page.getByRole("tooltip")).toContainText("limits may differ");
+    await expect(page.getByRole("tooltip")).not.toContainText("limits may differ");
     await card.locator(".account-plan-badge").blur();
     expect((await calls(page)).filter((call) => call.command === "refresh_local_account_quota")).toHaveLength(0);
     await card.getByRole("button", { name: "Refresh", exact: true }).click();
@@ -321,9 +321,10 @@ for (const donor of ["codex", "excel_bps"] as const) {
       await expect(control.locator(".reset-credits-count")).toHaveText("2");
       await expect(control).toHaveAttribute("data-relay-tooltip", `Reset weekly quota via ${client}`);
       await control.click();
-      const confirmation = page.getByRole("dialog", { name: `Reset weekly quota via ${client}` });
-      await expect(confirmation).toContainText("SIWC app limits are managed separately");
-      await confirmation.getByRole("button", { name: "Yes, reset", exact: true }).click();
+      const confirmation = page.getByRole("dialog", { name: "Do you want to reset the weekly quota?" });
+      await expect(confirmation.locator(".confirm-dialog-message")).toHaveCount(0);
+      await expect(confirmation.getByRole("button", { name: /^Yes \(3\)$/ })).toBeDisabled();
+      await confirmation.getByRole("button", { name: "Yes", exact: true }).click();
       await expect(control.locator(".reset-credits-count")).toHaveText("1");
       await expect(card.locator(".account-route-selector > button")).toHaveAttribute("data-value", "siwc");
       const recorded = await calls(page);
@@ -459,10 +460,12 @@ for (const scenario of ["stale", "unknown-time", "different-plan", "own-limit", 
         await expect(item.locator('.quota-stack[data-stale="true"]')).toHaveCount(0);
         await expect(item.locator(".account-quota-refresh-state")).toHaveCount(0);
         await expect(item.locator('[data-status="error"]')).toHaveCount(0);
-        await expect(item.locator('[data-status="warning"]')).toHaveCount(1);
+        await expect(item.locator('[data-status="warning"]')).toHaveCount(scenario === "quota-poll-error" ? 0 : 1);
         if (scenario === "quota-poll-error") {
           const indicator = item.locator(".account-kind-icon, .pool-member-kind-icon");
-          await expect(indicator).toHaveAttribute("aria-label", /Codex quota exhausted/);
+          await expect(indicator).toHaveAttribute("data-status", "ready");
+          await expect(indicator).toHaveAttribute("aria-label", /In rotation/);
+          await expect(item.locator(".quota-stack")).toHaveAttribute("data-relay-tooltip", /Codex quota exhausted/);
           await expect(indicator).not.toHaveAttribute("aria-label", /quota_prepare|Update failed/);
           await page.mouse.move(0, 0);
           await item.screenshot({ path: `output/playwright/siwc-quota-owner-${surface.toLowerCase()}.png`, animations: "disabled" });
@@ -559,7 +562,7 @@ for (const [kind, label] of [["codex", "Codex"], ["excel_bps", "Excel / BPS"]] a
     await expect(page.getByText("Trying your saved email", { exact: false })).toHaveCount(0);
     const started = (await calls(page)).filter((call) => call.command === "start_codex_oauth");
     expect(started).toHaveLength(1);
-    expect(started[0]!.args).toMatchObject({ openBrowser: true, clientKind: kind, automaticLogin: { notesAccountId: "account_synthetic_1" } });
+    expect(started[0]!.args).toMatchObject({ presentation: { openWindow: true, embedded: true }, clientKind: kind, automaticLogin: { notesAccountId: "account_synthetic_1" } });
     expect(started[0]!.args.accountId).toBeUndefined();
     expect((await calls(page)).some((call) => call.command === "reveal_local_account_login")).toBe(false);
     await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
@@ -583,7 +586,7 @@ test(`native missing-notes fallback opens manual route sign-in without the autom
   await page.getByRole("option", { name: "Excel / BPS · Connect", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "Sign in", exact: true })).toBeVisible();
   await expect(page.getByText("Trying your saved email", { exact: false })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Open sign-in window", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: platform === "windows" ? "Go to sign-in page" : "Open sign-in window", exact: true })).toBeEnabled();
 });
 }
 
@@ -596,7 +599,7 @@ for (const platform of ["windows", "macos", "linux"] as const) {
     await expect(page.getByRole("dialog", { name: "Sign in", exact: true })).toBeVisible();
     const started = (await calls(page)).filter((call) => call.command === "start_codex_oauth");
     expect(started).toHaveLength(1);
-    expect(started[0]!.args).toMatchObject({ openBrowser: false });
+    expect(started[0]!.args).toMatchObject({ presentation: { openWindow: false, embedded: true } });
     expect(started[0]!.args).not.toHaveProperty("automaticLogin");
   });
 }

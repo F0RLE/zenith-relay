@@ -2,7 +2,7 @@ import { expect, test } from "../../bun-playwright";
 import { installTauriMock } from "../tauri-mock";
 import { connectPoolToChatGPT } from "./helpers";
 
-test("OAuth sign-in exposes SIWC window and proxy actions without extra descriptions", async ({ page }, testInfo) => {
+test("OAuth sign-in exposes the SIWC pane and proxy actions without extra descriptions", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -12,22 +12,21 @@ test("OAuth sign-in exposes SIWC window and proxy actions without extra descript
   await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
   await dialog.getByText("ChatGPT (SIWC)", { exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
-  const open = dialog.getByRole("button", { name: "Open sign-in window", exact: true });
+  const open = dialog.getByRole("button", { name: "Open sign-in page", exact: true });
   await expect(dialog.getByRole("radio", { name: "ChatGPT (SIWC)", exact: true })).toBeChecked();
   await expect(dialog.getByRole("radio")).toHaveCount(3);
   await expect(dialog.getByRole("radio", { name: "Codex", exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Sign in through a proxy", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Sign in with a proxy", exact: true })).toBeVisible();
   await expect(dialog.locator("p")).toHaveCount(0);
   await expect(open).toBeEnabled();
   let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "start_codex_oauth")?.args).toEqual({ openBrowser: false, clientKind: "siwc" });
-  expect(calls.some((call) => call.command === "resume_codex_oauth")).toBe(false);
+  expect(calls.findLast((call) => call.command === "start_codex_oauth")?.args).toEqual({ presentation: { openWindow: false, embedded: true }, clientKind: "siwc" });
+  expect(calls.some((call) => ["resume_codex_oauth", "update_codex_oauth_view"].includes(call.command))).toBe(false);
   await open.click();
-  await expect(dialog.getByRole("button", { name: /Open again in \d+ s|Reopen sign-in window/ })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Go to sign-in page", exact: true })).toBeEnabled();
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.some((call) => call.command === "resume_codex_oauth")).toBe(true);
+  expect(calls.findLast((call) => call.command === "resume_codex_oauth")?.args).toEqual({ loginId: "oauth_synthetic", embedded: true });
   await expect(dialog.locator("input:not([type=radio]), textarea, details")).toHaveCount(0);
-  await dialog.screenshot({ path: testInfo.outputPath("siwc-sign-in.png") });
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   const canceled = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "cancel_codex_oauth"));
@@ -35,10 +34,10 @@ test("OAuth sign-in exposes SIWC window and proxy actions without extra descript
 });
 
 for (const locale of ["en", "ru"] as const) {
-  test(`SIWC proxy sign-in keeps its client and opens the native window (${locale})`, async ({ page }, testInfo) => {
+  test(`choosing among several proxies preserves SIWC and its embedded page (${locale})`, async ({ page }, testInfo) => {
     const labels = locale === "ru"
-      ? { connections: "Подключения", signIn: "Войти", proxy: "Войти через прокси", open: "Открыть окно входа" }
-      : { connections: "Connections", signIn: "Sign in", proxy: "Sign in through a proxy", open: "Open sign-in window" };
+      ? { connections: "Подключения", signIn: "Войти", proxy: "Войти с прокси", open: "Перейти к форме" }
+      : { connections: "Connections", signIn: "Sign in", proxy: "Sign in with a proxy", open: "Go to sign-in page" };
     if (locale === "ru") await page.setViewportSize({ width: 390, height: 760 });
     await installTauriMock(page, { mode: "local", locale, populated: true });
     await page.goto("/");
@@ -52,7 +51,7 @@ for (const locale of ["en", "ru"] as const) {
     await proxies.getByRole("button", { name: labels.signIn, exact: true }).click();
     await expect(proxies).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth")?.args))
-      .toEqual({ openBrowser: true, proxyId: "proxy_synthetic_2", clientKind: "siwc" });
+      .toEqual({ presentation: { openWindow: true, embedded: true }, proxyId: "proxy_synthetic_2", clientKind: "siwc" });
     await expect(dialog.getByRole("radio", { name: "ChatGPT (SIWC)", exact: true })).toBeChecked();
     await expect(dialog.locator(".account-connection-purpose")).toHaveCount(0);
     await expect(dialog.getByRole("button", { name: labels.open, exact: true })).toBeEnabled();
@@ -133,7 +132,7 @@ test("stale identity reveal cannot replace a newer request after switching throu
 
   await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
   await page.getByRole("menuitemradio", { name: "Relay Hosted", exact: true }).click();
-  await expect(page.getByText("In development", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   await page.locator(".mode-picker-trigger").click();
   await page.getByRole("menuitemradio", { name: "Computer", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
@@ -197,6 +196,7 @@ test("Russian usage labels format the saved request tier", async ({ page }) => {
 
   await expect(page.locator('.usage-request-table thead th[data-column="equivalent"]')).toHaveText("API-экв.");
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
+  await page.getByRole("dialog").locator(".request-technical-details > summary").click();
   await expect(page.locator(".request-details-parameters > div").filter({ hasText: "Режим обслуживания" })).toHaveText("Режим обслуживанияОбычная");
 });
 

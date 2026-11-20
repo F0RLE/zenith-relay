@@ -160,6 +160,13 @@ describe("overview analytics model", () => {
     ]);
   });
 
+  test("connects sparse observations without moving or filling their buckets", () => {
+    expect(lineSegments([null, 1, 2, null, 0, null, 3, null], 3, true)).toEqual([
+      "M18.75 66.67 L31.25 33.33 L56.25 100.00 L81.25 0.00",
+    ]);
+    expect(lineSegments([null, null], 1, true)).toEqual([]);
+  });
+
   test("uses a readable source host without rejecting manual addresses", () => {
     expect(sourceHost("https://api.example.test/v1")).toBe("api.example.test");
     expect(sourceHost("manual source")).toBe("manual source");

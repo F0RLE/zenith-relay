@@ -30,6 +30,22 @@ pub(crate) fn read_samples(connection: &Connection, anchor: Option<&UsageLog>) -
     let Some(anchor) = anchor else {
         return Ok(unavailable("final_request_missing"));
     };
+    if anchor
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.endpoint_kind.as_deref())
+        == Some("images")
+    {
+        return Ok(unavailable("reasoning_effort_not_applicable"));
+    }
+    if anchor
+        .effective_reasoning_effort
+        .as_deref()
+        .and_then(zenith_relay_core::normalize_reasoning_effort)
+        .is_none()
+    {
+        return Ok(unavailable("unknown_effective_reasoning"));
+    }
     if anchor.candidate_id.as_deref().is_none_or(str::is_empty)
         || anchor.resolved_model.as_deref().is_none_or(str::is_empty)
     {
@@ -42,10 +58,12 @@ pub(crate) fn read_samples(connection: &Connection, anchor: Option<&UsageLog>) -
     else {
         return Ok(unavailable("transport_observation_missing"));
     };
-    let mode = match transport.mode {
-        zenith_relay_core::usage::TransportMode::Native => "native",
-        zenith_relay_core::usage::TransportMode::ProtocolConversion => "protocol_conversion",
-        zenith_relay_core::usage::TransportMode::BasisPoints => "basis_points",
+    let (mode, legacy_mode) = match transport.mode {
+        zenith_relay_core::usage::TransportMode::Native => ("native", "native"),
+        zenith_relay_core::usage::TransportMode::ProtocolConversion => {
+            ("protocol_conversion", "protocol_conversion")
+        }
+        zenith_relay_core::usage::TransportMode::BasisPoints => ("bps", "basis_points"),
     };
     // Bound the indexed ID window BEFORE filtering by route. A scarce route must
     // not scan the entire log. CROSS JOIN keeps the bounded IDs before row lookups.
@@ -68,11 +86,11 @@ pub(crate) fn read_samples(connection: &Connection, anchor: Option<&UsageLog>) -
                THEN COALESCE(r.routing_json, d.data_json) ELSE '{{}}' END, '$.transport.upstream') = ?2
            AND json_extract(CASE WHEN length(COALESCE(r.routing_json, d.data_json)) <= 65536
                AND json_valid(COALESCE(r.routing_json, d.data_json))
-               THEN COALESCE(r.routing_json, d.data_json) ELSE '{{}}' END, '$.transport.mode') = ?3"
+               THEN COALESCE(r.routing_json, d.data_json) ELSE '{{}}' END, '$.transport.mode') IN (?3, ?4)"
     )).map_err(db_error)?;
     let rows = statement
         .query_map(
-            params![anchor.id, transport.upstream.as_str(), mode],
+            params![anchor.id, transport.upstream.as_str(), mode, legacy_mode],
             |row| {
                 let number = |index| -> rusqlite::Result<Option<u64>> {
                     Ok(row
@@ -156,12 +174,17 @@ pub(crate) fn document(samples: Samples) -> Value {
         .values()
         .filter(|group| group.ttft.len() >= MIN_GROUP_SAMPLES)
         .count();
-    let status = if samples.unavailable.is_some() {
-        "unavailable"
+    let (status, unavailable_reason) = if let Some(reason) = samples.unavailable {
+        ("unavailable", Some(reason))
     } else if enough_groups >= 2 {
-        "multiple_levels_observed"
+        ("multiple_levels_observed", None)
+    } else if groups.len() == 1 && enough_groups == 1 {
+        ("single_level_only", Some("single_effort_level_observed"))
     } else {
-        "insufficient_samples"
+        (
+            "insufficient_samples",
+            Some("insufficient_qualifying_samples"),
+        )
     };
     let groups: Vec<_> = groups.into_iter().map(|(effort, mut group)| {
         let count = group.ttft.len();
@@ -175,13 +198,13 @@ pub(crate) fn document(samples: Samples) -> Value {
         })
     }).collect();
     json!({
-        "status": status, "unavailableReason": samples.unavailable,
+        "status": status, "unavailableReason": unavailable_reason,
         "kind": "observational_not_controlled", "maxRecentRequests": RECENT_REQUEST_LIMIT,
         "lookbackDays": 7, "window": "at_or_before_selected_request",
         "minimumSamplesPerLevel": MIN_GROUP_SAMPLES, "minimumSamplesForP95": 20,
         "matchedRouteRequests": matched, "groups": groups,
         "excluded": { "unsuccessful": failed, "multipleSends": multi_send,
             "unknownEffectiveReasoning": unknown_effort, "missingTtft": missing_ttft },
-        "limitations": "Same recorded key, source, candidate, account, requested/resolved model, client protocol/transport, requested/observed tier and upstream transport/mode. Successful single-send requests only; retries and multi-round discovery are excluded. Different prompts, context sizes, cache state, output types and provider load remain confounders. Percentiles use nearest rank. Missing levels are not evidence of unsupported capabilities. This is not a causal speed comparison or a recommendation to lower reasoning."
+        "limitations": "Matched key, source, candidate, account, requested/resolved model, client protocol/transport, requested/observed tier and upstream transport/mode. Successful single-send requests only; retries and multi-round discovery are excluded. Prompts, context size, cache state, output type and provider load remain uncontrolled. Percentiles use nearest rank; missing levels have no qualifying samples."
     })
 }

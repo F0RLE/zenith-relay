@@ -5,7 +5,7 @@ import { completedUsage, setUsageEventOverrides } from "./request-details-fixtur
 for (const locale of ["ru", "en"] as const) {
   for (const theme of ["light", "dark"] as const) {
     for (const width of [360, 840, 1160]) {
-      test(`background request parameters share the grid: ${locale}, ${theme}, ${width}`, async ({ page }) => {
+      test(`background request parameters stay under the disclosure: ${locale}, ${theme}, ${width}`, async ({ page }) => {
         await page.setViewportSize({ width, height: 900 });
         await installTauriMock(page, {
           mode: "local", locale, theme, populated: true,
@@ -21,33 +21,17 @@ for (const locale of ["ru", "en"] as const) {
         await page.getByRole("button", {
           name: `${locale === "ru" ? "Сведения о запросе" : "Request details"}: req_synthetic_local`, exact: true,
         }).click();
-        const parameters = page.getByRole("dialog").locator(".request-details-parameters");
+        const dialog = page.getByRole("dialog");
+        const parameters = dialog.locator(".request-details-parameters");
+        await expect(parameters).toHaveCount(0);
+        await dialog.locator(".request-technical-details > summary").click();
         const cells = parameters.locator(":scope > div");
         await expect(cells).toHaveCount(5);
         await expect(cells.last().locator("dt")).toHaveText(locale === "ru" ? "Тип запроса" : "Request type");
         await expect(cells.last().locator("dd")).toHaveText(locale === "ru" ? "Сводки памяти" : "Memory summaries");
-        const layout = await cells.evaluateAll((elements) => elements.map((element) => {
-          const bounds = element.getBoundingClientRect();
-          const center = bounds.x + bounds.width / 2;
-          return {
-            top: bounds.y,
-            leftBorder: getComputedStyle(element).borderInlineStartWidth,
-            centered: getComputedStyle(element).textAlign === "center"
-              && Array.from(element.querySelectorAll(":scope > dt, :scope > dd")).every((child) => {
-                const childBounds = child.getBoundingClientRect();
-                return Math.abs(childBounds.x + childBounds.width / 2 - center) < 1;
-              }),
-          };
-        }));
-        expect(layout.every((cell) => cell.centered)).toBe(true);
-        if (width > 820) {
-          expect(Math.max(...layout.map((cell) => cell.top)) - Math.min(...layout.map((cell) => cell.top))).toBeLessThan(1);
-        } else {
-          const grid = await parameters.boundingBox();
-          const origin = await cells.last().boundingBox();
-          expect(origin!.width).toBeCloseTo(grid!.width - 2, 0);
-          expect(layout.at(-1)!.leftBorder).toBe("0px");
-        }
+        const layout = await cells.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().top));
+        if (width > 690) expect(layout[1]).toBe(layout[0]);
+        else expect(layout[1]).toBeGreaterThan(layout[0]!);
         expect(await parameters.locator("div, dt, dd").evaluateAll((elements) =>
           elements.every((element) => element.scrollWidth <= element.clientWidth + 1))).toBe(true);
         await parameters.screenshot({ path: `output/playwright/request-origin-${locale}-${theme}-${width}.png` });
@@ -72,13 +56,10 @@ for (const width of [360, 1160]) {
     });
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: "Request details: req_synthetic_local", exact: true }).click();
-    const parameters = page.getByRole("dialog").locator(".request-details-parameters");
-    await expect(parameters.locator(":scope > .request-parameter-wide")).toHaveCount(2);
-    const cells = parameters.locator(":scope > div:not(.request-parameter-wide)");
-    await expect(cells).toHaveCount(2);
-    const grid = await parameters.boundingBox();
-    const widths = await cells.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().width));
-    expect(widths[0]).toBeCloseTo((grid!.width - 2) / 2, 0);
-    expect(widths[1]).toBeCloseTo(widths[0], 0);
+    const dialog = page.getByRole("dialog");
+    await dialog.locator(".request-technical-details > summary").click();
+    await expect(dialog.locator(".request-details-parameters dt")).toHaveText(["Client transport", "Request type"]);
+    await expect(dialog.locator(".request-id-list")).toContainText("synthetic-requested-model");
+    await expect(dialog.locator(".request-id-list")).toContainText("synthetic-routed-model");
   });
 }

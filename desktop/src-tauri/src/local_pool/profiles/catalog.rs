@@ -103,7 +103,7 @@ async fn fetch_codex_model_catalog(
     if models.is_empty() && !allow_empty {
         return Err(LocalPoolError::new(
             ErrorCode::PoolModelsUnavailable,
-            "pool has no available ChatGPT-compatible models; refresh model access for enabled pool connections; quota availability alone does not grant model access",
+            "pool has no available ChatGPT-compatible models; refresh model access for enabled pool connections",
         )
         .with_diagnostic(ErrorDiagnostics {
             reason: Some("empty_model_catalog".into()),

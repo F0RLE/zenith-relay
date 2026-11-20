@@ -11,6 +11,7 @@ use std::{
 // Desktop's bootstrap ignores appliedId unless it is a lowercase UUID-shaped ID.
 const PROFILE_ID: &str = "d8e70c16-32ea-47c8-923a-6c1a7cf195d4";
 const MAX_CONFIG_BYTES: u64 = 2 * 1024 * 1024;
+const CONNECTION_FIELDS: [&str; 2] = ["egressProxyUrl", "egressProxyPacUrl"];
 
 mod payloads;
 mod snapshot;
@@ -223,6 +224,51 @@ fn owns_profile(record: &Recovery, bytes: Option<&[u8]>) -> bool {
     bytes.is_none_or(|bytes| record.profile_hashes.contains(&hash(bytes)))
 }
 
+pub(crate) fn record_native_connection_update(
+    library: &Path,
+    recovery_path: &Path,
+    profile_id: &str,
+    before: &[u8],
+    after: &[u8],
+) -> Result<()> {
+    if profile_id != PROFILE_ID {
+        return Ok(());
+    }
+    let Some(mut record) = recovery(recovery_path, library)? else {
+        return Ok(());
+    };
+    if record.pending || !owns_profile(&record, Some(before)) {
+        return Ok(());
+    }
+    let without_connection = |bytes: &[u8]| -> Result<Value> {
+        let mut value = parse(bytes)?;
+        let fields = value.as_object_mut().ok_or_else(invalid_config)?;
+        for key in CONNECTION_FIELDS {
+            fields.remove(key);
+        }
+        Ok(value)
+    };
+    if without_connection(before)? != without_connection(after)? {
+        return Err(invalid());
+    }
+    if read(&library.join(format!("{PROFILE_ID}.json")))?.as_deref() != Some(before) {
+        return Err(changed());
+    }
+    // Keep ownership valid on either side of the native writer's atomic replace.
+    record.profile_hashes = vec![hash(before), hash(after)];
+    write(recovery_path, &serialize(&record)?)
+}
+
+fn has_connection_settings(profile: Option<&[u8]>) -> bool {
+    profile
+        .and_then(|bytes| parse(bytes).ok())
+        .is_some_and(|value| {
+            CONNECTION_FIELDS
+                .iter()
+                .any(|key| value.get(*key).is_some())
+        })
+}
+
 fn owns_entry(meta: &Value, profile_id: &str) -> bool {
     meta["entries"].as_array().is_some_and(|entries| {
         entries
@@ -237,7 +283,6 @@ fn has_entry(meta: &Value, profile_id: &str) -> bool {
         .is_some_and(|entries| entries.iter().any(|entry| entry["id"] == profile_id))
 }
 
-// A public ID/display name is not proof of ownership after losing recovery.
 // Reclaim only the current gateway binding with validated model identities.
 // Client preferences are preserved separately from that connection proof.
 fn matches_model_identity(model: &Value, config: &Value) -> bool {
@@ -476,6 +521,7 @@ pub(super) fn apply(
 
 fn preserve_restored_profile(record: &Recovery, meta: &Value, profile: Option<&[u8]>) -> bool {
     record.preserve_profile_on_restore
+        || has_connection_settings(profile)
         || !owns_profile(record, profile)
         || (has_entry(meta, PROFILE_ID) && !owns_entry(meta, PROFILE_ID))
 }

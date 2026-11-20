@@ -38,6 +38,13 @@ pub(in crate::local_pool::accounts::import_orchestrator) fn import_proxy(
         )?,
         None => None,
     };
+    if existing.is_none()
+        && let Some(url) = import_item.bundle_proxy_url()
+    {
+        return ProxyConfig::parse(url).map(Some).map_err(|_| {
+            super::ImportItemError::new(error_codes::PROXY_UNAVAILABLE, "import proxy is invalid")
+        });
+    }
     account_import_proxy(credential_store, settings, existing.as_ref())
 }
 

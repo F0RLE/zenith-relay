@@ -109,6 +109,7 @@ export type AccountExportInput = {
   format: AccountExportFormat;
   destination: "copy" | "download";
   description?: string;
+  includeProxies?: boolean;
 };
 
 export type AccountExportResult = {
@@ -131,6 +132,7 @@ export type ImportSession = {
       identity: string;
       authMode: string;
       oauthClientKind?: OAuthClientKind;
+      bundleProxyEndpoint?: string;
       sourceName: string;
       quotaStatus: string;
       status: string;
@@ -176,8 +178,11 @@ export type OAuthFlowDiagnostic = {
   reason?: "callback_invalid" | "token_exchange_failed" | "identity_invalid" | "save_failed" | "storage_unavailable" | "conflict" | "recovery_required";
 };
 
+export type OAuthPageState = "closed" | "opened" | "failed";
+
 export type OAuthFlow = {
-  /** Renderer-only hint; credentials and automation stay in Rust. */
+  embedded?: boolean;
+  pageState?: OAuthPageState;
   automaticLogin?: boolean;
   loginId: string;
   authorizationUrl: string;
@@ -189,6 +194,8 @@ export type OAuthFlow = {
   notesAccountId?: string;
   clientKind?: OAuthClientKind;
 };
+
+export type OAuthViewBounds = { x: number; y: number; width: number; height: number };
 
 export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status" | "automaticLogin" | "diagnostic">;
 

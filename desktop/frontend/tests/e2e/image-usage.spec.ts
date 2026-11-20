@@ -1,6 +1,6 @@
 import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
-import { setUsageEventOverrides } from "./request-details-fixture";
+import { receiptCacheShare, setUsageEventOverrides } from "./request-details-fixture";
 
 test("per-image fees remain visible with unknown image token counts", async ({ page }) => {
   const price = { microUsd: 40_000, pricedTokens: 0, unpricedTokens: 12 };
@@ -23,6 +23,7 @@ test("per-image fees remain visible with unknown image token counts", async ({ p
   await page.getByRole("button", { name: "Request details: req_synthetic_local", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator(".request-details-cost-value")).toHaveText("≈$0.04");
+  await expect(receiptCacheShare(dialog)).toHaveCount(0);
   const output = dialog.locator(".request-details-token-child").filter({ hasText: "Image output" });
   await expect(output.locator(".request-token-count")).toHaveText("—");
   await expect(output.locator(".request-token-cost")).toHaveText("≈$0.04");
@@ -54,7 +55,7 @@ for (const scenario of [
     await expect(dialog.getByText(ru ? "Готовых изображений" : "Images completed", { exact: true })).toBeVisible();
     await expect(dialog.getByText(ru ? "Вход: текст" : "Text input", { exact: true })).toBeVisible();
     await expect(dialog.getByText(ru ? "Вход: изображения" : "Image input", { exact: true })).toBeVisible();
-    await expect(dialog.locator(".request-token-total dd")).toHaveText("28");
+    await expect(dialog.locator(".request-token-total")).toHaveText("28");
     await expect(dialog.locator(".request-details-cost-value")).toHaveCount(0);
     await expect(dialog.getByText(ru ? "Первый ответ" : "First response", { exact: true })).toHaveCount(0);
     await expect(dialog.locator("p.form-note")).toHaveCount(0);

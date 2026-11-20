@@ -36,6 +36,25 @@ pub(crate) struct CapacityObservation<'a> {
     pub now_ms: u64,
 }
 
+impl CapacityObservation<'_> {
+    pub(crate) fn usable_weekly_source(plan: &str, window: &QuotaWindow, now_ms: u64) -> bool {
+        let plan = plan.trim();
+        !plan.is_empty()
+            && !plan.eq_ignore_ascii_case("unknown")
+            && window
+                .window_minutes
+                .is_some_and(|minutes| (6 * 1440..=8 * 1440).contains(&minutes))
+            && window.available_basis_points.is_some_and(|bp| bp <= 10_000)
+            && window
+                .window_start_ms
+                .is_some_and(|start| start <= window.observed_at_ms)
+            && window.reset_at_ms.is_some_and(|reset| reset > now_ms)
+            && now_ms
+                .checked_sub(window.observed_at_ms)
+                .is_some_and(|age| age < MAX_ANCHOR_AGE)
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct Anchor {
     account_ids: Vec<String>,
@@ -51,10 +70,30 @@ struct Anchor {
     calibration: Option<Calibration>,
 }
 
+impl Anchor {
+    fn settled_consumption(&self, next: &Self) -> Option<u16> {
+        let consumed = self.remaining.saturating_sub(next.remaining);
+        (consumed >= MIN_CONSUMED
+            && next.window.observed_at_ms.saturating_sub(self.from_ms) >= 60_000)
+            .then_some(consumed)
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct Calibration {
     sample: Option<Measurement>,
     valid: bool,
+    // Legacy price changes could move the baseline without consuming quota.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_pricing_baseline_ms: Option<u64>,
+}
+
+impl Calibration {
+    fn paired_sample(&self, baseline_ms: u64) -> Option<&Measurement> {
+        self.sample
+            .as_ref()
+            .filter(|sample| self.legacy_pricing_baseline_ms.unwrap_or(sample.at_ms) == baseline_ms)
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -129,26 +168,14 @@ impl TelemetryDb {
             now_ms,
         } = observation;
         let plan = plan.trim().to_ascii_lowercase();
-        let Some(remaining) = window
-            .available_basis_points
-            .filter(|value| *value <= 10_000)
+        let (Some(remaining), Some(reset_at_ms)) =
+            (window.available_basis_points, window.reset_at_ms)
         else {
             return Ok(());
         };
-        let Some(reset_at_ms) = window.reset_at_ms.filter(|reset| *reset > now_ms) else {
-            return Ok(());
-        };
-        if plan.is_empty()
-            || plan == "unknown"
-            || account_ids.is_empty()
+        if account_ids.is_empty()
             || account_ids.len() > MAX_LEDGERS
-            || !window
-                .window_minutes
-                .is_some_and(|minutes| (6 * 1440..=8 * 1440).contains(&minutes))
-            || !window
-                .window_start_ms
-                .is_some_and(|start| start <= window.observed_at_ms)
-            || window.observed_at_ms > now_ms
+            || !CapacityObservation::usable_weekly_source(&plan, window, now_ms)
             || now_ms - window.observed_at_ms > DAY_MS
         {
             return Ok(());
@@ -248,8 +275,7 @@ impl TelemetryDb {
                 } else {
                     previous.calibration.clone()
                 };
-                let consumed = previous.remaining.saturating_sub(remaining);
-                if consumed >= MIN_CONSUMED && window.observed_at_ms - previous.from_ms >= 60_000 {
+                if let Some(consumed) = previous.settled_consumption(&fresh) {
                     // Adjacent intervals must not count the same second twice. The
                     // retained usage clock has second precision, not request-start precision.
                     let from_ms = (previous.from_ms / 1000 + 1) * 1000;
@@ -284,7 +310,14 @@ impl TelemetryDb {
                             });
                         }
                     }
-                    // An unpriced/incomplete block cannot contaminate the next one.
+                    // A completed drop without a paired sample retires the current estimate.
+                    if measurement.is_none() {
+                        calibration_changed |= next
+                            .calibration
+                            .as_ref()
+                            .is_some_and(|calibration| calibration.sample.is_some());
+                        next.calibration = Some(Calibration::default());
+                    }
                 } else {
                     next.from_ms = previous.from_ms;
                     next.remaining = previous.remaining;
@@ -295,6 +328,7 @@ impl TelemetryDb {
             next.calibration = Some(Calibration {
                 sample: sample.event.is_none().then(|| sample.clone()),
                 valid: sample.event.is_none(),
+                legacy_pricing_baseline_ms: None,
             });
         }
         drop(connection);

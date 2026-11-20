@@ -1,0 +1,15 @@
+.hosted-device-pane { display:grid; grid-template-columns:minmax(0, 1fr); max-inline-size:42rem; gap:1rem; justify-items:start; }
+.hosted-device-pane form,.hosted-device-target,.hosted-device-pane > .relay-field { display:grid; gap:.65rem; width:100%; min-width:0; }
+.hosted-device-pane form { justify-items:start; }
+.hosted-device-pane .relay-field,.hosted-device-pane .relay-field input,.hosted-device-pane section { width:100%; min-width:0; }
+.hosted-device-target,.hosted-device-pane code,.hosted-source-list li { overflow-wrap:anywhere; }
+.hosted-device-actions { display:flex; flex-wrap:wrap; gap:.5rem; }
+.hosted-source-list { list-style:none; padding:0; margin-block:.75rem; }
+.hosted-source-list li { display:grid; gap:.25rem; padding-block:.65rem; border-block-end:1px solid var(--relay-border); }
+.hosted-copy { width:100%; min-width:0; border-block-start:1px solid var(--relay-border); }
+.hosted-copy > summary { cursor:pointer; padding-block:.75rem; width:fit-content; font-weight:600; }
+.hosted-copy-body { display:grid; gap:.75rem; min-width:0; }
+.hosted-copy-plan { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr)); gap:.75rem 1.5rem; margin:0; }
+.hosted-copy-plan dt { font-size:.85em; }
+.hosted-copy-plan dd { margin:.2rem 0 0; overflow-wrap:anywhere; }
+.hosted-copy-plan small { display:block; }

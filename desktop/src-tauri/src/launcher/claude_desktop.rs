@@ -6,7 +6,7 @@ use std::{
 };
 
 mod version;
-pub(crate) use version::model_identity_support;
+pub(crate) use version::{model_identity_support, native_connection_support};
 
 pub(crate) fn is_claude_desktop_running() -> Result<bool, String> {
     Ok(super::process::codex_process_system()?
@@ -141,8 +141,9 @@ pub(crate) fn launch_claude_desktop(_restart: bool) -> Result<(), String> {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(crate) fn launch_claude_desktop(restart: bool) -> Result<(), String> {
-    let executable = super::settings::configured_path(super::settings::Application::ClaudeDesktop)?
-        .or_else(desktop_executable);
+    use super::settings::Application;
+    let executable =
+        super::settings::configured_path(Application::ClaudeDesktop)?.or_else(desktop_executable);
     // Resolve and validate the launch target before stopping an existing client.
     #[cfg(target_os = "windows")]
     let packaged = if executable.is_none() {
@@ -161,15 +162,18 @@ pub(crate) fn launch_claude_desktop(restart: bool) -> Result<(), String> {
     if restart {
         super::process::stop_claude_desktop_and_wait()?;
     }
-    if let Some(_executable) = executable {
-        #[cfg(target_os = "windows")]
-        super::process::windows_hidden_command(_executable)
-            .spawn()
-            .map_err(|_| "Could not start Claude Desktop".to_string())?;
+    if let Some(executable) = executable {
         #[cfg(target_os = "macos")]
-        std::process::Command::new("open")
-            .arg("-a")
-            .arg(application)
+        let _ = executable;
+        #[cfg(target_os = "windows")]
+        let mut command = super::process::windows_hidden_command(executable);
+        #[cfg(target_os = "macos")]
+        let mut command = {
+            let mut open = std::process::Command::new("open");
+            open.arg("-a").arg(application);
+            open
+        };
+        command
             .spawn()
             .map_err(|_| "Could not start Claude Desktop".to_string())?;
     } else {

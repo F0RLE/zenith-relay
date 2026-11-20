@@ -1,8 +1,27 @@
 use serde_json::{Value, json};
-use zenith_relay_core::usage::TransportDiagnostics;
+use zenith_relay_core::usage::{
+    CacheContextDiagnostics, ProviderCacheDiagnostics, TransportDiagnostics,
+};
+
+pub(super) fn cache_context(context: &CacheContextDiagnostics) -> Value {
+    let mut value = serde_json::to_value(context).expect("typed cache diagnostics serialize");
+    value["providerAvailability"] = json!(match context.provider {
+        Some(ProviderCacheDiagnostics::Unavailable) => "reported_unavailable",
+        Some(_) => "reported",
+        None => "not_observed",
+    });
+    value
+}
 
 pub(super) fn document(transport: &TransportDiagnostics) -> Value {
     let mut value = serde_json::to_value(transport).expect("typed transport diagnostics serialize");
+    value["codexServerTimingAvailability"] = json!(if transport.codex_server_timing.is_some() {
+        "reported"
+    } else if transport.upstream == zenith_relay_core::UsageTransport::Http {
+        "unsupported_for_transport"
+    } else {
+        "not_observed"
+    });
     let phases = transport.request_preparation.as_ref().map(|preparation| {
         // Schema validation is nested inside body_ms, never an extra phase.
         [

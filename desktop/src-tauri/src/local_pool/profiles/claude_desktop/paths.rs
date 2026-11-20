@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-pub(super) fn config_library() -> crate::local_pool::error::Result<PathBuf> {
+pub(crate) fn config_library() -> crate::local_pool::error::Result<PathBuf> {
     let path = library_from(
         std::env::consts::OS,
         env::var_os("CLAUDE_USER_DATA_DIR").map(PathBuf::from),

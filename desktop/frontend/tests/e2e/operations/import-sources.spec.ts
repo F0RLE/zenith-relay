@@ -2,6 +2,51 @@ import type { Locator } from "@playwright/test";
 import { expect, test } from "../../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "../tauri-mock";
 
+test("account file export includes proxies only for an explicit Zenith choice", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Export all" }).click();
+  const dialog = page.getByRole("dialog", { name: "Export accounts" });
+  const include = dialog.getByRole("checkbox", { name: "Include account proxies" });
+  await expect(include).not.toBeChecked();
+  await include.check();
+  await dialog.getByRole("radio", { name: "sub2api", exact: true }).click();
+  await expect(include).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Download JSON" }).click();
+  const lastRequest = () => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: { includeProxies?: boolean; format: string } } }>;
+  }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "export_local_accounts")?.args.input);
+  expect((await lastRequest())?.includeProxies).toBeUndefined();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Export all" }).click();
+  await expect(include).not.toBeChecked();
+  await include.check();
+  await dialog.getByRole("button", { name: "Download JSON" }).click();
+  expect(await lastRequest()).toMatchObject({ format: "zenith", includeProxies: true });
+});
+
+test("account file import waits for a route choice before confirming", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importBundleProxy: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await dialog.getByRole("button", { name: "Choose account files" }).click();
+  const confirm = dialog.getByRole("button", { name: "Import 2 account(s)" });
+  await expect(confirm).toBeDisabled();
+  await expect(dialog.getByText("Proxy: http://proxy.example.test:8123")).toBeVisible();
+  await dialog.getByRole("radio", { name: "Use proxies from the file" }).check();
+  await confirm.click();
+  await expect(dialog).toHaveCount(0);
+  const choice = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input: { useBundleProxies?: boolean } } }>;
+  }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "confirm_local_account_import")?.args.input);
+  expect(choice?.useBundleProxies).toBe(true);
+  expect(JSON.stringify(choice)).not.toContain("proxy.example.test");
+});
+
 async function expectSavingStatusCentered(dialog: Locator) {
   const content = dialog.locator(".oauth-completing-status > svg, .oauth-completing-status > span");
   await expect(content).toHaveCount(2);
@@ -137,7 +182,8 @@ test("BPS callback replaces sign-in controls with one saving status and dismisse
   await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
   const signIn = page.getByRole("dialog", { name: "Sign in" });
   await signIn.getByText("Excel / Basis Points", { exact: true }).click();
-  await expect(signIn.getByRole("button", { name: "Open sign-in window", exact: true })).toBeEnabled();
+  await signIn.getByRole("button", { name: "Open sign-in page", exact: true }).click();
+  await expect(signIn.getByRole("button", { name: "Go to sign-in page", exact: true })).toBeEnabled();
 
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
   const saving = page.getByRole("dialog", { name: "Saving account…" });

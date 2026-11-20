@@ -1,8 +1,4 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chacha20poly1305::{
-    ChaCha20Poly1305, Nonce, Tag,
-    aead::{Aead, KeyInit},
-};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,9 +8,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
+use zenith_relay_vault_envelope::{Envelope, OVERHEAD};
 
-const MAGIC: &[u8; 4] = b"ZDV1";
-const NONCE_BYTES: usize = 12;
 const MAX_SECRET_BYTES: usize = 4 * 1024 * 1024;
 const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SECRET_REFS: usize = 8_192;
@@ -189,22 +184,11 @@ impl Vault {
     fn persist(&self, vault_data: &VaultData) -> Result<(), String> {
         let plaintext_json =
             serde_json::to_vec(vault_data).map_err(|_| "vault serialization failed")?;
-        let max_plaintext_bytes =
-            MAX_VAULT_BYTES - (MAGIC.len() + NONCE_BYTES + Tag::default().len()) as u64;
+        let max_plaintext_bytes = MAX_VAULT_BYTES - OVERHEAD as u64;
         if plaintext_json.len() as u64 > max_plaintext_bytes {
             return Err("secret vault size limit is reached".to_string());
         }
-        let cipher = ChaCha20Poly1305::new((&self.key).into());
-        let mut nonce_bytes = [0_u8; NONCE_BYTES];
-        rand::rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from(nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext_json.as_ref())
-            .map_err(|_| "vault encryption failed")?;
-        let mut bytes = Vec::with_capacity(MAGIC.len() + NONCE_BYTES + ciphertext.len());
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&nonce_bytes);
-        bytes.extend_from_slice(&ciphertext);
+        let bytes = Envelope::Desktop.seal(&self.key, &plaintext_json)?;
         atomic_replace(&self.path, &self.backup_path, &bytes)
     }
 
@@ -224,15 +208,7 @@ fn decrypt_file(path: &Path, key: &[u8; 32]) -> Result<VaultData, String> {
                 io_error(error)
             }
         })?;
-    if bytes.len() <= MAGIC.len() + NONCE_BYTES || &bytes[..MAGIC.len()] != MAGIC {
-        return Err("secret vault file header is invalid".to_string());
-    }
-    let nonce = Nonce::try_from(&bytes[MAGIC.len()..MAGIC.len() + NONCE_BYTES])
-        .map_err(|_| "secret vault nonce is invalid".to_string())?;
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let plaintext = cipher
-        .decrypt(&nonce, &bytes[MAGIC.len() + NONCE_BYTES..])
-        .map_err(|_| "secret vault decryption failed")?;
+    let plaintext = Envelope::Desktop.open(key, &bytes)?;
     serde_json::from_slice(&plaintext).map_err(|_| "secret vault payload is invalid".to_string())
 }
 
@@ -319,6 +295,12 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chacha20poly1305::{
+        ChaCha20Poly1305, Nonce,
+        aead::{Aead, KeyInit},
+    };
+    const MAGIC: &[u8; 4] = b"ZDV1";
+    const NONCE_BYTES: usize = 12;
 
     #[test]
     fn diagnostic_vault_reads_do_not_create_recover_or_change_files() {

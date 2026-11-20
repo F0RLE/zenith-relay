@@ -54,10 +54,11 @@ export type CacheHistoryDiagnostics = {
   sharedPrefixItems: number | null;
   firstChangedItemKind: "developer" | "user" | "assistant" | "tool_result" | "tool_call"
     | "reasoning" | "compaction" | "additional_tools" | "configuration_update" | "other" | null;
-  /** Same-request body alignment only; not evidence of provider cache reuse. */
+  /** Body alignment within the same request. */
   leadingContextAlignment?: {
     skippedClientItems: number;
     skippedUpstreamItems: number;
+    skippedUpstreamRelayItems?: number | null;
     sharedPrefixItems: number;
     comparison: CacheHistoryDiagnostics["comparison"];
   } | null;
@@ -114,7 +115,7 @@ export type RoutingDiagnostics = {
     downstreamHttpStatus?: number | null;
     failureKind?: "connection" | "upstream" | "local" | null;
     upstream: "http" | "websocket";
-    mode: "native" | "protocol_conversion" | "basis_points";
+    mode: "native" | "protocol_conversion" | "bps" | "basis_points";
     fallbackReason?: "basis_points_http" | "protocol_conversion" | "websocket_disabled" | "websocket_unavailable" | "websocket_slow_handshake" | "existing_http_bridge" | null;
     responseFormat?: "json" | "sse" | "websocket_frames" | null;
     handshakeMs?: number | null;
@@ -129,6 +130,7 @@ export type RoutingDiagnostics = {
       sseJsonFirstMs?: number | null;
       upstreamReasoningFirstMs?: number | null;
       upstreamOutputFirstMs?: number | null;
+      upstreamReasoningTextFirstMs?: number | null;
       upstreamTextFirstMs?: number | null;
       upstreamToolFirstMs?: number | null;
       /** First complete native item, before client-call validation. */
@@ -137,7 +139,7 @@ export type RoutingDiagnostics = {
     requestPreparationMs?: number | null;
     requestPayload?: {
       mode: "full" | "continuation";
-      fullRequestReason?: "basis_points_transport" | "protocol_conversion" | "no_previous_response_id" | "socket_checkpoint_unavailable" | "socket_settings_changed" | "socket_history_changed" | "socket_output_changed" | "socket_no_new_input" | null;
+      fullRequestReason?: "bps_transport" | "basis_points_transport" | "protocol_conversion" | "stateless_image_request" | "no_previous_response_id" | "socket_checkpoint_unavailable" | "socket_settings_changed" | "socket_history_changed" | "socket_output_changed" | "socket_no_new_input" | null;
       /** Fixed field labels only; no item values, arbitrary keys or fingerprints. */
       socketOutputMismatch?: {
         outputIndex: number;
@@ -152,13 +154,24 @@ export type RoutingDiagnostics = {
           truncated: boolean;
         } | null;
       } | null;
+      socketOutputReconciled?:
+        | "omitted_completed_function_status"
+        | "omitted_parsed_function_arguments"
+        | "omitted_optional_function_fields"
+        | "omitted_reasoning_created_by"
+        | "omitted_allowlisted_output_fields"
+        | null;
       jsonBytes: number;
       /** Encoded body bytes, excluding HTTP/WebSocket framing and TLS. */
       bodyBytes: number;
-      contentEncoding: "identity" | "zstd";
+      contentEncoding: "identity" | "zstd" | "permessage-deflate";
       compressionMs?: number | null;
       /** Wall time including preparation and blocking-pool scheduling. */
       compressionUs?: number | null;
+      /** Credential preparation and BPS access checks for this send. */
+      authorizationMs?: number | null;
+      /** HTTP setup after authorization; includes encoding, before execute. */
+      httpDispatchPreparationMs?: number | null;
       /** HTTP execute to headers, not upload-only time or total TTFT. */
       httpSendToHeadersMs?: number | null;
     } | null;
@@ -251,6 +264,9 @@ export type ToolUseDiagnostics = {
     serverToolCalls?: Partial<Record<"web_search" | "web_fetch" | "code_execution", number>>;
     /** Subsets of cache-write totals, not additional tokens or charges. */
     cacheWriteTokensByTtl?: Record<string, number>;
+    cacheMode?: "implicit" | "explicit";
+    /** Returned policy, not the lifetime of every written prefix. */
+    cacheRetention?: string;
   };
   clientToolCount: number;
   /** Post-policy catalog, before BPS prompt encoding or other transport changes. */

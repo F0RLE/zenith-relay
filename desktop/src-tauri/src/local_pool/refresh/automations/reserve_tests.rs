@@ -2,8 +2,7 @@ use super::*;
 use crate::local_pool::refresh::tests::{account, cleanup, state};
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState},
-    automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask},
-    quota::QuotaWindow,
+    automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTrigger},
 };
 
 fn weekly_reset_still_current(
@@ -223,6 +222,17 @@ async fn weekly_reserve_rechecks_current_rule_and_account_observation() {
         .unwrap();
     assert!(weekly_reset_still_current(&state, &response, &fence).unwrap());
     let mut records = state.store().unwrap().automations().clone();
+    let mut threshold = records.tasks[0].clone();
+    threshold.id = "synthetic-threshold".into();
+    threshold.weekly_reset_remaining_basis_points = Some(1_000);
+    records.tasks.push(threshold);
+    state
+        .store()
+        .unwrap()
+        .replace_automations(records.clone())
+        .unwrap();
+    assert!(!weekly_reset_still_current(&state, &response, &fence).unwrap());
+    records.tasks.pop();
     records.tasks[0].enabled = false;
     state.store().unwrap().replace_automations(records).unwrap();
     assert!(!weekly_reset_still_current(&state, &response, &fence).unwrap());
@@ -252,7 +262,8 @@ async fn weekly_reserve_never_acts_on_a_failed_or_skipped_quota_read() {
         },
     ] {
         response.quota = outcome;
-        assert!(weekly_exhaustion_candidates(&response).is_empty());
+        assert!(weekly_exhaustion_fingerprint(&response, current_time_ms()).is_none());
+        assert!(!weekly_reset_still_current(&state, &response, &fence).unwrap());
         assert!(
             evaluate_weekly_exhaustions(&state, &response, &fence)
                 .await
@@ -341,6 +352,20 @@ async fn quota_exhaustion_wakes_only_other_enabled_weekly_reserves() {
         targets[0].member_id,
         zenith_relay_core::scheduler::account_member_key(&id)
     );
+    let mut records = state.store().unwrap().automations().clone();
+    records.tasks[0].weekly_reset_remaining_basis_points = Some(1_000);
+    state
+        .store()
+        .unwrap()
+        .replace_automations(records.clone())
+        .unwrap();
+    assert!(
+        weekly_reserve_targets(&state, &response)
+            .unwrap()
+            .is_empty()
+    );
+    records.tasks[0].weekly_reset_remaining_basis_points = None;
+    state.store().unwrap().replace_automations(records).unwrap();
     other.account.quota.reset_credits_available = Some(0);
     state.store().unwrap().upsert_account(other).unwrap();
     assert!(
@@ -424,7 +449,7 @@ async fn stale_future_or_nonempty_weekly_observations_never_spend_a_reset() {
     let state = state();
     let mut response = exhausted_response(&state);
     let now = current_time_ms();
-    assert!(fresh_weekly_exhaustion(&response, now));
+    assert!(fresh_weekly_exhaustion(&response, now).is_some());
     for (remaining, at) in [
         (
             Some(0),
@@ -437,7 +462,61 @@ async fn stale_future_or_nonempty_weekly_observations_never_spend_a_reset() {
         let window = response.account.account.quota.secondary.as_mut().unwrap();
         window.available_basis_points = remaining;
         window.observed_at_ms = at;
-        assert!(!fresh_weekly_exhaustion(&response, now));
+        assert!(fresh_weekly_exhaustion(&response, now).is_none());
+    }
+    cleanup(state).await;
+}
+
+#[tokio::test]
+async fn five_hour_exhaustion_does_not_redeem_without_a_proven_exhausted_week() {
+    let state = state();
+    let mut response = exhausted_response(&state);
+    let now = current_time_ms();
+    let quota = &mut response.account.account.quota;
+    let weekly = quota.secondary.clone().unwrap();
+    quota.primary = Some(QuotaWindow {
+        kind: QuotaWindowKind::Primary,
+        window_minutes: Some(300),
+        reset_at_ms: Some(now + 300_000),
+        ..weekly.clone()
+    });
+    for window in [
+        None,
+        Some(QuotaWindow {
+            available_basis_points: Some(4_700),
+            ..weekly.clone()
+        }),
+        Some(QuotaWindow {
+            window_minutes: Some(300),
+            ..weekly.clone()
+        }),
+        Some(QuotaWindow {
+            window_minutes: None,
+            ..weekly.clone()
+        }),
+        Some(QuotaWindow {
+            reset_at_ms: Some(now),
+            ..weekly.clone()
+        }),
+        Some(QuotaWindow {
+            reset_at_ms: None,
+            ..weekly.clone()
+        }),
+        Some(QuotaWindow {
+            explicitly_full: Some(true),
+            ..weekly.clone()
+        }),
+    ] {
+        response.account.account.quota.secondary = window;
+        let (_, fence) = {
+            let mut store = state.store().unwrap();
+            store.upsert_account(response.account.clone()).unwrap();
+            store
+                .account_refresh_scope(&response.account.account.id)
+                .unwrap()
+        };
+        assert!(weekly_exhaustion_fingerprint(&response, now).is_none());
+        assert!(!weekly_reset_still_current(&state, &response, &fence).unwrap());
     }
     cleanup(state).await;
 }

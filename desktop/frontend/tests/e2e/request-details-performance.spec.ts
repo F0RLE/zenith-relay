@@ -58,12 +58,11 @@ for (const view of ["Sends", "Errors"] as const) {
       await expect(dialog).toBeVisible();
       expect(await dateFormats(page)).toBe(beforeOpen + 1);
       expect(await usageReads(page)).toBe(readsBeforeOpen);
-      // Closed diagnostics should not create their DOM, tooltips or focus targets.
-      await expect(dialog.locator(".request-technical-grid")).toHaveCount(0);
+      await expect(dialog.locator(".request-id-list")).toHaveCount(0);
       await dialog.locator(".request-technical-details > summary").click();
       await expect(dialog.locator(".request-id-list")).toBeVisible();
       await dialog.locator(".request-technical-details > summary").click();
-      await expect(dialog.locator(".request-technical-grid")).toHaveCount(0);
+      await expect(dialog.locator(".request-id-list")).toHaveCount(0);
       await expect(page.locator(".request-details-backdrop")).toHaveCSS("backdrop-filter", "none");
       const before = await dateFormats(page);
       const reads = await usageReads(page);

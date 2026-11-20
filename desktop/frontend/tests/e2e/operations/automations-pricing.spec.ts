@@ -135,7 +135,7 @@ for (const mode of ["local"] as const) {
     const dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("Example compatible API");
     await dialog.locator(".request-technical-details > summary").click();
-    await expect(dialog).toContainText("Rotation when quota and credits tie");
+    await expect(dialog.getByRole("button", { name: "Copy request ID", exact: true })).toBeVisible();
     await expect(dialog.getByText("Quota at selection", { exact: true })).toHaveCount(0);
   });
 
@@ -195,7 +195,8 @@ for (const mode of ["local"] as const) {
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
     const details = page.getByRole("dialog", { name: "Request details" });
     await details.locator(".request-technical-details > summary").click();
-    await expect(details.getByText("Excel / Basis Points", { exact: true })).toBeVisible();
+    await expect(details.locator(".request-details-parameters")).toContainText("HTTP");
+    await expect(details).not.toContainText("excel_basis_points");
   });
 }
 

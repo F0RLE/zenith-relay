@@ -54,7 +54,7 @@ export function sourcePriceOverride(quote: TokenPrice | undefined): ApiModelPric
 
 const hasDraftRates = (draft: SourceRateDraft | undefined) => draft != null && Object.values(draft).some((value) => typeof value === "string" && value.trim() !== "");
 
-/** A quote is price evidence, not proof that an inference route supports a tier. */
+/** Tier pricing from a quote; route capabilities are checked separately. */
 export function publishedPriceTiers(price: TokenPrice | undefined, draft?: SourcePriceDraft): PriceSchedule[] {
   return ["standard", ...(["flex", "priority", "ultrafast"] as const).filter((tier) =>
     hasRates(price?.[tier]) || hasDraftRates(draft?.schedules?.[tier])

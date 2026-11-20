@@ -9,18 +9,14 @@ import {
   usageRowsFromLocal,
   type UsageRow,
 } from "../src/features/relay/pages/usage/usageData";
-import {
-  cacheLifetime,
-  cacheTouchForRow,
-  cacheWriteDurationWindows,
-} from "../src/features/relay/pages/usage/cacheLifetime";
+import { durationLabel, requestCacheStorage } from "../src/features/relay/pages/usage/requestCacheStorage";
 import type { LocalUsage } from "../src/features/relay/api/types";
 import { formatUsageApiEquivalent } from "../src/features/relay/pages/usage/usageFormatting";
-import { compactRequestId, formatEndpointKind, formatErrorCategory, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, formatWireApi, prefixErrorOrigin, requestStatusHint, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
+import { compactRequestId, differentAppliedTier, formatErrorCategory, formatModelId, formatReasoningEffort, formatReasoningSummary, formatTiming, formatWireApi, prefixErrorOrigin, requestStatusHint, requestStatusKind, requestStatusLabel } from "../src/features/relay/pages/usage/usageReportFormat";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 
-test("request protocol and endpoint names share labels and preserve unknown values", async () => {
+test("request protocols and materially different observed tiers retain their labels", async () => {
   for (const [language, translations] of Object.entries({ en, ru })) {
     const i18n = createInstance();
     await i18n.init({ lng: language, resources: { [language]: { translation: translations } } });
@@ -33,11 +29,11 @@ test("request protocol and endpoint names share labels and preserve unknown valu
       custom_api: "custom_api",
     })) {
       expect(formatWireApi(wireApi, i18n.t)).toBe(label);
-      expect(formatEndpointKind(wireApi, "responses", i18n.t)).toBe(label);
-      expect(formatEndpointKind(undefined, wireApi, i18n.t)).toBe(label);
     }
-    expect(formatEndpointKind("excel_basis_points", "responses", i18n.t)).toBe(translations.usage.endpoints.excelBasisPoints);
-    expect(formatEndpointKind(null, null, i18n.t)).toBe("—");
+    expect(differentAppliedTier({ serviceTier: "fast", appliedServiceTier: "priority" }, i18n.t)).toBeNull();
+    expect(differentAppliedTier({ serviceTier: "fast", appliedServiceTier: "default" }, i18n.t)).toBe(translations.pool.serviceTiers.standard);
+    expect(differentAppliedTier({ serviceTier: "standard", appliedServiceTier: null }, i18n.t)).toBeNull();
+    expect(differentAppliedTier({ serviceTier: "standard", appliedServiceTier: "flex" }, i18n.t)).toBe("Flex");
     expect(formatWireApi(null, i18n.t)).toBe("—");
   }
 });
@@ -296,49 +292,27 @@ describe("usage data", () => {
     expect(prefixErrorOrigin(null, "historical request failed")).toBe("historical request failed");
   });
 
-  test("uses only recorded windows, without inventing a provider policy", () => {
-    expect(cacheWriteDurationWindows(null)).toEqual([]);
-    expect(cacheWriteDurationWindows("30m")).toEqual(["30m"]);
-    expect(cacheWriteDurationWindows("5m, 1h, 5m")).toEqual(["5m", "1h"]);
-    expect(cacheWriteDurationWindows("15m")).toEqual(["15m"]);
-    expect(cacheWriteDurationWindows("0m, unknown")).toEqual([]);
+  test("returned defaults and per-prefix writes remain independent", () => {
+    const evidence = requestCacheStorage({ cacheMode: "explicit", cacheRetention: "30m",
+      cacheWriteTokensByTtl: { "12h": 70, "5m": 3, "1h": 0, secret: 20 } }, "5m, 12h");
+    expect(evidence.mode).toBe("explicit");
+    expect(evidence.retention).toMatchObject({ value: 30, unit: "minute" });
+    expect(evidence.writes.map(({ key, count }) => [key, count])).toEqual([["5m", 3], ["12h", 70]]);
+    expect(evidence.reported).toEqual([]);
+    expect(requestCacheStorage({ cacheRetention: "in_memory" }, null)).toEqual({
+      mode: null, retention: "in_memory", reported: [], writes: [],
+    });
   });
 
-
-  test("estimates cache lifetime from the last touch and the reported window", () => {
-    const now = Date.parse("2026-09-27T12:00:00.000Z");
-    expect(cacheLifetime({ cacheWriteTtl: "1h", touchedAt: "2026-09-27T11:20:00.000Z" }, now)).toMatchObject({
-      windows: ["1h"], expiry: "open", remainingMs: 20 * 60_000,
-    });
-    expect(cacheLifetime({ cacheWriteTtl: "5m, 1h", touchedAt: "2026-09-27T11:10:00.000Z" }, now)).toMatchObject({
-      windows: ["5m", "1h"], expiry: "unknown", remainingMs: null,
-    });
-    expect(cacheLifetime({ cacheWriteTtl: "5m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
-    expect(cacheLifetime({ cacheWriteTtl: null, touchedAt: "2026-09-27T11:50:00.000Z" }, now).expiry).toBe("unknown");
-    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:40:00.000Z" }, now)).toMatchObject({
-      windows: ["30m"], expiry: "open", remainingMs: 10 * 60_000,
-    });
-    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T11:00:00.000Z" }, now).expiry).toBe("elapsed");
-    expect(cacheLifetime({ cacheWriteTtl: "15m", touchedAt: "2026-09-27T11:40:00.000Z" }, now).expiry).toBe("elapsed");
-    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "2026-09-27T12:10:00.000Z" }, now).remainingMs).toBe(30 * 60_000);
-    expect(cacheLifetime({ cacheWriteTtl: "30m", touchedAt: "invalid" }, now).expiry).toBe("unknown");
-  });
-
-  test("cache reads refresh the observed window without becoming writes or borrowing another route", () => {
-    const request = row({ model: "Display alias", routedModel: "upstream-model", clientContextId: "chat", time: "2026-10-18T12:25:00Z", cachedInputTokens: 100, cacheWriteInputTokens: 0 });
-    const session = { clientContextId: "chat", candidateKind: "account" as const, candidateId: "account", model: "upstream-model", startedAt: "2026-10-18T12:00:00Z", touchedAt: "2026-10-18T12:00:00Z", cacheWriteTtl: "30m" };
-    const touch = cacheTouchForRow(request, [session])!;
-    expect(touch.touchedAt).toBe(request.time);
-    expect(cacheLifetime(touch, Date.parse(request.time)).remainingMs).toBe(30 * 60_000);
-    expect(cacheTouchForRow({ ...request, time: "2026-10-18T12:26:00Z", cachedInputTokens: 0 }, [{ ...session, touchedAt: request.time }])?.touchedAt).toBe(request.time);
-    for (const foreign of [
-      { ...session, clientContextId: "other" }, { ...session, model: "other" },
-      { ...session, candidateId: "other" }, { ...session, candidateKind: "source" as const },
-    ]) expect(cacheTouchForRow({ ...request, cachedInputTokens: 0 }, [foreign])).toBeNull();
-    expect(cacheTouchForRow({ ...request, cachedInputTokens: 0 }, [])).toBeNull();
-    const unknown = cacheTouchForRow({ ...request, model: "gpt-6", routedModel: "gpt-6" }, [])!;
-    expect(cacheLifetime(unknown, Date.parse(request.time)).expiry).toBe("unknown");
-    expect(request.cacheWriteInputTokens).toBe(0);
+  test("a legacy response window has no write count or deadline", () => {
+    const evidence = requestCacheStorage(undefined, "5m, 1h");
+    expect(evidence.reported.map((w) => durationLabel(w, "en"))).toEqual(["5 min", "1 hr"]);
+    expect(evidence.retention).toBeNull();
+    expect(evidence.writes).toEqual([]);
+    expect(requestCacheStorage({ cacheRetention: "1h" }, "60m").reported).toEqual([]);
+    expect(requestCacheStorage({ cacheRetention: "1h" }, "5m").reported.map((w) => durationLabel(w, "en"))).toEqual(["5 min"]);
+    expect(requestCacheStorage(undefined, "0m, secret, 99999999999m").reported).toEqual([]);
+    expect(requestCacheStorage(undefined, null).reported).toEqual([]);
   });
 
   test("normalizes known Codex background categories", () => {

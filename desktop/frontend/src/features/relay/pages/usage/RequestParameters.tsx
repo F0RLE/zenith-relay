@@ -1,27 +1,21 @@
-import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageRow } from "./usageData";
 import {
-  formatModelId, formatReasoningEffort, formatReasoningSummary, formatRequestOrigin,
+  formatReasoningEffort, formatReasoningSummary, formatRequestOrigin,
   formatServiceTier, formatTransport, formatWireApi,
 } from "./usageReportFormat";
+
+export function hasRequestParameters(row: UsageRow) {
+  return Boolean(row.wireApi || row.transport || row.serviceTier || row.effectiveReasoningEffort || row.requestedReasoningEffort || row.requestOrigin);
+}
 
 export function RequestParameters({ row }: { row: UsageRow }) {
   const { t } = useTranslation();
   const requestedEffort = row.requestedReasoningEffort;
   const effectiveEffort = row.effectiveReasoningEffort;
   const reasoningChanged = requestedEffort && effectiveEffort && requestedEffort !== effectiveEffort;
-  const requestedModel = formatModelId(row.requestedModel, row.routedModel);
-  const routedModel = formatModelId(row.routedModel);
-  const modelChanged = requestedModel !== "—" && routedModel !== "—" && requestedModel !== routedModel;
-  const parameterCount = [row.wireApi, row.transport, row.serviceTier, requestedEffort || effectiveEffort, row.requestOrigin].filter(Boolean).length;
-  if (!row.wireApi && !row.transport && !row.serviceTier && !requestedEffort && !effectiveEffort && !modelChanged && !row.requestOrigin) return null;
-  return <section className="request-detail-section request-parameters-section" aria-label={t("usage.requestSections.parameters")}>
-    <dl className="request-details-parameters" style={{ "--request-parameter-columns": Math.max(1, parameterCount) } as CSSProperties}>
-    {modelChanged ? <>
-      <div className="request-parameter-wide"><dt>{t("usage.requestedModel")}</dt><dd><code>{requestedModel}</code></dd></div>
-      <div className="request-parameter-wide"><dt>{t("usage.routedModel")}</dt><dd><code>{routedModel}</code></dd></div>
-    </> : null}
+  if (!hasRequestParameters(row)) return null;
+  return <dl className="request-details-parameters" aria-label={t("usage.requestSections.parameters")}>
     {row.wireApi ? <div><dt>{t("usage.protocol")}</dt><dd>{row.imageUsage ? "Images API" : formatWireApi(row.wireApi, t)}</dd></div> : null}
     {row.transport ? <div><dt>{t("usage.transport")}</dt><dd>{formatTransport(row.transport, t)}</dd></div> : null}
     {row.serviceTier ? <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t)}</dd></div> : null}
@@ -34,6 +28,5 @@ export function RequestParameters({ row }: { row: UsageRow }) {
       </dd>
     </div> : null}
     {row.requestOrigin ? <div><dt>{t("usage.requestOrigin")}</dt><dd>{formatRequestOrigin(row.requestOrigin, t)}</dd></div> : null}
-    </dl>
-  </section>;
+  </dl>;
 }

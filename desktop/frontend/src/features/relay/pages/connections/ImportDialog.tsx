@@ -56,6 +56,7 @@ export function ImportDialog({
   const [progress, setProgress] = useState<AccountImportProgress | null>(null);
   const [addToPool, setAddToPool] = useState(defaultAddToPool);
   const [assignProxy, setAssignProxy] = useState(false);
+  const [useBundleProxies, setUseBundleProxies] = useState<boolean>();
   const [fileLoading, setFileLoading] = useState(Boolean(initialPaths?.length));
   const activeSessionId = useRef<string | null>(initialSession?.sessionId ?? null);
   const selectAllRef = useRef<HTMLInputElement>(null);
@@ -79,6 +80,7 @@ export function ImportDialog({
     setCompleted(null);
     setProgress(null);
     pendingSelection.current = null;
+    setUseBundleProxies(undefined);
     importedToPool.current = false;
     setSelected(selectedImportItemIds(updatedSession));
   };
@@ -173,9 +175,11 @@ export function ImportDialog({
     try {
       const finishSelection = async (selection: ImportedSelection) => {
         if (relayMode === "local" && assignProxy) {
+          const localAssignment = new Set(session.preview.rows.filter((row) =>
+            !row.existing && !(useBundleProxies && row.bundleProxyEndpoint)).map((row) => row.itemId));
           const accountIds = selection.result.results.flatMap((item) => {
             const id = item.account?.account.id ?? item.accountId;
-            return item.status === "succeeded" && id ? [id] : [];
+            return item.status === "succeeded" && id && localAssignment.has(item.itemId) ? [id] : [];
           });
           if (accountIds.length) {
             const ok = await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
@@ -214,7 +218,9 @@ export function ImportDialog({
         try {
           captured = await captureOperationResult(
             (work) => perform("import-confirm", work, undefined, { backgroundRefresh: true }),
-            () => relayCommands.confirmImport(sessionId, selectedIds, includeInPool),
+            () => relayCommands.confirmImport(sessionId, selectedIds, includeInPool, session.preview.rows.some(
+              (row) => selectedIds.includes(row.itemId) && row.bundleProxyEndpoint,
+            ) ? useBundleProxies : undefined),
           );
         } finally {
           finishAccountImportConfirmation();
@@ -281,7 +287,9 @@ export function ImportDialog({
     if (selectAllRef.current) selectAllRef.current.indeterminate = someImportRowsSelected;
   }, [someImportRowsSelected]);
   const toggleAll = (checked: boolean) => setSelected(checked ? importRowIds : []);
-  const selectedAccountCount = session?.preview.rows.filter((row) => selected.includes(row.itemId) && row.authMode !== "api_key").length ?? 0;
+  const selectedAccounts = importRows.filter((row) => row.selectable && selected.includes(row.itemId) && row.authMode !== "api_key" && !row.existing);
+  const chooseBundleProxies = relayMode === "local" && importRows.some((row) => row.selectable && row.bundleProxyEndpoint && selected.includes(row.itemId));
+  const selectedAccountCount = selectedAccounts.filter((row) => !(useBundleProxies && row.bundleProxyEndpoint)).length;
   const localProxyOptions = relayMode === "local";
   const footer = completed ? (
     <>
@@ -292,7 +300,7 @@ export function ImportDialog({
     <>
       <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.cancel")}</Button>
       {fileLoading ? null : session ? (
-        <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy} onClick={() => void confirm()}
+        <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy || (chooseBundleProxies && useBundleProxies === undefined)} onClick={() => void confirm()}
         >{t("accounts.confirmImport", { count: selected.length })}</Button>
       ) : (
         <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim() || importOperationBusy} onClick={preview}>{t("accounts.preview")}</Button>
@@ -317,6 +325,9 @@ export function ImportDialog({
         onToggleAll={toggleAll}
         canImportToPool={canImportToPool}
         showProxy={localProxyOptions}
+        showBundleProxies={chooseBundleProxies}
+        useBundleProxies={useBundleProxies}
+        onUseBundleProxies={setUseBundleProxies}
         addToPool={addToPool}
         onAddToPool={setAddToPool}
         assignProxy={assignProxy}
@@ -434,6 +445,9 @@ function ImportPreview({
   onToggleAll,
   canImportToPool,
   showProxy,
+  showBundleProxies,
+  useBundleProxies,
+  onUseBundleProxies,
   addToPool,
   onAddToPool,
   assignProxy,
@@ -451,6 +465,9 @@ function ImportPreview({
   onToggleAll: (checked: boolean) => void;
   canImportToPool: boolean;
   showProxy: boolean;
+  showBundleProxies: boolean;
+  useBundleProxies: boolean | undefined;
+  onUseBundleProxies: (checked: boolean) => void;
   addToPool: boolean;
   onAddToPool: (checked: boolean) => void;
   assignProxy: boolean;
@@ -500,6 +517,7 @@ function ImportPreview({
               <span className="import-account-meta">
                 {row.oauthClientKind ? <span>{t(row.oauthClientKind === "siwc" ? "accounts.oauthChatGpt" : row.oauthClientKind === "excel_bps" ? "accounts.oauthExcel" : "accounts.oauthCodex")}</span> : null}
                 <span className="import-account-identity">{row.identity}</span>
+                {row.bundleProxyEndpoint ? <span>{t("accounts.importProxyEndpoint", { endpoint: row.bundleProxyEndpoint })}</span> : null}
                 <AccountPlanBadge planType={row.plan ?? null} unknown={t("common.unknown")} />
               </span>
               {row.error ? <small className="import-account-note error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
@@ -511,6 +529,12 @@ function ImportPreview({
     {showAfter ? <section className="import-after settings-group">
       <header><h2>{t("accounts.afterImport")}</h2></header>
       <div className="settings-group-body">
+        {showBundleProxies ? <fieldset className="relay-field import-bundle-route">
+          <legend>{t("accounts.importProxyChoice")}</legend>
+          <label><input type="radio" name="bundle-proxy" checked={useBundleProxies === true} onChange={() => onUseBundleProxies(true)} /> {t("accounts.importProxies")}</label>
+          <label><input type="radio" name="bundle-proxy" checked={useBundleProxies === false} onChange={() => onUseBundleProxies(false)} /> {t("accounts.importLocalRoute")}</label>
+          <small>{t("accounts.importProxiesHint")}</small>
+        </fieldset> : null}
         {canImportToPool ? <SettingToggle className="import-after-toggle" label={t("accounts.addImportedToPool")} description={t("accounts.addToPoolHint")} checked={addToPool} onChange={onAddToPool} /> : null}
         {showProxy ? <SettingToggle className="import-after-toggle" label={t("proxies.assignStoredAfterAdd")} description={proxyDescription} checked={assignProxy} disabled={proxyDisabled} onChange={onAssignProxy} /> : null}
       </div>

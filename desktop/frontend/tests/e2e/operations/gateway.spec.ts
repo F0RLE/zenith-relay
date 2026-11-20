@@ -115,6 +115,7 @@ test("SIWC output limits need no compatibility switch", async ({ page }) => {
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, {
+    platform: "linux",
     mode: "local", locale: "en", populated: true, accountOAuthClientKind: "excel_bps",
     importDescription: "# Seller package\n\n- Two Business accounts",
     sourceDetectedModelPrices: {
@@ -276,15 +277,45 @@ test("reset credits are visible and require explicit account confirmation", asyn
 
   const reset = page.getByRole("button", { name: "Reset available: 1 · Reset weekly quota", exact: true });
   await expect(reset).toBeVisible();
+  const now = new Date("2026-11-20T12:00:00Z");
+  await page.clock.install({ time: now });
+  await page.clock.pauseAt(new Date(now.getTime() + 1_000));
   await reset.click();
-  const dialog = page.getByRole("dialog", { name: "Reset weekly quota" });
-  await expect(dialog).toContainText("Reset the weekly quota for this account?");
+  const dialog = page.getByRole("dialog", { name: "Do you want to reset the weekly quota?" });
+  await expect(dialog.getByRole("button")).toHaveCount(2);
+  await expect(dialog.locator(".relay-dialog-body")).toBeHidden();
+  const yes = dialog.getByRole("button", { name: /^Yes/ });
+  await expect(yes).toHaveText("Yes (3)");
+  await expect(yes).toBeDisabled();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "No", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "No", exact: true })).toBeFocused();
+  await page.clock.runFor(1_000);
+  await expect(yes).toHaveText("Yes (2)");
+  await page.clock.runFor(1_000);
+  await expect(yes).toHaveText("Yes (1)");
+  await page.clock.runFor(999);
+  await expect(yes).toBeDisabled();
+  await page.clock.runFor(1);
+  await expect(yes).toHaveText("Yes");
+  await expect(yes).toBeEnabled();
+  expect(await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "consume_local_reset_credit"))).toHaveLength(0);
   await dialog.getByRole("button", { name: "No", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(reset).toBeVisible();
 
   await reset.click();
-  await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+  await expect(yes).toHaveText("Yes (3)");
+  await expect(yes).toBeDisabled();
+  await page.clock.runFor(3_000);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(yes).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(dialog).toBeHidden();
   await expect(page.getByRole("button", { name: /Reset available: 0/ })).toHaveCount(0);
 
@@ -295,6 +326,36 @@ test("reset credits are visible and require explicit account confirmation", asyn
   expect(calls.filter((call) => call.command === "consume_local_reset_credit")).toHaveLength(1);
   expect(calls.filter((call) => call.command === "consume_local_reset_credit").at(-1)?.args.accountId).toBe("account_synthetic");
 });
+
+for (const dismissal of ["No", "Escape", "backdrop"] as const) {
+  test(`reset countdown cancels through ${dismissal} and restarts on reopening`, async ({ page }) => {
+    await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    const reset = page.locator(".reset-credits-control");
+    const now = new Date("2026-11-20T12:00:00Z");
+    await page.clock.install({ time: now });
+    await page.clock.pauseAt(new Date(now.getTime() + 1_000));
+    await reset.click();
+    const dialog = page.getByRole("dialog", { name: "Do you want to reset the weekly quota?" });
+    await page.clock.runFor(1_000);
+    await expect(dialog.getByRole("button", { name: "Yes (2)", exact: true })).toBeDisabled();
+    if (dismissal === "No") await dialog.getByRole("button", { name: "No", exact: true }).click();
+    else if (dismissal === "Escape") await page.keyboard.press("Escape");
+    else await page.locator(".relay-modal-backdrop").click({ position: { x: 4, y: 4 } });
+    await expect(dialog).toBeHidden();
+    await expect(reset).toBeFocused();
+    await page.clock.runFor(3_000);
+    await reset.click();
+    await expect(dialog.getByRole("button", { name: "Yes (3)", exact: true })).toBeDisabled();
+    await page.clock.runFor(2_000);
+    await expect(dialog.getByRole("button", { name: "Yes (1)", exact: true })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    expect(await page.evaluate(() => (window as unknown as {
+      __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+    }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "consume_local_reset_credit"))).toHaveLength(0);
+  });
+}
 
 test("pool summary shows the total provider credits across pooled accounts", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, providerCredits: 2.5 });
@@ -344,7 +405,7 @@ for (const nav of ["Connections", "Pool"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: nav, exact: true }).click();
     await page.locator(".reset-credits-control").click();
-    await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+    await page.getByRole("dialog", { name: "Do you want to reset the weekly quota?" }).getByRole("button", { name: "Yes", exact: true }).click();
     const error = page.locator(".reset-credits-inline-error");
     await expect(error).toContainText("Reset was applied, but quota refresh failed");
     await expect(error).toContainText("Quota unavailable");
@@ -361,7 +422,7 @@ test("reset rejection uses redacted diagnostics and leaves the credit available"
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.locator(".reset-credits-control").click();
-  await page.getByRole("dialog", { name: "Reset weekly quota" }).getByRole("button", { name: "Yes, reset", exact: true }).click();
+  await page.getByRole("dialog", { name: "Do you want to reset the weekly quota?" }).getByRole("button", { name: "Yes", exact: true }).click();
   const error = page.locator(".reset-credits-inline-error");
   await expect(error).toContainText("Reset failed: Reset rejected");
   await expect(error).not.toContainText("synthetic-reset-secret");

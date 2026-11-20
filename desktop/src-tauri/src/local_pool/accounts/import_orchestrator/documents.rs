@@ -60,35 +60,15 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
                 "selected import file must use the .json or .txt extension",
             ));
         }
-        // Do not follow links selected by the file picker.  Besides keeping
-        // imports bounded to the files the user actually chose, this avoids
-        // surprising reads from a changing target while the preview is being
-        // prepared.
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-            LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import path is not a file",
-            ));
-        }
-        let length = usize::try_from(metadata.len()).map_err(|_| {
-            LocalPoolError::new(ErrorCode::InvalidState, "selected import file is too large")
-        })?;
-        total_bytes = total_bytes.checked_add(length).ok_or_else(|| {
+        let remaining = (MAX_IMPORT_BYTES - total_bytes) as u64;
+        let bytes = crate::files::read_regular_file_bounded(&path, remaining).map_err(|_| {
             LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import files are too large",
+                ErrorCode::Io,
+                "selected import file is unreadable or exceeds the size limit",
             )
         })?;
-        if total_bytes > MAX_IMPORT_BYTES {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import files are too large",
-            ));
-        }
-        documents.push(std::fs::read_to_string(path).map_err(|_| {
+        total_bytes += bytes.len();
+        documents.push(String::from_utf8(bytes).map_err(|_| {
             LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
         })?);
     }

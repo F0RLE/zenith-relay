@@ -19,7 +19,7 @@ fn connection_cache_budget(connection: &Connection) -> Option<usize> {
 }
 
 impl TelemetryDb {
-    /// Configured pager budget, not a claim about currently allocated pages.
+    /// Configured pager memory budget.
     pub(crate) fn memory_cache_budget(&self) -> Option<usize> {
         let writer = self.connection.try_lock().ok()?;
         let writer_budget = connection_cache_budget(&writer)?;

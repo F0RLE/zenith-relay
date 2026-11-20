@@ -33,10 +33,9 @@ export type WeeklyCapacityGroup = WeeklyCapacitySeries & {
   pricingRevision: string;
 };
 
-/** All workloads of one plan and price revision, deduplicated by the native ledger. */
+/** One series per plan. History retains the observed prices; current uses validated prices. */
 export type WeeklyCapacitySummary = WeeklyCapacitySeries & {
   plan: string;
-  pricingRevision: string;
 };
 
 /** Single-model observations across workload variants, deduplicated by ledger. */

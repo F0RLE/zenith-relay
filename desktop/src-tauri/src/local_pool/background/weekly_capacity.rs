@@ -77,7 +77,7 @@ fn record_capacity(
     now_ms: u64,
 ) -> Result<()> {
     let revision = pricing.revision_key(catalog);
-    for ledger in subscription_ledgers(inventory, account_facts) {
+    for ledger in subscription_ledgers(inventory, account_facts, now_ms) {
         telemetry.observe_weekly_capacity(
             ledger.observation(&revision, now_ms),
             catalog,
@@ -115,6 +115,7 @@ impl SubscriptionLedger<'_> {
 pub(crate) fn subscription_ledgers<'a>(
     inventory: &'a [LocalAccountRecord],
     account_facts: &HashMap<String, Option<AccountCredentialFacts>>,
+    now_ms: u64,
 ) -> Vec<SubscriptionLedger<'a>> {
     let mut ledgers = BTreeMap::<String, Vec<&LocalAccountRecord>>::new();
     for account in inventory {
@@ -125,11 +126,16 @@ pub(crate) fn subscription_ledgers<'a>(
         {
             continue;
         }
-        // A credits-only SIWC route does not spend the shared subscription quota.
+        // SIWC's registration identity is not a native subscription workspace ID.
         let Some(key) = account_facts
             .get(&account.account.id)
             .and_then(Option::as_ref)
-            .filter(|facts| facts.plan_use_enabled)
+            .filter(|facts| {
+                matches!(
+                    facts.oauth_client_kind,
+                    OAuthClientKind::Codex | OAuthClientKind::ExcelBps
+                )
+            })
             .and_then(|facts| facts.credit_balance_key)
         else {
             continue;
@@ -138,33 +144,19 @@ pub(crate) fn subscription_ledgers<'a>(
     }
     let mut result = Vec::new();
     for (ledger, accounts) in ledgers {
-        // SIWC can expose an application ceiling. Only Codex/BPS observations
-        // establish the shared weekly window; all linked routes contribute usage.
         let source = accounts
             .iter()
             .filter(|account| account.account.quota.error.is_none())
-            .filter(|account| {
-                account_facts
-                    .get(&account.account.id)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|facts| {
-                        matches!(
-                            facts.oauth_client_kind,
-                            OAuthClientKind::Codex | OAuthClientKind::ExcelBps
-                        )
-                    })
-            })
             .filter_map(|account| {
-                zenith_relay_core::protocol::api_equivalent_projection_window(
+                let plan = account.account.subscription.plan_type.as_deref()?;
+                let window = zenith_relay_core::protocol::api_equivalent_projection_window(
                     &account.account.quota,
-                )
-                .map(|window| (*account, window))
+                )?;
+                CapacityObservation::usable_weekly_source(plan, window, now_ms)
+                    .then_some((plan, window))
             })
             .max_by_key(|(_, window)| window.observed_at_ms);
-        let Some((account, window)) = source else {
-            continue;
-        };
-        let Some(plan) = account.account.subscription.plan_type.as_deref() else {
+        let Some((plan, window)) = source else {
             continue;
         };
         let mut ids = accounts

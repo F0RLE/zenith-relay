@@ -3,8 +3,7 @@ import type { ErrorOrigin, ToolUseDiagnostics, UsageTotals } from "../../api/typ
 import { formatNumber } from "../../numberFormatting";
 import { normalizeReasoningEffort } from "../../poolFormatting";
 import { observedTokensPerSecond } from "../../usageSpeed";
-import { cacheLifetime } from "./cacheLifetime";
-import { normalizeObservedServiceTier, totalsFromRows } from "./usageData";
+import { totalsFromRows } from "./usageData";
 import type { CodexRequestOrigin, UsageRow } from "./usageData";
 
 export function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
@@ -18,12 +17,6 @@ export function compactRequestId(requestId: string | null): string {
 }
 
 export { formatModelId } from "./usageModelIdentity";
-
-export function formatContextBytes(bytes: number | undefined, locale: string): string {
-  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
-  const kilo = bytes >= 1000;
-  return `${formatNumber(kilo ? bytes / 1000 : bytes, locale, { maximumFractionDigits: 1 })} ${kilo ? "kB" : "B"}`;
-}
 
 export function missingRequiredToolCall(tools: ToolUseDiagnostics | null | undefined): boolean {
   return Boolean(tools && tools.forwardedToolCount > 0 && tools.toolCallCount === 0
@@ -109,8 +102,12 @@ export function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedSe
   return row.serviceTier ? t(`pool.serviceTiers.${row.serviceTier}`) : fallback;
 }
 
-export function formatObservedServiceTier(row: Pick<UsageRow, "appliedServiceTier">): string | null {
-  return normalizeObservedServiceTier(row.appliedServiceTier);
+export function differentAppliedTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction): string | null {
+  const tier = row.appliedServiceTier;
+  const display = tier === "default" ? "standard" : tier === "priority" ? "fast" : tier;
+  if (!display || display === (row.serviceTier ?? "standard")) return null;
+  if (display === "flex") return "Flex";
+  return display === "standard" || display === "fast" || display === "ultrafast" ? t(`pool.serviceTiers.${display}`) : tier;
 }
 
 export function formatWireApi(wireApi: string | null, t: TFunction): string {
@@ -128,11 +125,6 @@ export function formatTransport(transportKind: string | null | undefined, t: TFu
   return transportKind ?? "—";
 }
 
-export function formatEndpointKind(value: string | null | undefined, wireApi: string | null, t: TFunction): string {
-  if (value === "excel_basis_points") return t("usage.endpoints.excelBasisPoints");
-  return formatWireApi(value ?? wireApi, t);
-}
-
 export function formatErrorCategory(category: string | null, t: TFunction): string {
   if (!category) return t("common.unknown");
   return t(`usage.errorCategories.${category}`, { defaultValue: category.replace(/_/g, " ") });
@@ -147,14 +139,6 @@ export function prefixErrorOrigin(origin: ErrorOrigin | null | undefined, messag
   const label = origin === "account" ? "Account" : origin === "provider" ? "Provider" : "Relay";
   const unprefixed = message.replace(/^(?:Account|Provider|Relay):\s*/i, "");
   return `${label}: ${unprefixed}`;
-}
-
-export function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {
-  return t(`usage.toolChoices.${choice}`);
-}
-
-export function formatTerminalOutput(terminalOutput: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
-  return t(`usage.terminalOutputs.${terminalOutput}`);
 }
 
 export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
@@ -187,13 +171,4 @@ export function aggregateRowFromTotals(rowLabel: string, totals: UsageTotals): A
     generationSpeed: observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs),
     apiEquivalent: totals.apiEquivalent,
   };
-}
-
-export function cacheRemainingLabel(life: ReturnType<typeof cacheLifetime>, translate: TFunction) {
-  if (life.windows.length > 1) return translate("usage.cacheReport.mixed", { windows: life.windows.join(", ") });
-  if (life.expiry === "unknown") return translate("usage.cacheReport.unknown");
-  if (life.expiry === "elapsed") return translate("usage.cacheReport.elapsed");
-  const remaining = life.remainingMs ?? 0;
-  if (remaining < 60_000) return translate("usage.cacheReport.soon");
-  return translate("usage.cacheReport.open", { count: Math.max(1, Math.round(remaining / 60_000)) });
 }

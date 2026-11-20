@@ -22,7 +22,7 @@ describe("scalable Desktop localization", () => {
     expect(files.sort()).toEqual(locales.map(locale => `${locale.code}.${locale.format}`).sort());
   });
 
-  test("routing labels match the current scheduler reasons", async () => {
+  test("request telemetry keeps the scheduler's routing reasons even without a UI label", () => {
     const source = readFileSync(new URL("../../../crates/relay-core/src/scheduler/selection/snapshot.rs", import.meta.url), "utf8");
     const body = source.match(/pub enum SelectionReason \{([^}]+)\}/s)?.[1];
     expect(body).toBeDefined();
@@ -30,14 +30,9 @@ describe("scalable Desktop localization", () => {
       .map(([, variant]) => variant.replace(/[A-Z]/g, (letter, offset) => `${offset ? "_" : ""}${letter.toLowerCase()}`))
       .sort();
     expect(reasons.length).toBeGreaterThan(0);
-    for (const locale of locales) {
-      const dictionary = flattenTranslations(await loadTranslations(locale.code));
-      const labels = Object.keys(dictionary)
-        .filter(key => key.startsWith("usage.routingReasons."))
-        .map(key => key.slice("usage.routingReasons.".length))
-        .sort();
-      expect(labels).toEqual(reasons);
-    }
+    const types = readFileSync(new URL("../src/features/relay/api/types/usage.ts", import.meta.url), "utf8");
+    const union = types.match(/type RoutingDiagnostics = \{\s*reason: ([^;]+);/)?.[1] ?? "";
+    expect([...union.matchAll(/"(\w+)"/g)].map(([, name]) => name).sort()).toEqual(reasons);
   });
 
   test("preserves scripts, regions and canonical OS spelling", () => {

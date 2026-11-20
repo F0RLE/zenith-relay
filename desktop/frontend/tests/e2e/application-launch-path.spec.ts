@@ -10,6 +10,105 @@ const applications = [
 
 type InvokeCall = { command: string; args: Record<string, unknown> };
 
+test("only Claude offers an application connection", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+  await page.goto("/");
+  await openApplications(page);
+  for (const application of applications) {
+    await selectApplication(page, application);
+    await expect(page.locator("[data-application-connection]")).toHaveCount(application.id === "claude-desktop" ? 1 : 0);
+  }
+  const reads = (await calls(page)).filter(({ command }) => command === "get_application_connection");
+  expect(reads.length).toBeGreaterThan(0);
+  expect(reads.every(({ args }) => args.application === "claude-desktop")).toBe(true);
+});
+
+test("Claude connection is saved without changing sign-in or launching", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, gatewayRunning: false });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const tauri = (window as unknown as { __TAURI_INTERNALS__: { invoke: (name: string, args: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    await tauri.invoke("rename_local_stored_proxy", { proxyId: "proxy_synthetic_1", label: "Work connection" });
+  });
+  await openApplications(page);
+  const form = await selectApplication(page, applications[1]);
+  const connection = page.locator('[data-application-connection="claude-desktop"]');
+  expect(await connection.evaluate((element) => element.closest(".application-launch-settings") === null)).toBe(true);
+  await expect(form.locator("[data-application-connection]")).toHaveCount(0);
+  await expect(connection.getByRole("button", { name: "Connection: As usual" })).toBeEnabled();
+  await chooseOption(page, connection, "Connection", "proxy_synthetic_1");
+  await expect(connection.locator(".application-connection-status")).not.toHaveClass(/is-default|is-pending/);
+  await expect(connection.locator("small, p, [role=alert]")).toHaveCount(0);
+  await selectApplication(page, applications[0]);
+  await selectApplication(page, applications[1]);
+  await expect(connection.getByRole("button", { name: "Connection: Work connection" })).toBeEnabled();
+  await chooseOption(page, connection, "Connection", "");
+  await expect(connection.getByRole("button", { name: "Connection: As usual" })).toBeEnabled();
+  const invoked = await calls(page);
+  expect(invoked.filter((call) => call.command === "set_application_connection").map((call) => call.args)).toEqual([
+    { application: "claude-desktop", proxyId: "proxy_synthetic_1", expectedRevision: "0" },
+    { application: "claude-desktop", proxyId: null, expectedRevision: "1" },
+  ]);
+  expect(invoked.filter((call) => /^(launch_|stop_|restart_|attach_|connect_)/.test(call.command))).toEqual([]);
+});
+
+test("a removed application connection is shown as unavailable, not as the default", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true });
+  await page.goto("/");
+  await overrideCommand(page, { command: "get_application_connection", result: {
+    proxyId: "proxy_removed", nativeSupported: true, status: "saved", revision: "0",
+  } });
+  const connection = await openClaudeConnection(page);
+  await expect(connection.getByRole("button", { name: "Connection: Connection unavailable" })).toBeEnabled();
+  await expect(connection.locator(".application-connection-status")).toHaveClass(/is-error/);
+  await connection.locator(".application-connection-status").hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Connection unavailable");
+});
+
+test("default Claude connection does not depend on reading the proxy pool", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, gatewayRunning: false });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const tauri = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args: unknown, options?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    tauri.invoke = (name, args, options) => name === "get_local_proxy_pool"
+      ? Promise.reject({ code: "synthetic_proxy_pool_unavailable" }) : invoke(name, args, options);
+  });
+  const connection = await openClaudeConnection(page);
+  const icon = connection.locator(".application-connection-status");
+  await expect(icon).toHaveClass(/is-default/);
+  await expect(icon).toHaveAttribute("aria-label", "Connection status: As usual");
+  await expect(connection.locator("p, small, [role=alert]")).toHaveCount(0);
+  expect((await calls(page)).filter((call) => /^(launch_|stop_|restart_|attach_|connect_)/.test(call.command))).toEqual([]);
+});
+
+test("a failed save leaves the prior choice intact and shows the error only in the icon tooltip", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", populated: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    const tauri = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args: unknown, options?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    tauri.invoke = (name, args, options) => name === "set_application_connection"
+      ? Promise.reject({ code: "connection_changed" })
+      : invoke(name, args, options);
+  });
+  const connection = await openClaudeConnection(page, true);
+  await chooseOption(page, connection, "Подключение", "proxy_synthetic_1");
+  await expect(connection.getByRole("alert")).toHaveCount(0);
+  const icon = connection.locator(".application-connection-status");
+  await expect(icon).toHaveClass(/is-error/);
+  await icon.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Настройки приложения изменились. Нажмите значок, чтобы обновить.");
+  await icon.blur();
+  await icon.focus();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await expect(connection.getByRole("button", { name: "Подключение: Как обычно" })).toBeEnabled();
+});
+
 test("upstream protocol is independent per application and does not restart clients", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "local", populated: true });
   await page.goto("/");
@@ -30,6 +129,126 @@ test("upstream protocol is independent per application and does not restart clie
     { application: "opencode", policy: "gemini", expected: "auto" },
   ]);
   expect(invoked.filter((call) => /^(launch_|stop_|restart_|attach_|connect_)/.test(call.command))).toEqual([]);
+});
+
+test("proxy reachability never claims an application route is active", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, gatewayRunning: false });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const tauri = (window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args?: Record<string, unknown>, options?: unknown) => Promise<unknown> };
+    }).__TAURI_INTERNALS__;
+    const invoke = tauri.invoke.bind(tauri);
+    const pool = await invoke("get_local_proxy_pool") as { entries: { lastCheck?: unknown }[] };
+    pool.entries[0].lastCheck = null;
+    pool.entries[1].lastCheck = { ip: "192.0.2.1", checkedAtMs: Date.now(), errorCode: null };
+    pool.entries[2].lastCheck = { ip: null, checkedAtMs: Date.now(), errorCode: "proxy_check_timeout" };
+    tauri.invoke = (name, args, options) => name === "get_local_proxy_pool" ? Promise.resolve(pool)
+      : invoke(name, args, options);
+  });
+  const connection = await openClaudeConnection(page);
+  const states = ["unverified", "unverified", "error"];
+  for (const [index, status] of states.entries()) {
+    await overrideCommand(page, { command: "get_application_connection", result: {
+      proxyId: `proxy_synthetic_${index + 1}`, nativeSupported: true, status: "saved", revision: String(index),
+    } });
+    const icon = connection.locator(".application-connection-status");
+    await icon.click();
+    await expect(icon).toHaveClass(new RegExp(`is-${status}`));
+    await expect(icon).not.toHaveClass(/is-ready/);
+    await expect(connection.locator("p, small, [role=alert]")).toHaveCount(0);
+    await icon.hover();
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    if (index === 1) {
+      await expect(page.getByRole("tooltip")).toHaveText("Saved in the application. Restart it to apply.");
+    }
+    expect(await icon.evaluate((element) => getComputedStyle(element).color)).not.toBe("rgba(0, 0, 0, 0)");
+    await page.screenshot({ path: `output/playwright/claude-connection-${index}-${status}.png` });
+    await page.mouse.move(0, 0);
+  }
+});
+
+test("connection loading and failed reads stay in the icon and retry without launching", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, gatewayRunning: false });
+  await page.goto("/");
+  await overrideCommand(page, { command: "get_application_connection", failTimes: 1 });
+  const connection = await openClaudeConnection(page);
+  const icon = connection.locator(".application-connection-status");
+  await expect(icon).toHaveClass(/is-error/);
+  await expect(connection.locator(".relay-option-trigger")).toBeDisabled();
+  await expect(connection.locator("p, small, [role=alert]")).toHaveCount(0);
+  await page.keyboard.press("Tab");
+  await icon.focus();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await icon.click();
+  await expect(connection.locator(".relay-option-trigger")).toBeEnabled();
+  await expect(icon).toHaveClass(/is-default/);
+  expect((await calls(page)).filter((call) => /^(launch_|stop_|restart_|attach_|connect_)/.test(call.command))).toEqual([]);
+});
+
+test("refresh reads native settings without starting a proxy probe or claiming application routing", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, gatewayRunning: false });
+  await page.goto("/");
+  await page.evaluate(async () => {
+    const host = window as unknown as {
+      __TAURI_INTERNALS__: { invoke: (name: string, args?: unknown, options?: unknown) => Promise<unknown> };
+      finishConnectionRead?: () => void;
+    };
+    const invoke = host.__TAURI_INTERNALS__.invoke.bind(host.__TAURI_INTERNALS__);
+    const pool = await invoke("get_local_proxy_pool") as { entries: { lastCheck?: unknown }[] };
+    pool.entries[0].lastCheck = null;
+    const setting = { proxyId: "proxy_synthetic_1", nativeSupported: true, status: "saved", revision: "0" };
+    let reads = 0;
+    host.__TAURI_INTERNALS__.invoke = (name, args, options) => name === "get_local_proxy_pool" ? Promise.resolve(pool)
+      : name === "get_application_connection" ? reads++ === 0 ? Promise.resolve(setting) : new Promise((resolve) => {
+        host.finishConnectionRead = () => resolve(setting);
+      }) : invoke(name, args, options);
+  });
+  const connection = await openClaudeConnection(page);
+  const icon = connection.locator(".application-connection-status");
+  await expect(icon).toHaveClass(/is-unverified/);
+  await icon.click();
+  await expect(icon).toHaveClass(/is-pending/);
+  await expect(icon).toHaveAttribute("aria-busy", "true");
+  await expect(connection.locator(".relay-option-trigger")).toBeDisabled();
+  await page.evaluate(() => (window as unknown as { finishConnectionRead: () => void }).finishConnectionRead());
+  await expect(icon).toHaveClass(/is-unverified/);
+  await expect(icon).not.toHaveClass(/is-ready/);
+  await icon.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Saved in the application. Restart it to apply.");
+  await expect(connection.locator(".relay-option-trigger")).toBeEnabled();
+  await expect(connection.locator("p, small, [role=alert]")).toHaveCount(0);
+  expect((await calls(page)).filter(({ command }) => command === "check_local_stored_proxy")).toEqual([]);
+});
+
+test("unsupported Claude configurations disable saving without offering a service", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", claudeConnectionSupported: false });
+  await page.goto("/");
+  const connection = await openClaudeConnection(page);
+  await expect(connection.locator(".relay-option-trigger")).toBeDisabled();
+  const icon = connection.locator(".application-connection-status");
+  await expect(icon).toHaveClass(/is-error/);
+  await icon.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("This Claude Desktop configuration does not support the selected connection.");
+  await expect(connection.locator("p, small, [role=alert]")).toHaveCount(0);
+  expect((await calls(page)).filter(({ command }) => command === "set_application_connection")).toEqual([]);
+});
+
+test("legacy selections stay visible and can be cleared without a native adapter", async ({ page }) => {
+  await installTauriMock(page, { locale: "en" });
+  await page.goto("/");
+  await overrideCommand(page, { command: "get_application_connection", result: {
+    proxyId: "proxy_synthetic_1", nativeSupported: false, status: "legacy", revision: "old",
+  } });
+  await overrideCommand(page, { command: "set_application_connection", record: true, result: {
+    proxyId: null, nativeSupported: false, status: "unsupported", revision: "new",
+  } });
+  const connection = await openClaudeConnection(page);
+  await expect(connection.locator(".application-connection-status")).toHaveClass(/is-error/);
+  await chooseOption(page, connection, "Connection", "");
+  await expect(connection.getByRole("button", { name: "Connection: As usual" })).toBeDisabled();
+  expect((await calls(page)).filter(({ command }) => command === "set_application_connection").at(-1)?.args)
+    .toEqual({ application: "claude-desktop", proxyId: null, expectedRevision: "old" });
 });
 
 test("upstream protocol only offers backend choices and retains the saved value after failure", async ({ page }) => {
@@ -105,6 +324,12 @@ async function openApplications(page: Page, russian = false) {
   await page.getByRole("tab", { name: russian ? "Приложения" : "Applications", exact: true }).click();
 }
 
+async function openClaudeConnection(page: Page, russian = false) {
+  await openApplications(page, russian);
+  await selectApplication(page, applications[1]);
+  return page.locator('[data-application-connection="claude-desktop"]');
+}
+
 async function selectApplication(page: Page, application: typeof applications[number]) {
   await page.locator(".application-workspace .integration-picker").getByRole("tab", { name: application.name, exact: true }).click();
   const form = page.locator(`.application-launch-path[data-application="${application.id}"]`);
@@ -112,7 +337,7 @@ async function selectApplication(page: Page, application: typeof applications[nu
   return form;
 }
 
-async function overrideCommand(page: Page, override: { command: string; failTimes?: number; result?: unknown }) {
+async function overrideCommand(page: Page, override: { command: string; failTimes?: number; result?: unknown; record?: boolean }) {
   await page.evaluate((override) => {
     const internals = (window as unknown as {
       __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
@@ -121,6 +346,9 @@ async function overrideCommand(page: Page, override: { command: string; failTime
     let remaining = override.failTimes ?? 0;
     internals.invoke = (command, args, options) => {
       if (command !== override.command) return invoke(command, args, options);
+      if (override.record) {
+        (window as unknown as { __TAURI_TEST_INVOKES__: unknown[] }).__TAURI_TEST_INVOKES__.push({ command, args });
+      }
       if (remaining > 0) {
         remaining -= 1;
         return Promise.reject("Synthetic application setting failure");
@@ -131,7 +359,7 @@ async function overrideCommand(page: Page, override: { command: string; failTime
 }
 
 for (const application of applications) {
-  test(`${application.name} starts with only an application path, folder picker and Save`, async ({ page }) => {
+  test(`${application.name} path editor keeps the folder picker and Save`, async ({ page }) => {
     await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false });
     await page.goto("/");
     await openApplications(page);
@@ -361,6 +589,13 @@ for (const locale of ["en", "ru"] as const) {
           const form = element.closest("form")!.getBoundingClientRect();
           return box.left >= form.left && box.right <= form.right + 1 && box.right <= innerWidth + 1;
         }))).toBe(true);
+        const connection = page.locator(`[data-application-connection="${application.id}"]`);
+        if (application.id === "claude-desktop") {
+          await expect(connection.getByRole("button", { name: russian ? "Подключение: Как обычно" : "Connection: As usual" })).toBeEnabled();
+          expect(await connection.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+        } else {
+          await expect(connection).toHaveCount(0);
+        }
         await page.screenshot({ path: `output/playwright/launch-path-${application.id}-${locale}-${scenario.width}-${scenario.expanded ? "expanded" : "collapsed"}.png` });
       }
     });

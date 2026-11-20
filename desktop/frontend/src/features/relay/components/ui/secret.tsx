@@ -15,6 +15,7 @@ export function SecretField({
   placeholder,
   labelAction,
   disabled = false,
+  copyable = true,
   onBlur,
 }: {
   label: string;
@@ -23,6 +24,7 @@ export function SecretField({
   placeholder?: string;
   labelAction?: ReactNode;
   disabled?: boolean;
+  copyable?: boolean;
   onBlur?: FocusEventHandler<HTMLInputElement>;
 }) {
   const { t } = useTranslation();
@@ -55,7 +57,7 @@ export function SecretField({
         value={value}
         onChange={(event) => { clearCopied(); setCopyFailed(false); onChange(event.target.value); }}
         onKeyDown={(event) => {
-          if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || (event.code !== "KeyC" && event.key.toLowerCase() !== "c")) return;
+          if (!copyable || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || (event.code !== "KeyC" && event.key.toLowerCase() !== "c")) return;
           event.preventDefault();
           event.stopPropagation();
           const input = event.currentTarget;
@@ -71,7 +73,7 @@ export function SecretField({
         spellCheck={false}
       />
       <div className="secret-field-actions">
-        <IconButton
+        {copyable ? <IconButton
           label={copyFailed ? `${copyLabel}: ${t("common.copyFailed")}` : copied ? `${copyLabel}: ${t("feedback.copied")}` : copyLabel}
           title={copyFailed ? t("common.copyFailed") : copied ? t("feedback.copied") : t("common.copy")}
           icon={copied ? <CheckCircle2 aria-hidden /> : <Copy aria-hidden />}
@@ -81,7 +83,7 @@ export function SecretField({
           data-copied={copied}
           aria-controls={inputId}
           aria-live="polite"
-        />
+        /> : null}
         <IconButton
           label={`${visible ? t("common.hide") : t("common.reveal")}: ${label}`}
           title={visible ? t("common.hide") : t("common.reveal")}
@@ -96,7 +98,13 @@ export function SecretField({
   </div>;
 }
 
-export function CopyButton({ value: copyValue, label, children }: { value: string; label: string; children?: ReactNode }) {
+export function CopyButton({ value: copyValue, label, children, disabled, preserveFocus }: {
+  value: string;
+  label: string;
+  children?: ReactNode;
+  disabled?: boolean;
+  preserveFocus?: boolean;
+}) {
   const { t } = useTranslation();
   const [copied, showCopied, clearCopied] = useTransientFlag(1_500);
   const [failed, setFailed] = useState(false);
@@ -106,7 +114,8 @@ export function CopyButton({ value: copyValue, label, children }: { value: strin
     try { await copyText(copyValue); setFailed(false); showCopied(); }
     catch { clearCopied(); setFailed(true); }
   };
+  const onPointerDown = preserveFocus ? (event: React.PointerEvent) => event.preventDefault() : undefined;
   return children !== undefined
-    ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick}>{children}</Button>
-    : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} />;
+    ? <Button aria-label={accessibleLabel} icon={icon} onClick={onClick} onPointerDown={onPointerDown} disabled={disabled}>{children}</Button>
+    : <IconButton label={accessibleLabel} icon={icon} onClick={onClick} onPointerDown={onPointerDown} disabled={disabled} />;
 }

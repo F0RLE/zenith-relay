@@ -186,7 +186,7 @@ impl OAuthFlowEventSink for DesktopOAuthEvents {
                 }
             }
             if event.status != OAuthFlowStatus::Pending {
-                crate::local_pool::commands::oauth::close_sign_in_window(&app);
+                crate::local_pool::commands::oauth::close_sign_in_window(&event.login_id);
             }
             let _ = app.emit("relay-oauth-status", event);
         }

@@ -15,7 +15,7 @@ fn diagnostic_report_preserves_cache_affinity_without_owner_identifiers() {
         "candidateId":"private-candidate","promptCacheKey":"private-key"});
     row.routing.as_mut().unwrap().cache_affinity = Some(serde_json::from_value(evidence).unwrap());
     let report = document(Some(&row), std::slice::from_ref(&row), false);
-    let affinity = &report["finalRequest"]["routing"]["cacheAffinity"];
+    let affinity = &report["attempts"][0]["routing"]["cacheAffinity"];
     assert_eq!(affinity["reason"], "owner_unavailable");
     assert_eq!(affinity["ownerBlockReason"], "capacity_busy");
     assert_eq!(affinity["quotaSwitchMarginBasisPoints"], 500);
@@ -38,7 +38,7 @@ fn diagnostic_report_separates_post_policy_catalog_from_prompt_embedded_contract
             "renderedSchemaBytes": 2075, "catalogPromptBytes": 4500, "loadedToolCount": 4, "discoveryRounds": 1}
     })).unwrap());
     let report = document(Some(&row), std::slice::from_ref(&row), false);
-    let tools = &report["finalRequest"]["tools"];
+    let tools = &report["attempts"][0]["tools"];
     assert_eq!(tools["policyCatalog"]["toolCount"], 312);
     assert_eq!(tools["policyCatalog"]["schemaBytes"], 389861);
     assert!(tools.get("forwardedToolCount").is_none());
@@ -70,17 +70,25 @@ fn diagnostic_report_preserves_final_encoded_payload_without_private_content() {
             "upstream":"http","mode":"native","requestPayload":{
                 "mode":"full","fullRequestReason":"no_previous_response_id",
                 "jsonBytes":100000,"bodyBytes":2000,"contentEncoding":"zstd","compressionMs":0,
-                "compressionUs":420,"httpSendToHeadersMs":12
+                "compressionUs":420,"authorizationMs":748,
+                "httpDispatchPreparationMs":0,"httpSendToHeadersMs":12
             }
         }))
         .unwrap(),
     );
     let report = document(Some(&row), std::slice::from_ref(&row), false);
-    let payload = &report["finalRequest"]["routing"]["transport"]["requestPayload"];
+    let transport = &report["attempts"][0]["routing"]["transport"];
+    let payload = &transport["requestPayload"];
+    assert_eq!(
+        transport["codexServerTimingAvailability"],
+        "unsupported_for_transport"
+    );
     assert_eq!(payload["jsonBytes"], 100000);
     assert_eq!(payload["bodyBytes"], 2000);
     assert_eq!(payload["compressionMs"], 0);
     assert_eq!(payload["compressionUs"], 420);
+    assert_eq!(payload["authorizationMs"], 748);
+    assert_eq!(payload["httpDispatchPreparationMs"], 0);
     assert_eq!(payload["httpSendToHeadersMs"], 12);
     assert_eq!(payload["contentEncoding"], "zstd");
     assert_eq!(payload["fullRequestReason"], "no_previous_response_id");
@@ -90,6 +98,32 @@ fn diagnostic_report_preserves_final_encoded_payload_without_private_content() {
             .unwrap()
             .contains("not an acknowledgement")
     );
+}
+
+#[test]
+fn diagnostic_report_distinguishes_missing_from_explicitly_unavailable_cache() {
+    for (provider, availability) in [
+        (Value::Null, "not_observed"),
+        (json!({"type":"unavailable"}), "reported_unavailable"),
+        (json!({"type":"cache_hit"}), "reported"),
+    ] {
+        let mut row = diagnostic_rows().pop().unwrap();
+        row.routing.as_mut().unwrap().cache_context = Some(
+            serde_json::from_value(json!({
+                "baseline":"first_observation","scope":"unavailable",
+                "clientChanges":[],"upstreamChanges":[],"relayChanges":[],
+                "clientHistory":{"comparison":"not_compared"},
+                "upstreamHistory":{"comparison":"not_compared"},
+                "relayHistory":{"comparison":"not_compared"},
+                "provider":provider
+            }))
+            .unwrap(),
+        );
+        let report = document(Some(&row), std::slice::from_ref(&row), false);
+        let context = &report["attempts"][0]["routing"]["cacheContext"];
+        assert_eq!(context["providerAvailability"], availability);
+        assert_eq!(context["provider"], provider);
+    }
 }
 
 fn preparation_report(total: Option<u64>, phases: Value) -> Value {
@@ -127,7 +161,7 @@ fn diagnostic_report_explains_preparation_remainder_without_adding_nested_valida
         ),
     ] {
         let report = preparation_report(Some(2408), phases);
-        let transport = &report["finalRequest"]["routing"]["transport"];
+        let transport = &report["attempts"][0]["routing"]["transport"];
         assert_eq!(transport["requestPreparationMs"], 2408);
         assert_eq!(transport["requestPreparation"]["schemaValidationMs"], 22);
         let accounting = &transport["preparationAccounting"];
@@ -153,12 +187,12 @@ fn diagnostic_report_does_not_turn_missing_or_conflicting_timing_into_zero() {
         (Some(22), Value::Null, "not_observed"),
     ] {
         let report = preparation_report(total, phases);
-        let accounting = &report["finalRequest"]["routing"]["transport"]["preparationAccounting"];
+        let accounting = &report["attempts"][0]["routing"]["transport"]["preparationAccounting"];
         assert_eq!(accounting["status"], status);
         assert!(accounting["unattributedMs"].is_null());
     }
     let report = preparation_report(Some(0), json!({"bodyMs": 0}));
-    let accounting = &report["finalRequest"]["routing"]["transport"]["preparationAccounting"];
+    let accounting = &report["attempts"][0]["routing"]["transport"]["preparationAccounting"];
     assert_eq!(accounting["status"], "consistent");
     assert_eq!(accounting["unattributedMs"], 0);
     assert_eq!(accounting["observedPhaseCount"], 1);

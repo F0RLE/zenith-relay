@@ -1,5 +1,6 @@
 use super::pricing_context;
 use crate::local_pool::{
+    background::weekly_capacity::subscription_ledgers,
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
     store::telemetry_db::{
@@ -15,10 +16,32 @@ pub async fn get_local_weekly_capacity(
     input: Option<WeeklyCapacityQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<WeeklyCapacityReport, CommandError> {
-    let telemetry = state.telemetry.clone();
+    let state = state.inner().clone();
     super::run_blocking(move || {
         let now = zenith_relay_core::unix_time_ms();
-        telemetry.weekly_capacity_report(input.unwrap_or_default(), now)
+        let query = input.unwrap_or_default();
+        if query.to_ms.is_some_and(|to| to < now) {
+            return state.telemetry.weekly_capacity_report(query, now, &[]);
+        }
+        let accounts = state.store()?.accounts().to_vec();
+        let facts = match state.cached_account_credential_facts(&accounts) {
+            Ok(facts) => facts,
+            // A locked credential store prevents current attribution, not a history read.
+            Err(error) if error.code == ErrorCode::SecretStoreUnavailable => {
+                return state.telemetry.weekly_capacity_report(query, now, &[]);
+            }
+            Err(error) => return Err(error),
+        };
+        let revision = zenith_relay_core::pricing::PricingContext::default()
+            .revision_key(&state.pricing_catalog());
+        let ledgers = subscription_ledgers(&accounts, &facts, now);
+        let observations = ledgers
+            .iter()
+            .map(|ledger| ledger.observation(&revision, now))
+            .collect::<Vec<_>>();
+        state
+            .telemetry
+            .weekly_capacity_report(query, now, &observations)
     })
     .await
     .map_err(Into::into)

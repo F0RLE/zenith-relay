@@ -76,9 +76,9 @@ test("pool sign-in status starts reauthentication for that account", async ({ pa
   const signIn = member.getByRole("button", { name: "Sign-in required", exact: true });
   await expect(signIn).toBeVisible();
   await signIn.click();
-  await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Sign in" }).getByRole("region", { name: "Sign-in page" })).toBeVisible();
   const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));
-  expect(oauthStart?.args).toEqual({ openBrowser: false, accountId: "account_synthetic" });
+  expect(oauthStart?.args).toEqual({ presentation: { openWindow: false, embedded: true }, accountId: "account_synthetic" });
 });
 
 test("connections show the same sign-in action instead of stale quota data", async ({ page }) => {
@@ -94,7 +94,7 @@ test("connections show the same sign-in action instead of stale quota data", asy
   await signIn.click();
   await expect(page.getByRole("dialog", { name: "Sign in" })).toBeVisible();
   const oauthStart = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((call) => call.command === "start_codex_oauth"));
-  expect(oauthStart?.args).toEqual({ openBrowser: false, accountId: "account_synthetic" });
+  expect(oauthStart?.args).toEqual({ presentation: { openWindow: false, embedded: true }, accountId: "account_synthetic" });
 });
 
 test("connections stay outside the pool until the user adds selected members", async ({ page }) => {

@@ -387,7 +387,7 @@ fn cache_sessions_follow_the_latest_cache_touch_and_reported_window() {
                 started_at: "2026-09-27T10:00:00Z".into(),
                 touched_at: "2026-09-27T10:40:00Z".into(),
                 model: Some("claude-sonnet".into()),
-                cache_write_ttl: Some("1h".into()),
+                cache_write_ttl: None,
             },
         ]
     );
@@ -571,11 +571,11 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
         .unwrap();
     assert_eq!(sessions.len(), 5);
     for (kind, id, model, expected_ttl, expected_time) in [
-        ("account", "a", "m1", "30m", "12:25:00"),
-        ("account", "a", "m2", "5m", "12:26:00"),
-        ("account", "b", "m1", "1h", "12:27:00"),
-        ("source", "a", "m1", "15m", "12:28:00"),
-        ("source", "source-b", "m1", "45m", "12:29:00"),
+        ("account", "a", "m1", None, "12:25:00"),
+        ("account", "a", "m2", Some("5m"), "12:26:00"),
+        ("account", "b", "m1", Some("1h"), "12:27:00"),
+        ("source", "a", "m1", Some("15m"), "12:28:00"),
+        ("source", "source-b", "m1", Some("45m"), "12:29:00"),
     ] {
         let session = sessions
             .iter()
@@ -585,7 +585,7 @@ fn cache_sessions_isolate_routes_and_ignore_misses_and_future_policies() {
                     && session.model.as_deref() == Some(model)
             })
             .unwrap();
-        assert_eq!(session.cache_write_ttl.as_deref(), Some(expected_ttl));
+        assert_eq!(session.cache_write_ttl.as_deref(), expected_ttl);
         assert_eq!(session.touched_at, format!("2026-10-18T{expected_time}Z"));
         let scoped = database
             .cache_sessions(

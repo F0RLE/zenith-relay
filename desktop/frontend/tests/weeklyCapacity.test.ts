@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WeeklyCapacityGroup, WeeklyCapacityReport } from "../src/features/relay/api/types/weeklyCapacity";
-import { cachedCapacity, capacityCurrent, capacityModelOptions, loadCapacity, nextCapacityExpiry } from "../src/features/relay/pages/overview/weeklyCapacityModel";
+import { cachedCapacity, capacityCurrent, capacityModelOptions, formatCapacityEstimate, loadCapacity, nextCapacityExpiry } from "../src/features/relay/pages/overview/weeklyCapacityModel";
 
 const DAY = 86_400_000;
 const NOW = 2_000_000_000_000;
@@ -12,19 +12,26 @@ function report(id = "synthetic"): WeeklyCapacityReport {
       validUntilMs: NOW + 3 * DAY, medianMicroUsd: 100_000_000,
       lowMicroUsd: 90_000_000, highMicroUsd: 110_000_000, accountCount: 3, consumedBasisPoints: 1500 },
   };
-  return { generatedAtMs: NOW, events: [], groups: [group], models: [{ ...group, model: "model" }], summaries: [{
-    plan: group.plan, pricingRevision: group.pricingRevision,
+  const summary = {
+    plan: group.plan,
     points: group.points, current: group.current, stale: group.stale,
-  }] };
+  };
+  return { generatedAtMs: NOW, events: [], groups: [group], models: [{ ...summary, model: "model" }], summaries: [summary] };
 }
 
 describe("weekly capacity", () => {
+  test("displays recorded microdollars without rounding to cents or inventing precision", () => {
+    expect(formatCapacityEstimate(123_456_789, "en")).toBe("≈$123.456789");
+    expect(formatCapacityEstimate(123_400_000, "ru").replace(/\s/g, " ")).toBe("≈123,40 $");
+    expect(formatCapacityEstimate(1, "en")).toBe("≈$0.000001");
+    expect(formatCapacityEstimate(Number.MAX_SAFE_INTEGER, "en")).toBe("≈$9,007,199,254.740991");
+  });
+
   test("model choices are unique names without workload ordinals or mixtures", () => {
     const model = report().models[0]!;
     const options = capacityModelOptions([
       { ...model, model: "other-model" },
       model,
-      { ...model, pricingRevision: "older" },
       { ...model, model: "literal+model" },
     ]);
     expect(options).toEqual([
@@ -40,6 +47,7 @@ describe("weekly capacity", () => {
     const group = report().groups[0]!;
     expect(capacityCurrent(group, NOW)?.stale).toBe(false);
     expect(capacityCurrent(group, NOW + DAY)?.stale).toBe(true);
+    expect(capacityCurrent(group, NOW + 3 * DAY - 60_000)).toBeNull();
     expect(capacityCurrent(group, NOW + 3 * DAY)).toBeNull();
     expect(capacityCurrent(group, NOW - 1)).toBeNull();
     const expired: WeeklyCapacityGroup = { ...group, current: { ...group.current!, validUntilMs: NOW } };
@@ -49,7 +57,7 @@ describe("weekly capacity", () => {
 
   test("schedules only freshness/reset deadlines, with no provider polling", () => {
     expect(nextCapacityExpiry(report(), NOW)).toBe(NOW + DAY - 60_000);
-    expect(nextCapacityExpiry(report(), NOW + DAY)).toBe(NOW + 3 * DAY);
+    expect(nextCapacityExpiry(report(), NOW + DAY)).toBe(NOW + 3 * DAY - 60_000);
     expect(nextCapacityExpiry(report(), NOW + 3 * DAY)).toBeNull();
     const summaryOnly = { ...report(), groups: [] };
     expect(nextCapacityExpiry(summaryOnly, NOW)).toBe(NOW + DAY - 60_000);

@@ -21,6 +21,7 @@ pub(super) fn reconcile_imported_credentials(
     settings: &GatewaySettings,
     issued_at_ms: u64,
     mut material: ImportedCredentialMaterial,
+    bundle_proxy_url: Option<String>,
 ) -> ItemResult<ReconciledImportCredentials> {
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
         ImportItemError::new(
@@ -89,6 +90,10 @@ pub(super) fn reconcile_imported_credentials(
                 previous_credentials.proxy_url().map(str::to_owned),
                 previous_credentials.bypass_common_proxy(),
             )
+            .map_err(credential_item_error)?;
+    } else if existing_account.is_none() && bundle_proxy_url.is_some() {
+        credentials = credentials
+            .with_proxy_route(bundle_proxy_url, false)
             .map_err(credential_item_error)?;
     }
     let proxy = effective_proxy_config(settings, &credentials).map_err(proxy_item_error)?;

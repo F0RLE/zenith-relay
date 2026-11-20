@@ -20,7 +20,7 @@ fn facts(kind: OAuthClientKind) -> Option<AccountCredentialFacts> {
 }
 
 #[test]
-fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() {
+fn collector_uses_native_workspace_evidence_not_siwc_registration() {
     let root = crate::files::test_temp_root("capacity-collector");
     let telemetry = TelemetryDb::open(&root.join("test.sqlite")).unwrap();
     let mut codex = super::super::tests::account_record();
@@ -59,12 +59,37 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         ("bps".into(), facts(OAuthClientKind::ExcelBps)),
         ("siwc".into(), facts(OAuthClientKind::Siwc)),
     ]);
-    let ledgers = subscription_ledgers(&inventory, &facts);
+    let ledgers = subscription_ledgers(&inventory, &facts, NOW + 2000);
     assert_eq!(ledgers.len(), 1);
-    assert_eq!(ledgers[0].account_ids, ["bps", "codex", "siwc"]);
+    assert_eq!(ledgers[0].account_ids, ["bps", "codex"]);
     assert_eq!(ledgers[0].plan, "plus");
     assert_eq!(ledgers[0].window.observed_at_ms, NOW + 1000);
-    assert!(subscription_ledgers(&inventory[2..], &facts).is_empty());
+    assert!(subscription_ledgers(&inventory[2..], &facts, NOW + 2000).is_empty());
+    let plan = inventory[1].account.subscription.plan_type.take();
+    assert_eq!(
+        subscription_ledgers(&inventory, &facts, NOW + 2000)[0]
+            .window
+            .observed_at_ms,
+        NOW,
+        "a newer reader without a known plan must not hide Codex evidence"
+    );
+    inventory[1].account.subscription.plan_type = plan;
+    let newer = inventory[1].account.quota.secondary.as_mut().unwrap();
+    let reset = newer.reset_at_ms.replace(NOW + 1500);
+    assert_eq!(
+        subscription_ledgers(&inventory, &facts, NOW + 2000)[0]
+            .window
+            .observed_at_ms,
+        NOW,
+        "an expired weekly window must not hide a valid reader"
+    );
+    inventory[1]
+        .account
+        .quota
+        .secondary
+        .as_mut()
+        .unwrap()
+        .reset_at_ms = reset;
     let catalog = PricingCatalog::from_litellm_payload(&serde_json::json!({"model":{
         "litellm_provider":"openai", "input_cost_per_token":0.000002, "output_cost_per_token":0.00001,
     }}), Some("synthetic".into()), Some(1), false).unwrap();
@@ -81,7 +106,9 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
     };
     observe(&inventory, NOW + 2000);
     let revision_before_reset = telemetry.weekly_capacity_revision();
-    let weekly_before_reset = subscription_ledgers(&inventory, &facts)[0].window.clone();
+    let weekly_before_reset = subscription_ledgers(&inventory, &facts, NOW + 2000)[0]
+        .window
+        .clone();
     let burst = inventory[1].account.quota.primary.as_mut().unwrap();
     burst.window_start_ms = Some(NOW + 30_000);
     burst.reset_at_ms = Some(NOW + 18_030_000);
@@ -90,7 +117,7 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
     burst.observed_at_ms = NOW + 30_000;
     observe(&inventory, NOW + 30_000);
     assert_eq!(
-        subscription_ledgers(&inventory, &facts)[0].window,
+        subscription_ledgers(&inventory, &facts, NOW + 30_000)[0].window,
         &weekly_before_reset
     );
     assert_eq!(telemetry.weekly_capacity_revision(), revision_before_reset);
@@ -104,7 +131,7 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         .observed_at_ms = NOW + 60_000;
     observe(&inventory, NOW + 60_000);
     let report = telemetry
-        .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 60_000)
+        .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 60_000, &[])
         .unwrap();
     assert_eq!(report.events.len(), 1);
     assert_eq!(report.events[0].plan, "pro");
@@ -117,7 +144,7 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
         .unwrap()
         .plan_use_enabled = false;
     assert_eq!(
-        subscription_ledgers(&inventory, &credits_only)[0].account_ids,
+        subscription_ledgers(&inventory, &credits_only, NOW + 60_000)[0].account_ids,
         ["bps", "codex"]
     );
     record_capacity(
@@ -136,11 +163,12 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
                 ..Default::default()
             },
             NOW + 60_000,
+            &[],
         )
         .unwrap();
     assert!(
         scoped.events.is_empty(),
-        "credits-only use must not enter subscription evidence"
+        "SIWC use must not enter weekly evidence without a workspace identity"
     );
     telemetry.clear().unwrap();
     observe(&inventory[2..], NOW + 60_000);
@@ -155,7 +183,7 @@ fn collector_uses_shared_weekly_evidence_not_siwc_ceiling_without_ui_snapshot() 
     observe(&inventory[2..], NOW + 120_000);
     assert!(
         telemetry
-            .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 120_000)
+            .weekly_capacity_report(WeeklyCapacityQuery::default(), NOW + 120_000, &[])
             .unwrap()
             .events
             .is_empty()

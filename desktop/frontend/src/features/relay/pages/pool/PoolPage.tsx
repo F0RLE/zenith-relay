@@ -26,7 +26,7 @@ export function PoolPage() {
   const [connectDialog, setConnectDialog] = useState(false);
   const [routingPolicy, setRoutingPolicy] = useState(false);
   const [configurationPreview, setConfigurationPreview] = useState<ConfigurationPresetPreview | null>(null);
-  const oauth = useOAuthSignIn(() => refresh());
+  const oauth = useOAuthSignIn(() => refresh(), true);
   const claudeDesktop = useClaudeDesktopLaunch();
   const localPool = mode === "local";
   const supportsRoutingSettings = localPool && Boolean(runtime);

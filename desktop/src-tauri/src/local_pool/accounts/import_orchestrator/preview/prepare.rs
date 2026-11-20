@@ -58,7 +58,15 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
                 ("auth_mode", row.auth_mode.as_str().to_string()),
             ],
         );
-        let original_json = parsed_item_json(&import_item, row.auth_mode);
+        let mut original_json = parsed_item_json(&import_item, row.auth_mode);
+        if let Some(url) = import_item.bundle_proxy_url() {
+            // Neither a file-supplied proxy nor a fallback route is approved at preview time.
+            original_json["proxyIndex"] = 0.into();
+            prepared_items.push(serde_json::json!({
+                "format": "zenith", "version": 2, "proxies": [url], "accounts": [original_json]
+            }));
+            continue;
+        }
         if row.auth_mode == ImportAuthMode::ApiKey {
             if let (Some(base_url), Some(api_key)) = (
                 import_item.base_url.as_deref(),
@@ -67,8 +75,7 @@ pub(in crate::local_pool::accounts::import_orchestrator) async fn prepare_import
                 .map_err(import_item_command_error)?
                 .is_some()
             {
-                row.existing = true;
-                row.status = ImportPreviewStatus::Existing;
+                row.mark_existing();
             }
             prepared_items.push(original_json);
             crate::diagnostics::breadcrumb(

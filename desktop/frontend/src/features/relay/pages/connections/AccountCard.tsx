@@ -21,7 +21,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot } from "../../api/types";
 import { accountDisplayStatus, accountQuotaRefreshState, accountSurfaceTone, canLaunchCodexAccount, currentAccountErrorCode, transientCandidateTone } from "../../accountStatus";
 import { refreshOneAccountQuota } from "../../accountQuotaRefresh";
-import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountSubscriptionSource, linkedAccountQuotaIndicator } from "../../accountRoutes";
+import { accountMetadataHint, accountMetadataIsStale, accountMetadataSources, accountRouteConnections, accountSubscriptionSource } from "../../accountRoutes";
 import {
   AccountBadges,
   ActionMenu,
@@ -113,21 +113,16 @@ export function AccountCard({
   const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
   const canLaunch = canLaunchCodexAccount(account) && !recoveryRequired;
   const surfaceTone = accountSurfaceTone(account, recoveryRequired, runtimeState);
-  const quotaIndicator = linkedAccountQuotaIndicator(account, metadata.quota, nowMs,
-    surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone);
-  const indicatorTone = quotaIndicator.tone;
-  const linkedQuotaHint = quotaIndicator.warning ? accountMetadataHint(metadata.quota, "quota", nowMs, t, i18n.language) : null;
+  const indicatorTone = surfaceTone === "ready" ? runtimeTone ?? surfaceTone : surfaceTone;
   const statusIndicatorLabel = quotaStatus === "updated" || quotaStatus === "not_available" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
   const indicatorLabel = [
-    `${clientAuthWarning ? `${t("accounts.clientAuthWarning")} · ` : ""}${runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel}`,
-    linkedQuotaHint,
+    clientAuthWarning ? t("accounts.clientAuthWarning") : null, statusIndicatorLabel, runtimeHint,
   ].filter(Boolean).join(" · ");
   const errorLabel = displayedErrorCode ? accountErrorLabel(displayedErrorCode, t) : null;
   const errorIndicatorLabel = [
     operationalStatus === "rotation" || operationalStatus === "unavailable" ? null : operationalLabel,
     errorLabel,
     runtimeHint,
-    linkedQuotaHint,
   ].filter(Boolean).join(" · ");
 
   const updateParticipation = async (participate: boolean) => {
@@ -212,7 +207,7 @@ export function AccountCard({
             </ActionMenuItem>
             <ActionMenuItem
               icon={<Download aria-hidden />}
-              disabled={!account.secretAvailable}
+              disabled={!account.secretAvailable && !accountRouteConnections(account, runtime?.accounts ?? []).some((connection) => connection.secretAvailable)}
               onClick={() => onExport([account.id])}
             >
               {t("accounts.exportOne", { name: account.label })}

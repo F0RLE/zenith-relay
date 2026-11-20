@@ -15,11 +15,7 @@ fn classification(row: &UsageLog) -> (&'static str, &'static str, bool) {
                 && row.error_origin.is_none()
                 && row.upstream_error.is_none() =>
         {
-            (
-                "intermediate",
-                "Relay loaded tool definitions; this is not a failed client request.",
-                false,
-            )
+            ("intermediate", "Intermediate tool-discovery step.", false)
         }
         Some(AttemptOutcome::ToolDiscovery) => (
             "inconsistent",
@@ -30,19 +26,15 @@ fn classification(row: &UsageLog) -> (&'static str, &'static str, bool) {
             AttemptOutcome::RetrySelection
             | AttemptOutcome::RetryRepair
             | AttemptOutcome::RetryAuthorization,
-        ) => (
-            "retrying",
-            "Relay continued with another attempt; this step is not the final request outcome.",
-            false,
-        ),
+        ) => ("retrying", "Intermediate attempt; Relay continued.", false),
         Some(AttemptOutcome::ExecutionUncertain) => (
             "execution_uncertain",
-            "Execution may have started; completion is unknown. Do not infer that retrying is safe.",
+            "Execution may have started; completion is unknown. Automatic retry is unsafe.",
             true,
         ),
         Some(AttemptOutcome::ClientDisconnected) => (
             "client_disconnected",
-            "The client disconnected; this does not establish whether provider execution completed.",
+            "Client disconnected; provider completion is unknown.",
             true,
         ),
         Some(AttemptOutcome::ReturnedFailure) => {
@@ -63,11 +55,7 @@ fn classification(row: &UsageLog) -> (&'static str, &'static str, bool) {
             "The retained observation records a failure.",
             true,
         ),
-        None => (
-            "unknown",
-            "No terminal outcome was retained; a false success flag alone does not establish failure.",
-            false,
-        ),
+        None => ("unknown", "Terminal outcome unavailable.", false),
     }
 }
 
@@ -125,6 +113,32 @@ pub(super) fn summarize(
             "overflow": sum.is_none(),
         })
     };
+    let routing = final_request.and_then(|row| row.routing.as_ref());
+    let phases = routing.and_then(|routing| routing.request_timing.as_ref()?.phases.as_ref());
+    let first_attempt_phases = phases.filter(|phases| {
+        phases.prior_attempts_ms.is_some() || final_request.is_some_and(|row| row.attempt <= 1)
+    });
+    let request_preparation_ms = first_attempt_phases.and_then(|phases| {
+        if phases.prior_attempts_ms.is_some() {
+            phases.request_preparation_ms
+        } else {
+            routing?.transport.as_ref()?.request_preparation_ms
+        }
+    });
+    let pre_attempt_unattributed_ms = first_attempt_phases.and_then(|phases| {
+        let mut measured = [
+            phases.body_read_and_parse_ms,
+            phases.bps_access_refresh_ms,
+            phases.cache_context_ms,
+            phases.candidate_selection_ms,
+            request_preparation_ms,
+        ]
+        .into_iter()
+        .flatten();
+        let first = measured.next()?;
+        let observed = measured.try_fold(first, u64::checked_add)?;
+        phases.pre_attempt_ms.checked_sub(observed)
+    });
     json!({
         "outcome": final_request.map(outcome),
         "scope": "retained_sends_before_export_detail_size_limit",
@@ -138,7 +152,20 @@ pub(super) fn summarize(
         "reportedTiming": {
             "source": "latest_request_projection_not_sum_of_attempts",
             "durationMs": final_request.map(|row| row.latency_ms),
-            "ttftMs": final_request.and_then(|row| row.ttft_ms),
+            "upstreamTtftMs": phases.and_then(|phases| phases.upstream_ttft_ms),
+            "clientFirstOutputMs": phases.and_then(|phases| phases.client_first_output_ms),
+            "legacyTtftMs": final_request.filter(|_| phases.is_none()).and_then(|row| row.ttft_ms),
+            "preAttemptMs": first_attempt_phases.map(|phases| phases.pre_attempt_ms),
+            "priorAttemptsMs": phases.and_then(|phases| phases.prior_attempts_ms),
+            "legacyPreFinalAttemptMs": phases.filter(|_| first_attempt_phases.is_none()).map(|phases| phases.pre_attempt_ms),
+            "postAttemptMs": phases.and_then(|phases| phases.post_attempt_ms),
+            "afterClientReadyMs": phases.and_then(|phases| phases.after_client_ready_ms),
+            "bodyReadAndParseMs": phases.and_then(|phases| phases.body_read_and_parse_ms),
+            "bpsAccessRefreshMs": phases.and_then(|phases| phases.bps_access_refresh_ms),
+            "cacheContextMs": phases.and_then(|phases| phases.cache_context_ms),
+            "candidateSelectionMs": first_attempt_phases.and_then(|phases| phases.candidate_selection_ms),
+            "requestPreparationMs": request_preparation_ms,
+            "preAttemptUnattributedMs": pre_attempt_unattributed_ms,
             "generationMs": final_request.and_then(|row| row.generation_ms),
         },
         "consumption": {

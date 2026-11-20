@@ -3,6 +3,7 @@ import type { AccountSummary, ApiModelPriceOverride, CacheContextDiagnostics, Ca
 import type { WeeklyCapacityReport } from "../../../src/features/relay/api/types/weeklyCapacity";
 
 export type RuntimeMockOptions = {
+  claudeConnectionSupported?: boolean;
   platform?: "windows" | "macos" | "linux";
   fullscreen?: boolean;
   locale?: "en" | "ru";
@@ -64,6 +65,7 @@ export type AccountMockOptions = {
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
   importPreviewError?: boolean;
+  importBundleProxy?: boolean;
   importPreviewDelayMs?: number;
   importPreviewDeferred?: boolean;
   importConfirmDelayMs?: number;
@@ -100,6 +102,7 @@ export type SourceMockOptions = {
 
 export type UsageMockOptions = {
   weeklyCapacity?: WeeklyCapacityReport;
+  dailyWeeklyCapacity?: WeeklyCapacityReport;
   weeklyCapacityError?: boolean;
   usageAccountIndex?: number;
   usagePresent?: boolean;

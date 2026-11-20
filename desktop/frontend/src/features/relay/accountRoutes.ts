@@ -1,8 +1,10 @@
 import type { AccountSummary, OAuthClientKind } from "./api/types";
 import type { TFunction } from "i18next";
-import { accountQuotaRefreshState, type accountSurfaceTone } from "./accountStatus";
+import { accountQuotaRefreshState } from "./accountStatus";
 import { accountPlanOption } from "./accountPlans";
 import { isFastSupplementalQuota } from "./quotaFormatting";
+
+export const accountRouteNames: Record<OAuthClientKind, string> = { codex: "Codex", siwc: "SIWC", excel_bps: "Excel / BPS" };
 
 type AccountRouteIndex = {
   byId: ReadonlyMap<string, AccountSummary>;
@@ -96,24 +98,18 @@ export function linkedAccountQuotaState(source: AccountSummary, nowMs: number): 
     ? "exhausted" : "available";
 }
 
-export function linkedAccountQuotaIndicator(account: AccountSummary, source: AccountSummary, nowMs: number, tone: ReturnType<typeof accountSurfaceTone>) {
-  const warning = account.id !== source.id && (tone === "ready" || tone === "warning")
-    && linkedAccountQuotaState(source, nowMs) !== "available";
-  return { tone: warning ? "warning" as const : tone, warning };
-}
-
 export function accountMetadataHint(source: AccountSummary, resource: "plan" | "quota", nowMs: number, t: TFunction, locale: string) {
   const { observedAtMs } = accountMetadataObservation(source, resource);
   const time = observedAtMs != null && observedAtMs <= nowMs
     ? formatMetadataDate(observedAtMs, locale)
     : t("accounts.routeMetadataTimeUnknown");
   const quotaState = resource === "quota" ? linkedAccountQuotaState(source, nowMs) : null;
+  const client = source.oauthClientKind ? accountRouteNames[source.oauthClientKind] : t("common.unknown");
   return [
-    t("accounts.routeMetadataSource", { client: source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex", time }),
+    t("accounts.routeMetadataSource", { client, time }),
     accountMetadataIsStale(source, resource, nowMs) ? t("accounts.routeMetadataStale") : null,
     quotaState === "exhausted" || quotaState === "weekly_exhausted"
-      ? t(`accounts.linkedQuotaStatus.${quotaState}`, { client: source.oauthClientKind === "excel_bps" ? "Excel / BPS" : "Codex" }) : null,
-    t("accounts.routeMetadataFrom"),
+      ? t(`accounts.linkedQuotaStatus.${quotaState}`, { client }) : null,
   ].filter(Boolean).join(" · ");
 }
 

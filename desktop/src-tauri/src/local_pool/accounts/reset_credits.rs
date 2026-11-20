@@ -1,4 +1,7 @@
-use super::{quota_refresh::verify_reset_account_quota, refresh_observations::AccountRefreshScope};
+use super::{
+    quota_refresh::{AccountQuotaOutcome, AccountQuotaRefreshResponse, verify_reset_account_quota},
+    refresh_observations::AccountRefreshScope,
+};
 use crate::local_pool::{
     error::{CommandError, LocalPoolError, Result as LocalResult},
     refresh,
@@ -7,7 +10,6 @@ use crate::local_pool::{
 use reqwest::StatusCode;
 use serde::Serialize;
 use tauri::State;
-use uuid::Uuid;
 
 #[cfg(test)]
 use zenith_relay_core::providers::chatgpt::connector::reset_credits::ResetCreditsSnapshot;
@@ -15,6 +17,9 @@ use zenith_relay_core::providers::chatgpt::connector::reset_credits::{
     ResetHttpResponse,
     workflow::{self, ResetHost},
 };
+
+mod trace;
+pub(crate) use trace::{ResetAttempt, ResetOrigin};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,24 +45,33 @@ pub(crate) async fn consume_local_reset_credit_for_account(
 ) -> LocalResult<ConsumeResetCreditResponse> {
     let _reset = state.reset_redemption_guard().await;
     let scope = AccountRefreshScope::capture(state, account_id).await?;
-    consume_reset_credit_for_scope(state, &scope.fence).await?;
+    let attempt = ResetAttempt::new(ResetOrigin::Manual(&scope.initial_account.account.quota));
+    consume_reset_credit_for_scope(state, &scope.fence, &attempt).await?;
 
-    match verify_reset_account_quota(state, &scope.fence).await {
-        Ok(_) => Ok(ConsumeResetCreditResponse {
-            refreshed: true,
-            refresh_error: None,
-        }),
-        Err(error) => Ok(ConsumeResetCreditResponse {
-            refreshed: false,
-            refresh_error: Some(error.message),
-        }),
+    let verification = verify_reset_account_quota(state, &scope.fence).await;
+    attempt.record_verification(account_id, verification.as_ref().ok());
+    Ok(reset_verification_result(verification))
+}
+
+fn reset_verification_result(
+    verification: LocalResult<AccountQuotaRefreshResponse>,
+) -> ConsumeResetCreditResponse {
+    let refresh_error = match verification.map(|response| response.quota) {
+        Ok(AccountQuotaOutcome::Updated { .. }) => None,
+        Ok(AccountQuotaOutcome::Failed { code, .. }) => Some(code),
+        Ok(AccountQuotaOutcome::Skipped) => Some("Quota verification was skipped.".into()),
+        Err(error) => Some(error.message),
+    };
+    ConsumeResetCreditResponse {
+        refreshed: refresh_error.is_none(),
+        refresh_error,
     }
 }
 
-/// The quota job calls this action without recursively requesting itself.
-pub(crate) async fn consume_reset_credit_for_scope(
+async fn consume_reset_credit_for_scope(
     state: &DesktopState,
     fence: &crate::local_pool::store::AccountRefreshFence,
+    attempt: &ResetAttempt<'_>,
 ) -> LocalResult<()> {
     let fingerprint = state
         .store()?
@@ -73,7 +87,7 @@ pub(crate) async fn consume_reset_credit_for_scope(
         })
         .filter(|window| window.available_basis_points == Some(0))
         .and_then(|window| window.exhaustion_transition_fingerprint.clone());
-    consume_reset_credit_when(state, fence, fingerprint.as_deref(), |_| {
+    consume_reset_credit_when(state, fence, fingerprint.as_deref(), attempt, |_| {
         std::future::ready(Ok(true))
     })
     .await
@@ -84,6 +98,7 @@ pub(crate) async fn consume_reset_credit_when<F, Fut>(
     state: &DesktopState,
     fence: &crate::local_pool::store::AccountRefreshFence,
     attempt_fingerprint: Option<&str>,
+    attempt: &ResetAttempt<'_>,
     should_consume: F,
 ) -> LocalResult<bool>
 where
@@ -97,9 +112,10 @@ where
             state,
             fence,
             attempt_fingerprint,
+            attempt,
             should_consume,
         },
-        &Uuid::new_v4().to_string(),
+        &attempt.request_id,
     )
     .await
 }
@@ -108,6 +124,7 @@ struct DesktopResetHost<'a, F> {
     state: &'a DesktopState,
     fence: &'a crate::local_pool::store::AccountRefreshFence,
     attempt_fingerprint: Option<&'a str>,
+    attempt: &'a ResetAttempt<'a>,
     should_consume: F,
 }
 
@@ -164,7 +181,13 @@ where
         authorization: &Self::Authorization,
         request_id: &str,
     ) -> LocalResult<ResetHttpResponse> {
-        http::post_reset_credit(authorization, request_id).await
+        self.attempt.record_dispatch(&self.fence.account_id);
+        let result = http::post_reset_credit(authorization, request_id).await;
+        self.attempt.record_post_result(
+            &self.fence.account_id,
+            result.as_ref().ok().map(|response| response.status),
+        );
+        result
     }
 }
 
@@ -225,6 +248,35 @@ use snapshot::{is_codex_credit, parse_snapshot};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_reset_does_not_report_failed_or_skipped_verification_as_refreshed() {
+        let response = |quota| {
+            reset_verification_result(Ok(AccountQuotaRefreshResponse {
+                account: crate::local_pool::refresh::tests::account(),
+                quota,
+                exhaustion_transitions: Vec::new(),
+            }))
+        };
+        let failed = response(AccountQuotaOutcome::Failed {
+            code: "synthetic_quota_failure".into(),
+            retryable: true,
+        });
+        assert!(!failed.refreshed);
+        assert_eq!(
+            failed.refresh_error.as_deref(),
+            Some("synthetic_quota_failure")
+        );
+        let skipped = response(AccountQuotaOutcome::Skipped);
+        assert!(!skipped.refreshed);
+        assert!(skipped.refresh_error.is_some());
+        let updated = response(AccountQuotaOutcome::Updated {
+            transitions: Vec::new(),
+            exhaustion_transitions: Vec::new(),
+        });
+        assert!(updated.refreshed);
+        assert!(updated.refresh_error.is_none());
+    }
 
     async fn record_reset_dispatch(
         state: &DesktopState,

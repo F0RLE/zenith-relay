@@ -12,6 +12,35 @@ pub(crate) fn model_identity_support() -> Option<bool> {
     release(&installed_version().ok()?).map(|version| version >= (4, 29, 0))
 }
 
+/// Native bootstrap verified against Claude Desktop 5.11492.5 on Windows.
+pub(crate) fn native_connection_support() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if !installed_version()
+            .ok()
+            .and_then(|version| release(&version))
+            .is_some_and(|version| version >= (5, 11492, 5))
+        {
+            return false;
+        }
+        let mut command = super::super::process::windows_hidden_command("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", r#"
+$ErrorActionPreference = 'Stop'
+$managed = $false
+foreach ($hive in @([Microsoft.Win32.Registry]::CurrentUser, [Microsoft.Win32.Registry]::LocalMachine)) {
+    $key = $hive.OpenSubKey('SOFTWARE\Policies\Claude')
+    if ($null -ne $key) { try { if ($key.ValueCount -gt 0) { $managed = $true } } finally { $key.Dispose() } }
+}
+if ($managed) { 'managed' } else { 'local' }
+"#]);
+        query_output(command).is_ok_and(|output| output.trim() == "local")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 fn release(version: &str) -> Option<(u32, u32, u32)> {
     let version = version.trim();
     if version.len() > 64 {

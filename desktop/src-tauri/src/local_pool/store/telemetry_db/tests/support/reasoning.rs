@@ -33,6 +33,72 @@ fn group<'a>(report: &'a Value, effort: &str) -> &'a Value {
 }
 
 #[test]
+fn reasoning_comparison_checks_effective_effort_before_transport() {
+    let (root, db) = database();
+    for effort in [None, Some("synthetic_unknown")] {
+        for transport in [false, true] {
+            let mut sample = event("no_effective_effort", effort, None);
+            if !transport {
+                sample.routing = None;
+            }
+            db.record(&sample).unwrap();
+            let report = db.request_diagnostics("no_effective_effort").unwrap();
+            let comparison = &report["reasoningLatencyComparison"];
+            assert_eq!(comparison["status"], "unavailable");
+            assert_eq!(
+                comparison["unavailableReason"],
+                "unknown_effective_reasoning"
+            );
+            assert!(comparison["groups"].as_array().unwrap().is_empty());
+        }
+    }
+    let mut image = event("image", None, None);
+    let routing = image.routing.as_mut().unwrap();
+    routing.endpoint_kind = Some("images".to_owned());
+    routing.transport = None;
+    db.record(&image).unwrap();
+    let report = db.request_diagnostics("image").unwrap();
+    assert_eq!(
+        report["reasoningLatencyComparison"]["unavailableReason"],
+        "reasoning_effort_not_applicable"
+    );
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reasoning_comparison_matches_current_and_legacy_bps_transport_names() {
+    let (root, db) = database();
+    db.record(&event("current", Some("low"), Some(10))).unwrap();
+    db.record(&event("legacy", Some("high"), Some(20))).unwrap();
+    db.lock_connection().unwrap().execute(
+        "UPDATE request_logs SET routing_json = json_set(
+             COALESCE(routing_json, (SELECT data_json FROM usage_diagnostics WHERE id = routing_diagnostics_id)),
+             '$.transport.mode', 'basis_points')
+         WHERE request_id = 'legacy'",
+        [],
+    ).unwrap();
+    let report = db.request_diagnostics("legacy").unwrap();
+    assert_eq!(
+        report["reasoningLatencyComparison"]["matchedRouteRequests"],
+        2
+    );
+    assert_eq!(group(&report, "low")["ttftP50Ms"], 10);
+    assert_eq!(group(&report, "high")["ttftP50Ms"], 20);
+    db.record(&event("current_anchor", Some("low"), Some(30)))
+        .unwrap();
+    let report = db.request_diagnostics("current_anchor").unwrap();
+    assert_eq!(
+        report["reasoningLatencyComparison"]["matchedRouteRequests"],
+        3
+    );
+    assert_eq!(group(&report, "low")["samples"], 2);
+    assert_eq!(group(&report, "high")["samples"], 1);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn reasoning_comparison_is_same_route_single_send_and_never_recommends_a_level() {
     let (root, db) = database();
     for variant in 0..11 {
@@ -117,7 +183,7 @@ fn reasoning_comparison_is_same_route_single_send_and_never_recommends_a_level()
         8000
     );
     assert_eq!(
-        report["finalRequest"]["protocol"]["effectiveReasoningEffort"],
+        report["attempts"][0]["protocol"]["effectiveReasoningEffort"],
         "high"
     );
     assert!(!report.to_string().contains("PRIVATE_"));
@@ -179,7 +245,11 @@ fn reasoning_comparison_bounds_history_and_only_reports_supported_percentile_sam
     let comparison = &report["reasoningLatencyComparison"];
     assert_eq!(comparison["matchedRouteRequests"], 1000);
     assert_eq!(comparison["groups"].as_array().unwrap().len(), 1);
-    assert_eq!(comparison["status"], "insufficient_samples");
+    assert_eq!(comparison["status"], "single_level_only");
+    assert_eq!(
+        comparison["unavailableReason"],
+        "single_effort_level_observed"
+    );
     assert_eq!(group(&report, "high")["ttftP50Ms"], 499);
     assert_eq!(group(&report, "high")["ttftP95Ms"], 949);
     drop(db);

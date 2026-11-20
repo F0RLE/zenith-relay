@@ -6,18 +6,16 @@ for (const locale of ["ru", "en"] as const) {
     test.skip(!test.info().config.configFile?.endsWith("playwright.hosted-preview.config.ts"), "The preview action is development-only.");
     await installTauriMock(page, { mode: "hosted", locale, theme: locale === "ru" ? "dark" : "light", populated: true });
     await page.goto("/");
-    const placeholder = page.locator(".relay-empty");
-    await expect(placeholder.locator(":scope > *")).toHaveCount(2);
-    await expect(placeholder.locator("strong")).toHaveText(locale === "ru" ? "В разработке" : "In development");
-    await expect(placeholder.locator(":scope > svg, p")).toHaveCount(0);
-    const button = placeholder.getByRole("button", { name: locale === "ru" ? "Открыть демо" : "Open demo", exact: true });
+    const pane = page.locator(".hosted-device-pane");
+    await expect(pane.getByRole("textbox")).toHaveValue("");
+    await expect(pane.getByRole("button", {name: locale === "ru" ? "Проверить сервер" : "Review server"})).toBeDisabled();
+    const button = pane.getByRole("button", { name: locale === "ru" ? "Открыть демо" : "Open demo", exact: true });
     await expect(button).toBeVisible();
-    await placeholder.screenshot({ path: testInfo.outputPath(`hosted-minimal-${locale}.png`) });
+    await pane.screenshot({ path: testInfo.outputPath(`hosted-pairing-${locale}.png`) });
     await button.click();
     const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args?: unknown }> }).__TAURI_TEST_INVOKES__);
     expect(commands.filter(call => call.command === "open_hosted_preview")).toHaveLength(1);
-    expect(commands.some(call => call.command === "get_local_runtime_state" || call.command === "stop_local_gateway" || call.command.startsWith("get_remote_"))).toBe(false);
-    await expect(placeholder.getByRole("button")).toHaveCount(1);
+    expect(commands.some(({command}) => ["get_local_runtime_state","stop_local_gateway","read_hosted_connections","prepare_hosted_device"].includes(command) || command.startsWith("get_remote_"))).toBe(false);
   });
 }
 

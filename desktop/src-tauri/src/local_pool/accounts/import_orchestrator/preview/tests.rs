@@ -5,6 +5,8 @@ use std::fs;
 use tokio::net::TcpListener;
 use url::Url;
 
+mod proxy_transfer;
+
 #[tokio::test]
 async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_probes_codex() {
     let root = crate::files::test_temp_root("relay-siwc-import");
@@ -40,6 +42,7 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
     let result = super::super::confirmation::confirm_local_account_import_inner(
         super::super::ConfirmAccountImportInput {
             session_id,
+            use_bundle_proxies: None,
             selected_item_ids: selected,
             add_to_pool: true,
             discover_models: true,
@@ -69,6 +72,7 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
         std::slice::from_ref(&account.account.id),
         zenith_relay_core::accounts::AccountExportFormat::Zenith,
         None,
+        false,
         &state,
     )
     .unwrap();
@@ -87,6 +91,7 @@ async fn siwc_import_round_trip_is_inactive_preserves_registration_and_never_pro
     let result = super::super::confirmation::confirm_local_account_import_inner(
         super::super::ConfirmAccountImportInput {
             session_id: duplicate.session_id,
+            use_bundle_proxies: None,
             selected_item_ids: vec![duplicate.items[0].item_id.clone()],
             add_to_pool: true,
             discover_models: true,

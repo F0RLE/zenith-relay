@@ -29,6 +29,15 @@ pub(super) async fn reconcile(state: &DesktopState) -> Result<()> {
     let _mutation = state.setup_guard().await;
     let activity = super::active_members(state).await;
     let store = state.store()?;
+    state
+        .refresh
+        .set_activity_groups(store.gateway().account_routes.iter().map(|group| {
+            group
+                .account_ids
+                .iter()
+                .map(|id| account_member_key(id))
+                .collect()
+        }));
     let mut active_fence_ids = BTreeSet::new();
     for account in store
         .accounts()

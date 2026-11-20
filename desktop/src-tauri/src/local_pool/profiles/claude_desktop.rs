@@ -10,7 +10,8 @@ use tauri::State;
 
 mod library;
 mod models;
-mod paths;
+pub(crate) mod paths;
+pub(crate) use library::record_native_connection_update;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

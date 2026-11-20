@@ -18,7 +18,7 @@ export function useAccountSignIn() {
     if (target && target !== completed.account.id) {
       await relayCommands.selectAccountRoute(target, completed.account.id, true);
     }
-  });
+  }, true);
 
   useEffect(() => {
     setProxyId(undefined);

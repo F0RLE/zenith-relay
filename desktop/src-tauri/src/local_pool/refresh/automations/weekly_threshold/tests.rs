@@ -205,15 +205,17 @@ async fn threshold_is_opt_in_and_only_uses_fresh_general_weekly_quota() {
         .unwrap()
         .available_basis_points = Some(9_999);
     assert!(due_window(&response, &records, now).is_some());
-    response
-        .account
-        .account
-        .quota
-        .secondary
-        .as_mut()
-        .unwrap()
-        .window_minutes = Some(300);
-    assert!(due_window(&response, &records, now).is_none());
+    for minutes in [None, Some(300)] {
+        response
+            .account
+            .account
+            .quota
+            .secondary
+            .as_mut()
+            .unwrap()
+            .window_minutes = minutes;
+        assert!(due_window(&response, &records, now).is_none());
+    }
     response
         .account
         .account
@@ -297,9 +299,26 @@ async fn ambiguous_threshold_redemption_is_persisted_until_fresh_full_confirmati
         &id,
         deadline + 1
     ));
+    for (remaining, minutes) in [(9_950, 10_080), (10_000, 300)] {
+        let window = response.account.account.quota.secondary.as_mut().unwrap();
+        window.available_basis_points = Some(remaining);
+        window.explicitly_full = None;
+        window.window_minutes = Some(minutes);
+        state
+            .store()
+            .unwrap()
+            .upsert_account(response.account.clone())
+            .unwrap();
+        confirm_redemption(&state, &response, &fence).unwrap();
+        assert!(has_pending_redemption(
+            state.store().unwrap().automations(),
+            &Default::default(),
+            &id,
+        ));
+    }
     let window = response.account.account.quota.secondary.as_mut().unwrap();
     window.available_basis_points = Some(10_000);
-    window.explicitly_full = Some(true);
+    window.window_minutes = Some(10_080);
     state
         .store()
         .unwrap()

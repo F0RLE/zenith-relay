@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
@@ -7,7 +7,7 @@ import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeCloc
 import { useTransientFlag } from "../hooks/useTransientFlag";
 import { useTotpPreview } from "../hooks/useTotpPreview";
 import { useRelayState } from "../state/RelayStateProvider";
-import { Button, SecretField, copyText } from "./Ui";
+import { Button, CopyButton, SecretField, copyText } from "./Ui";
 
 type AccountLoginNotesProps = {
   accountId?: string;
@@ -22,6 +22,8 @@ type PendingSave = {
 export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps) {
   const { t } = useTranslation();
   const { refresh, perform } = useRelayState();
+  const emailId = useId();
+  const notesRef = useRef<HTMLElement>(null);
   const initialDraft = useRef(loginId && !accountId ? getAccountLoginDraft(loginId) : undefined);
   const [email, setEmail] = useState(initialDraft.current?.email ?? "");
   const [phone, setPhone] = useState(initialDraft.current?.phone ?? "");
@@ -129,7 +131,14 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    const keyboardNavigation = (event: KeyboardEvent) => {
+      if (event.key === "Tab") notesRef.current?.removeAttribute("data-pointer-edit");
+    };
+    document.addEventListener("keydown", keyboardNavigation, true);
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener("keydown", keyboardNavigation, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -206,16 +215,18 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
   };
 
   return (
-    <section className="account-login-notes" aria-label={t("accounts.loginDetails")}>
+    <section ref={notesRef} className="account-login-notes" aria-label={t("accounts.loginDetails")}
+      onPointerDownCapture={(event) => event.currentTarget.setAttribute("data-pointer-edit", "")}>
       <div className="account-login-fields">
-        <label className="relay-field">
-          <span>{t("accounts.loginEmail")}</span>
-          <input value={email} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("email", event.target.value, setEmail)} onBlur={() => void save()} />
-        </label>
-        <label className="relay-field">
-          <span>{t("accounts.loginPhone")}</span>
-          <input type="tel" value={phone} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("phone", event.target.value, setPhone)} onBlur={() => void save()} />
-        </label>
+        <div className="relay-field">
+          <label htmlFor={emailId}>{t("accounts.loginEmail")}</label>
+          <div className="secret-field">
+            <input id={emailId} value={email} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("email", event.target.value, setEmail)} onBlur={() => void save()} />
+            <div className="secret-field-actions">
+              <CopyButton value={email} label={`${t("common.copy")}: ${t("accounts.loginEmail")}`} disabled={!ready || !email.trim()} preserveFocus />
+            </div>
+          </div>
+        </div>
         <SecretField
           key={`${accountId ?? loginId}:password`}
           label={t("accounts.loginPassword")}
@@ -224,11 +235,16 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
           onChange={(value) => updateDraftField("password", value, setPassword)}
           onBlur={() => void save()}
         />
+        <label className="relay-field">
+          <span>{t("accounts.loginPhone")}</span>
+          <input type="tel" value={phone} disabled={!ready} autoComplete="off" spellCheck={false} onChange={(event) => updateDraftField("phone", event.target.value, setPhone)} onBlur={() => void save()} />
+        </label>
         <SecretField
           key={`${accountId ?? loginId}:totp`}
           label={t("accounts.loginTotpSecret")}
           value={totpSecret}
           disabled={!ready}
+          copyable={false}
           onChange={(value) => updateDraftField("totpSecret", value, setTotpSecret)}
           onBlur={() => void save()}
         />

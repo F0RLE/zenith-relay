@@ -284,7 +284,7 @@ fn image_usage_survives_failure_reopen_and_duplicate_observation() {
     assert_eq!(rows[0].cached_input_tokens, None);
     let report = database.request_diagnostics("image-request").unwrap();
     assert_eq!(
-        report["finalRequest"]["usage"]["imageUsage"]["inputImageTokens"],
+        report["attempts"][0]["usage"]["imageUsage"]["inputImageTokens"],
         7
     );
     assert_eq!(
@@ -292,7 +292,7 @@ fn image_usage_survives_failure_reopen_and_duplicate_observation() {
         23
     );
     assert_eq!(
-        report["finalRequest"]["usage"]["imageUsage"]["svgUsage"]["totalTokens"],
+        report["attempts"][0]["usage"]["imageUsage"]["svgUsage"]["totalTokens"],
         8
     );
     assert_eq!(report["summary"]["includedSends"], 1);

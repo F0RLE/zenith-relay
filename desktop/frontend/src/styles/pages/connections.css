@@ -1073,6 +1073,102 @@
   gap: 18px;
 }
 
+.relay-dialog.sign-in-dialog.oauth-with-page {
+  width: min(1096px, 100%);
+  height: min(760px, calc(100dvh - 76px));
+}
+
+.oauth-with-page .relay-dialog-body {
+  overflow: hidden;
+  scrollbar-gutter: auto;
+}
+
+.oauth-workspace {
+  display: grid;
+  grid-template-columns: clamp(282px, 33%, 338px) minmax(0, 1fr);
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+.oauth-workspace > .oauth-waiting {
+  align-self: start;
+  max-height: 100%;
+  min-width: 0;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  gap: 12px;
+}
+
+.oauth-workspace > .oauth-waiting > * {
+  flex-shrink: 0;
+}
+
+.oauth-workspace .oauth-progress:not(:has(.is-error)) {
+  padding: 2px 4px;
+  background: transparent;
+}
+
+.oauth-workspace .oauth-client-option {
+  display: grid;
+  place-items: center;
+  padding: 8px 4px;
+  line-height: 1.2;
+}
+
+.oauth-client-option:has(input:focus-visible) {
+  outline: 2px solid var(--relay-accent);
+  outline-offset: -2px;
+}
+
+.oauth-page {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  padding: 6px;
+  border: 1px solid var(--relay-border);
+  border-radius: 12px;
+  background: var(--relay-surface);
+}
+
+.oauth-page-slot {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  background: var(--relay-bg);
+}
+
+.oauth-page-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--relay-secondary);
+}
+
+.oauth-page-state > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.oauth-page-state[role="alert"] > svg {
+  color: var(--relay-error);
+}
+
+@media (max-width: 700px) {
+  .oauth-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(152px, 1.2fr);
+    gap: 12px;
+  }
+
+  .oauth-workspace:has(.oauth-notes-toggle[aria-expanded="true"]) {
+    grid-template-rows: minmax(0, 1.4fr) minmax(152px, 1fr);
+  }
+}
+
 .relay-dialog.sign-in-dialog.oauth-completing > header {
   display: none;
 }
@@ -1364,6 +1460,7 @@
 }
 
 .oauth-waiting .account-login-notes {
+  gap: 12px;
   padding: 12px;
   border: 0;
   background: transparent;
@@ -1381,11 +1478,35 @@
 .account-login-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 12px;
+  gap: 10px 12px;
 }
 
-.account-login-fields .relay-field:nth-child(n + 3) {
+.account-login-fields > .relay-field:nth-child(-n + 2) {
   grid-column: 1 / -1;
+}
+
+.oauth-workspace .account-login-fields :is(.relay-field > input, .secret-field > input) {
+  min-height: 38px;
+  padding-block: 6px;
+}
+
+@media (max-height: 620px) {
+  .oauth-workspace .oauth-notes-toggle {
+    min-height: 36px;
+    padding-block: 6px;
+  }
+
+  .oauth-workspace .account-login-notes {
+    padding-block: 8px;
+  }
+
+  .oauth-workspace .account-login-fields > .relay-field {
+    gap: 4px;
+  }
+
+  .oauth-workspace .account-login-fields :is(.relay-field > input, .secret-field > input) {
+    min-height: 34px;
+  }
 }
 
 .account-login-dialog .account-login-notes {
@@ -1400,14 +1521,24 @@
   scrollbar-gutter: auto;
 }
 
-.account-login-notes .secret-field > input {
+.account-login-notes .secret-field > input[type="password"] {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.relay-dialog .account-login-fields .secret-field:has(.secret-field-actions > :only-child) > input {
+  padding-inline-end: 44px;
+}
+
+.relay-dialog .account-login-notes[data-pointer-edit] :is(.relay-field > input, .secret-field > input):focus {
+  outline: none !important;
+  background: var(--relay-dialog-field-background);
 }
 
 .account-login-code {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 4px 8px;
   min-height: 42px;
   padding: 8px 8px 8px 12px;
   border: 1px solid transparent;
@@ -1481,17 +1612,9 @@
   color: var(--relay-text);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 360px) {
   .account-login-fields {
-    grid-template-columns: 1fr;
-  }
-
-  .account-login-code {
-    flex-wrap: wrap;
-  }
-
-  .account-login-code .account-login-copy {
-    margin-left: 0;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -1757,6 +1880,39 @@
   color: var(--relay-muted);
   font-size: 12px;
   font-weight: 500;
+}
+
+.account-export-methods {
+  display: grid;
+  gap: 8px;
+  max-height: 15rem;
+  overflow: auto;
+}
+
+.account-export-methods fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.account-export-methods legend {
+  max-width: 100%;
+  padding: 0;
+  overflow-wrap: anywhere;
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.account-export-methods label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 13px;
 }
 
 .account-export-formats {

@@ -75,6 +75,38 @@ fn account_refresh_revisions_survive_reopen_and_do_not_contain_credentials() {
 }
 
 #[test]
+fn linking_and_detaching_routes_wake_refresh_without_invalidating_reader_scopes() {
+    let (root, mut store) = seeded();
+    let mut accounts = store.accounts().to_vec();
+    for account in &mut accounts {
+        account.account.in_pool = false;
+    }
+    store
+        .replace_accounts_and_keys(accounts.clone(), Vec::new())
+        .unwrap();
+    let (_, fence) = store.account_refresh_scope("account-b").unwrap();
+    let mut changes = store.refresh_changes();
+    let mut gateway = store.gateway().clone();
+    gateway.account_routes = vec![crate::local_pool::models::AccountRouteGroup {
+        account_ids: vec!["account-a".into(), "account-b".into()],
+        selected_account_id: "account-a".into(),
+        notes_account_id: None,
+    }];
+    store.replace_gateway(gateway.clone()).unwrap();
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    store.ensure_account_refresh_current(&fence).unwrap();
+    gateway.account_routes.clear();
+    store
+        .replace_account_routes(accounts, gateway, store.automations().clone())
+        .unwrap();
+    assert!(changes.has_changed().unwrap());
+    store.ensure_account_refresh_current(&fence).unwrap();
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn account_scope_changes_retire_reads_even_if_the_record_is_restored() {
     let account_mutations: [fn(&mut LocalAccountRecord); 7] = [
         |account| account.account.enabled = false,

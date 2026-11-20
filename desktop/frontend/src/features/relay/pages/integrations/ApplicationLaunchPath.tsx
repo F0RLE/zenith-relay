@@ -5,7 +5,13 @@ import { relayCommands } from "../../api/commands";
 import type { LaunchApplication, LaunchPathSetting } from "../../api/types";
 import { Button, IconButton } from "../../components/Ui";
 
-export function ApplicationLaunchPath({ application }: { application: LaunchApplication }) {
+export function ApplicationLaunchSettings({ application }: { application: LaunchApplication }) {
+  return <div className="application-launch-settings">
+    <ApplicationLaunchPath application={application} />
+  </div>;
+}
+
+function ApplicationLaunchPath({ application }: { application: LaunchApplication }) {
   const { t } = useTranslation();
   const [setting, setSetting] = useState<LaunchPathSetting | null>(null);
   const [draft, setDraft] = useState("");

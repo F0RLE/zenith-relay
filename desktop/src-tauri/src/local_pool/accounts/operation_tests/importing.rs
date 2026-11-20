@@ -160,6 +160,7 @@ async fn batch_confirm_persists_every_selected_account_and_credential() {
     let response = confirm_local_account_import_inner(
         ConfirmAccountImportInput {
             session_id: session.session_id,
+            use_bundle_proxies: None,
             selected_item_ids,
             add_to_pool: true,
             discover_models: false,
@@ -236,6 +237,7 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
     let response = confirm_local_account_import_inner(
         ConfirmAccountImportInput {
             session_id: first.session_id,
+            use_bundle_proxies: None,
             selected_item_ids: vec![first_item_id],
             add_to_pool: false,
             discover_models: false,
@@ -273,6 +275,7 @@ async fn access_only_reimport_preserves_existing_refresh_token() {
     let response = confirm_local_account_import_inner(
         ConfirmAccountImportInput {
             session_id: second.session_id,
+            use_bundle_proxies: None,
             selected_item_ids: vec![second_item_id],
             add_to_pool: false,
             discover_models: false,
@@ -326,6 +329,7 @@ async fn import_outside_pool_is_scheduled_for_quota_monitoring() {
     let response = confirm_local_account_import_inner(
         ConfirmAccountImportInput {
             session_id: session_id.clone(),
+            use_bundle_proxies: None,
             selected_item_ids: vec![item_id],
             add_to_pool: false,
             discover_models: false,
@@ -378,6 +382,7 @@ async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
         ConfirmAccountImportInput {
             session_id: session.session_id,
             selected_item_ids,
+            use_bundle_proxies: None,
             add_to_pool: true,
             discover_models: false,
             probe_quota: true,

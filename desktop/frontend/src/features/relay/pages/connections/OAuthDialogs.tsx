@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
-import { Check, ChevronDown, CircleAlert, CircleHelp, Clock3, Copy, ExternalLink, Loader2, Lock, Network } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, CircleAlert, CircleHelp, Clock3, Copy, ExternalLink, Loader2, Lock, Network } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { OAuthClientKind, OAuthFlow, ProxyPoolEntry } from "../../api/types";
@@ -7,11 +7,13 @@ import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
 import { AccountLoginNotes } from "../../components/AccountLoginNotes";
 import { secondsUntil, useRelativeTimeClock } from "../../hooks/useRelativeTimeClock";
 import { useTransientFlag } from "../../hooks/useTransientFlag";
+import { readRelayPreference, writeRelayPreference } from "../../state/relayPreferences";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { isHttpProxyEndpoint, rememberedSignInProxyId } from "./signInProxyPreference";
-import { useProxyPool } from "../../hooks/useProxyPool";
+import { OAuthPage } from "./OAuthPage";
 
 const HelpTopicDialog = lazy(async () => ({ default: (await import("../../help/HelpCenter")).HelpTopicDialog }));
+const NOTES_EXPANDED = "relay.signInNotesExpanded";
 
 export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseClient, starting = false }: {
   flow: OAuthFlow;
@@ -24,9 +26,17 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
   const [reopenAt, setReopenAt] = useState(0);
-  const [notesOpen, setNotesOpen] = useState(false);
-  const [proxyOpen, setProxyOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(() => readRelayPreference(NOTES_EXPANDED, "0") === "1");
+  const [proxyDialog, setProxyDialog] = useState<{ entries: ProxyPoolEntry[]; failed: boolean } | null>(null);
+  const [checkingProxies, setCheckingProxies] = useState(false);
+  const proxyRequest = useRef<object | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [readyPageId, setReadyPageId] = useState<string | null>(null);
+  const [pageResume, setPageResume] = useState<{ loginId: string; attempt: number; state: "opened" | "failed" }>();
+  const resumedPage = pageResume?.loginId === flow.loginId ? pageResume : undefined;
+  const pageReady = readyPageId === flow.loginId;
+  const pageAttempt = resumedPage?.attempt ?? 0;
+  const pageState = resumedPage?.state ?? flow.pageState ?? "closed";
   const clientChoiceId = useId();
   const actionPending = useRef(false);
   const [linkCopied, showLinkCopied, clearLinkCopied] = useTransientFlag(1_500);
@@ -45,17 +55,19 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
   // A route sign-in reads card notes without reauthenticating its issuing client.
   const loginNotesAccountId = flow.targetAccountId ?? notesAccountId;
   const clientKind = flow.clientKind ?? "codex";
-  const proxies = useProxyPool(!reauthentication && Boolean(onUseProxy));
   const requestClose = () => {
     if (closeLocked || actionPending.current) return;
+    proxyRequest.current = null;
     void onCancel();
   };
   const reopen = async () => {
-    if (flowUnavailable || closeLocked || reopenIn > 0 || actionPending.current) return;
+    if (flowUnavailable || closeLocked || checkingProxies || reopenIn > 0 || actionPending.current) return;
     actionPending.current = true;
     try {
-      const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId), undefined, { backgroundRefresh: true });
-      if (opened) {
+      const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId, flow.embedded), undefined, { backgroundRefresh: true });
+      if (flow.embedded && !pageReady && (opened || pageState === "closed")) {
+        setPageResume({ loginId: flow.loginId, attempt: pageAttempt + 1, state: opened ? "opened" : "failed" });
+      } else if (opened && !flow.embedded) {
         setReopenAt(Date.now() + 3_000);
       }
     } finally {
@@ -69,24 +81,38 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
   };
   useEffect(() => {
     setReopenAt(0);
+    setCheckingProxies(false);
     clearLinkCopied();
+    return () => { proxyRequest.current = null; };
   }, [flow.loginId, clearLinkCopied]);
   useEffect(() => {
-    if (closeLocked || flowUnavailable) setProxyOpen(false);
-  }, [closeLocked, flowUnavailable]);
-  const chooseProxy = () => {
-    if (!onUseProxy || flowUnavailable || closeLocked || actionPending.current) return;
-    setProxyOpen(true);
-  };
-  const repeatProxy = () => {
-    if (!onUseProxy || flowUnavailable || closeLocked || actionPending.current) return;
-    const remembered = rememberedSignInProxyId();
-    const proxyEntry = proxies.pool?.entries.find((candidateProxy) => candidateProxy.id === remembered);
-    if (proxyEntry && isHttpProxyEndpoint(proxyEntry.endpoint)) {
-      onUseProxy(proxyEntry.id);
-      return;
+    if (closeLocked || flowUnavailable) {
+      proxyRequest.current = null;
+      setCheckingProxies(false);
+      setProxyDialog(null);
     }
-    setProxyOpen(true);
+  }, [closeLocked, flowUnavailable]);
+  const selectProxy = async (repeat: boolean) => {
+    if (!onUseProxy || flowUnavailable || closeLocked || actionPending.current || proxyRequest.current) return;
+    const request = {};
+    proxyRequest.current = request;
+    setCheckingProxies(true);
+    try {
+      const { entries } = await relayCommands.getProxyPool();
+      if (proxyRequest.current !== request || Date.now() >= flow.expiresAtMs) return;
+      const compatible = entries.filter((entry) => isHttpProxyEndpoint(entry.endpoint));
+      const remembered = repeat ? compatible.find((entry) => entry.id === rememberedSignInProxyId()) : undefined;
+      const selected = remembered ?? (compatible.length === 1 ? compatible[0] : undefined);
+      if (selected) onUseProxy(selected.id);
+      else setProxyDialog({ entries, failed: false });
+    } catch {
+      if (proxyRequest.current === request) setProxyDialog({ entries: [], failed: true });
+    } finally {
+      if (proxyRequest.current === request) {
+        proxyRequest.current = null;
+        setCheckingProxies(false);
+      }
+    }
   };
   if (callbackReceived) return <Dialog
     className="sign-in-dialog oauth-sign-in-dialog oauth-completing"
@@ -98,15 +124,21 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
       <span>{completionLabel}</span>
     </div>
   </Dialog>;
-  return <>
-  <Dialog
-    className="sign-in-dialog oauth-sign-in-dialog"
-    title={t("accounts.signIn")}
-    headerActions={<IconButton label={t("accounts.signInHelp")} icon={<CircleHelp aria-hidden />} onClick={() => setHelpOpen(true)} />}
-    onClose={requestClose}
-  >
+  const openLabel = flow.embedded
+    ? t(flow.automaticLogin ? "accounts.signInManually" : pageState === "opened" && pageReady && !starting ? "accounts.focusSignInPage" : "accounts.openSignInPage")
+    : reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn");
+  const openButton = (
+    <Button
+      variant="primary"
+      icon={flow.embedded ? <ArrowRight aria-hidden /> : <ExternalLink aria-hidden />}
+      busy={busy === "oauth-reopen"}
+      disabled={flowUnavailable || closeLocked || checkingProxies || reopenIn > 0}
+      onClick={() => void reopen()}
+    >{openLabel}</Button>
+  );
+  const controls = (
     <div className="relay-form oauth-waiting" aria-busy={starting}>
-      <fieldset className="oauth-client-choice" disabled={reauthentication || !onUseClient || flowUnavailable || closeLocked}>
+      <fieldset className="oauth-client-choice" disabled={reauthentication || !onUseClient || flowUnavailable || closeLocked || checkingProxies}>
         <legend className="sr-only">{t("accounts.oauthClient")}</legend>
         <div className="oauth-client-options">
           {([
@@ -146,39 +178,21 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
       <div className="oauth-link-actions">
         {onUseProxy && !reauthentication ? (
           <div className={flowUnavailable || closeLocked ? "oauth-open-with-lock is-disabled" : "oauth-open-with-lock"}>
-            <Button
-              variant="primary"
-              icon={<ExternalLink aria-hidden />}
-              busy={busy === "oauth-reopen"}
-              disabled={flowUnavailable || closeLocked || reopenIn > 0}
-              onClick={() => void reopen()}
-            >
-              {reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn")}
-            </Button>
+            {openButton}
             <IconButton
               className="oauth-open-lock"
               label={t("accounts.signInWithProxy")}
-              title={t("accounts.signInWithProxyHint")}
               icon={<Lock aria-hidden />}
+              busy={checkingProxies}
               disabled={flowUnavailable || closeLocked}
-              onClick={chooseProxy}
+              onClick={() => void selectProxy(false)}
               onContextMenu={(event) => {
                 event.preventDefault();
-                repeatProxy();
+                void selectProxy(true);
               }}
             />
           </div>
-        ) : (
-          <Button
-            variant="primary"
-            icon={<ExternalLink aria-hidden />}
-            busy={busy === "oauth-reopen"}
-            disabled={flowUnavailable || closeLocked || reopenIn > 0}
-            onClick={() => void reopen()}
-          >
-            {reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t(reopenAt ? "accounts.reopenSignIn" : "accounts.openSignIn")}
-          </Button>
-        )}
+        ) : openButton}
         <IconButton
           className="oauth-copy-link"
           label={t(linkCopied ? "accounts.signInLinkCopied" : "accounts.copySignInLink")}
@@ -188,41 +202,63 @@ export function OAuthDialog({ flow, notesAccountId, onCancel, onUseProxy, onUseC
         />
       </div>
       <section className="oauth-notes-card">
-        <button type="button" className="oauth-notes-toggle" aria-expanded={notesOpen} onClick={() => setNotesOpen((open) => !open)}>
+        <button type="button" className="oauth-notes-toggle" aria-expanded={notesOpen} onClick={() => {
+          setNotesOpen(!notesOpen);
+          writeRelayPreference(NOTES_EXPANDED, notesOpen ? "0" : "1");
+        }}>
           <span>{t("accounts.loginDetails")}</span>
           <ChevronDown aria-hidden />
         </button>
         {notesOpen ? <AccountLoginNotes key={flow.loginId} {...(loginNotesAccountId ? { accountId: loginNotesAccountId } : {})} loginId={flow.loginId} /> : null}
       </section>
     </div>
-  </Dialog>
-  {proxyOpen && onUseProxy ? (
-    <SignInProxyDialog
-      proxyEntries={proxies.pool?.entries ?? []}
-      loading={!proxies.pool && !proxies.failed}
-      failed={proxies.failed}
-      initialProxyId={rememberedSignInProxyId()}
-      onClose={() => setProxyOpen(false)}
-      onConfirm={(proxyId) => {
-        setProxyOpen(false);
-        if (!flowUnavailable && !closeLocked && !actionPending.current) onUseProxy(proxyId);
-      }}
-    />
-  ) : null}
-  {helpOpen ? <Suspense fallback={null}><HelpTopicDialog topic="sign-in" onClose={() => setHelpOpen(false)} /></Suspense> : null}
+  );
+  return <>
+    <Dialog
+      className={`sign-in-dialog oauth-sign-in-dialog${flow.embedded ? " oauth-with-page" : ""}`}
+      title={t("accounts.signIn")}
+      headerActions={<IconButton label={t("accounts.signInHelp")} icon={<CircleHelp aria-hidden />} onClick={() => setHelpOpen(true)} />}
+      onClose={requestClose}
+    >
+      {flow.embedded ? (
+        <div className="oauth-workspace">
+          {controls}
+          <OAuthPage
+            key={`${flow.loginId}:${pageAttempt}`}
+            loginId={flow.loginId}
+            pageState={pageState}
+            suspended={starting || Boolean(proxyDialog) || helpOpen}
+            automatic={flow.automaticLogin === true}
+            unavailable={flowUnavailable}
+            onReady={setReadyPageId}
+          />
+        </div>
+      ) : controls}
+    </Dialog>
+    {proxyDialog && onUseProxy ? (
+      <SignInProxyDialog
+        proxyEntries={proxyDialog.entries}
+        failed={proxyDialog.failed}
+        initialProxyId={rememberedSignInProxyId()}
+        onClose={() => setProxyDialog(null)}
+        onConfirm={(proxyId) => {
+          setProxyDialog(null);
+          if (!flowUnavailable && !closeLocked && !actionPending.current) onUseProxy(proxyId);
+        }}
+      />
+    ) : null}
+    {helpOpen ? <Suspense fallback={null}><HelpTopicDialog topic="sign-in" onClose={() => setHelpOpen(false)} /></Suspense> : null}
   </>;
 }
 
-export function SignInProxyDialog({
+function SignInProxyDialog({
   proxyEntries,
-  loading,
   failed,
   initialProxyId,
   onClose,
   onConfirm,
 }: {
   proxyEntries: ProxyPoolEntry[];
-  loading: boolean;
   failed: boolean;
   initialProxyId: string | null;
   onClose: () => void;
@@ -246,9 +282,9 @@ export function SignInProxyDialog({
       }
     >
       <div className="relay-form proxy-route-form">
-        {!loading && failed ? <p role="alert" className="form-note error-text">{t("accounts.signInProxyUnavailable")}</p> : null}
-        {!loading && !failed && proxyEntries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
-        {!loading && !failed && proxyEntries.length > 0 ? (
+        {failed ? <p role="alert" className="form-note error-text">{t("accounts.signInProxyUnavailable")}</p> : null}
+        {!failed && proxyEntries.length === 0 ? <p className="form-note">{t("accounts.signInProxyEmpty")}</p> : null}
+        {!failed && proxyEntries.length > 0 ? (
           <div className="proxy-route-options sign-in-proxy-options" role="radiogroup" aria-label={t("accounts.signInWithProxy")}>
             {proxyEntries.map((proxyEntry) => {
               const isHttpProxy = isHttpProxyEndpoint(proxyEntry.endpoint);

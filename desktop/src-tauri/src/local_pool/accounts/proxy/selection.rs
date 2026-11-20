@@ -11,14 +11,21 @@ pub fn effective_proxy_url(
     settings: &GatewaySettings,
     credentials: &StoredCodexCredentials,
 ) -> Result<Option<String>> {
-    let proxy = choose_proxy_url(
+    let proxy = saved_account_proxy_url(settings, credentials)?;
+    ensure_account_proxy(settings, proxy.as_ref())?;
+    Ok(proxy)
+}
+
+pub(crate) fn saved_account_proxy_url(
+    settings: &GatewaySettings,
+    credentials: &StoredCodexCredentials,
+) -> Result<Option<String>> {
+    choose_proxy_url(
         credentials.proxy_url(),
         credentials.bypass_common_proxy(),
         settings.common_proxy_configured,
         || secret_store::load(COMMON_PROXY_SECRET_REF),
-    )?;
-    ensure_account_proxy(settings, proxy.as_ref().map(|_| ()))?;
-    Ok(proxy)
+    )
 }
 
 pub fn effective_proxy_config(

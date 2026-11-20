@@ -100,7 +100,9 @@ async fn refresh_account_quota_item(
     state: &DesktopState,
     account_id: String,
 ) -> AccountQuotaRefreshItemResult {
-    let quota_result = refresh_account_quota_once(state, &account_id).await;
+    let quota_result = refresh_account_quota_once(state, &account_id)
+        .await
+        .and_then(checked_quota_response);
     match quota_result {
         Ok(response) => AccountQuotaRefreshItemResult {
             account_id,
@@ -125,7 +127,21 @@ pub(in crate::local_pool::accounts) async fn refresh_manual_account_quota(
         .into_iter()
         .next()
         .unwrap_or_else(|| account_id.to_string());
-    refresh_account_quota_once(state, &target).await
+    refresh_account_quota_once(state, &target)
+        .await
+        .and_then(checked_quota_response)
+}
+
+fn checked_quota_response(
+    response: AccountQuotaRefreshResponse,
+) -> LocalResult<AccountQuotaRefreshResponse> {
+    if let AccountQuotaOutcome::Failed { code, .. } = &response.quota {
+        return Err(LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            format!("quota refresh failed: {code}"),
+        ));
+    }
+    Ok(response)
 }
 
 /// Reset verification owns its provider read while holding the redemption
@@ -171,8 +187,7 @@ pub(crate) async fn prepare_account_credentials(
     let stored = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
-    // A valid access token does not prove that this SIWC grant permits plan
-    // usage. Check before its newer generation can enter the shared authority.
+    // Validate SIWC plan permission before admitting the new credential generation.
     super::super::records::require_plan_permission(&stored)?;
     let gateway = state.store()?.gateway().clone();
     let proxy = effective_proxy_config(&gateway, &stored)
@@ -267,4 +282,36 @@ pub(crate) async fn prepare_account_credentials(
         provider_account_id,
         proxy,
     })
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn failed_observation_cannot_complete_a_manual_refresh_successfully() {
+        for outcome in [
+            AccountQuotaOutcome::Failed {
+                code: "quota_transport".into(),
+                retryable: true,
+            },
+            AccountQuotaOutcome::Failed {
+                code: "quota_unauthorized".into(),
+                retryable: false,
+            },
+            AccountQuotaOutcome::Updated {
+                transitions: vec![],
+                exhaustion_transitions: vec![],
+            },
+            AccountQuotaOutcome::Skipped,
+        ] {
+            let failed = matches!(outcome, AccountQuotaOutcome::Failed { .. });
+            let response = AccountQuotaRefreshResponse {
+                account: crate::local_pool::refresh::tests::account(),
+                quota: outcome,
+                exhaustion_transitions: vec![],
+            };
+            assert_eq!(checked_quota_response(response).is_err(), failed);
+        }
+    }
 }

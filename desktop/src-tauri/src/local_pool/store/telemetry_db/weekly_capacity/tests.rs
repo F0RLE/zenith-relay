@@ -66,7 +66,18 @@ pub(super) fn usage(database: &TelemetryDb, id: &str, account: &str, at: u64, ca
 fn report(database: &TelemetryDb, now: u64) -> serde_json::Value {
     serde_json::to_value(
         database
-            .weekly_capacity_report(WeeklyCapacityQuery::default(), now)
+            .weekly_capacity_report(
+                WeeklyCapacityQuery::default(),
+                now,
+                &[CapacityObservation {
+                    ledger: "synthetic-ledger",
+                    account_ids: &["a".into(), "b".into()],
+                    plan: "plus",
+                    window: &window(now, 9_500),
+                    pricing_revision: "v1",
+                    now_ms: now,
+                }],
+            )
             .unwrap(),
     )
     .unwrap()
@@ -207,6 +218,14 @@ fn weekly_capacity_persists_anchors_and_counts_linked_routes_as_one_ledger() {
                     ..Default::default()
                 },
                 NOW + 60_000,
+                &[CapacityObservation {
+                    ledger: "synthetic-ledger",
+                    account_ids: &ids,
+                    plan: "plus",
+                    window: &current,
+                    pricing_revision: "v1",
+                    now_ms: NOW + 60_000,
+                }],
             )
             .unwrap()
     };

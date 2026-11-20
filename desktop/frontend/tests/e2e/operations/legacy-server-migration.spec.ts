@@ -21,7 +21,7 @@ for (const locale of ["en", "ru"] as const) {
   });
 }
 
-test("personal-server setup is retired without changing the Hosted placeholder", async ({ page }) => {
+test("retired personal-server setup does not restore a server or pair Desktop", async ({ page }) => {
   await installTauriMock(page, { storedMode: "remote", locale: "en", onboarding: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started", exact: true }).click();
@@ -31,4 +31,9 @@ test("personal-server setup is retired without changing the Hosted placeholder",
   await expect(page.getByRole("heading", { name: "Add connections to your pool", exact: true })).toBeVisible();
   await expect(page.getByLabel("Server address", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Management token", { exact: true })).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string }>;
+  }).__TAURI_TEST_INVOKES__.map(({command}) => command));
+  expect(calls).not.toContain("prepare_hosted_device");
+  expect(calls).not.toContain("read_hosted_connections");
 });

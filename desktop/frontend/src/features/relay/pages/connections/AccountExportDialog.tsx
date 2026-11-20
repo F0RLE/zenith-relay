@@ -1,13 +1,13 @@
-import { type ChangeEvent, useRef, useState } from "react";
+import { type ChangeEvent, useMemo, useRef, useState } from "react";
 import { Copy, Download, Eye, Pencil, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountExportFormat } from "../../api/types";
-import { Button, Dialog, IconButton, copyText } from "../../components/Ui";
+import { Button, Dialog, IconButton, SettingToggle, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { OPERATION_CANCELLED } from "../../state/relayOperationModel";
 import { MarkdownPreview } from "../../components/MarkdownPreview";
-import { expandAccountRouteIds } from "../../accountRoutes";
+import { accountRouteConnections, accountRouteNames } from "../../accountRoutes";
 
 const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const accountExportFormats: Array<{ value: AccountExportFormat; label: string; multiple: boolean }> = [
@@ -23,21 +23,44 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string; m
 export function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
   const { runtime, perform, busy } = useRelayState();
-  accountIds = expandAccountRouteIds(accountIds, runtime?.accounts ?? []);
+  const groups = useMemo(() => {
+    const accounts = runtime?.accounts ?? [];
+    const byId = new Map(accounts.map((account) => [account.id, account]));
+    const seen = new Set<string>();
+    return accountIds.flatMap((id) => {
+      const account = byId.get(id);
+      if (!account || seen.has(id)) return [];
+      const connections = accountRouteConnections(account, accounts);
+      for (const connection of connections) seen.add(connection.id);
+      return [{ account, connections }];
+    });
+  }, [accountIds, runtime?.accounts]);
+  const [checked, setChecked] = useState(() => new Set(accountIds.filter((id) => runtime?.accounts.some((account) => account.id === id && account.secretAvailable))));
+  const selected = groups.flatMap(({ connections }) => connections.filter((connection) => connection.secretAvailable && checked.has(connection.id)));
   const [format, setFormat] = useState<AccountExportFormat>("zenith");
+  const [includeProxies, setIncludeProxies] = useState(false);
   const [description, setDescription] = useState("");
   const [descriptionMode, setDescriptionMode] = useState<"edit" | "preview">("edit");
   const [descriptionError, setDescriptionError] = useState<string | null>(null);
   const markdownFileInput = useRef<HTMLInputElement>(null);
-  const hasSiwcAccount = runtime?.accounts.some((account) => accountIds.includes(account.id) && account.oauthClientKind === "siwc");
-  const hasExcelAccount = runtime?.accounts.some((account) => accountIds.includes(account.id) && account.oauthClientKind === "excel_bps");
+  const hasSiwcAccount = selected.some((account) => account.oauthClientKind === "siwc");
+  const hasExcelAccount = selected.some((account) => account.oauthClientKind === "excel_bps");
   const formats = accountExportFormats.filter((option) =>
-    (accountIds.length === 1 || option.multiple)
+    selected.length > 0 && (selected.length === 1 || option.multiple)
     && (!hasSiwcAccount || option.value === "zenith")
     && (!hasExcelAccount || option.value === "zenith" || option.value === "sub2api"),
   );
   const selectedFormat = formats.find((option) => option.value === format) ?? formats[0];
-  if (!selectedFormat) return null;
+  const offerProxies = selectedFormat?.value === "zenith" && selected.some((account) => account.proxyMode === "account" || account.proxyMode === "common");
+  const toggle = (id: string) => {
+    setChecked((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setIncludeProxies(false);
+  };
   const loadMarkdown = async (event: ChangeEvent<HTMLInputElement>) => {
     const markdownInput = event.currentTarget;
     const file = markdownInput.files?.[0];
@@ -57,11 +80,13 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     }
   };
   const run = async (destination: "copy" | "download") => {
+    if (!selectedFormat || !selected.length) return;
     const ok = await perform(`account-export-${destination}`, async () => {
       const exportRequest = {
-        accountIds,
+        accountIds: selected.map((account) => account.id),
         format: selectedFormat.value,
         destination,
+        ...(offerProxies && includeProxies ? { includeProxies: true } : {}),
         ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
       const exportResult = await relayCommands.exportLocalAccounts(exportRequest);
@@ -82,24 +107,35 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
       <>
         <Button className="account-export-cancel" variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
         <div className="account-export-actions">
-          <Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
-          <Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
+          <Button variant="secondary" icon={<Copy aria-hidden />} disabled={!selectedFormat || Boolean(busy)} busy={busy === "account-export-copy"} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button>
+          <Button variant="primary" icon={<Download aria-hidden />} disabled={!selectedFormat || Boolean(busy)} busy={busy === "account-export-download"} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button>
         </div>
       </>
     }
   >
     <div className="relay-form account-export-form">
-      {hasSiwcAccount ? <p role="alert">{t("accounts.siwcExportNotice")}</p> : null}
-      <div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div>
-      <div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>
+      {groups.some(({ connections }) => connections.length > 1) ? <div className="account-export-methods" role="group" aria-label={t("accounts.exportMethods")}>
+        <span className="account-export-heading">{t("accounts.exportMethods")}</span>
+        {groups.map(({ account, connections }) => <fieldset key={account.id} disabled={Boolean(busy)}>
+          {groups.length > 1 ? <legend>{account.label}</legend> : null}
+          {connections.map((connection) => <label key={connection.id} data-relay-tooltip={!connection.secretAvailable ? t("accounts.credentialsUnavailable") : undefined} tabIndex={!connection.secretAvailable ? 0 : undefined}>
+            <input type="checkbox" checked={connection.secretAvailable && checked.has(connection.id)} disabled={!connection.secretAvailable} onChange={() => toggle(connection.id)} />
+            {connection.oauthClientKind ? accountRouteNames[connection.oauthClientKind] : t("common.unknown")}
+          </label>)}
+        </fieldset>)}
+      </div> : null}
+      <div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: selected.length })}</strong></div>
+      {selectedFormat ? <><div className="account-export-formats" data-count={formats.length} role="radiogroup" aria-label={t("accounts.exportFormat")}>
         {formats.map((option) => (
           <button type="button" role="radio" data-value={option.value} aria-checked={selectedFormat.value === option.value} key={option.value} onClick={() => setFormat(option.value)}>
             <span>{option.label}</span>
           </button>
         ))}
       </div>
-      <p className="account-export-description">{t(`accounts.exportFormats.${selectedFormat.value}`)}</p>
-      {selectedFormat.value === "zenith" ? <div className="relay-field account-export-description-field">
+      <p className="account-export-description">{t(`accounts.exportFormats.${selectedFormat.value}`)}</p></> : null}
+      {hasSiwcAccount ? <p className="account-export-description" role="alert">{t("accounts.siwcExportNotice")}</p> : null}
+      {offerProxies ? <SettingToggle label={t("accounts.exportProxies")} description={t("accounts.exportProxiesHint")} checked={includeProxies} onChange={setIncludeProxies} /> : null}
+      {selectedFormat?.value === "zenith" ? <div className="relay-field account-export-description-field">
         <div className="account-export-description-toolbar">
           <label htmlFor="zenith-export-description">{t("accounts.exportDescription")}</label>
           <div className="account-export-description-controls">

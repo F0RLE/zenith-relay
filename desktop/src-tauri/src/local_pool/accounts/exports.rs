@@ -23,6 +23,8 @@ pub struct AccountExportInput {
     pub format: AccountExportFormat,
     pub destination: AccountExportDestination,
     #[serde(default)]
+    pub include_proxies: bool,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -120,6 +122,7 @@ mod tests {
 
     fn fixture() -> AccountExportCredential {
         AccountExportCredential {
+            transfer_proxy_url: None,
             oauth_client_kind: Default::default(),
             siwc_registration: None,
             basis_points_headers: None,

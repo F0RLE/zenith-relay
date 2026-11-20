@@ -1,4 +1,4 @@
-use super::session_is_current;
+use super::{SignInSurface, session_is_current};
 use crate::local_pool::{
     accounts::{oauth::OAuthClientKind, oauth_flow::OAuthFlowStatus},
     commands::current_time_ms,
@@ -11,7 +11,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager};
 use url::Url;
 
 const DRIVER: &str = include_str!("automatic_login.cjs");
@@ -144,16 +144,16 @@ fn script(
     ))
 }
 
-async fn evaluate(window: &WebviewWindow, script: String) -> Option<Stage> {
+async fn evaluate(surface: &SignInSurface, script: String) -> Option<Stage> {
     let (send, receive) = tokio::sync::oneshot::channel();
     let send = Mutex::new(Some(send));
-    window
-        .eval_with_callback(script, move |result| {
-            if let Some(send) = zenith_relay_core::poison::mutex(&send).take() {
-                let _ = send.send(result);
-            }
-        })
-        .ok()?;
+    if !surface.evaluate(script, move |result| {
+        if let Some(send) = zenith_relay_core::poison::mutex(&send).take() {
+            let _ = send.send(result);
+        }
+    }) {
+        return None;
+    }
     let result = tokio::time::timeout(Duration::from_millis(EVALUATION_TIMEOUT_MS), receive)
         .await
         .ok()?
@@ -162,13 +162,14 @@ async fn evaluate(window: &WebviewWindow, script: String) -> Option<Stage> {
 }
 
 pub(super) async fn run(
-    window: WebviewWindow,
+    app: AppHandle,
+    surface: SignInSurface,
     generation: u64,
     login_id: String,
     active: Arc<AtomicBool>,
     notes: LoginNotes,
 ) {
-    let flow = window.app_handle().state::<DesktopState>().oauth_flow();
+    let flow = app.state::<DesktopState>().oauth_flow();
     let expires_at_ms = current_time_ms().saturating_add(AUTOMATION_TIMEOUT_MS);
     let current = || {
         active.load(Ordering::Acquire)
@@ -178,7 +179,7 @@ pub(super) async fn run(
                     && start.expires_at_ms > current_time_ms()
                     && start.notes_account_id.as_deref().is_none_or(|id| {
                         super::super::flow::validate_oauth_target(
-                            &window.app_handle().state::<DesktopState>(),
+                            &app.state::<DesktopState>(),
                             Some(id),
                         )
                         .is_ok()
@@ -194,7 +195,9 @@ pub(super) async fn run(
             if !current() {
                 return;
             }
-            let Ok(url) = window.url() else { break };
+            let Some(url) = surface.url().await else {
+                break;
+            };
             if url.as_str() == "about:blank"
                 || (trusted_origin(&url)
                     && matches!(url.path(), "/api/accounts/authorize" | "/oauth/authorize"))
@@ -214,7 +217,7 @@ pub(super) async fn run(
             else {
                 break;
             };
-            let Some(stage) = evaluate(&window, detect).await else {
+            let Some(stage) = evaluate(&surface, detect).await else {
                 break;
             };
             let (index, name, value) = match stage {
@@ -238,7 +241,7 @@ pub(super) async fn run(
                 }
                 Stage::Manual | Stage::Submitted => break,
             };
-            if !current() || window.url().ok().as_ref() != Some(&url) {
+            if !current() || surface.url().await.as_ref() != Some(&url) || !current() {
                 continue;
             }
             if !claim_attempt(&mut submitted, index) {
@@ -254,7 +257,7 @@ pub(super) async fn run(
             ) else {
                 break;
             };
-            if evaluate(&window, fill).await != Some(Stage::Submitted) {
+            if evaluate(&surface, fill).await != Some(Stage::Submitted) {
                 break;
             }
             wait_until_ms = current_time_ms().saturating_add(FORM_LOAD_GRACE_MS);
@@ -263,9 +266,8 @@ pub(super) async fn run(
     // One bounded native task, no page timers, external IPC or background browser process.
     let _ = tokio::time::timeout(Duration::from_millis(AUTOMATION_TIMEOUT_MS), automate).await;
     if current() && active.swap(false, Ordering::AcqRel) {
-        notify_manual(window.app_handle(), &login_id);
-        let _ = window.show();
-        let _ = window.set_focus();
+        notify_manual(&app, &login_id);
+        surface.reveal();
     }
 }
 

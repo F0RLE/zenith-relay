@@ -52,7 +52,8 @@ pub(super) fn prepare_local_configuration_preset(
     let existing = super::local_configuration_preset(state)?;
     let mut resolved = normalize_configuration_preset(preset)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    resolve_local_preset_references(state, &mut resolved.settings)?;
+    resolve_local_preset_references(state, &mut resolved, &existing.settings)?;
+    resolved.schema_version = CONFIGURATION_PRESET_SCHEMA_VERSION;
     resolved = normalize_configuration_preset(resolved)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     if resolved.settings.quota.common_proxy_id != existing.settings.quota.common_proxy_id {
@@ -77,8 +78,10 @@ pub(super) fn prepare_local_configuration_preset(
 
 fn resolve_local_preset_references(
     state: &DesktopState,
-    settings: &mut ConfigurationPresetSettings,
+    preset: &mut ConfigurationPreset,
+    existing: &ConfigurationPresetSettings,
 ) -> CommandResult<()> {
+    let settings = &mut preset.settings;
     let (sources, accounts) = {
         let store = state.store()?;
         (store.sources().to_vec(), store.accounts().to_vec())
@@ -94,6 +97,15 @@ fn resolve_local_preset_references(
                 ),
             )
         })?;
+        let current = existing
+            .sources
+            .iter()
+            .find(|r| r.id == source_record.id)
+            .ok_or_else(|| {
+                LocalPoolError::new(ErrorCode::Conflict, "source changed during preview")
+            })?;
+        validate_source_proxy_reference(rule, source_record, current, preset.schema_version)?;
+        rule.proxy_id.clone_from(&current.proxy_id);
         validate_source_record(state, source_record)?;
         member_ids.insert(
             (zenith_relay_core::PoolMemberKind::Source, rule.id.clone()),
@@ -121,19 +133,20 @@ fn resolve_local_preset_references(
                 ),
             )
         })?;
-        let credential = credentials.require(&account.account.id).map_err(|error| {
+        let credential = credentials.load(&account.account.id).map_err(|error| {
             LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
         })?;
         if rule.in_pool {
             crate::local_pool::accounts::records::validate_pool_account(
-                &credential,
+                credential.as_ref().ok_or_else(|| {
+                    LocalPoolError::new(ErrorCode::NotFound, "pool account credentials are missing")
+                })?,
                 account.image_pool_enabled,
             )?;
         }
-        let proxy_id = credential
-            .proxy_url()
-            .and_then(|proxy_url| zenith_relay_core::proxy_reference_id(proxy_url).ok());
-        if rule.proxy_id != proxy_id || rule.bypass_common_proxy != credential.bypass_common_proxy()
+        let proxy_id = super::proxy_reference(credential.as_ref().and_then(|v| v.proxy_url()))?;
+        if rule.proxy_id != proxy_id
+            || rule.bypass_common_proxy != credential.is_some_and(|v| v.bypass_common_proxy())
         {
             return Err(LocalPoolError::new(
                 ErrorCode::Conflict,
@@ -165,6 +178,27 @@ fn resolve_local_preset_references(
     validate_resolved_configuration_preset_members(settings)
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     Ok(())
+}
+
+fn validate_source_proxy_reference(
+    requested: &SourcePresetRule,
+    source: &ProviderSourceRecord,
+    current: &SourcePresetRule,
+    schema_version: u16,
+) -> CommandResult<()> {
+    let same_legacy_binding = schema_version < 7
+        && requested.proxy_id.is_some()
+        && requested.id == source.id
+        && requested.proxy_id == source.proxy_id;
+    if requested.proxy_id == current.proxy_id || same_legacy_binding {
+        Ok(())
+    } else {
+        Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "configuration preset references a different source proxy",
+        )
+        .into())
+    }
 }
 
 fn resolve_local_source_reference<'a>(
@@ -254,5 +288,38 @@ fn diff_json(
             after: after.clone(),
         }),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_proxy_references_match_credentials_not_foreign_pool_ids() {
+        let mut source = crate::local_pool::models::synthetic_responses_source();
+        source.proxy_id = Some("proxy_local".into());
+        let reference = |password| {
+            zenith_relay_core::proxy_reference_id(&format!(
+                "http://fixture:{password}@proxy.test:8100"
+            ))
+            .unwrap()
+        };
+        let current: SourcePresetRule = serde_json::from_value(serde_json::json!({
+            "id": source.id, "name": source.name, "baseUrl": source.base_url, "wireApi": "responses",
+            "enabled":true, "inPool":false, "allowedModels":[], "excludedModels":[], "priority":0,
+            "weight":1, "proxyId":reference("one")
+        })).unwrap();
+        let mut requested = current.clone();
+        requested.id = "source_elsewhere".into();
+        assert!(validate_source_proxy_reference(&requested, &source, &current, 7).is_ok());
+        for incompatible in [None, source.proxy_id.clone(), Some(reference("two"))] {
+            requested.proxy_id = incompatible;
+            assert!(validate_source_proxy_reference(&requested, &source, &current, 7).is_err());
+        }
+        requested.proxy_id.clone_from(&source.proxy_id);
+        assert!(validate_source_proxy_reference(&requested, &source, &current, 6).is_err());
+        requested.id.clone_from(&source.id);
+        assert!(validate_source_proxy_reference(&requested, &source, &current, 6).is_ok());
     }
 }
