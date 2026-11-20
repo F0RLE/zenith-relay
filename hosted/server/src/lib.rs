@@ -3,6 +3,9 @@ pub mod accounting;
 pub mod auth;
 pub mod config;
 pub mod db;
+#[cfg(test)]
+#[path = "../tests/fixture_files.rs"]
+mod fixture_files;
 mod history;
 pub mod http;
 pub mod identity;

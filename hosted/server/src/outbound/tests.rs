@@ -1,7 +1,5 @@
 use super::*;
-
-#[path = "../../tests/fixture_files.rs"]
-mod fixture_files;
+use crate::fixture_files;
 
 const ORIGIN: &str = "https://provider.example/v1";
 const SOURCE: Uuid = Uuid::from_u128(17);

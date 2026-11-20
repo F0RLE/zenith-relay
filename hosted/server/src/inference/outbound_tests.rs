@@ -2,7 +2,7 @@
 mod cluster;
 
 use super::*;
-use crate::config::Config;
+use crate::{config::Config, fixture_files};
 use std::fs;
 
 #[tokio::test]
