@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { readFixture } from "../../test-support/files.mjs";
 import { join } from "node:path";
 
 export async function pairDesktop({owner, ownerRead, origin, exchange, wait, issue}) {
@@ -20,7 +20,7 @@ export async function pairDesktop({owner, ownerRead, origin, exchange, wait, iss
   expect((await fetch(url)).status).toBe(401);
   issue("device-invited",invitation);
   await wait("device-review");
-  const code=readFileSync(join(exchange,"device-review"),"utf8");
+  const code=readFixture(exchange,"device-review");
   const input=owner.getByLabel("Approval code from your Desktop");
   await input.fill(code.replace(cmd.device_id,crypto.randomUUID()));
   const approve=owner.getByRole("button",{name:"Allow access for 24 hours"});

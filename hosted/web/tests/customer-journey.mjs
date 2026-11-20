@@ -1,6 +1,5 @@
 import { expect } from "@playwright/test";
-import { existsSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { fixtureExists, writeFixture, fixtureOrigin } from "../../test-support/files.mjs";
 import { startIssuer } from "./oidc-issuer.mjs";
 import { checkOwnKeys } from "./own-keys.mjs";
 import { checkPublishedCatalog } from "./published-catalog.mjs";
@@ -11,11 +10,10 @@ import { checkCheckout } from "./checkout-flow.mjs";
 import { checkRefunds } from "./refund-flow.mjs";
 
 export async function checkCustomerJourney({ browser, owner, origin, issuer, exchange, funded }) {
+  origin = fixtureOrigin(origin);
   const api = origin + "/api/hosted/v1/";
-  const issue = (file, value = "") => {
-    const name = join(exchange, file); writeFileSync(name + ".partial", value, { flag: "wx" }); renameSync(name + ".partial", name);
-  };
-  const wait = file => expect.poll(() => existsSync(join(exchange, file)), { timeout: 25000 }).toBe(true);
+  const issue = (file, value = "") => writeFixture(exchange, file, value);
+  const wait = file => expect.poll(() => fixtureExists(exchange, file), { timeout: 25000 }).toBe(true);
   await expect.poll(async () => {
     try { return (await fetch(api + "public/config")).status; } catch { return 0; }
   }, { timeout: 15000 }).toBe(200);
@@ -126,7 +124,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     expect((await probe.get(api + "device/connections")).status()).toBe(401);
     expect((await probe.post(api + "auth/customer/logout", { headers: { Origin: origin, "X-Relay-CSRF":acctB.csrf_token } })).status()).toBe(403);
     const session = (await a.context().cookies()).find(v => v.name === "__Host-relay_customer");
-    expect(!!session && session.httpOnly && session.secure && session.sameSite === "Strict").toBe(true);
+    expect(session).toMatchObject({ httpOnly: true, secure: true, sameSite: "Strict" });
     await login(other); await expect(other.getByRole("alert")).toHaveText(/Access was not granted/);
     expect((await other.context().request.get(api + "account")).status()).toBe(401);
     issue("customers",JSON.stringify([acctA.workspace_id,acctB.workspace_id]));
@@ -139,11 +137,11 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
       process.stdout.write(bKey); issue("funding-keys");
       await checkPublishedCatalog({ a,b,owner,origin,api,ownerRead,issue,wait,exchange });
       const { current, corrected } = await checkUsageReport({ a,b,owner,origin,api,wait: file => expect.poll(
-        () => existsSync(join(exchange,file)), {timeout:155000},
+        () => fixtureExists(exchange,file), {timeout:155000},
       ).toBe(true),issue,exchange });
       const { checkOwnerOperations } = await import("./owner-operations-flow.mjs");
       await checkOwnerOperations({ owner,a,b,origin,api,issue,wait });
-      await expect.poll(() => existsSync(join(exchange,"charge-complete")), {timeout:155000}).toBe(true);
+      await expect.poll(() => fixtureExists(exchange,"charge-complete"), {timeout:155000}).toBe(true);
       await balance(a,fundedBalance);
       const history = async (p,path) => (await (await p.context().request.get(api+path)).json()).data.items;
       const charged = (await history(a,"usage/requests?report="+current)).find(v=>v.charge_micro_usd==="1200000");

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "../../tests/fixture_files.rs"]
+mod fixture_files;
+
 const ORIGIN: &str = "https://provider.example/v1";
 const SOURCE: Uuid = Uuid::from_u128(17);
 
@@ -181,11 +184,13 @@ async fn qualified_client_verifies_tls_and_keeps_its_pin_after_failure() {
         }
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("relay-hosted-")
+        .tempdir()
+        .unwrap();
     let cert = dir.path().join("cert.pem");
     let key = dir.path().join("key.pem");
-    let openssl = std::env::var_os("RELAY_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
-    let status = Command::new(openssl)
+    let status = fixture_files::openssl()
         .args([
             "req",
             "-x509",

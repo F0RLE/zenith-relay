@@ -1,7 +1,15 @@
 mod diagnostics;
+#[cfg(test)]
+mod file_tests;
 pub use diagnostics::CaptureLimits;
 use serde::{Deserialize, Serialize};
-use std::{env, fs::File, io::Read, net::SocketAddr, path::Path};
+use std::{
+    env,
+    fs::{self, File},
+    io::Read,
+    net::SocketAddr,
+    path::{Component, Path},
+};
 use url::{Host, Url};
 use zeroize::Zeroizing;
 
@@ -104,7 +112,26 @@ pub struct Branding {
 }
 
 fn read_limited(path: &Path, limit: u64, _private: bool) -> Option<Zeroizing<String>> {
-    let file = File::open(path).ok()?;
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return None;
+    }
+    let directory = fs::canonicalize(path.parent()?).ok()?;
+    let path = directory.join(path.file_name()?);
+    if !path.starts_with(&directory) {
+        return None;
+    }
+    let before = path.symlink_metadata().ok()?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > limit {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if before.file_attributes() & 0x400 != 0 {
+            return None;
+        }
+    }
+    let file = File::open(&path).ok()?;
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() {
         return None;

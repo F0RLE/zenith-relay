@@ -1,10 +1,9 @@
 import { expect } from "@playwright/test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { fixtureExists, readFixture, writeFixture } from "../../test-support/files.mjs";
 
 export async function checkSourceCopy(page, origin, exchange) {
-  const wait = name => expect.poll(() => existsSync(join(exchange, name)), { timeout: 25000 }).toBe(true);
-  const notify = name => writeFileSync(join(exchange, name), "", { flag: "wx" });
+  const wait = name => expect.poll(() => fixtureExists(exchange, name), { timeout: 25000 }).toBe(true);
+  const notify = name => writeFixture(exchange, name);
   const api = "/api/hosted/v1";
   await expect.poll(() => page.evaluate(async path => {
     try { return (await fetch(path)).status; } catch { return 0; }
@@ -15,7 +14,7 @@ export async function checkSourceCopy(page, origin, exchange) {
   await page.getByText("Desktop source copy", { exact: true }).click();
   notify("owner-ready");
   await wait("review");
-  const code = readFileSync(join(exchange, "review"), "utf8");
+  const code = readFixture(exchange, "review");
   const input = page.getByLabel("Review code from Desktop");
   await input.fill(code);
   const decision = status => page.waitForResponse(r =>

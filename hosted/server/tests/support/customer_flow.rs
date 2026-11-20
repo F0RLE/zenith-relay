@@ -144,12 +144,7 @@ pub async fn journey(with_inference: bool) {
             .unwrap(),
     );
     support::ready(&mut setup, &http, &format!("{origin}/setup/owner")).await;
-    let code = fs::read_dir(&code_dir)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let code = support::fixture_files::setup_code(&code_dir);
     let mut browser = Process(
         Command::new("bun")
             .current_dir(&web)

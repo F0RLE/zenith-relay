@@ -1,7 +1,11 @@
 import { expect } from "@playwright/test";
 import { join } from "node:path";
+import { fixtureOrigin } from "../../test-support/files.mjs";
 
 export async function checkOwnerUsage({ owner, customer, origin, api, requestId }) {
+  origin = fixtureOrigin(origin);
+  if (api !== origin + "/api/hosted/v1/" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(requestId))
+    throw new Error("Invalid owner usage fixture target");
   const base = api + "admin/usage/", detail = base + "requests/" + requestId;
   const customerHttp = customer.context().request;
   const context = await owner.context().browser().newContext({ storageState: await owner.context().storageState() });
@@ -15,7 +19,9 @@ export async function checkOwnerUsage({ owner, customer, origin, api, requestId 
   };
   for (const url of [base + "requests", base + "errors", detail]) {
     expect((await customerHttp.get(url)).status()).toBe(401);
-    expect((await fetch(url)).status).toBe(401);
+    const anonymousContext = await owner.context().browser().newContext();
+    try { expect((await anonymousContext.request.get(url, { maxRedirects: 0 })).status()).toBe(401); }
+    finally { await anonymousContext.close(); }
   }
   const anonymous = await customerHttp.get(origin + "/admin/usage/requests/" + requestId, { maxRedirects: 0 });
   expect(anonymous.status()).toBe(303);
@@ -51,7 +57,7 @@ export async function checkOwnerUsage({ owner, customer, origin, api, requestId 
   await plot.press("Enter");
   await expect(page).toHaveURL(new RegExp(`/admin/usage\\?from_ms=${chart.as_of_ms - 3600000}&to_ms=${chart.as_of_ms}$`));
   const listUrl = page.url();
-  const requestLink = page.getByRole("link", { name: new RegExp(requestId) });
+  const requestLink = page.getByRole("link").filter({ hasText: requestId });
   await expect(requestLink).toHaveCount(1);
   await requestLink.focus();
   await requestLink.press("Enter");

@@ -31,9 +31,13 @@ export function observeControl<T>(read: () => Promise<T>, updated: (v: T) => voi
 }
 
 export async function controlResponse(path: string, init: RequestInit = {}) {
+  const route = path.split("?", 1)[0] ?? "";
+  if (path.length > 8192 || /[\s#\\]/.test(path)
+    || !/^[a-z][a-z0-9_-]*(?:\/[a-z0-9_-]+)*$/.test(route)) throw new Error("Invalid control path");
   const r = await fetch("/api/hosted/v1/" + path, {
+    ...init,
     mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
-    signal: AbortSignal.timeout(12000), ...init,
+    signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
   });
   if (!r.ok) {
     const body: unknown = await r.json().catch(() => null);

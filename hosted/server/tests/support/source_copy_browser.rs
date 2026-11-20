@@ -109,8 +109,7 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
 
     let cert = root.join("edge.pem");
     let tls_key = root.join("edge-key.pem");
-    let openssl = std::env::var_os("RELAY_TEST_OPENSSL").unwrap_or_else(|| "openssl".into());
-    let cert_result = Command::new(openssl)
+    let cert_result = crate::support::fixture_files::openssl()
         .args([
             "req",
             "-x509",
@@ -192,12 +191,7 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
             .unwrap(),
     );
     ready(&mut setup, &http, &format!("{origin}/setup/owner")).await;
-    let code = fs::read_dir(&enrollment)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let code = crate::support::fixture_files::setup_code(&enrollment);
     let mut browser = Process(
         Command::new("bun")
             .current_dir(&web)

@@ -31,14 +31,7 @@ pub async fn verify(
         cmd
     };
     let setup = || setup_with(cfg, root.path());
-    let get_file = || {
-        fs::read_dir(root.path())
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
-    };
+    let get_file = || super::support::fixture_files::setup_code(root.path());
     let request = |step: &str, token: &str, site: &str, data: Value| {
         http.post(format!("{origin}/api/hosted/v1/setup/{step}"))
             .bearer_auth(token)
@@ -155,12 +148,7 @@ pub async fn verify(
         &format!("{other_origin}/setup/owner"),
     )
     .await;
-    let other_file = fs::read_dir(other.path())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+    let other_file = super::support::fixture_files::setup_code(other.path());
     let mut authenticators = Process(
         browser()
             .args(["race", &other_origin])

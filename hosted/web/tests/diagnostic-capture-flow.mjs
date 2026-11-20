@@ -1,10 +1,10 @@
 import { expect } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { readFixture } from "../../test-support/files.mjs";
 import { join } from "node:path";
 
 export async function checkCapture({ owner, a, b, origin, api, ownerRead, issue, wait, exchange }) {
   await wait("capture-request");
-  const target = readFileSync(join(exchange, "capture-request"), "utf8");
+  const target = readFixture(exchange, "capture-request");
   const path = api + "admin/operations/diagnostic-sessions";
   const http = owner.context().request;
   const previousPreferences = await owner.evaluate(() => [localStorage.getItem("relay-hosted-theme"),

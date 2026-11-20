@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { existsSync } from "node:fs";
+import { fixtureExists } from "../../test-support/files.mjs";
 import { join } from "node:path";
 
 export async function checkPurchaseLimit({ owner, customer, origin, api, sourceId, ownerRead, issue, wait, exchange }) {
@@ -113,6 +113,6 @@ export async function checkPurchaseLimit({ owner, customer, origin, api, sourceI
     }
   }
   issue("limit-set");
-  await expect.poll(() => existsSync(join(exchange, "receipts-closed")), { timeout: 110000 }).toBe(true);
+  await expect.poll(() => fixtureExists(exchange, "receipts-closed"), { timeout: 110000 }).toBe(true);
   expect(await read()).toMatchObject({ revision: "3", accounted_micro_usd: "730000", outstanding_micro_usd: "0", remaining_micro_usd: "200000" });
 }

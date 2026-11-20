@@ -71,7 +71,8 @@ mod tests {
 
     #[test]
     fn original_desktop_format_and_new_contexts_are_not_interchangeable() {
-        let key = [13; 32];
+        let mut key = [0; 32];
+        getrandom::fill(&mut key).unwrap();
         let nonce = [7; 12];
         let plain = b"synthetic test data";
         let cipher = ChaCha20Poly1305::new((&key).into());

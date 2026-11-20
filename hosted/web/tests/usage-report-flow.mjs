@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { readFixture } from "../../test-support/files.mjs";
 import { join } from "node:path";
 import { checkOwnerOverview } from "./owner-overview-flow.mjs";
 import { checkOwnerUsage } from "./owner-usage-flow.mjs";
@@ -39,7 +40,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
 
   await wait("usage-before-credit");
   const checkOwnerCorrection = await checkOwnerOverview({ owner, customer: a, origin, api });
-  const correctedId = readFileSync(join(exchange, "usage-before-credit"), "utf8");
+  const correctedId = readFixture(exchange, "usage-before-credit");
   const checkOwnerRequestCorrection = await checkOwnerUsage({ owner, customer: a, origin, api, requestId: correctedId });
   const requested = captured();
   await a.goto(origin + "/app/overview");
@@ -139,7 +140,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
   const receipt = a.locator(".own-receipt").filter({ has: a.locator("code", { hasText: correctedId }) });
   await receipt.locator("summary").click();
   await receipt.getByRole("link", { name: "Request details", exact: true }).click();
-  await expect(a).toHaveURL(new RegExp("/app/usage\\?hours=24&id=" + correctedId + "$"));
+  await expect(a).toHaveURL(origin + "/app/usage?hours=24&id=" + correctedId);
   const direct = await read(livePath);
   expect(direct.items[0].charge_micro_usd).toBe("4000");
   expect(direct.diagnostic).toEqual({ diagnostic_version: 1, coverage: "partial",

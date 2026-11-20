@@ -55,7 +55,10 @@ impl Cluster {
     }
 
     fn isolated(bin: PathBuf, password: String) -> Self {
-        let temp = TempDir::new().unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("relay-hosted-")
+            .tempdir()
+            .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -143,7 +146,12 @@ impl Cluster {
         assert!(
             started.success(),
             "isolated PostgreSQL did not start: {}",
-            fs::read_to_string(self.temp.path().join("pg.log")).unwrap_or_default()
+            fs::read_to_string(self.temp.path().join("pg.log"))
+                .unwrap_or_default()
+                .chars()
+                .take(4096)
+                .flat_map(char::escape_default)
+                .collect::<String>()
         );
     }
 

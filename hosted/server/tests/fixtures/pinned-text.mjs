@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFixture } from "../../../test-support/files.mjs";
 import { createServer } from "node:https";
 
 const [port, cert, key] = process.argv.slice(2);
@@ -6,7 +6,8 @@ const counts = { catalog: 0, responses: 0, unexpected: 0 };
 const payload = (res, value) => res.writeHead(200, { "content-type": "application/json" })
   .end(JSON.stringify(value));
 
-createServer({ cert: readFileSync(cert), key: readFileSync(key) }, async (req, res) => {
+if (!/^\d+$/.test(port) || +port < 1 || +port > 65535) throw new Error("Invalid fixture port");
+createServer({ cert: readFixture(cert), key: readFixture(key) }, async (req, res) => {
   if (req.headers.host === `fixture.test:${port}`) {
     if (req.method === "GET" && req.url === "/counts") return payload(res, counts);
     if (req.headers.authorization === "Bearer fixture-provider") {

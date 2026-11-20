@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { readFixture } from "../../test-support/files.mjs";
 import { join } from "node:path";
 import { configureCheckout } from "./payment-builder-flow.mjs";
 
@@ -88,7 +88,7 @@ export async function checkCheckout({ a, b, secondA, owner, ownerRead, origin, a
   await review();
   const shortQuote = (await (await quoteReply).json()).data.quote;
   issue("checkout-shorten-quote", shortQuote.id); await wait("checkout-short-quote");
-  const quoteDeadline = Number(readFileSync(join(exchange, "checkout-short-quote"), "utf8"));
+  const quoteDeadline = Number(readFixture(exchange, "checkout-short-quote"));
   let ack, submitted;
   const opRoute = url => url.pathname.endsWith("/payments") && url.searchParams.has("operation_id");
   await a.route(opRoute, route => route.abort());

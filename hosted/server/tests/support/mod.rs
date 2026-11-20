@@ -1,4 +1,6 @@
 mod cluster;
+#[path = "../fixture_files.rs"]
+pub mod fixture_files;
 pub use cluster::{Cluster, port};
 use std::{
     fs,

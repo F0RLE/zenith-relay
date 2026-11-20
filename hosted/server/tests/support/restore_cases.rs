@@ -92,10 +92,15 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&copied_vault, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    for entry in fs::read_dir(f._cluster.temp.path().join("vault")).unwrap() {
+    let source_vault = f._cluster.temp.path().join("vault");
+    for entry in fs::read_dir(&source_vault).unwrap() {
         let entry = entry.unwrap();
-        assert!(entry.file_type().unwrap().is_file());
-        fs::copy(entry.path(), copied_vault.join(entry.file_name())).unwrap();
+        let name = entry.file_name();
+        let source = crate::support::fixture_files::child(&source_vault, &name);
+        let target = copied_vault.join(name);
+        assert!(target.starts_with(&copied_vault));
+        assert!(!target.exists());
+        fs::copy(source, target).unwrap();
     }
 
     // All three effects commit AFTER the backup. The merchant's effect

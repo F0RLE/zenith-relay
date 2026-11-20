@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFixture } from "../../test-support/files.mjs";
 import { request } from "node:http";
 import { createServer } from "node:https";
 
@@ -7,7 +7,7 @@ if (![port, web, transfers].every(p => /^\d+$/.test(p) && +p > 0 && +p <= 65535)
   || new Set([port, web, transfers]).size !== 3) throw new Error("Expected three isolated test ports");
 
 // Fixture edge: forward only to these two local processes. No logs or retries.
-createServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, (req, res) => {
+createServer({ cert: readFixture(certPath), key: readFixture(keyPath) }, (req, res) => {
   if (req.headers.host !== `localhost:${port}` || !req.url?.startsWith("/")) {
     res.writeHead(400).end();
     return;
