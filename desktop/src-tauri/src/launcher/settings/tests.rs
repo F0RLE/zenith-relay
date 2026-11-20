@@ -33,7 +33,7 @@ impl Fixture {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let relative = match application {
             Application::Chatgpt => "chatgpt",
-            Application::ClaudeDesktop => "claude",
+            Application::ClaudeDesktop => "Claude.app/Contents/MacOS/Claude",
             Application::Opencode => "opencode-desktop",
         };
         let path = self.root.join(relative);
