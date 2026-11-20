@@ -3,20 +3,26 @@ use serde::Deserialize;
 
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
-fn checked_input(input: &[u8]) -> serde_json::Result<&[u8]> {
-    if input.len() > MAX_BYTES {
+fn checked_input<const LIMIT: usize>(input: &[u8]) -> serde_json::Result<&[u8]> {
+    if input.len() > LIMIT {
         return Err(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "JSON record exceeds 4 MiB",
+            "JSON record exceeds its byte limit",
         )));
     }
     Ok(input)
 }
 
 pub fn from_slice<'de, T: Deserialize<'de>>(input: &'de [u8]) -> serde_json::Result<T> {
+    from_slice_with_limit::<T, MAX_BYTES>(input)
+}
+
+pub fn from_slice_with_limit<'de, T: Deserialize<'de>, const LIMIT: usize>(
+    input: &'de [u8],
+) -> serde_json::Result<T> {
     // Keep serde_json's recursion limit enabled. Callers validate field semantics
     // and enforce any smaller format-specific limit before using the result.
-    serde_json::from_slice(checked_input(input)?)
+    serde_json::from_slice(checked_input::<LIMIT>(input)?)
 }
 
 pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> serde_json::Result<T> {
@@ -30,6 +36,12 @@ mod tests {
 
     #[test]
     fn size_and_nesting_limits_apply_before_acceptance() {
+        assert!(from_slice_with_limit::<Value, 2>(b"[]").is_ok());
+        assert!(
+            from_slice_with_limit::<Value, 1>(b"[]")
+                .unwrap_err()
+                .is_io()
+        );
         let at_limit = format!("\"{}\"", "x".repeat(MAX_BYTES - 2));
         assert!(from_str::<Value>(&at_limit).is_ok());
         let too_large = format!("{at_limit} ");

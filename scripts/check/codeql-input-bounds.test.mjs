@@ -17,8 +17,9 @@ test("deserialization models name only the two rejecting size guards", () => {
   }] });
   const json = read("crates/relay-core/src/bounded_json.rs");
   expect(json).toContain("const MAX_BYTES: usize = 4 * 1024 * 1024;");
-  expect(json).toMatch(/if input\.len\(\) > MAX_BYTES \{\s*return Err/);
-  expect(json).toContain("serde_json::from_slice(checked_input(input)?)");
+  expect(json).toMatch(/if input\.len\(\) > LIMIT \{\s*return Err/);
+  expect(json).toContain("from_slice_with_limit::<T, MAX_BYTES>(input)");
+  expect(json).toContain("serde_json::from_slice(checked_input::<LIMIT>(input)?)");
   expect(json).not.toContain("disable_recursion_limit(");
   const config = read("hosted/server/src/config.rs");
   expect(config).toMatch(/fn checked_text[\s\S]*?if text\.len\(\) > 65_536 \{\s*return Err/);
