@@ -132,7 +132,7 @@ test("stale identity reveal cannot replace a newer request after switching throu
 
   await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
   await page.getByRole("menuitemradio", { name: "Relay Hosted", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Open settings", exact: true })).toBeVisible();
   await page.locator(".mode-picker-trigger").click();
   await page.getByRole("menuitemradio", { name: "Computer", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");

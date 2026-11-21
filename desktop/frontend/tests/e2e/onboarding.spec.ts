@@ -53,6 +53,7 @@ test("quick setup chooses where the shared pool runs", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Choose API/ })).toHaveCount(0);
   await page.getByRole("button", { name: /Relay Hosted/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
   await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   const calls = await page.evaluate(() => (window as unknown as {
     __TAURI_TEST_INVOKES__: Array<{ command: string }>;
@@ -444,6 +445,7 @@ for (const theme of ["light", "dark"] as const) {
       }
       await page.getByRole("button", { name: /На сервере/ }).click();
       await page.getByRole("button", { name: "Продолжить" }).click();
+      await page.getByRole("button", { name: "Открыть настройки", exact: true }).click();
       await expect(page.getByRole("button", { name: "Проверить сервер" })).toBeDisabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-hosted-ru-${theme}-${viewport.width}x${viewport.height}.png` });

@@ -194,7 +194,9 @@ async function releaseSnapshot(page: Page) {
 async function switchMode(page: Page, label: "Computer" | "Relay Hosted") {
   await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
   await page.getByRole("menuitemradio", { name: label, exact: true }).click();
-  await expect(page.getByRole("heading", { name: label === "Relay Hosted" ? label : "Overview", exact: true })).toBeVisible();
+  await expect(label === "Relay Hosted"
+    ? page.getByRole("button", { name: "Open settings", exact: true })
+    : page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
 }
 
 for (const mode of ["local"] as const) {

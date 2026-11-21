@@ -130,6 +130,7 @@ test("confirmed local reset delegates protected restoration to Rust", async ({ p
 test("local pool reset is hidden outside Computer mode", async ({ page }) => {
   await installTauriMock(page, { mode: "hosted", locale: "en", populated: true });
   await page.goto("/");
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
   await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   await expect(page.getByText("Reset local pool data", { exact: true })).toHaveCount(0);
 });
