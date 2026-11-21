@@ -97,15 +97,14 @@ In **Computer**, closing the window keeps Relay in the tray; quitting stops
 the local API and automations. Changing modes keeps the local API running and
 credentials on this device.
 
-In the server's **Admin → Connections → Paired devices**, name the computer
-and create an invitation. Paste it into **Relay Hosted → Review server**.
-Check the server address and installation ID. Paste the displayed approval
-code back into the same invitation, approve it, then select **View server
-connections** in Desktop. Invitations last five minutes; access lasts 24 hours.
-**Forget on this computer** removes the local pairing. Use **Revoke access**
-on the server to end its grant immediately.
+Create an invitation in **Admin → Connections → Desktop → Paired devices**.
+Paste it into **Relay Hosted → Settings → Review server**. Check the address
+and installation ID, approve the code in the same invitation, then select
+**Check access** in Desktop Settings. Invitations last five minutes; access
+lasts 24 hours. **Forget on this computer** removes the local pairing.
+**Revoke access** on the server ends the grant immediately.
 
-For an HTTPS server, open **Copy an API source to the server** in Desktop.
+For HTTPS servers, open **Copy an API source to the server** under Connections.
 Choose a Responses source and check the server address and route. Paste the
 review code into **Admin → Connections → Desktop source copy** and approve it
 with your passkey. Within ten minutes, choose **Check server result** and

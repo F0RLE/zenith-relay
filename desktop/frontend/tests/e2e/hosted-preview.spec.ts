@@ -6,6 +6,7 @@ for (const locale of ["ru", "en"] as const) {
     test.skip(!test.info().config.configFile?.endsWith("playwright.hosted-preview.config.ts"), "The preview action is development-only.");
     await installTauriMock(page, { mode: "hosted", locale, theme: locale === "ru" ? "dark" : "light", populated: true });
     await page.goto("/");
+    await page.locator(".sidebar-nav-utilities").getByRole("button", { name: locale === "ru" ? "Настройки" : "Settings", exact: true }).click();
     const pane = page.locator(".hosted-device-pane");
     await expect(pane.getByRole("textbox")).toHaveValue("");
     await expect(pane.getByRole("button", {name: locale === "ru" ? "Проверить сервер" : "Review server"})).toBeDisabled();
@@ -23,6 +24,7 @@ test("failed preview launch shows recovery, not a successful launch", async ({ p
   test.skip(!test.info().config.configFile?.endsWith("playwright.hosted-preview.config.ts"), "The preview action is development-only.");
   await installTauriMock(page, { mode: "hosted", locale: "ru" });
   await page.goto("/");
+  await page.locator(".sidebar-nav-utilities").getByRole("button", { name: "Настройки", exact: true }).click();
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, ...args: unknown[]) => Promise<unknown> } }).__TAURI_INTERNALS__;
     const original = internals.invoke.bind(internals);

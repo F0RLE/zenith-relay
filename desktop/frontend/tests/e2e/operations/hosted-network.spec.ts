@@ -31,12 +31,26 @@ for (const locale of ["en", "ru"] as const) {
     await page.locator(".mode-picker-trigger").click();
     await expect(page.getByRole("menuitemradio")).toHaveText([computer, hosted]);
     await page.getByRole("menuitemradio", { name: hosted, exact: true }).click();
-    await expect(page.getByRole("heading", { name: hosted, exact: true })).toBeVisible();
+    const labels = locale === "ru" ? ["Обзор", "Подключения", "Пул", "Использование"] : ["Overview", "Connections", "Pool", "Usage"];
+    const settings = locale === "ru" ? "Настройки" : "Settings";
+    await expect(page.getByRole("heading", { name: labels[0], exact: true })).toBeVisible();
+    const main = page.locator(".sidebar-main-nav");
+    const utilities = page.locator(".sidebar-nav-utilities");
+    await expect(main.getByRole("button")).toHaveText(labels);
+    await expect(utilities.getByRole("button")).toHaveText([settings]);
+    await expect(main.getByRole("button", { name: labels[0], exact: true })).toHaveAttribute("aria-current", "page");
+    for (const name of labels.slice(1)) {
+      await main.getByRole("button", { name, exact: true }).click();
+      await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+      await expect(main.getByRole("button", { name, exact: true })).toHaveAttribute("aria-current", "page");
+    }
+    await utilities.getByRole("button", { name: settings, exact: true }).click();
+    await expect(page.getByRole("heading", { name: settings, exact: true })).toBeVisible();
+    await expect(utilities.getByRole("button", { name: settings, exact: true })).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("button", { name: locale === "ru" ? "Проверить сервер" : "Review server" })).toBeDisabled();
-    await expect(page.locator(".sidebar-main-nav button")).toHaveCount(0);
-    await expect(page.locator(".sidebar-nav-utilities button")).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("hosted");
-    expect((await calls(page)).some(({ command }) => ["stop_local_gateway","execute_remote_server_action","read_hosted_connections","prepare_hosted_device"].includes(command) || command.startsWith("get_remote_"))).toBe(false);
+    expect((await calls(page)).some(({ command }) => ["stop_local_gateway", "prepare_hosted_device", "get_relay_storage_info", "get_diagnostic_settings"].includes(command) ||
+      command.startsWith("read_hosted_") || command.startsWith("get_remote_"))).toBe(false);
     await page.screenshot({ path: `output/playwright/hosted-${locale}.png` });
 
     await expect(page.getByRole("button", {name:locale === "ru" ? "Открыть демо" : "Open demo"})).toHaveCount(0);
@@ -49,6 +63,7 @@ for (const locale of ["en", "ru"] as const) {
 test("Hosted startup does not load either runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "hosted", locale: "en", populated: true });
   await page.goto("/");
+  await page.locator(".sidebar-nav-utilities").getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("button", { name: "Review server" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Open demo", exact: true })).toHaveCount(0);
   expect((await calls(page)).some(({ command }) => ["get_local_runtime_state","read_hosted_connections","prepare_hosted_device"].includes(command) || command.startsWith("get_remote_"))).toBe(false);

@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Cloud, Download, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Cloud, Download, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Plug, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
@@ -41,15 +41,21 @@ const settingsPage = lazyNamed(async () => (await import("../pages/settings/Sett
 const helpCenter = lazyNamed(async () => (await import("../help/HelpCenter")).HelpCenter);
 const pageModules = { connections: connectionsPage, pool: poolPage, usage: usagePage, integrations: integrationsPage, profiles: profilesPage, settings: settingsPage, help: helpCenter };
 
-const pages: Array<{ id: PageId; icon: typeof LayoutDashboard; preload?: () => void }> = [
+type SidebarEntry = { id: PageId; icon: typeof LayoutDashboard };
+const mainPages: SidebarEntry[] = [
   { id: "overview", icon: LayoutDashboard },
-  { id: "connections", icon: Cable, preload: connectionsPage.preload },
-  { id: "pool", icon: SlidersHorizontal, preload: poolPage.preload },
-  { id: "integrations", icon: Plug, preload: integrationsPage.preload },
-  { id: "usage", icon: Activity, preload: usagePage.preload },
-  { id: "profiles", icon: ArchiveRestore, preload: profilesPage.preload },
-  { id: "settings", icon: Settings, preload: settingsPage.preload },
+  { id: "connections", icon: Cable },
+  { id: "pool", icon: SlidersHorizontal },
+  { id: "integrations", icon: Plug },
+  { id: "usage", icon: Activity },
 ];
+const utilityPages: SidebarEntry[] = [
+  { id: "profiles", icon: ArchiveRestore },
+  { id: "settings", icon: Settings },
+];
+
+const pageModule = (mode: RelayMode, page: PageId) =>
+  mode === "hosted" && page !== "help" ? hostedPage : page === "overview" ? undefined : pageModules[page];
 
 export function RelayShell() {
   const { t } = useTranslation();
@@ -60,14 +66,15 @@ export function RelayShell() {
   const navigate = useCallback((target: PageId) => {
     const revision = ++navigationRevision.current;
     setNavigationFailure(null);
-    if (target === "overview") { setPage(target); return; }
+    const module = pageModule(mode, target);
+    if (!module) { setPage(target); return; }
     // Keep the actual current screen until both the target JS and CSS are ready.
-    void pageModules[target].prepare().then(() => {
+    void module.prepare().then(() => {
       if (navigationRevision.current === revision) setPage(target);
     }).catch(() => {
       if (navigationRevision.current === revision) setNavigationFailure(target);
     });
-  }, [setPage]);
+  }, [mode, setPage]);
   useEffect(() => () => { navigationRevision.current += 1; }, [mode, page]);
   useEffect(() => {
     let secondFrame = 0;
@@ -106,10 +113,10 @@ export function RelayShell() {
     openUpdateDialog,
     closeUpdateDialog,
   } = useAppUpdates();
-  const mainPages = mode === "hosted" ? [] : pages.filter(({ id }) => id !== "profiles" && id !== "settings");
-  const utilityPages = mode === "hosted" ? [] : pages.filter(({ id }) => id === "profiles" || id === "settings");
-  const navigationButton = ({ id: pageId, icon: Icon, preload }: (typeof pages)[number]) => (
-    <button
+  const navigationButton = ({ id: pageId, icon: Icon }: SidebarEntry) => {
+    if (mode === "hosted" && (pageId === "integrations" || pageId === "profiles")) return null;
+    const preload = pageModule(mode, pageId)?.preload;
+    return <button
       key={pageId}
       type="button"
       className={page === pageId ? "active" : ""}
@@ -122,8 +129,8 @@ export function RelayShell() {
     >
       <Icon aria-hidden />
       <span>{t(`nav.${pageId}`)}</span>
-    </button>
-  );
+    </button>;
+  };
   const focusModePicker = useCallback(() => {
     modePickerRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
   }, []);
@@ -199,7 +206,10 @@ export function RelayShell() {
             aria-label={`${t("common.mode")}: ${t(`modes.${mode}`)}`}
             aria-haspopup="menu"
             aria-expanded={modeOpen}
-            onClick={() => setModeOpen((isOpen) => !isOpen)}
+            onClick={() => {
+              if (!modeOpen) hostedPage.preload();
+              setModeOpen(!modeOpen);
+            }}
           >
             <ModeIcon mode={mode} />
             <span className="mode-picker-label">{t(`modes.${mode}`)}</span>
@@ -211,8 +221,6 @@ export function RelayShell() {
                 <button
                   className="relay-popover-item"
                   role="menuitemradio"
-                  onFocus={modeOption === "hosted" ? hostedPage.preload : undefined}
-                  onPointerEnter={modeOption === "hosted" ? hostedPage.preload : undefined}
                   aria-checked={mode === modeOption}
                   key={modeOption}
                   type="button"
@@ -288,15 +296,12 @@ export function RelayShell() {
         {navigationFailure ? <div className="form-note error-text" role="alert">
           {t("feedback.refreshFailed")} <Button variant="secondary" onClick={() => navigate(navigationFailure)}>{t("common.retry")}</Button>
         </div> : null}
-        {/* Remount the boundary per page: a retained boundary keeps the
-            previous page hidden in the DOM while the next lazy chunk loads,
-            so automation and assistive tech would still resolve the old
-            page's nodes after navigation. */}
+        {/* Keep the Hosted grant in memory across sidebar pages, not across mode switches. */}
         {pageNeedsRuntime && !runtime && page !== "overview" ? (
           loading ? null : <RuntimeUnavailable />
         ) : (
           <div inert={pageNeedsRuntime && !runtimeReady} style={{ display: "contents" }}>
-          <Suspense key={page} fallback={null}>
+          <Suspense key={mode === "hosted" ? mode : page} fallback={null}>
             <Page
               page={page}
               onImport={() => openImport()}
@@ -361,7 +366,7 @@ function RuntimeUnavailable() {
 }
 
 function ModeIcon({ mode }: { mode: RelayMode }) {
-  return mode === "local" ? <Laptop aria-hidden /> : mode === "hosted" ? <Cloud aria-hidden /> : <Server aria-hidden />;
+  return mode === "local" ? <Laptop aria-hidden /> : <Cloud aria-hidden />;
 }
 
 function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void; focusAfterClose: () => void }) {
@@ -408,7 +413,9 @@ function GlobalFeedback({ feedback, clearFeedback, focusAfterClose }: { feedback
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {
   const { mode } = useRelayState();
-  if (mode === "hosted" && page !== "help") return <hostedPage.Component />;
+  if (mode === "hosted") return <hostedPage.Component>
+    {page === "help" && <helpCenter.Component />}
+  </hostedPage.Component>;
   if (page === "overview") return <OverviewPage />;
   if (page === "connections") return <connectionsPage.Component onImport={onImport} />;
   if (page === "pool") return <poolPage.Component />;

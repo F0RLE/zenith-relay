@@ -3,7 +3,10 @@ use serde::Serialize;
 use std::sync::Mutex;
 use tauri::WebviewWindow;
 use uuid::Uuid;
-use zenith_relay_hosted_device::{Destination, DeviceKey, DevicePage};
+use zenith_relay_hosted_device::{
+    Destination, DeviceAccess, DeviceKey, DeviceOverview, DevicePage, DeviceUsage, PoolChange,
+    PoolReview, UsageFilter,
+};
 use zeroize::Zeroizing;
 pub(crate) mod copy;
 
@@ -116,14 +119,82 @@ pub(crate) async fn read_hosted_connections(
         .map(Uuid::parse_str)
         .transpose()
         .map_err(|_| "invalid_device_cursor")?;
-    let target = invitation.clone();
-    let key = local(&window, move || expected(&target)).await?;
-    let page = key.connections(cursor).await?;
-    let same = local(&window, move || {
+    let key = read_key(&window, &invitation).await?;
+    finish_read(
+        &window,
+        invitation,
+        key.connections_with_pool(cursor).await?,
+        key,
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn prepare_hosted_pool_change(
+    window: WebviewWindow,
+    invitation: String,
+    change: PoolChange,
+) -> Result<PoolReview, &'static str> {
+    let key = read_key(&window, &invitation).await?;
+    finish_read(
+        &window,
+        invitation,
+        key.prepare_pool_change(&change).await?,
+        key,
+    )
+    .await
+}
+
+async fn read_key(window: &WebviewWindow, invitation: &str) -> Result<DeviceKey, &'static str> {
+    let target = invitation.to_owned();
+    local(window, move || expected(&target)).await
+}
+
+async fn finish_read<T>(
+    window: &WebviewWindow,
+    invitation: String,
+    reply: T,
+    key: DeviceKey,
+) -> Result<T, &'static str> {
+    let same = local(window, move || {
         Ok(expected(&invitation)?.verifier() == key.verifier())
     })
     .await?;
-    if same { Ok(page) } else { Err(CHANGED) }
+    if same { Ok(reply) } else { Err(CHANGED) }
+}
+
+#[tauri::command]
+pub(crate) async fn read_hosted_access(
+    window: WebviewWindow,
+    invitation: String,
+) -> Result<Option<DeviceAccess>, &'static str> {
+    let key = read_key(&window, &invitation).await?;
+    let reply = match key.access().await {
+        Ok(v) => Some(v),
+        Err("device_endpoint_unavailable") => None, // older server; verify via Connections
+        Err(e) => return Err(e),
+    };
+    finish_read(&window, invitation, reply, key).await
+}
+
+#[tauri::command]
+pub(crate) async fn read_hosted_overview(
+    window: WebviewWindow,
+    invitation: String,
+    hours: i32,
+) -> Result<DeviceOverview, &'static str> {
+    let key = read_key(&window, &invitation).await?;
+    finish_read(&window, invitation, key.overview(hours).await?, key).await
+}
+
+#[tauri::command]
+pub(crate) async fn read_hosted_usage(
+    window: WebviewWindow,
+    invitation: String,
+    filter: UsageFilter,
+) -> Result<DeviceUsage, &'static str> {
+    let key = read_key(&window, &invitation).await?;
+    finish_read(&window, invitation, key.usage(&filter).await?, key).await
 }
 
 #[cfg(test)]

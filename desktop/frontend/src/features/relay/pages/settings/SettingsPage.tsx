@@ -1,7 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Bug, Database, FileText, FileWarning, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
+import { Bug, Database, FileText, FileWarning, FolderOpen, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { LanguagePicker } from "../../../../i18n/LanguagePicker";
 import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
 import { relayCommands } from "../../api/commands";
 import type { DiagnosticSettings, RelayStorageInfo } from "../../api/types";
@@ -9,6 +8,7 @@ import { Button, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../.
 import { useRelayState } from "../../state/RelayStateProvider";
 import { usePendingFlag } from "../../state/usePendingFlag";
 import { CodexTextModelsControl } from "./CodexTextModelsControl";
+import { AppearanceSettings, SettingsGroup } from "./AppearanceSettings";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
@@ -27,7 +27,7 @@ function loadStorageInfo() {
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t } = useTranslation();
-  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, launchApplicationAfterConnect, setLaunchApplicationAfterConnect, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState(() => cachedStorageInfo);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -64,22 +64,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
   return <section className="relay-page relay-workspace-page settings-page">
     <PageHeader workspace title={t("nav.settings")} />
     <div className="settings-groups">
-      <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
-        <div className="settings-control-row">
-          <div><strong>{t("settings.language")}</strong></div>
-          <LanguagePicker />
-        </div>
-        <div className="settings-control-row">
-          <div><strong>{t("settings.theme")}</strong></div>
-          <div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>
-            {(["system", "light", "dark"] as const).map((themeName) => (
-              <button key={themeName} type="button" className={theme === themeName ? "active" : ""} aria-pressed={theme === themeName} onClick={() => setTheme(themeName)}>
-                {t(`settings.themes.${themeName}`)}
-              </button>
-            ))}
-          </div>
-        </div>
-      </SettingsGroup>
+      <AppearanceSettings />
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>
         <SettingToggle
@@ -170,10 +155,6 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup> : null}
     </div>
   </section>;
-}
-
-function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
-  return <section className="settings-group"><header>{icon}<h2>{title}</h2></header><div className="settings-group-body">{children}</div></section>;
 }
 
 function SettingsPathRow({ title, path, missing, icon, action, busy, onOpen }: {
