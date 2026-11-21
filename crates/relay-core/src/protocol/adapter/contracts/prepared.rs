@@ -1,7 +1,5 @@
 use super::super::stream::AdapterStreamBridge;
 use super::{AdapterContinuationState, AdapterError, AdapterResult, TranslatedResponse};
-use crate::ToolPolicy;
-use crate::tool_policy::{ToolPolicyResult, apply_tool_policy};
 use serde_json::Value;
 
 /// One response codec result, independent of the selected upstream API.
@@ -93,14 +91,5 @@ impl PreparedAdapterRequest {
                 super::super::translation::TranslationStream::new(*request),
             ))),
         }
-    }
-
-    /// Policy is applied once, after conversion and before upstream I/O.
-    pub(crate) fn apply_tool_policy(
-        &mut self,
-        policy: &ToolPolicy,
-        diagnostics_enabled: bool,
-    ) -> Result<ToolPolicyResult, &'static str> {
-        apply_tool_policy(self.upstream_body_mut(), policy, diagnostics_enabled)
     }
 }

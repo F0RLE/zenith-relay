@@ -24,7 +24,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(in crate::protocol::adapter) use model::{Block, Message};
-use model::{Finish, Function, OutputFormat, Reasoning, Request, Response, Role, Usage};
+use model::{
+    Finish, Function, OutputFormat, Reasoning, ReasoningDisplay, Request, Response, Role, Usage,
+};
 pub use stream::TranslationStream;
 
 pub(crate) fn continuation_key(
@@ -56,6 +58,7 @@ pub struct TranslationRequest {
     model: String,
     response_id: String,
     reasoning_mode: MessagesReasoningMode,
+    reasoning_display: Option<ReasoningDisplay>,
     history: Vec<Message>,
     client_tools: BTreeMap<String, ClientToolTarget>,
     allowed_tool_names: BTreeSet<String>,
@@ -208,6 +211,7 @@ impl TranslationRequest {
             model: context.model.to_owned(),
             response_id,
             reasoning_mode: context.reasoning_mode,
+            reasoning_display: decoded_request.reasoning_display,
             history: decoded_request.messages,
             client_tools: decoded_request.client_tools,
             requires_tool_call: matches!(
@@ -280,8 +284,13 @@ impl TranslationRequest {
             self.normalize_function_arguments(block, true);
         }
         response.id = self.response_id.clone();
-        let mut response_body =
-            response::encode(self.client, &response, &self.model, &self.client_tools)?;
+        let mut response_body = response::encode(
+            self.client,
+            &response,
+            &self.model,
+            &self.client_tools,
+            self.reasoning_display,
+        )?;
         if self.client == WireApi::Responses {
             options::write_metadata(
                 response_body.as_object_mut().expect("encoded response"),
@@ -347,6 +356,10 @@ impl TranslationRequest {
             response_id: self.response_id.clone(),
             continuation,
         })
+    }
+
+    fn omits_reasoning(&self) -> bool {
+        self.reasoning_display == Some(ReasoningDisplay::Omitted)
     }
 
     fn normalize_function_arguments(&self, block: &mut Block, complete: bool) {

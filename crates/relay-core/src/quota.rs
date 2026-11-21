@@ -1,5 +1,10 @@
 mod refresh;
+mod spending;
 mod windows;
+
+pub use spending::{QuotaSpendDeadline, QuotaSpendResets};
+
+pub(crate) use refresh::QuotaTransportFailure;
 
 pub(crate) fn observation_is_fresh(
     observed_at_ms: Option<u64>,

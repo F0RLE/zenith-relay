@@ -2,8 +2,7 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const CLAUDE_DESKTOP_ALIAS_PREFIX: &str = "claude-sonnet-5-relay-";
 const CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX: &str = "claude-fable-5-relay-";
-const LEGACY_ALIAS_PREFIX: &str = "claude-zenith-";
-const LEGACY_REASONING_ALIAS_PREFIX: &str = "claude-fable-5-zenith-";
+const CLAUDE_DESKTOP_CATALOG_ALIAS_PREFIX: &str = "claude-relay-";
 
 /// A client-facing alias for the canonical upstream model.
 /// Desktop rejects other vendors' names even inside a `claude-*` route. Hash
@@ -24,37 +23,38 @@ pub fn claude_desktop_reasoning_model_alias(model: &str) -> String {
     model_alias(CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX, model)
 }
 
+/// Version-neutral route identity for Desktop's documented `behavesAs` mapping.
+/// The caller supplies the verified Claude identity separately; the alias itself
+/// grants no model capabilities or upstream access.
+pub fn claude_desktop_catalog_model_alias(model: &str) -> String {
+    model_alias(CLAUDE_DESKTOP_CATALOG_ALIAS_PREFIX, model)
+}
+
 pub(crate) fn is_claude_desktop_model_alias(model: &str) -> bool {
     alias_kind(model).is_some()
 }
 
 #[cfg(test)]
 fn is_claude_desktop_reasoning_model_alias(model: &str) -> bool {
-    alias_kind(model).is_some_and(|(prefix, _)| {
-        matches!(
-            prefix,
-            CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX | LEGACY_REASONING_ALIAS_PREFIX
-        )
-    })
+    alias_kind(model) == Some(CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX)
 }
 
 pub(crate) fn claude_desktop_model_alias_matches(alias: &str, model: &str) -> bool {
-    let Some((prefix, legacy)) = alias_kind(alias) else {
+    let Some(prefix) = alias_kind(alias) else {
         return false;
     };
     let digest = Sha256::digest(super::model_id_key(model).as_bytes());
-    alias[prefix.len()..].eq_ignore_ascii_case(&alias_suffix(&digest, legacy))
+    alias[prefix.len()..].eq_ignore_ascii_case(&alias_suffix(&digest))
 }
 
-fn alias_kind(model: &str) -> Option<(&'static str, bool)> {
+fn alias_kind(model: &str) -> Option<&'static str> {
     [
-        (CLAUDE_DESKTOP_ALIAS_PREFIX, false),
-        (CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX, false),
-        (LEGACY_ALIAS_PREFIX, true),
-        (LEGACY_REASONING_ALIAS_PREFIX, true),
+        CLAUDE_DESKTOP_ALIAS_PREFIX,
+        CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX,
+        CLAUDE_DESKTOP_CATALOG_ALIAS_PREFIX,
     ]
     .into_iter()
-    .find(|(prefix, _)| {
+    .find(|prefix| {
         model
             .get(..prefix.len())
             .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
@@ -63,25 +63,17 @@ fn alias_kind(model: &str) -> Option<(&'static str, bool)> {
 
 fn model_alias(prefix: &str, model: &str) -> String {
     let digest = Sha256::digest(super::model_id_key(model).as_bytes());
-    format!("{prefix}{}", alias_suffix(&digest, false))
+    format!("{prefix}{}", alias_suffix(&digest))
 }
 
-fn alias_suffix(digest: &[u8], legacy: bool) -> String {
-    if legacy {
-        digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<Vec<_>>()
-            .join("-")
-    } else {
-        digest[..8]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
-            .collect::<Vec<_>>()
-            .join("-")
-    }
+fn alias_suffix(digest: &[u8]) -> String {
+    digest[..8]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| format!("{:02x}{:02x}", pair[0], pair[1]))
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 #[cfg(test)]
@@ -104,6 +96,10 @@ mod tests {
                 (
                     CLAUDE_DESKTOP_REASONING_ALIAS_PREFIX,
                     claude_desktop_reasoning_model_alias,
+                ),
+                (
+                    CLAUDE_DESKTOP_CATALOG_ALIAS_PREFIX,
+                    claude_desktop_catalog_model_alias,
                 ),
             ] {
                 let alias = alias_fn(&model);
@@ -129,25 +125,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_desktop_routes_remain_valid_without_generating_them() {
+    fn retired_desktop_routes_are_not_aliases() {
         let model = "vendor/model";
         let digest = Sha256::digest(super::super::model_id_key(model).as_bytes());
-        for prefix in [LEGACY_ALIAS_PREFIX, LEGACY_REASONING_ALIAS_PREFIX] {
-            let alias = format!("{prefix}{}", alias_suffix(&digest, true));
-            assert!(is_claude_desktop_model_alias(&alias));
-            assert_eq!(
-                is_claude_desktop_reasoning_model_alias(&alias),
-                prefix == LEGACY_REASONING_ALIAS_PREFIX
-            );
-            assert!(claude_desktop_model_alias_matches(
-                &alias.to_uppercase(),
-                model
-            ));
-            assert!(!claude_desktop_model_alias_matches(&alias, "other/model"));
-            assert!(!claude_desktop_model_alias_matches(
-                &format!("{alias}-effort-high"),
-                model
-            ));
+        let retired_suffix = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("-");
+        for prefix in ["claude-zenith-", "claude-fable-5-zenith-"] {
+            for suffix in [&retired_suffix, &alias_suffix(&digest)] {
+                let alias = format!("{prefix}{suffix}");
+                assert!(!is_claude_desktop_model_alias(&alias));
+                assert!(!is_claude_desktop_reasoning_model_alias(&alias));
+                assert!(!claude_desktop_model_alias_matches(&alias, model));
+                assert!(!claude_desktop_model_alias_matches(
+                    &alias.to_uppercase(),
+                    model
+                ));
+            }
         }
     }
 }

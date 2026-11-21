@@ -1,6 +1,45 @@
 use super::*;
 use crate::model_metadata::ModelMetadataCatalog;
 
+impl ModelEndpointCapability {
+    fn merge_observation(&mut self, observation: &Self) {
+        // Feature-only observations do not establish or erase the protocol
+        // selected by an endpoint declaration.
+        if observation.status != CapabilityStatus::Unknown
+            && (self.status != CapabilityStatus::Unsupported
+                || observation.status == CapabilityStatus::Unsupported)
+        {
+            self.status = observation.status;
+            self.origin = observation.origin;
+            self.checked_at_ms = observation.checked_at_ms;
+        }
+        // A refresh replaces its own catalog rows, not another authority's
+        // explicit exclusion that is still present.
+        for (&feature, &status) in &observation.features {
+            self.features
+                .entry(feature)
+                .and_modify(|existing| {
+                    if *existing != CapabilityStatus::Unsupported {
+                        *existing = status;
+                    }
+                })
+                .or_insert(status);
+        }
+        if !observation.reasoning_efforts.is_empty() {
+            self.reasoning_efforts = observation.reasoning_efforts.clone();
+        }
+        if observation.service_tiers.is_some() {
+            self.service_tiers = observation.service_tiers.clone();
+        }
+        if observation.origin == CapabilityOrigin::Catalog {
+            let limits = observation.token_limits.validated();
+            if !limits.is_empty() {
+                self.token_limits = limits;
+            }
+        }
+    }
+}
+
 impl SourceProtocolConfig {
     pub fn effective_capabilities(
         &self,
@@ -19,11 +58,13 @@ impl SourceProtocolConfig {
                 continue;
             }
             if capability.status == CapabilityStatus::Unknown
-                && (capability.origin != CapabilityOrigin::Catalog
-                    || (capability.features.is_empty()
-                        && capability.reasoning_efforts.is_empty()
-                        && capability.token_limits.is_empty()
-                        && capability.service_tiers.is_none()))
+                && (!matches!(
+                    capability.origin,
+                    CapabilityOrigin::Catalog | CapabilityOrigin::Manual
+                ) || (capability.features.is_empty()
+                    && capability.reasoning_efforts.is_empty()
+                    && capability.token_limits.is_empty()
+                    && capability.service_tiers.is_none()))
             {
                 continue;
             }
@@ -71,27 +112,7 @@ impl SourceProtocolConfig {
                     .or_else(|| observations.first().map(|capability| (*capability).clone()));
                 if let Some(effective_capability) = merged.as_mut() {
                     for observation in observations {
-                        // Feature-only catalog rows do not establish or erase
-                        // the protocol selected by an endpoint declaration.
-                        if observation.status != CapabilityStatus::Unknown {
-                            effective_capability.status = observation.status;
-                            effective_capability.origin = observation.origin;
-                            effective_capability.checked_at_ms = observation.checked_at_ms;
-                        }
-                        effective_capability
-                            .features
-                            .extend(observation.features.clone());
-                        if !observation.reasoning_efforts.is_empty() {
-                            effective_capability.reasoning_efforts =
-                                observation.reasoning_efforts.clone();
-                        }
-                        if observation.service_tiers.is_some() {
-                            effective_capability.service_tiers = observation.service_tiers.clone();
-                        }
-                        if observation.origin == CapabilityOrigin::Catalog {
-                            effective_capability.token_limits =
-                                observation.token_limits.validated();
-                        }
+                        effective_capability.merge_observation(observation);
                     }
                 }
                 effective_capabilities.extend(merged);

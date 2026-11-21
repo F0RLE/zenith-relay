@@ -59,13 +59,21 @@ fn response_owner_probe_still_yields_when_the_member_is_excluded() {
 }
 
 #[test]
-fn response_owner_probe_uses_the_warm_quota_margin_without_moving_opaque_ownership() {
-    for (other, yields) in [(3_500, false), (3_999, false), (4_000, true), (9_000, true)] {
+fn response_owner_probe_uses_warm_quota_protection_without_moving_opaque_ownership() {
+    for (owner, other, yields) in [
+        (3_000, 3_500, false),
+        (3_000, 4_000, false),
+        (3_000, 9_000, false),
+        (1_001, 10_000, false),
+        (1_000, 1_999, false),
+        (1_000, 2_000, true),
+        (400, 7_700, true),
+    ] {
         let mut scheduler = aliased_owner();
         for (id, remaining) in [
             ("a-cold", other),
-            ("z-warm", 3_000),
-            ("z-warm::chat", 3_000),
+            ("z-warm", owner),
+            ("z-warm::chat", owner),
         ] {
             let mut member = scheduler.candidate(id).unwrap().clone();
             member.quota = CandidateQuota::Available(remaining);
@@ -93,15 +101,19 @@ fn cache_affinity_diagnostics_follow_the_projected_owner_and_keep_legacy_rows_re
     let mut scheduler = aliased_owner();
     assert!(scheduler.bind_prompt_affinity("cache:private", "z-warm::chat", 0));
     let selected = scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::new(),
-            response_affinity_key: None,
-            prompt_affinity_key: Some("cache:private"),
-            now_ms: 100,
-        })
+        .select_with_rotation_capture(
+            SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:private"),
+                now_ms: 100,
+            },
+            RotationOperation::Text,
+            None,
+        )
         .unwrap();
     let diagnostics = selected.diagnostics.cache_affinity.as_ref().unwrap();
     assert_eq!(
@@ -127,15 +139,19 @@ fn cache_affinity_diagnostics_keep_owner_evidence_after_structural_exclusion() {
     let mut scheduler = aliased_owner();
     assert!(scheduler.bind_prompt_affinity("cache:private", "z-warm::chat", 0));
     let selected = scheduler
-        .select(SelectionRequest {
-            model: "gpt-5",
-            allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
-            scope: &CandidateScope::default(),
-            tried: &HashSet::from(["z-warm".into(), "z-warm::chat".into()]),
-            response_affinity_key: None,
-            prompt_affinity_key: Some("cache:private"),
-            now_ms: 100,
-        })
+        .select_with_rotation_capture(
+            SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::from(["z-warm".into(), "z-warm::chat".into()]),
+                response_affinity_key: None,
+                prompt_affinity_key: Some("cache:private"),
+                now_ms: 100,
+            },
+            RotationOperation::Text,
+            None,
+        )
         .unwrap();
     assert_eq!(selected.candidate_id, "a-cold");
     let diagnostics = selected.diagnostics.cache_affinity.unwrap();
@@ -148,4 +164,37 @@ fn cache_affinity_diagnostics_keep_owner_evidence_after_structural_exclusion() {
         Some(crate::scheduler::rotation::CandidateBlockReason::AlreadyTried)
     );
     assert!(diagnostics.preferred.is_some());
+}
+
+#[test]
+fn optional_routing_diagnostics_do_not_change_selection() {
+    let mut quiet = aliased_owner();
+    assert!(quiet.bind_prompt_affinity("cache:synthetic", "z-warm::chat", 0));
+    let mut debug = quiet.clone();
+    let scope = CandidateScope::default();
+    let tried = HashSet::new();
+    let request = || SelectionRequest {
+        model: "gpt-5",
+        allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
+        scope: &scope,
+        tried: &tried,
+        response_affinity_key: None,
+        prompt_affinity_key: Some("cache:synthetic"),
+        now_ms: 100,
+    };
+    let quiet = quiet.select(request()).unwrap();
+    let mut debug = debug
+        .select_with_rotation_capture(request(), RotationOperation::Text, None)
+        .unwrap();
+    assert!(quiet.diagnostics.cache_affinity.is_none());
+    assert!(quiet.diagnostics.route_latency.is_none());
+    assert!(debug.diagnostics.cache_affinity.take().is_some());
+    assert!(debug.diagnostics.route_latency.take().is_some());
+    // Independent admissions allocate distinct request identities.
+    assert_ne!(
+        quiet.rotation_request.request_id,
+        debug.rotation_request.request_id
+    );
+    debug.rotation_request.request_id = quiet.rotation_request.request_id;
+    assert_eq!(quiet, debug);
 }

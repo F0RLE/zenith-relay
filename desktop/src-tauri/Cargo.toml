@@ -1,0 +1,112 @@
+[package]
+name = "zenith-relay"
+version = "1.1.5"
+edition = "2024"
+license = "AGPL-3.0-only"
+rust-version = "1.99"
+
+[lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_imports = "deny"
+unused_must_use = "deny"
+unused_variables = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+complexity = "deny"
+perf = "deny"
+style = "deny"
+pedantic = { level = "allow", priority = -1 }
+
+[features]
+experimental-bps-images = ["zenith-relay-core/experimental-bps-images"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.6", features = [] }
+
+[dependencies]
+# age 0.12 requires crypto-bigint 0.5 via HPKE/P-256 (RUSTSEC-2026-0387).
+# Keep the parallel security release until a fixed stable 0.12 successor exists.
+age = { version = "0.11.5", default-features = false }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.23.1"
+chrono = "0.4.45"
+hex = "0.4.3"
+hyper = { version = "1.12.0", default-features = false, features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+keyring-core = "1.1.0"
+rand = "0.10.4"
+reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls", "stream"] }
+futures-util = "0.3.34"
+rusqlite = { version = "0.43.0", default-features = false, features = ["backup", "bundled", "cache"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sys-locale = "0.3.2"
+sysinfo = "0.40.4"
+tauri = { version = "2.12.7", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
+open = "5.4.5"
+percent-encoding = "2.3.2"
+rustls-platform-verifier = "0.7.1"
+tauri-plugin-dialog = "2.8.4"
+tauri-plugin-process = "2.4.0"
+tauri-plugin-updater = "2.14.1"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
+tower = { version = "0.5.3", features = ["util"] }
+toml_edit = "0.25.20"
+url = "2.5.9"
+uuid = { version = "1.29.3", features = ["v4"] }
+zenith-relay-core = { path = "../../crates/relay-core" }
+zenith-relay-vault-envelope = { path = "../../crates/relay-vault-envelope" }
+zenith-relay-hosted-device = { path = "../../crates/relay-hosted-device" }
+zeroize = "1.9.2"
+
+[dev-dependencies]
+chacha20poly1305 = "0.11.0"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2.5.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust", "vendored"] }
+zbus = { version = "6.5.0", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+windows-native-keyring-store = "1.1.0"
+wry = { version = "0.57.3", default-features = false }
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "2.1.0"
+
+[patch.crates-io]
+# Upstream replaces basic-toml with the maintained TOML parser.
+i18n-config = { git = "https://github.com/kellpossible/cargo-i18n", rev = "2ce7b1dfe9a8cc224288bf50cbc2a67a6de863c4" }
+# Upstream PR #14 fixes the private proc_macro re-export; remove after release.
+proc-macro-error2 = { git = "https://github.com/GnomedDev/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
+# Upstream PR #3759 migrates the Linux single-instance transport to zbus 6.
+tauri-plugin-single-instance = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "1dba01713786ffbfd960745e73486541ffe93f33" }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+incremental = false
+
+# Avoid the Windows rustc crash when the large core crate uses a single unit.
+# Keep release optimization and cross-crate LTO enabled.
+[profile.release.package.zenith-relay-core]
+codegen-units = 16

@@ -142,7 +142,8 @@ fn complete_scoped_effort_enum_wins_over_partial_litellm_flags() {
         Some(details),
         None,
         Some(litellm),
-    );
+    )
+    .unwrap();
     let metadata = catalog(&merged.to_string());
     assert_eq!(
         metadata.reasoning_levels_for("provider/synthetic"),
@@ -229,7 +230,8 @@ fn scalar_effort_is_not_an_exhaustive_enum() {
         Some(details),
         None,
         Some(litellm),
-    );
+    )
+    .unwrap();
     assert_eq!(
         catalog(&merged.to_string()).reasoning_levels_for("provider/synthetic"),
         ["low", "medium", "high"]
@@ -370,7 +372,8 @@ fn enriches_models_dev_records_from_nested_api_details() {
         Some(details),
         None,
         None,
-    );
+    )
+    .unwrap();
     assert_eq!(
         merged["xai/grok-4.6"]["reasoning_effort_levels"],
         serde_json::json!(["low", "medium", "high", "xhigh"])
@@ -407,7 +410,8 @@ fn preserves_details_reasoning_levels_when_options_describe_another_control() {
         Some(details),
         None,
         None,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         merged["vendor/model"]["reasoning_effort_levels"],

@@ -204,8 +204,8 @@ pub(in crate::gateway) fn normalize_account_request(
 /// Normalize the legacy non-streaming account compaction contract.
 ///
 /// Unlike a regular Responses request, `/responses/compact` does not accept
-/// the streaming transport controls that Relay adds for the normal account
-/// path. Remove them even when a client supplied them explicitly; otherwise a
+/// the streaming transport controls or generation output limit used by the
+/// normal account path. Remove them even when supplied explicitly; otherwise a
 /// request can pass local validation and still be rejected by the account
 /// endpoint. All other request fields remain client-owned so newly introduced
 /// Codex options are not silently discarded.
@@ -215,6 +215,7 @@ pub(in crate::gateway) fn normalize_compact_account_request(
 ) {
     request_fields.remove("store");
     request_fields.remove("stream");
+    request_fields.remove("max_output_tokens");
     normalize_account_request_common(request_fields, responses_lite);
 }
 

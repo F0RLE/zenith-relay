@@ -24,17 +24,24 @@ function fixture(run) {
 }
 
 test("checked text reads a regular file and skips directories", () => fixture(({ root, path, io }) => {
+  const open = io.openSync;
+  io.openSync = (path, flags, mode) => {
+    expect(flags & fs.constants.O_CREAT).toBe(0);
+    expect(flags & fs.constants.O_TRUNC).toBe(0);
+    expect(mode).toBe(0o600);
+    return open(path, flags, mode);
+  };
   expect(readCheckedText(path, io)).toBe("synthetic source");
   expect(readCheckedText(root, io)).toBeNull();
 }));
 
-test("replacing a source after lstat cannot redirect the read", () => fixture(({ path, io }) => {
-  const open = io.openSync;
+test("replacing an opened path before validation cannot redirect the read", () => fixture(({ path, io }) => {
+  const lstat = io.lstatSync;
   let reads = 0;
-  io.openSync = (...args) => {
+  io.lstatSync = (...args) => {
     fs.renameSync(path, `${path}.original`);
     fs.writeFileSync(path, "different source");
-    return open(...args);
+    return lstat(...args);
   };
   io.readFileSync = () => { reads++; throw new Error("must not read replacement"); };
   expect(() => readCheckedText(path, io)).toThrow("File changed while checking");
@@ -63,4 +70,26 @@ test("a directory link is never followed", () => fixture(({ root, path, io }) =>
   fs.symlinkSync(root, link, process.platform === "win32" ? "junction" : "dir");
   expect(readCheckedText(link, io)).toBeNull();
   expect(fs.readFileSync(path, "utf8")).toBe("synthetic source");
+}));
+
+test("bounded reads enforce byte limits and close handles on oversized files", () => fixture(({ path, io }) => {
+  fs.writeFileSync(path, "é");
+  expect(readCheckedText(path, io, { maxBytes: 2 })).toBe("é");
+  expect(() => readCheckedText(path, io, { maxBytes: 1 })).toThrow("File exceeds the read limit");
+  fs.writeFileSync(path, "");
+  expect(readCheckedText(path, io, { maxBytes: 0 })).toBe("");
+}));
+
+test("bounded reads detect growth during descriptor reads", () => fixture(({ path, io }) => {
+  const read = io.readSync;
+  let changed = false;
+  io.readSync = (...args) => {
+    const count = read(...args);
+    if (!changed) {
+      changed = true;
+      fs.appendFileSync(path, "additional content");
+    }
+    return count;
+  };
+  expect(() => readCheckedText(path, io, { maxBytes: 100 })).toThrow("File changed while checking");
 }));

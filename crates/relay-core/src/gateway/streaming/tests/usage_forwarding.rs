@@ -1,6 +1,118 @@
 use super::*;
 
 #[tokio::test]
+async fn native_passthrough_observations_include_late_text_and_terminal() {
+    for fast in [true, false] {
+        let mut event = test_usage_event();
+        event.routing = Some(serde_json::from_value(json!({
+            "reason":"only_eligible", "eligibleCandidates":1, "inFlightBefore":0, "dispatchesBefore":0,
+            "transport":{"upstream":"websocket","mode":"native"}
+        })).unwrap());
+        let mut delta = json!({"type":"response.output_text.delta","delta":"synthetic"});
+        if !fast {
+            delta["usage"] = json!({"input_tokens":10,"output_tokens":1});
+        }
+        let frames = [
+            json!({"type":"response.output_item.added","output_index":0,
+                "item":{"type":"reasoning","id":"synthetic-reasoning","summary":[]}}),
+            json!({"type":"response.output_text.delta","delta":""}),
+            delta,
+            json!({"type":"response.completed","response":{"id":"synthetic-response",
+                "status":"completed","output":[]}}),
+        ];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let input = frames
+            .into_iter()
+            .map(|event| Ok::<_, Infallible>(Bytes::from(format!("data: {event}\n\n"))));
+        let mut stream = UsageStream::new(
+            stream::iter(input),
+            Arc::new(move |event| observed.lock().unwrap().push(event)),
+            event,
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        stream.native_timing = true;
+        assert!(stream.next().await.unwrap().is_ok());
+        assert!(stream.next().await.unwrap().is_ok());
+        let current = stream
+            .event
+            .as_ref()
+            .unwrap()
+            .routing
+            .as_ref()
+            .unwrap()
+            .transport
+            .as_ref()
+            .unwrap();
+        assert!(
+            current
+                .stream_response
+                .as_ref()
+                .unwrap()
+                .upstream_output_first_ms
+                .is_none()
+        );
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert!(event.success);
+        let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        let timing = transport.stream_response.as_ref().unwrap();
+        assert!(timing.upstream_reasoning_first_ms.is_some());
+        assert!(timing.upstream_text_first_ms.is_some(), "fast={fast}");
+        assert_eq!(
+            timing.upstream_output_first_ms,
+            timing.upstream_text_first_ms
+        );
+        assert!(transport.upstream_response_ms.is_some(), "fast={fast}");
+        assert!(transport.upstream_response_ms <= transport.client_response_ready_ms);
+    }
+}
+
+#[tokio::test]
+async fn native_passthrough_cancelled_stream_does_not_invent_terminal_timing() {
+    let mut event = test_usage_event();
+    event.routing = Some(serde_json::from_value(json!({
+        "reason":"only_eligible", "eligibleCandidates":1, "inFlightBefore":0, "dispatchesBefore":0,
+        "transport":{"upstream":"websocket","mode":"native"}
+    })).unwrap());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let input = stream::iter([Ok::<_, Infallible>(Bytes::from_static(
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"synthetic\"}\n\n",
+    ))]);
+    let mut stream = UsageStream::new(
+        input,
+        Arc::new(move |event| observed.lock().unwrap().push(event)),
+        event,
+        Instant::now(),
+        Arc::new(|_, _, _| {}),
+    );
+    stream.native_timing = true;
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert!(!event.success);
+    let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+    assert!(
+        transport
+            .stream_response
+            .as_ref()
+            .unwrap()
+            .upstream_output_first_ms
+            .is_some()
+    );
+    assert!(transport.upstream_response_ms.is_none());
+    assert!(transport.client_response_ready_ms.is_none());
+}
+
+#[tokio::test]
 async fn normalized_output_timing_survives_raw_timing_settlement_without_inventing_readiness() {
     for outcome in ["completed", "empty", "invalid", "cancelled"] {
         let mut event = test_usage_event();

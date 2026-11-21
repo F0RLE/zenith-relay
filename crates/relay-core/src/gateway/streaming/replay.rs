@@ -8,7 +8,7 @@ const MAX_CAPTURE_ITEMS: usize = 1_024;
 /// Volatile replay input, never diagnostics. Deltas alone cannot reconstruct
 /// phase, tool state, or reasoning; retain the upstream's completed items.
 #[derive(Default)]
-pub(in crate::gateway) struct NativeReplayCapture {
+pub(crate) struct NativeReplayCapture {
     captured_items: Vec<(Option<u64>, Value)>,
     pending: BTreeSet<u64>,
     retained_bytes: usize,
@@ -17,13 +17,35 @@ pub(in crate::gateway) struct NativeReplayCapture {
 }
 
 impl NativeReplayCapture {
-    pub(in crate::gateway) fn observe(&mut self, event_payload: &Value) {
+    /// Reuse the stream's error/model policy without replacing its client-facing
+    /// failure. Rejected events permanently disqualify this replay checkpoint.
+    pub(crate) fn validate_for_replay(&mut self, event: &Value, expected_model: Option<&str>) {
+        if self.disabled {
+            return;
+        }
+        let has_model = crate::protocol::response_models::declared(event)
+            .next()
+            .is_some();
+        if super::upstream_event_failure_category(event.get("type").and_then(Value::as_str), event)
+            .is_some()
+            || has_model
+                && expected_model
+                    .is_some_and(|expected| super::served_model_is_rejected(event, expected))
+        {
+            self.disable();
+        }
+    }
+
+    pub(crate) fn observe(&mut self, event_payload: &Value) {
         if self.disabled {
             return;
         }
         let event_type = event_payload.get("type").and_then(Value::as_str);
         let output_index = event_payload.get("output_index").and_then(Value::as_u64);
         if event_type == Some("response.output_item.done") {
+            if event_payload.get("output_index").is_some() && output_index.is_none() {
+                self.unindexed_output = true;
+            }
             let Some(output_item) = event_payload
                 .get("item")
                 .filter(|output_item| output_item.is_object())
@@ -36,26 +58,42 @@ impl NativeReplayCapture {
                 self.disable();
                 return;
             };
-            self.retained_bytes = self.retained_bytes.saturating_add(item_size);
-            if self.retained_bytes > MAX_CAPTURE_BYTES
-                || self.captured_items.len() >= MAX_CAPTURE_ITEMS
+            let replacement = output_index.and_then(|index| {
+                self.captured_items
+                    .iter()
+                    .position(|captured_item| captured_item.0 == Some(index))
+            });
+            if replacement.is_some_and(|index| {
+                crate::protocol::response_snapshots::validate_unchanged(
+                    &self.captured_items[index].1,
+                    output_item,
+                )
+                .is_err()
+            }) {
+                self.disable();
+                return;
+            }
+            let replaced_bytes = replacement.map_or(0, |index| {
+                crate::json_size::serialized_len(&self.captured_items[index].1, MAX_CAPTURE_BYTES)
+                    .expect("retained item fits the capture bound")
+            });
+            let retained_bytes = self.retained_bytes - replaced_bytes + item_size;
+            if retained_bytes > MAX_CAPTURE_BYTES
+                || replacement.is_none() && self.captured_items.len() >= MAX_CAPTURE_ITEMS
             {
                 self.disable();
                 return;
             }
+            self.retained_bytes = retained_bytes;
             if let Some(output_index) = output_index {
                 self.pending.remove(&output_index);
-                if let Some(existing) = self
-                    .captured_items
-                    .iter_mut()
-                    .find(|captured_item| captured_item.0 == Some(output_index))
-                {
-                    existing.1 = output_item.clone();
-                    return;
-                }
             }
-            self.captured_items
-                .push((output_index, output_item.clone()));
+            if let Some(index) = replacement {
+                self.captured_items[index].1 = output_item.clone();
+            } else {
+                self.captured_items
+                    .push((output_index, output_item.clone()));
+            }
         } else if has_semantic_output(event_payload, event_type)
             || is_compaction_payload(event_payload, event_type)
             || event_type == Some("response.output_item.added")
@@ -89,10 +127,11 @@ impl NativeReplayCapture {
         self.disabled = true;
         self.captured_items.clear();
         self.pending.clear();
+        self.retained_bytes = 0;
     }
 
-    pub(in crate::gateway) fn finish(
-        mut self,
+    pub(crate) fn finish(
+        self,
         completed_response: Option<Value>,
         response_id: Option<&str>,
     ) -> Option<Value> {
@@ -101,17 +140,24 @@ impl NativeReplayCapture {
         }
         let mut replay_response = completed_response.unwrap_or_else(|| json!({}));
         let response_object = replay_response.as_object_mut()?;
-        if !response_object
-            .get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|response_id_value| !response_id_value.trim().is_empty())
-        {
+        if let Some(id) = response_object.get("id") {
+            let id = id.as_str().filter(|id| !id.trim().is_empty())?;
+            if response_id.is_some_and(|observed| observed != id) {
+                return None;
+            }
+        } else {
             let response_id_value =
                 response_id.filter(|response_id_value| !response_id_value.trim().is_empty())?;
             response_object.insert(
                 "id".to_string(),
                 Value::String(response_id_value.to_string()),
             );
+        }
+        if response_object
+            .get("output")
+            .is_some_and(|output| !output.is_array())
+        {
+            return None;
         }
         let output_items = response_object.get("output").and_then(Value::as_array);
         if output_items.is_none_or(Vec::is_empty) {
@@ -121,25 +167,17 @@ impl NativeReplayCapture {
             if self.captured_items.is_empty() && output_items.is_none() {
                 return None;
             }
-            if self
-                .captured_items
-                .iter()
-                .all(|captured_item| captured_item.0.is_some())
-            {
-                self.captured_items
-                    .sort_by_key(|captured_item| captured_item.0);
-            }
             response_object.insert(
                 "output".to_string(),
                 Value::Array(
-                    self.captured_items
-                        .into_iter()
-                        .map(|captured_item| captured_item.1)
-                        .collect(),
+                    crate::protocol::response_snapshots::ordered_completed_output(
+                        self.captured_items,
+                    )
+                    .ok()?,
                 ),
             );
         } else {
-            crate::protocol::response_snapshots::retain_completed_reasoning_items(
+            crate::protocol::response_snapshots::reconcile_completed_output(
                 &self.captured_items,
                 response_object.get_mut("output")?.as_array_mut()?,
             )
@@ -149,6 +187,18 @@ impl NativeReplayCapture {
         Some(replay_response)
     }
 }
+
+#[cfg(test)]
+mod accounting;
+
+#[cfg(test)]
+mod malformed;
+
+#[cfg(test)]
+mod ordering;
+
+#[cfg(test)]
+mod validation;
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,134 @@
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { createInstance } from "i18next";
+import { createLanguageController, readLanguagePreference } from "../src/i18n/controller";
+import { canonicalLocale, languageChain, locales, resolveLanguage, type LocaleDefinition } from "../src/i18n/registry";
+import { loadTranslations } from "../src/i18n/resources";
+import { flattenTranslations, validateRegistry, validateTranslations } from "../src/i18n/contract";
+import { synchronizeNativeLanguage } from "../src/i18n/presentation";
+
+const definition = (code: string, fallbacks = ["en"]): LocaleDefinition => ({ code, nativeName: code, englishName: code, direction: "ltr", format: "json", helpLocale: "en", fallbacks });
+
+describe("scalable Desktop localization", () => {
+  test("every registered dictionary and locale-aware plural set is valid", async () => {
+    validateRegistry(locales);
+    const english = await loadTranslations("en");
+    for (const locale of locales) {
+      expect(existsSync(new URL(`../../../docs/help/${locale.helpLocale}/README.md`, import.meta.url))).toBe(true);
+      expect(validateTranslations(locale.code, await loadTranslations(locale.code), english, true).missing).toEqual([]);
+    }
+    const files = readdirSync(join(import.meta.dir, "../src/i18n/locales")).filter(file => file !== "legacyAutomationNames.json");
+    expect(files.sort()).toEqual(locales.map(locale => `${locale.code}.${locale.format}`).sort());
+  });
+
+  test("request telemetry keeps the scheduler's routing reasons even without a UI label", () => {
+    const source = readFileSync(new URL("../../../crates/relay-core/src/scheduler/selection/snapshot.rs", import.meta.url), "utf8");
+    const body = source.match(/pub enum SelectionReason \{([^}]+)\}/s)?.[1];
+    expect(body).toBeDefined();
+    const reasons = [...body!.matchAll(/^\s*(\w+),\s*$/gm)]
+      .map(([, variant]) => variant.replace(/[A-Z]/g, (letter, offset) => `${offset ? "_" : ""}${letter.toLowerCase()}`))
+      .sort();
+    expect(reasons.length).toBeGreaterThan(0);
+    const types = readFileSync(new URL("../src/features/relay/api/types/usage.ts", import.meta.url), "utf8");
+    const union = types.match(/type RoutingDiagnostics = \{\s*reason: ([^;]+);/)?.[1] ?? "";
+    expect([...union.matchAll(/"(\w+)"/g)].map(([, name]) => name).sort()).toEqual(reasons);
+  });
+
+  test("preserves scripts, regions and canonical OS spelling", () => {
+    const available = [definition("en", []), definition("pt"), definition("pt-BR", ["pt"]), definition("zh-Hans"), definition("zh-Hant"), definition("sr-Latn")];
+    expect(canonicalLocale("pt_BR.UTF-8")).toBe("pt-BR");
+    expect(resolveLanguage("pt-BR", available)).toBe("pt-BR");
+    expect(resolveLanguage("pt-PT", available)).toBe("pt");
+    expect(resolveLanguage("zh-Hant-TW", available)).toBe("zh-Hant");
+    expect(resolveLanguage("zh-Hans", available)).toBe("zh-Hans");
+    expect(resolveLanguage("sr-Latn-RS", available)).toBe("sr-Latn");
+    expect(resolveLanguage("zh", available)).toBe("en");
+    expect(resolveLanguage("../../path", available)).toBe("en");
+    expect(languageChain("pt-BR", available)).toEqual(["pt-BR", "pt", "en"]);
+  });
+
+  test("150+ metadata records do not load their dictionaries", async () => {
+    const available = [definition("en", []), ...Array.from({ length: 160 }, (_, index) => definition(`en-x-test-${index}`))];
+    validateRegistry(available);
+    const reads: string[] = [];
+    const engine = createInstance();
+    const controller = createLanguageController(engine, async code => { reads.push(code); return { example: code }; }, available);
+    await controller.initialize("en-x-test-159");
+    expect(reads.sort()).toEqual(["en", "en-x-test-159"]);
+    for (let index = 0; index < 10; index++) await controller.change(`en-x-test-${index}`, false);
+    expect(available.filter(locale => engine.hasResourceBundle(locale.code, "translation")).length).toBeLessThanOrEqual(4);
+  });
+
+  test("latest selection wins even if an earlier dictionary finishes last", async () => {
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const engine = createInstance();
+    const controller = createLanguageController(engine, async code => { if (code === "ru") await wait; return { example: code }; });
+    await controller.initialize("en");
+    const slow = controller.change("ru", false);
+    await controller.change("en", false);
+    release();
+    expect(await slow).toBe(false);
+    expect(engine.language).toBe("en");
+  });
+
+  test("missing keys fall back, failed loads retain current language and retry", async () => {
+    let failures = 1;
+    const engine = createInstance();
+    const controller = createLanguageController(engine, async code => {
+      if (code === "ru" && failures-- > 0) throw new Error("synthetic failed chunk");
+      return code === "en" ? { example: "English", fallback: "Available" } : { example: "Русский" };
+    });
+    await controller.initialize("en");
+    await expect(controller.change("ru", false)).rejects.toThrow("synthetic");
+    expect(engine.language).toBe("en");
+    await controller.change("ru", false);
+    expect(engine.t("example")).toBe("Русский");
+    expect(engine.t("fallback")).toBe("Available");
+  });
+
+  test("invalid dictionaries and fallback cycles fail the quality gate", () => {
+    expect(() => validateTranslations("ru", { name: "Привет {{other}}" }, { name: "Hi {{name}}" }, false)).toThrow("interpolation");
+    expect(() => validateTranslations("en", { missing: "value" }, { name: "name" }, false)).toThrow("unknown key");
+    expect(() => flattenTranslations({ empty: "" })).toThrow("Empty");
+    expect(() => validateRegistry([definition("en", ["ru"]), definition("ru", ["en"])])).toThrow("Cyclic");
+  });
+
+  test("unavailable preference storage does not block initialization or selection", async () => {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { getItem() { throw new Error("synthetic denial"); }, setItem() { throw new Error("synthetic denial"); } } });
+    try {
+      expect(readLanguagePreference()).toBeNull();
+      const engine = createInstance();
+      const controller = createLanguageController(engine, async code => ({ example: code }));
+      await controller.initialize("en");
+      expect(await controller.change("ru")).toBe(true);
+      expect(engine.language).toBe("ru");
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    }
+  });
+
+  test("a failed selected startup dictionary uses the English recovery UI", async () => {
+    const engine = createInstance();
+    const controller = createLanguageController(engine, async code => {
+      if (code === "ru") throw new Error("synthetic missing chunk");
+      return { example: "English" };
+    });
+    await controller.initialize("ru");
+    expect(engine.language).toBe("en");
+    expect(engine.t("example")).toBe("English");
+  });
+
+  test("native language synchronization recovers after a failed preference write", async () => {
+    const applied: string[] = [];
+    await expect(synchronizeNativeLanguage(async () => {
+      applied.push("ru");
+      throw new Error("synthetic preference write failure");
+    })).rejects.toThrow("preference write failure");
+    await synchronizeNativeLanguage(async () => { applied.push("en"); });
+    expect(applied).toEqual(["ru", "en"]);
+  });
+});

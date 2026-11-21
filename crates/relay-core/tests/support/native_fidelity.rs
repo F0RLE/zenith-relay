@@ -1,5 +1,134 @@
 use super::*;
 use axum::extract::ws::{Message as ServerMessage, WebSocketUpgrade};
+use axum::http::HeaderValue;
+
+#[path = "native_fidelity/json_roundtrip.rs"]
+mod json_roundtrip;
+
+#[tokio::test]
+async fn native_http_preserves_repeated_headers_without_forwarding_connection_local_metadata() {
+    for streaming in [false, true] {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = observed.clone();
+        let upstream = spawn(Router::new().fallback(post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(
+                        headers
+                            .get_all("openai-beta")
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    );
+                    let response = json!({
+                        "id":"resp_synthetic_headers", "status":"completed", "output":[],
+                        "usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+                    });
+                    let mut response = if body["stream"] == true {
+                        Response::builder()
+                            .header(CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from(format!(
+                                "event: response.completed\ndata: {}\n\n",
+                                json!({"type":"response.completed","response":response})
+                            )))
+                            .unwrap()
+                    } else {
+                        Json(response).into_response()
+                    };
+                    for value in ["private", "no-store"] {
+                        response
+                            .headers_mut()
+                            .append("cache-control", value.parse().unwrap());
+                    }
+                    response
+                        .headers_mut()
+                        .append("x-ratelimit-policy", "first".parse().unwrap());
+                    response.headers_mut().append(
+                        "x-ratelimit-policy",
+                        HeaderValue::from_bytes(b"second;opaque=\x80").unwrap(),
+                    );
+                    response
+                        .headers_mut()
+                        .insert("connection", "request-id".parse().unwrap());
+                    response
+                        .headers_mut()
+                        .insert("request-id", "synthetic-hop-local".parse().unwrap());
+                    response
+                        .headers_mut()
+                        .insert("set-cookie", "synthetic=session".parse().unwrap());
+                    response
+                }
+            },
+        )))
+        .await;
+        let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append("openai-beta", "synthetic-first=v1".parse().unwrap());
+        headers.append("openai-beta", "synthetic-second=v1".parse().unwrap());
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .headers(headers)
+            .json(&json!({"model":"gpt-test","input":"synthetic","stream":streaming}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let relay_request_id = response
+            .headers()
+            .get("x-zenith-relay-request-id")
+            .expect("JSON and SSE retain the Relay request identity")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            response
+                .headers()
+                .get_all("x-zenith-relay-request-id")
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_all("cache-control")
+                .iter()
+                .map(|value| value.as_bytes())
+                .collect::<Vec<_>>(),
+            vec![b"private".as_slice(), b"no-store".as_slice()]
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_all("x-ratelimit-policy")
+                .iter()
+                .map(|value| value.as_bytes())
+                .collect::<Vec<_>>(),
+            vec![b"first".as_slice(), b"second;opaque=\x80".as_slice()]
+        );
+        assert!(!response.headers().contains_key("request-id"));
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("resp_synthetic_headers")
+        );
+        assert_eq!(
+            observed.lock().unwrap().as_slice(),
+            &[vec![
+                HeaderValue::from_static("synthetic-first=v1"),
+                HeaderValue::from_static("synthetic-second=v1"),
+            ]]
+        );
+        let events = events.lock().unwrap();
+        let event = events.iter().find(|event| event.success).unwrap();
+        assert_eq!(relay_request_id, event.request_id);
+    }
+}
 
 #[tokio::test]
 async fn native_responses_preserves_images_in_tool_results_and_user_messages() {
@@ -169,13 +298,29 @@ async fn native_gemini_continuation_resumes_only_with_its_original_model_and_con
             );
             let events = events.lock().unwrap();
             let events = usage_observations::physical_attempts(&events);
-            assert_eq!(events.len(), 2);
+            assert_eq!(events.len(), 5);
+            for rejection in &events[1..4] {
+                assert!(!rejection.success);
+                assert_eq!(rejection.http_status, 409);
+                assert_eq!(rejection.source_id, "relay");
+                assert_eq!(
+                    rejection.error_category.as_deref(),
+                    Some("response_continuation_unavailable")
+                );
+                assert!(rejection.candidate_id.is_none());
+                assert!(rejection.total_tokens.is_none());
+                assert!(rejection.cooldown_scope.is_none());
+                let diagnostic = serde_json::to_string(rejection).unwrap();
+                assert!(!diagnostic.contains("c3ludGhldGlj"));
+                assert!(!diagnostic.contains("Changed prompt"));
+            }
             assert_eq!(
                 events[0].error_category.as_deref(),
                 Some("response_incomplete")
             );
-            assert!(events[1].success);
-            assert!(events.iter().all(|event| event.input_tokens == Some(3)));
+            assert!(events[4].success);
+            assert_eq!(events[0].input_tokens, Some(3));
+            assert_eq!(events[4].input_tokens, Some(3));
         }
     }
 }
@@ -237,11 +382,7 @@ async fn native_websocket_preserves_raw_text_binary_numbers_and_repeated_beta_he
         (DELTA, true),
         (COMPLETED, false),
     ] {
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let frame = receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
         match frame {
             ClientWsMessage::Text(text) => {
                 assert!(!binary);

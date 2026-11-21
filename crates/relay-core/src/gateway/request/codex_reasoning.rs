@@ -19,13 +19,24 @@ pub(in crate::gateway) fn normalize_codex_reasoning_placeholder(
     {
         return;
     }
-    let Some(model) = request
-        .get("model")
-        .and_then(Value::as_str)
-        .and_then(crate::catalog::decode_codex_model_alias)
-    else {
+    let Some(requested_model) = request.get("model").and_then(Value::as_str) else {
         return;
     };
+    let decoded = crate::catalog::decode_codex_model_alias(requested_model);
+    let display_model = decoded.as_deref().unwrap_or(requested_model);
+    let Some(model) = runtime.resolve_model(key, display_model) else {
+        return;
+    };
+    if decoded.is_none()
+        && !crate::catalog::codex_model_uses_public_id(
+            &model,
+            !runtime
+                .codex_model_native_responses_account_ids(key, display_model)
+                .is_empty(),
+        )
+    {
+        return;
+    }
     let capabilities = runtime.model_capabilities(&model);
     if capabilities.reasoning != Some(true)
         || !matches!(
@@ -33,7 +44,15 @@ pub(in crate::gateway) fn normalize_codex_reasoning_placeholder(
             None | Some(ReasoningMethod::Unknown)
         )
         || !runtime
-            .client_reasoning_levels(key, &model, WireApi::Responses)
+            .client_reasoning_levels(
+                key,
+                &model,
+                WireApi::Responses,
+                request
+                    .get("stream")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
             .is_empty()
     {
         return;

@@ -1,7 +1,7 @@
 use super::super::*;
 use super::ConnectTrace;
 
-pub(super) fn record_connect_failure(
+pub(in crate::gateway::websocket) fn record_connect_failure(
     trace: &ConnectTrace<'_>,
     failure: &GatewayFailure,
     headers: Option<&HeaderMap>,
@@ -112,6 +112,14 @@ fn connect_usage(
     status: u16,
     category: Option<String>,
 ) -> super::super::UsageEvent {
+    if let Some(event) = trace.event {
+        let mut event = event.clone();
+        event.success = false;
+        event.http_status = status;
+        event.error_category = category;
+        event.latency_ms = trace.started.elapsed().as_millis() as u64;
+        return event;
+    }
     let reasoning = trace.request.reasoning_effort_for(trace.route);
     usage_event(
         UsageAttempt {

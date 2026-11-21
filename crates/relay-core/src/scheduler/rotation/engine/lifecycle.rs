@@ -167,7 +167,17 @@ impl RotationEngine {
         lease_id: LeaseId,
         budget: &mut RequestBudget,
     ) -> Result<AttemptId, DispatchStartError> {
-        self.begin_dispatch_internal(lease_id, budget, false)
+        self.begin_dispatch_at(lease_id, budget, crate::unix_time_ms())
+    }
+
+    /// Start a reserved dispatch using the same clock as quota observations.
+    pub fn begin_dispatch_at(
+        &mut self,
+        lease_id: LeaseId,
+        budget: &mut RequestBudget,
+        now_ms: u64,
+    ) -> Result<AttemptId, DispatchStartError> {
+        self.begin_dispatch_internal(lease_id, budget, now_ms, false)
     }
 
     /// Only the transport controller can retain a lease for a proven repair
@@ -177,14 +187,16 @@ impl RotationEngine {
         &mut self,
         lease_id: LeaseId,
         budget: &mut RequestBudget,
+        now_ms: u64,
     ) -> Result<AttemptId, DispatchStartError> {
-        self.begin_dispatch_internal(lease_id, budget, true)
+        self.begin_dispatch_internal(lease_id, budget, now_ms, true)
     }
 
-    pub(super) fn begin_dispatch_internal(
+    fn begin_dispatch_internal(
         &mut self,
         lease_id: LeaseId,
         budget: &mut RequestBudget,
+        now_ms: u64,
         allow_retained_lease: bool,
     ) -> Result<AttemptId, DispatchStartError> {
         let Some(pending) = self.leases.get(&lease_id).cloned() else {
@@ -210,6 +222,10 @@ impl RotationEngine {
                     && !runtime.candidate.draining
                     && runtime.candidate.auth == AuthState::Ready
                     && runtime.candidate.quota == pending.quota
+                    && (!matches!(runtime.candidate.quota, QuotaState::CreditFallback { .. })
+                        || self
+                            .fresh_provider_credits(&pending.candidate_id, now_ms)
+                            .is_some())
                     && runtime.candidate.rate == pending.rate
                     && runtime
                         .candidate
@@ -243,9 +259,18 @@ impl RotationEngine {
         if pending.recovery_credit_required {
             self.recovery_credits = self.recovery_credits.saturating_sub(1);
         }
+        let circuit_incident = self
+            .circuits
+            .get(&(pending.candidate_id.clone(), pending.route_key.clone()))
+            .map_or(0, |circuit| circuit.incident);
         let Some(lease) = self.leases.get_mut(&lease_id) else {
             return Err(DispatchStartError::UnknownLease);
         };
+        // A peer may have closed the reservation's incident before this wire
+        // send. Bind the actual attempt, including a retained transport lease,
+        // to the current incident only after every dispatch gate has passed.
+        lease.circuit_epoch = circuit.epoch;
+        lease.circuit_incident = circuit_incident;
         lease.recovery_credit_required = false;
         lease.attempt_id = Some(attempt_id);
         Ok(attempt_id)
@@ -258,7 +283,7 @@ impl RotationEngine {
         budget: &RequestBudget,
         now_ms: u64,
     ) -> Result<RotationSettlement, SettlementError> {
-        self.settle_with_latency(lease_id, observation, budget, now_ms, None)
+        self.settle_with_latency(lease_id, observation, budget, now_ms, None, true)
     }
 
     pub(crate) fn settle_with_latency(
@@ -268,6 +293,7 @@ impl RotationEngine {
         budget: &RequestBudget,
         now_ms: u64,
         first_output_latency_ms: Option<u64>,
+        observation_owner_current: bool,
     ) -> Result<RotationSettlement, SettlementError> {
         let Some(pending) = self.leases.get(&lease_id) else {
             return Err(SettlementError::UnknownLease);
@@ -288,19 +314,22 @@ impl RotationEngine {
             .remove(&lease_id)
             .ok_or(SettlementError::UnknownLease)?;
         let current_generation = self.candidate_generations.get(&lease.candidate_id).copied();
-        let observation_current = current_generation == Some(lease.candidate_generation)
+        let observation_current = observation_owner_current
+            && current_generation == Some(lease.candidate_generation)
             && self
                 .candidates
                 .get(&lease.candidate_id)
-                .and_then(|runtime| runtime.candidate.routes.get(&lease.route_key))
-                == Some(&lease.route);
+                .is_some_and(|runtime| {
+                    runtime.candidate.capacity_key == lease.capacity_key
+                        && runtime.candidate.routes.get(&lease.route_key) == Some(&lease.route)
+                });
         self.release_capacity(&lease);
         let health = observation.health;
         let (circuit, health_counted) = if observation_current {
             self.update_circuit(&lease, health, now_ms)
         } else {
-            // A removed candidate may be re-added under the same display ID.
-            // Its old outcome can release only its own capacity lease.
+            // Replaced candidates and authorization incarnations retain their
+            // execution outcome while releasing only their own capacity lease.
             (self.circuit(&lease.candidate_id, &lease.route_key), false)
         };
         if health_counted

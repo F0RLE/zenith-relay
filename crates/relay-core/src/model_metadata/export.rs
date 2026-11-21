@@ -6,8 +6,7 @@ use crate::catalog_io::{self, CatalogIoError};
 use serde::Serialize;
 use std::{collections::BTreeMap, path::Path};
 
-pub const MODEL_CATALOG_SCHEMA: &str =
-    include_str!("../../../../catalog/model-catalog.schema.json");
+pub const MODEL_CATALOG_SCHEMA: &str = include_str!("../../catalog/model-catalog.schema.json");
 
 /// Public reference data only. Participant inventory, routes, saved display
 /// overrides, prices, credentials, and usage are not inputs to this export.

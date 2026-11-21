@@ -81,9 +81,9 @@ pub struct CandidateQuotaReference {
 }
 
 impl CandidateQuotaReference {
-    pub(crate) fn fresh_remaining(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
+    pub(crate) fn fresh_observation(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
         (!self.source_account_id.is_empty()
-            && (1..=10_000).contains(&self.remaining_basis_points)
+            && self.remaining_basis_points <= 10_000
             && crate::quota::observation_is_fresh(
                 Some(self.observed_at_ms),
                 now_ms,
@@ -171,6 +171,10 @@ pub struct RuntimeCandidate {
     pub priority: i32,
     pub weight: u32,
     pub models: BTreeSet<String>,
+    /// Direct account Images transport accepts explicit image IDs independently
+    /// of the advertised catalog. This is not model entitlement evidence.
+    #[serde(default)]
+    pub native_images: bool,
     pub model_rules: ModelRules,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
@@ -245,20 +249,52 @@ impl RuntimeCandidate {
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
     ) -> bool {
-        self.enabled
-            && !self.draining
-            && self.secret_available
-            && self.supports_protocol(model, allowed_protocols)
-            && self.supports_model(model)
-            && self.model_rules.allows(model)
-            && scope.includes(self)
-            && scope.model_rules.allows(model)
+        self.configuration_block(model, allowed_protocols, scope)
+            .is_none()
+    }
+
+    pub(crate) fn configuration_block(
+        &self,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+    ) -> Option<super::rotation::RotationConfigurationBlock> {
+        use super::rotation::RotationConfigurationBlock as Block;
+        if !self.enabled {
+            return Some(Block::Disabled);
+        }
+        if self.draining {
+            return Some(Block::Draining);
+        }
+        if !self.secret_available {
+            return Some(Block::SecretMissing);
+        }
+        if !self.supports_protocol(model, allowed_protocols) {
+            return Some(Block::ProtocolUnsupported);
+        }
+        if !self.supports_model(model) {
+            return Some(Block::ModelUnsupported);
+        }
+        if !self.model_rules.allows(model) {
+            return Some(Block::ModelRule);
+        }
+        if !scope.includes(self) {
+            return Some(Block::Scope);
+        }
+        if !scope.model_rules.allows(model) {
+            return Some(Block::ScopeModelRule);
+        }
+        None
     }
 
     pub(crate) fn supports_model(&self, model: &str) -> bool {
         // Catalog/snapshot callers already have the exact saved spelling.
         // Use the set index before the compatibility case-insensitive scan.
         self.models.contains(model)
+            || (self.kind == CandidateKind::OAuthAccount
+                && self.native_images
+                && crate::is_valid_model_id(model)
+                && crate::runtime::is_image_model_id(model))
             || self
                 .models
                 .iter()

@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { prependPath, repoRoot, withZenithRustEnv } from "../lib/tauri-env.mjs";
 
 const root = repoRoot();
-const frontendRoot = join(root, "src");
+const frontendRoot = join(root, "desktop", "frontend");
 const wantsBrowsers = process.argv.includes("--with-browsers");
 const helpRequested = process.argv.includes("--help") || process.argv.includes("-h");
 
@@ -85,7 +85,7 @@ try {
     if (!existsSync(workspaceSetup)) {
       throw new Error(
         "Windows native tools are missing. Install MSVC, Windows SDK, CMake, and Ninja " +
-        "as described in CONTRIBUTING.md, then run setup again. " +
+        "as described in docs/CONTRIBUTING.md, then run setup again. " +
         "Use the optional portable installer from the Zenith workspace.",
       );
     }
@@ -125,7 +125,7 @@ try {
 
   for (const manifest of [
     "crates/relay-core/Cargo.toml",
-    "src-tauri/Cargo.toml",
+    "desktop/src-tauri/Cargo.toml",
   ]) {
     run(`fetch ${manifest}`, cargo, ["fetch", "--locked", "--manifest-path", manifest], root, env);
   }

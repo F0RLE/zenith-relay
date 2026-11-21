@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod native_cards;
+mod route_features;
 mod speed_reasoning;
+mod streaming;
 
 #[test]
 fn api_context_limits_follow_key_scope_without_changing_reference_metadata() {

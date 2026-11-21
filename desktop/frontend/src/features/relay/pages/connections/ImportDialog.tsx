@@ -1,0 +1,569 @@
+import { useEffect, useRef, useState, type RefObject } from "react";
+import type { TFunction } from "i18next";
+import { Loader2, Upload } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { relayCommands } from "../../api/commands";
+import type { AccountImportProgress, ConfirmAccountImportResponse, ImportSession, RelayMode } from "../../api/types";
+import { AccountPlanBadge, Button, Dialog, SettingToggle } from "../../components/Ui";
+import { useRelayState } from "../../state/RelayStateProvider";
+import { toggleSelectedId } from "../../state/selectionModel";
+import { captureOperationResult } from "../../state/relayOperationModel";
+import {
+  beginAccountImportConfirmation,
+  finishAccountImportConfirmation,
+} from "../../state/relayPreferences";
+import { MarkdownPreview } from "../../components/MarkdownPreview";
+import { useProxyPool } from "../../hooks/useProxyPool";
+import { canAccountJoinPool } from "../../poolMembership";
+
+type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
+type ImportedSelection = {
+  result: ConfirmAccountImportResponse;
+  addedToPool: boolean;
+};
+
+function selectedImportItemIds(session?: ImportSession) {
+  return session?.preview.rows
+    .filter((row) => row.defaultSelected)
+    .map((row) => row.itemId) ?? [];
+}
+
+export function ImportDialog({
+  initialPaths,
+  initialSession,
+  modeOverride,
+  defaultAddToPool = false,
+  onImported,
+  onClose,
+}: {
+  initialPaths?: string[];
+  initialSession?: ImportSession;
+  modeOverride?: RelayMode;
+  defaultAddToPool?: boolean;
+  onImported?: (addedToPool: boolean) => void;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const { mode: currentMode, perform, busy } = useRelayState();
+  const relayMode = modeOverride ?? currentMode;
+  const { pool: proxyPool } = useProxyPool(relayMode === "local");
+  const [content, setContent] = useState("");
+  const [session, setSession] = useState<ImportSession | null>(initialSession ?? null);
+  const [ownedSessionId, setOwnedSessionId] = useState<string | null>(initialSession?.sessionId ?? null);
+  const [selected, setSelected] = useState<string[]>(() => selectedImportItemIds(initialSession));
+  const [commandFailed, setCommandFailed] = useState(false);
+  const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
+  const [progress, setProgress] = useState<AccountImportProgress | null>(null);
+  const [addToPool, setAddToPool] = useState(defaultAddToPool);
+  const [assignProxy, setAssignProxy] = useState(false);
+  const [useBundleProxies, setUseBundleProxies] = useState<boolean>();
+  const [fileLoading, setFileLoading] = useState(Boolean(initialPaths?.length));
+  const activeSessionId = useRef<string | null>(initialSession?.sessionId ?? null);
+  const selectAllRef = useRef<HTMLInputElement>(null);
+  const initialPreviewStarted = useRef(false);
+  const mounted = useRef(true);
+  const confirmInFlight = useRef(false);
+  const pendingSelection = useRef<ImportedSelection | null>(null);
+  const importedToPool = useRef(false);
+  const closing = useRef(false);
+  const supportsImportToPool = relayMode === "local";
+  const poolItemIds = new Set(session?.preview.rows
+    .filter((row) => selected.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && row.oauthClientKind !== "codex" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+    .map((row) => row.itemId));
+  const canImportToPool = supportsImportToPool && poolItemIds.size > 0;
+  const importOperationBusy = busy?.startsWith("import-") ?? false;
+  const acceptSession = (updatedSession: ImportSession) => {
+    setSession(updatedSession);
+    setOwnedSessionId(updatedSession.sessionId);
+    activeSessionId.current = updatedSession.sessionId;
+    setCommandFailed(false);
+    setCompleted(null);
+    setProgress(null);
+    pendingSelection.current = null;
+    setUseBundleProxies(undefined);
+    importedToPool.current = false;
+    setSelected(selectedImportItemIds(updatedSession));
+  };
+  const cancel = async () => {
+    if (importOperationBusy || confirmInFlight.current || closing.current) return;
+    closing.current = true;
+    const sessionId = session?.sessionId ?? ownedSessionId;
+    try {
+      if (relayMode === "local" && sessionId) await perform("import-cancel", () => relayCommands.cancelImport(sessionId), undefined, { backgroundRefresh: true });
+    } finally {
+      activeSessionId.current = null;
+      if (mounted.current) onClose();
+    }
+  };
+  const preview = async () => {
+    if (relayMode === "local") {
+      let startedSessionId: string | null = null;
+      const captured = await captureOperationResult(
+        (work) => perform("import-preview", work, undefined, { backgroundRefresh: true }),
+        async () => {
+          const started = await relayCommands.startImport(content);
+          startedSessionId = started.sessionId;
+          activeSessionId.current = started.sessionId;
+          if (mounted.current) setOwnedSessionId(started.sessionId);
+          return relayCommands.prepareImport(started.sessionId, false);
+        },
+      );
+      if (!mounted.current) {
+        if (startedSessionId) void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
+        return;
+      }
+      if (captured.ok && captured.value) acceptSession(captured.value);
+      else {
+        // `startImport` creates a temporary session before parsing.  If the
+        // parser/metadata probe fails, release that session immediately so a
+        // repeated preview cannot accumulate stale state or crash cleanup.
+        if (startedSessionId) {
+          if (activeSessionId.current === startedSessionId) activeSessionId.current = null;
+          setOwnedSessionId((previousOwnedSessionId) => previousOwnedSessionId === startedSessionId ? null : previousOwnedSessionId);
+          void relayCommands.cancelImport(startedSessionId).catch(() => undefined);
+        }
+        setCommandFailed(true);
+      }
+      return;
+    }
+  };
+  const chooseFiles = async (paths?: string[]) => {
+    setFileLoading(true);
+    let captured: { ok: boolean; value: ImportSession | null | undefined } = { ok: false, value: undefined };
+    let createdSessionId: string | null = null;
+    try {
+      captured = await captureOperationResult(
+        (work) => perform("import-files", work, undefined, { backgroundRefresh: true }),
+        async () => {
+          const session = await relayCommands.previewImportFiles(paths);
+          if (session) {
+            activeSessionId.current = session.sessionId;
+            createdSessionId = session.sessionId;
+          }
+          return session;
+        },
+      );
+      if (!mounted.current) return;
+      if (captured.ok && captured.value) acceptSession(captured.value);
+      else if (!captured.ok) setCommandFailed(true);
+    } finally {
+      if (!mounted.current && relayMode === "local" && createdSessionId) {
+        void relayCommands.cancelImport(createdSessionId).catch(() => undefined);
+      }
+      if (mounted.current) setFileLoading(false);
+    }
+  };
+  const finishConfirmedImport = (importResult: ConfirmAccountImportResponse | null, addedToPool: boolean) => {
+    if (!session) return;
+    importedToPool.current ||= addedToPool;
+    const failures = collectImportFailures(importResult, session);
+    setProgress(null);
+    if (failures.length) {
+      setSelected(failures.map((failure) => failure.itemId));
+      setCompleted(failures);
+      return;
+    }
+    activeSessionId.current = null;
+    onImported?.(importedToPool.current);
+    if (mounted.current) onClose();
+  };
+  const confirm = async (selectedIds = selected) => {
+    if (!session || confirmInFlight.current || closing.current) return;
+    confirmInFlight.current = true;
+    const sessionId = session.sessionId;
+    setCommandFailed(false);
+    try {
+      const finishSelection = async (selection: ImportedSelection) => {
+        if (relayMode === "local" && assignProxy) {
+          const localAssignment = new Set(session.preview.rows.filter((row) =>
+            !row.existing && !(useBundleProxies && row.bundleProxyEndpoint)).map((row) => row.itemId));
+          const accountIds = selection.result.results.flatMap((item) => {
+            const id = item.account?.account.id ?? item.accountId;
+            return item.status === "succeeded" && id && localAssignment.has(item.itemId) ? [id] : [];
+          });
+          if (accountIds.length) {
+            const ok = await perform("import-proxy-assign", () => relayCommands.assignAutomaticProxies(accountIds), undefined, { backgroundRefresh: true });
+            if (!mounted.current) return;
+            if (!ok) {
+              setProgress(null);
+              setCommandFailed(true);
+              return;
+            }
+          }
+        }
+        pendingSelection.current = null;
+        finishConfirmedImport(selection.result, selection.addedToPool);
+      };
+      // Retry proxy assignment after a completed import using saved IDs.
+      if (pendingSelection.current) {
+        await finishSelection(pendingSelection.current);
+        return;
+      }
+      const eligibleItemIds = new Set(session.preview.rows
+        .filter((row) => selectedIds.includes(row.itemId) && row.status !== "invalid" && row.oauthClientKind !== "siwc" && row.oauthClientKind !== "codex" && (row.authMode === "api_key" || canAccountJoinPool(row)))
+        .map((row) => row.itemId));
+      const includeInPool = addToPool && supportsImportToPool && eligibleItemIds.size > 0;
+      const acceptImportedSelection = async (result: ConfirmAccountImportResponse) => {
+        const selection: ImportedSelection = {
+          result,
+          addedToPool: includeInPool && result.results.some((item) => item.status === "succeeded" && eligibleItemIds.has(item.itemId)),
+        };
+        pendingSelection.current = selection;
+        await finishSelection(selection);
+      };
+      setProgress({ sessionId, completed: 0, total: selectedIds.length, succeeded: 0, failed: 0 });
+      if (relayMode === "local") {
+        let captured: { ok: boolean; value: ConfirmAccountImportResponse | undefined } = { ok: false, value: undefined };
+        beginAccountImportConfirmation();
+        try {
+          captured = await captureOperationResult(
+            (work) => perform("import-confirm", work, undefined, { backgroundRefresh: true }),
+            () => relayCommands.confirmImport(sessionId, selectedIds, includeInPool, session.preview.rows.some(
+              (row) => selectedIds.includes(row.itemId) && row.bundleProxyEndpoint,
+            ) ? useBundleProxies : undefined),
+          );
+        } finally {
+          finishAccountImportConfirmation();
+        }
+        if (!mounted.current) return;
+        if (!captured.ok) {
+          setProgress(null);
+          setCommandFailed(true);
+          return;
+        }
+        if (captured.value) await acceptImportedSelection(captured.value);
+        return;
+      }
+    } finally {
+      confirmInFlight.current = false;
+    }
+  };
+  const retryFailed = () => {
+    const failedIds = completed?.map((failure) => failure.itemId) ?? [];
+    if (!failedIds.length) return;
+    setCompleted(null);
+    setSelected(failedIds);
+    void confirm(failedIds);
+  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (relayMode !== "local") return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void relayCommands.onImportProgress((event) => {
+      if (event.sessionId === activeSessionId.current) setProgress(event);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, [relayMode]);
+  useEffect(() => {
+    if (!initialPaths?.length || initialPreviewStarted.current) return;
+    initialPreviewStarted.current = true;
+    void chooseFiles(initialPaths);
+  }, [initialPaths]);
+  useEffect(() => () => {
+    if (relayMode === "local" && activeSessionId.current) {
+      void relayCommands.cancelImport(activeSessionId.current).catch(() => undefined);
+    }
+  }, [relayMode]);
+  const importRows = session?.preview.rows ?? [];
+  const toggle = (itemId: string) => setSelected((selectedIds) => toggleSelectedId(selectedIds, itemId));
+  // Selectable invalid rows receive per-item errors from Rust validation.
+  const importRowIds = importRows.map((row) => row.itemId);
+  const selectedImportRowCount = importRowIds.filter((itemId) => selected.includes(itemId)).length;
+  const allImportRowsSelected = importRowIds.length > 0 && selectedImportRowCount === importRowIds.length;
+  const someImportRowsSelected = selectedImportRowCount > 0 && !allImportRowsSelected;
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someImportRowsSelected;
+  }, [someImportRowsSelected]);
+  const toggleAll = (checked: boolean) => setSelected(checked ? importRowIds : []);
+  const selectedAccounts = importRows.filter((row) => row.selectable && selected.includes(row.itemId) && row.authMode !== "api_key" && !row.existing);
+  const chooseBundleProxies = relayMode === "local" && importRows.some((row) => row.selectable && row.bundleProxyEndpoint && selected.includes(row.itemId));
+  const selectedAccountCount = selectedAccounts.filter((row) => !(useBundleProxies && row.bundleProxyEndpoint)).length;
+  const localProxyOptions = relayMode === "local";
+  const footer = completed ? (
+    <>
+      <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.close")}</Button>
+      <Button variant="primary" disabled={importOperationBusy} onClick={retryFailed}>{t("accounts.retryFailed")}</Button>
+    </>
+  ) : (
+    <>
+      <Button variant="secondary" disabled={importOperationBusy} onClick={cancel}>{t("common.cancel")}</Button>
+      {fileLoading ? null : session ? (
+        <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0 || importOperationBusy || (chooseBundleProxies && useBundleProxies === undefined)} onClick={() => void confirm()}
+        >{t("accounts.confirmImport", { count: selected.length })}</Button>
+      ) : (
+        <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim() || importOperationBusy} onClick={preview}>{t("accounts.preview")}</Button>
+      )}
+    </>
+  );
+  let importContent;
+  if (busy === "import-confirm" && progress) {
+    importContent = <ImportProgressView mode={relayMode} progress={progress} />;
+  } else if (completed) {
+    importContent = <ImportFailureSummary failures={completed} />;
+  } else if (session) {
+    importContent = (
+      <ImportPreview
+        session={session}
+        selected={selected}
+        busy={importOperationBusy}
+        selectAllRef={selectAllRef}
+        allSelected={allImportRowsSelected}
+        someSelected={someImportRowsSelected}
+        onToggle={toggle}
+        onToggleAll={toggleAll}
+        canImportToPool={canImportToPool}
+        showProxy={localProxyOptions}
+        showBundleProxies={chooseBundleProxies}
+        useBundleProxies={useBundleProxies}
+        onUseBundleProxies={setUseBundleProxies}
+        addToPool={addToPool}
+        onAddToPool={setAddToPool}
+        assignProxy={assignProxy}
+        onAssignProxy={setAssignProxy}
+        proxyDisabled={!proxyPool || proxyPool.total === 0 || selectedAccountCount === 0}
+        proxyDescription={proxyPool ? t(proxyPool.total ? "proxies.importAssignmentHint" : "proxies.noStored", { total: proxyPool.total, selected: selectedAccountCount, count: proxyPool.total }) : ""}
+      />
+    );
+  } else if (fileLoading || busy === "import-preview") {
+    importContent = <ImportFileStatus />;
+  } else {
+    importContent = <ImportSourceForm choosingFiles={busy === "import-files"} content={content} onContent={setContent} onChooseFiles={() => void chooseFiles()} />;
+  }
+  return (
+    <Dialog className="account-import-dialog" title={t("accounts.import")} onClose={cancel} footer={footer}>
+      {commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}
+      {importContent}
+    </Dialog>
+  );
+}
+
+function ImportProgressView({ mode, progress }: { mode: RelayMode; progress: AccountImportProgress }) {
+  const { t } = useTranslation();
+  return (
+    <div className="import-progress" role="status" aria-live="polite">
+      <header>
+        <span><Loader2 className="spin" aria-hidden /></span>
+        <div>
+          <strong>{t("accounts.importProgress", { completed: progress.completed, total: progress.total })}</strong>
+          <small>{mode === "local" && progress.currentLabel ? t("accounts.importCurrent", { name: progress.currentLabel }) : t("accounts.importProcessing")}</small>
+        </div>
+        <b>{progress.completed}/{progress.total}</b>
+      </header>
+      <progress max={Math.max(1, progress.total)} value={mode === "local" ? progress.completed : undefined} />
+      {mode === "local" ? <p>{t("accounts.importProgressSummary", { succeeded: progress.succeeded, failed: progress.failed })}</p> : null}
+    </div>
+  );
+}
+
+function ImportFailureSummary({ failures }: { failures: ImportFailure[] }) {
+  const { t } = useTranslation();
+  return (
+    <div role="alert" className="relay-form import-failure-summary">
+      <strong>{t("accounts.importIncomplete")}</strong>
+      <p>{t("accounts.importIncompleteHint", { count: failures.length })}</p>
+      <ul className="import-failure-list">{failures.map((failure) => (
+        <li key={failure.itemId}>
+          <div>
+            <strong>{failure.label || t("accounts.importUnknownAccount")}</strong>
+            <code data-relay-tooltip={t("accounts.importTechnicalCode")}>{failure.code}</code>
+          </div>
+          {failure.identity ? <span>{failure.identity}</span> : null}
+          <p>{importFailureReason(failure.code, t)}</p>
+        </li>
+      ))}</ul>
+    </div>
+  );
+}
+
+function ImportFileStatus() {
+  const { t } = useTranslation();
+  return (
+    <div className="import-file-loading" role="status" aria-live="polite">
+      <span><Loader2 className="spin" aria-hidden /></span>
+      <strong>{t("accounts.readingImportFiles")}</strong>
+    </div>
+  );
+}
+
+function ImportSourceForm({
+  choosingFiles,
+  content,
+  onContent,
+  onChooseFiles,
+}: {
+  choosingFiles: boolean;
+  content: string;
+  onContent: (contentValue: string) => void;
+  onChooseFiles: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="relay-form import-start">
+      <button type="button" className="import-file-source" disabled={choosingFiles} onClick={onChooseFiles}>
+        <span>{choosingFiles ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}</span>
+        <strong>{t("accounts.chooseImportFiles")}</strong>
+        <small>{t("accounts.importFileHint")}</small>
+      </button>
+      <div className="import-source-divider"><span>{t("accounts.orPaste")}</span></div>
+      <label className="relay-field">
+        <span>{t("accounts.importData")}</span>
+        <textarea value={content} onChange={(event) => onContent(event.target.value)} placeholder={t("accounts.importPlaceholder")} spellCheck={false} />
+      </label>
+    </div>
+  );
+}
+
+type ImportPreviewRowStatus = "ready" | "warning" | "error" | "info";
+
+function importPreviewTone(status: string): ImportPreviewRowStatus {
+  if (status === "invalid") return "error";
+  if (status === "quota_failed") return "warning";
+  if (status === "existing") return "info";
+  return "ready";
+}
+
+function ImportPreview({
+  session,
+  selected,
+  busy,
+  selectAllRef,
+  allSelected,
+  someSelected,
+  onToggle,
+  onToggleAll,
+  canImportToPool,
+  showProxy,
+  showBundleProxies,
+  useBundleProxies,
+  onUseBundleProxies,
+  addToPool,
+  onAddToPool,
+  assignProxy,
+  onAssignProxy,
+  proxyDisabled,
+  proxyDescription,
+}: {
+  session: ImportSession;
+  selected: string[];
+  busy: boolean;
+  selectAllRef: RefObject<HTMLInputElement | null>;
+  allSelected: boolean;
+  someSelected: boolean;
+  onToggle: (itemId: string) => void;
+  onToggleAll: (checked: boolean) => void;
+  canImportToPool: boolean;
+  showProxy: boolean;
+  showBundleProxies: boolean;
+  useBundleProxies: boolean | undefined;
+  onUseBundleProxies: (checked: boolean) => void;
+  addToPool: boolean;
+  onAddToPool: (checked: boolean) => void;
+  assignProxy: boolean;
+  onAssignProxy: (checked: boolean) => void;
+  proxyDisabled: boolean;
+  proxyDescription: string;
+}) {
+  const { t } = useTranslation();
+  const rows = session.preview.rows;
+  const showAfter = canImportToPool || showProxy;
+  return <div className="import-preview">
+    <div className="import-preview-heading">
+      <strong>{t("accounts.importReady")}</strong>
+    </div>
+    {session.preview.description ? <div className="import-package-description"><span>{t("accounts.importPackageDescription")}</span><MarkdownPreview content={session.preview.description} /></div> : null}
+    {rows.some((row) => row.oauthClientKind === "siwc") ? <p role="alert">{t("accounts.siwcImportNotice")}</p> : null}
+    <ul className="import-account-list">
+      <li className="import-account-card import-select-all-row">
+        <label>
+          <input
+            ref={selectAllRef}
+            type="checkbox"
+            checked={allSelected}
+            disabled={!rows.length || busy}
+            aria-label={t("accounts.selectAllImport")}
+            aria-checked={someSelected ? "mixed" : allSelected ? "true" : "false"}
+            onChange={(event) => onToggleAll(event.target.checked)}
+          />
+          <span className="import-account-copy">
+            <strong>{t("accounts.selectAllImport")}</strong>
+            <small>{t("accounts.importReadyHint", { selected: selected.length, total: rows.length })}</small>
+          </span>
+        </label>
+      </li>
+      {rows.map((row) => {
+        const tone = importPreviewTone(row.status);
+        const statusLabel = t(`accounts.importStatus.${row.status}`, { defaultValue: row.status });
+        const checked = selected.includes(row.itemId);
+        return <li className={checked ? "import-account-card selected" : "import-account-card"} key={row.itemId}>
+          <label>
+            <input type="checkbox" checked={checked} disabled={busy} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => onToggle(row.itemId)} />
+            <span className="import-account-copy">
+              <span className="import-account-title">
+                <strong>{row.label}</strong>
+                {tone === "ready" ? null : <span className="import-row-status" data-status={tone}>{statusLabel}</span>}
+              </span>
+              <span className="import-account-meta">
+                {row.oauthClientKind ? <span>{t(row.oauthClientKind === "siwc" ? "accounts.oauthChatGpt" : row.oauthClientKind === "excel_bps" ? "accounts.oauthExcel" : "accounts.oauthCodex")}</span> : null}
+                <span className="import-account-identity">{row.identity}</span>
+                {row.bundleProxyEndpoint ? <span>{t("accounts.importProxyEndpoint", { endpoint: row.bundleProxyEndpoint })}</span> : null}
+                <AccountPlanBadge planType={row.plan ?? null} unknown={t("common.unknown")} />
+              </span>
+              {row.error ? <small className="import-account-note error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small className="import-account-note">{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}
+            </span>
+          </label>
+        </li>;
+      })}
+    </ul>
+    {showAfter ? <section className="import-after settings-group">
+      <header><h2>{t("accounts.afterImport")}</h2></header>
+      <div className="settings-group-body">
+        {showBundleProxies ? <fieldset className="relay-field import-bundle-route">
+          <legend>{t("accounts.importProxyChoice")}</legend>
+          <label><input type="radio" name="bundle-proxy" checked={useBundleProxies === true} onChange={() => onUseBundleProxies(true)} /> {t("accounts.importProxies")}</label>
+          <label><input type="radio" name="bundle-proxy" checked={useBundleProxies === false} onChange={() => onUseBundleProxies(false)} /> {t("accounts.importLocalRoute")}</label>
+          <small>{t("accounts.importProxiesHint")}</small>
+        </fieldset> : null}
+        {canImportToPool ? <SettingToggle className="import-after-toggle" label={t("accounts.addImportedToPool")} description={t("accounts.addToPoolHint")} checked={addToPool} onChange={onAddToPool} /> : null}
+        {showProxy ? <SettingToggle className="import-after-toggle" label={t("proxies.assignStoredAfterAdd")} description={proxyDescription} checked={assignProxy} disabled={proxyDisabled} onChange={onAssignProxy} /> : null}
+      </div>
+    </section> : null}
+  </div>;
+}
+
+function collectImportFailures(response: ConfirmAccountImportResponse | null, session: ImportSession): ImportFailure[] {
+  const rows = new Map(session.preview.rows.map((row) => [row.itemId, row]));
+  return (response?.results ?? [])
+    .filter((importResult) => importResult.status === "failed")
+    .map((importResult) => {
+      const row = rows.get(importResult.itemId);
+      return {
+        itemId: importResult.itemId,
+        code: importResult.error?.code ?? "unknown",
+        ...(row?.label ? { label: row.label } : {}),
+        ...(row?.identity ? { identity: row.identity } : {}),
+      };
+    });
+}
+
+function importFailureReason(code: string, t: TFunction) {
+  if (code === "provider_account_id_missing") return t("accounts.importFailureReasons.providerAccountIdMissing");
+  if (code === "provider_account_lookup_failed") return t("accounts.importFailureReasons.providerAccountLookupFailed");
+  if (code === "access_token_rejected") return t("accounts.importFailureReasons.accessTokenRejected");
+  if (code === "account_profile_rate_limited") return t("accounts.importFailureReasons.accountProfileRateLimited");
+  if (code === "models_http_status") return t("accounts.importFailureReasons.modelsHttpStatus");
+  if (code === "models_endpoint_not_found") return t("accounts.errors.modelsEndpointNotFound");
+  if (code === "models_forbidden") return t("accounts.importFailureReasons.modelsForbidden");
+  return t("accounts.importFailureReasons.unknown");
+}

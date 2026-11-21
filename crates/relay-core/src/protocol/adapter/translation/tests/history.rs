@@ -727,6 +727,7 @@ fn messages_thinking_blocks_are_translated_as_reasoning() {
         &response,
         "test",
         &Default::default(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -737,8 +738,14 @@ fn messages_thinking_blocks_are_translated_as_reasoning() {
         response.native_output[0]["signature"],
         "synthetic-signature"
     );
-    let portable =
-        response::encode(WireApi::Messages, &response, "test", &Default::default()).unwrap();
+    let portable = response::encode(
+        WireApi::Messages,
+        &response,
+        "test",
+        &Default::default(),
+        None,
+    )
+    .unwrap();
     assert_eq!(
         portable["content"][0],
         json!({"type":"thinking","thinking":"plan first"})

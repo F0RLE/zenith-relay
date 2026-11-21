@@ -181,8 +181,7 @@ pub(crate) fn responses_tool_call_is_missing_output_message(message: &str) -> bo
     )
 }
 
-/// Recognize the legacy Gateway envelope. Its generic text is not evidence of
-/// a broken route, lost response, or tool-link failure.
+/// Recognize the legacy Gateway invalid-request envelope.
 #[cfg(test)]
 pub(crate) fn zenith_gateway_invalid_request(error_response_body: &[u8]) -> bool {
     let Ok(error_payload) = serde_json::from_slice::<Value>(error_response_body) else {

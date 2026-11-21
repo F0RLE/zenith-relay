@@ -33,16 +33,16 @@ fn inspect(engine: &RotationEngine, request: &RotationRequest) -> CacheAffinityD
 #[test]
 fn cache_affinity_diagnostics_report_exact_quota_boundary_without_mutating_selection() {
     for (other, expected) in [
-        (4_499, CacheAffinityReason::Retained),
-        (4_500, CacheAffinityReason::Retained),
-        (4_999, CacheAffinityReason::Retained),
-        (5_000, CacheAffinityReason::QuotaHeadroom),
+        (1_499, CacheAffinityReason::Retained),
+        (1_500, CacheAffinityReason::Retained),
+        (1_999, CacheAffinityReason::Retained),
+        (2_000, CacheAffinityReason::QuotaHeadroom),
     ] {
         let mut engine = engine_with([
             candidate("private-owner", 0, 1),
             candidate("private-other", 0, 1),
         ]);
-        quota(&mut engine, "private-owner", 4_000, 100);
+        quota(&mut engine, "private-owner", 1_000, 100);
         quota(&mut engine, "private-other", other, 100);
         let diagnostics = inspect(&engine, &preferred_request(1, "private-owner"));
         assert_eq!(diagnostics.reason, expected);
@@ -52,14 +52,15 @@ fn cache_affinity_diagnostics_report_exact_quota_boundary_without_mutating_selec
                 .as_ref()
                 .unwrap()
                 .quota_remaining_basis_points,
-            Some(4_000)
+            Some(1_000)
         );
+        assert_eq!(diagnostics.quota_low_water_basis_points, Some(1_000));
         assert_eq!(diagnostics.quota_switch_margin_basis_points, 1_000);
         if expected == CacheAffinityReason::QuotaHeadroom {
-            assert_eq!(diagnostics.best_quota_remaining_basis_points, Some(5_000));
+            assert_eq!(diagnostics.best_quota_remaining_basis_points, Some(2_000));
             assert_eq!(
                 diagnostics.selected.quota_remaining_basis_points,
-                Some(5_000)
+                Some(2_000)
             );
         }
         let encoded = serde_json::to_string(&diagnostics).unwrap();
@@ -103,6 +104,22 @@ fn cache_affinity_diagnostics_keep_unknown_or_future_quota_as_null() {
         diagnostics.selected.quota_remaining_basis_points,
         Some(4_000)
     );
+}
+
+#[test]
+fn cache_affinity_diagnostics_explain_response_ownership_without_a_prompt_binding() {
+    let mut engine = engine_with([candidate("owner", 0, 1), candidate("other", 0, 1)]);
+    quota(&mut engine, "owner", 400, 100);
+    quota(&mut engine, "other", 7_700, 100);
+    for preferred in [None, Some("owner"), Some("other")] {
+        let mut request = request(1).with_owner("owner");
+        request.preferred = preferred.map(str::to_owned);
+        let diagnostics = inspect(&engine, &request);
+        assert_eq!(diagnostics.reason, CacheAffinityReason::ResponseOwner);
+        assert_eq!(diagnostics.quota_low_water_basis_points, None);
+        assert_eq!(diagnostics.selected.quota_remaining_basis_points, Some(400));
+        assert_eq!(engine.select(&request, 100).unwrap().candidate_id, "owner");
+    }
 }
 
 #[test]
@@ -167,6 +184,10 @@ fn cache_affinity_diagnostics_preserve_scope_and_manual_policy() {
         Some(CandidateBlockReason::NotAllowed)
     );
     engine.set_mode(RotationMode::Failover);
+    assert_eq!(
+        inspect(&engine, &preferred_request(2, "owner")).quota_low_water_basis_points,
+        None
+    );
     assert_eq!(
         inspect(&engine, &preferred_request(2, "owner")).reason,
         CacheAffinityReason::RoutingPolicy

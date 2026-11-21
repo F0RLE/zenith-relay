@@ -1,0 +1,29 @@
+.owner-passkeys { width: min(100%, 580px); min-width: 0; text-align: start; }
+.owner-passkeys > summary { display: inline-flex; align-items: center; gap: 10px; min-height: 44px;
+  padding-inline: 4px; border-radius: 8px; color: var(--accent); font-size: 13px; font-weight: 550; cursor: pointer; }
+.owner-passkeys > summary::-webkit-details-marker { display: none; }
+.owner-passkeys > summary::after { content: ""; width: 6px; height: 6px; border: solid currentColor;
+  border-width: 0 1px 1px 0; transform: translateY(-2px) rotate(45deg); }
+.owner-passkeys[open] > summary::after { transform: translateY(2px) rotate(225deg); }
+.owner-passkeys > summary:hover { text-decoration: underline; text-underline-offset: 3px; }
+.owner-passkeys :is(summary, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.owner-passkey-body { border-block-start: 1px solid var(--border); padding-block-start: 12px;
+  display: grid; justify-items: start; gap: 12px; }
+.owner-passkey-body ul { list-style: none; margin: 0; padding: 0; width: 100%; }
+.owner-passkey-body li { display: grid; grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center; gap: 12px; padding-block: 8px; border-block-end: 1px solid var(--border); }
+.owner-passkey-body li > div { min-width: 0; overflow-wrap: anywhere; }
+.owner-passkey-body li strong { font-size: 14px; font-weight: 550; }
+.owner-passkey-body li span { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--secondary); font-size: 12px; }
+.owner-passkey-body small { background: var(--accent-soft); color: var(--accent); padding: 2px 6px; border-radius: 6px; font-size: inherit; }
+.owner-passkey-body .key-button { min-height: 44px; padding: 8px 12px; font-size: 13px; white-space: normal; }
+.owner-passkey-body p { margin: 0; font-size: 13px; line-height: 1.55; }
+.owner-passkey-body :is(.owner-passkey-revoke, .owner-passkey-error) { color: var(--error); }
+.owner-passkey-form { display: grid; justify-items: start; gap: 8px; width: 100%; min-width: 0; }
+.owner-passkey-form label { display: grid; gap: 6px; width: min(100%, 300px); font-size: 13px; font-weight: 550; }
+.owner-passkey-form input { min-width: 0; min-height: 44px; padding: 8px 12px; border: 1px solid var(--control-border);
+  border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 16px; }
+.owner-passkey-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+@media (forced-colors: active) {
+  .owner-passkeys :is(summary, input):focus-visible { outline-color: Highlight; }
+}

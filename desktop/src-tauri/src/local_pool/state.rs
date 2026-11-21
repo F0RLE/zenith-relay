@@ -1,0 +1,428 @@
+mod adapters;
+mod catalog_refresh;
+mod catalog_warning;
+mod coordination;
+mod paths;
+mod snapshot;
+mod subscription;
+
+pub(crate) use adapters::DesktopOAuthEvents;
+use coordination::wake_coordinator;
+pub(crate) use paths::migrate_storage_layout;
+pub(crate) use snapshot::{AccountCredentialFacts, LocalRuntimeInputs, SnapshotInputs};
+#[cfg(test)]
+use snapshot::{SecretLookup, account_secret_available};
+
+use super::{
+    accounts::{
+        NativeSecretBackend, import_session::ImportSessionStore, oauth_flow::OAuthFlowManager,
+    },
+    error::{ErrorCode, LocalPoolError, Result},
+    host::GatewayManager,
+    profiles::repair,
+    store::{LocalPoolStore, telemetry_db::TelemetryDb},
+};
+use crate::storage_paths::StoragePaths;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex, MutexGuard, atomic::AtomicU64},
+};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, watch};
+use url::Url;
+use zenith_relay_core::{
+    RuntimeContinuationStores,
+    accounts::TokenAuthority,
+    automations::WakeCoordinator,
+    model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogLoader},
+    pricing::{CatalogStatus, PricingCatalog, PricingCatalogLoader},
+    scheduler::refresh::{RefreshLimits, service::RefreshService},
+};
+
+pub(super) use zenith_relay_core::unix_time_ms as now_ms;
+
+#[cfg(test)]
+use zenith_relay_core::DefaultServiceTier;
+
+const DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/wham/accounts/check";
+
+#[derive(Clone)]
+pub struct DesktopState {
+    pub(super) owner: Arc<DesktopStateOwner>,
+}
+
+impl std::ops::Deref for DesktopState {
+    type Target = DesktopStateOwner;
+    fn deref(&self) -> &Self::Target {
+        &self.owner
+    }
+}
+
+// Shared ownership lets refresh jobs keep only a Weak reference while idle.
+// The Tauri-managed state remains the sole long-lived lifetime owner.
+pub struct DesktopStateOwner {
+    pub(crate) root: PathBuf,
+    pub(crate) gateway: GatewayManager,
+    pub(crate) telemetry: Arc<TelemetryDb>,
+    pricing: Arc<PricingCatalogLoader>,
+    model_metadata: Arc<ModelMetadataCatalogLoader>,
+    store: Arc<Mutex<LocalPoolStore>>,
+    token_authority: Arc<TokenAuthority>,
+    pub(in crate::local_pool) continuation_state: RuntimeContinuationStores,
+    pub(super) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
+    pub(super) refresh_started: std::sync::atomic::AtomicBool,
+    wake: Arc<Mutex<WakeCoordinator>>,
+    wake_notify: Arc<Notify>,
+    oauth_flow: OAuthFlowManager<NativeSecretBackend, DesktopOAuthEvents>,
+    pub(super) oauth_events: DesktopOAuthEvents,
+    failed_usage_writes: Arc<AtomicU64>,
+    usage_writer: std::sync::OnceLock<zenith_relay_core::UsageCallback>,
+    failed_affinity_writes: Arc<AtomicU64>,
+    catalog_refresh_state: Arc<Mutex<catalog_warning::CatalogRefreshWarnings>>,
+    pub(in crate::local_pool) client_catalog_refresh: catalog_refresh::CatalogRefreshQueue,
+    background_session_active: watch::Sender<bool>,
+    quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    reset_redemption_lock: AsyncMutex<()>,
+    subscription_refresh_lock: AsyncMutex<subscription::SubscriptionRefreshState>,
+    setup_lock: tokio::sync::Mutex<()>,
+    runtime_snapshot_slots: Arc<Semaphore>,
+    pub(in crate::local_pool) pool_rotation_projection:
+        Mutex<Option<(u64, zenith_relay_core::protocol::PoolRotationProjection)>>,
+    account_check_url: Url,
+    credential_cache: Mutex<snapshot::CredentialCache>,
+}
+
+impl DesktopState {
+    pub(crate) fn continuation_memory_diagnostics(
+        &self,
+    ) -> Vec<zenith_relay_core::gateway::CacheMemoryDiagnostics> {
+        self.continuation_state.memory_diagnostics()
+    }
+
+    #[cfg(test)]
+    pub fn open(root: PathBuf) -> Result<Self> {
+        Self::open_with_continuation_state(root, RuntimeContinuationStores::default())
+    }
+
+    pub(super) fn open_with_continuation_state(
+        root: PathBuf,
+        continuation_state: RuntimeContinuationStores,
+    ) -> Result<Self> {
+        let paths = StoragePaths::from_root(&root);
+        let transient_root = paths.cache_root();
+        let history_repair_root = paths.history_repair_backup_root();
+        let _ = std::thread::Builder::new()
+            .name("transient-cleanup".to_string())
+            .spawn(move || {
+                if let Err(error) =
+                    ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
+                        .cleanup_expired()
+                {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("import_sessions_cleanup_failed"),
+                        &error.to_string(),
+                        &[],
+                    );
+                }
+                if let Err(error) = repair::cleanup_expired_previews(&transient_root) {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("repair_previews_cleanup_failed"),
+                        &error,
+                        &[],
+                    );
+                }
+                if let Err(error) = repair::cleanup_history_repair_backups(&history_repair_root) {
+                    crate::diagnostics::record_error(
+                        "startup-cleanup",
+                        Some("repair_backups_cleanup_failed"),
+                        &error,
+                        &[],
+                    );
+                }
+            });
+        let mut store = LocalPoolStore::open(root.clone())?;
+        let mut accounts = store.accounts().to_vec();
+        let mut accounts_changed = false;
+        let credentials =
+            super::accounts::credentials::CredentialStore::from_backend(NativeSecretBackend);
+        for account in &mut accounts {
+            if account.oauth_client_kind.is_none()
+                && let Ok(Some(stored)) = credentials.load(&account.account.id)
+            {
+                account.oauth_client_kind = Some(stored.oauth_client_kind());
+                accounts_changed = true;
+            }
+            if account.account.in_pool
+                && super::accounts::records::can_account_join_pool(account)
+                    .is_ok_and(|eligible| !eligible)
+            {
+                account.account.in_pool = false;
+                account.image_pool_enabled = false;
+                accounts_changed = true;
+            }
+        }
+        if accounts_changed {
+            store.replace_accounts_and_keys(accounts, store.keys().to_vec())?;
+        }
+        let telemetry = store.database();
+        let pricing = Arc::new(
+            PricingCatalogLoader::open(paths.pricing_catalog_file())
+                .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?,
+        );
+        let model_metadata = Arc::new(
+            ModelMetadataCatalogLoader::open(paths.model_metadata_catalog_file())
+                .map_err(|error| LocalPoolError::new(ErrorCode::Io, error.to_string()))?,
+        );
+        let wake = wake_coordinator(store.automations())?;
+        if &store.automations().state != wake.state() {
+            let mut automations = store.automations().clone();
+            automations.state = wake.state().clone();
+            store.replace_automations(automations)?;
+        }
+        let failed_usage_writes = Arc::new(AtomicU64::new(0));
+        let failed_affinity_writes = Arc::new(AtomicU64::new(0));
+        let catalog_refresh_state = Arc::new(Mutex::new(
+            catalog_warning::CatalogRefreshWarnings::from_gateway(store.gateway()),
+        ));
+        // The native process owns automatic account work. A tray-only startup
+        // or a closed WebView must not pause quota, credit, or catalog refresh.
+        let (background_session_active, _) = watch::channel(true);
+        let token_authority = Arc::new(
+            TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
+                .map_err(LocalPoolError::invalid_state)?,
+        );
+        let oauth_events = DesktopOAuthEvents::default();
+        let oauth_flow = OAuthFlowManager::new(
+            paths.cache_root(),
+            NativeSecretBackend,
+            oauth_events.clone(),
+        );
+        Ok(Self {
+            owner: Arc::new(DesktopStateOwner {
+                root,
+                gateway: GatewayManager::default(),
+                telemetry,
+                pricing,
+                model_metadata,
+                store: Arc::new(Mutex::new(store)),
+                token_authority,
+                continuation_state,
+                refresh: RefreshService::with_cache_policy(
+                    RefreshLimits::default(),
+                    super::refresh::cache_observation,
+                )
+                .map_err(LocalPoolError::invalid_state)?,
+                refresh_started: std::sync::atomic::AtomicBool::new(false),
+                wake: Arc::new(Mutex::new(wake)),
+                wake_notify: Arc::new(Notify::new()),
+                oauth_flow,
+                oauth_events,
+                failed_usage_writes,
+                usage_writer: std::sync::OnceLock::new(),
+                failed_affinity_writes,
+                catalog_refresh_state,
+                client_catalog_refresh: catalog_refresh::CatalogRefreshQueue::default(),
+                background_session_active,
+                quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
+                reset_redemption_lock: AsyncMutex::new(()),
+                subscription_refresh_lock: AsyncMutex::new(Default::default()),
+                setup_lock: tokio::sync::Mutex::new(()),
+                runtime_snapshot_slots: Arc::new(Semaphore::new(1)),
+                pool_rotation_projection: Mutex::new(None),
+                account_check_url: Url::parse(DEFAULT_CODEX_ACCOUNT_CHECK_ENDPOINT)
+                    .expect("the built-in account-check endpoint must be valid"),
+                credential_cache: Mutex::new(snapshot::CredentialCache::default()),
+            }),
+        })
+    }
+
+    pub fn store(&self) -> Result<MutexGuard<'_, LocalPoolStore>> {
+        self.store
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "local pool store lock poisoned"))
+    }
+
+    pub(crate) fn token_authority(&self) -> Arc<TokenAuthority> {
+        self.token_authority.clone()
+    }
+
+    pub(crate) fn pricing_loader(&self) -> Arc<PricingCatalogLoader> {
+        self.pricing.clone()
+    }
+
+    pub(crate) fn pricing_catalog(&self) -> Arc<PricingCatalog> {
+        self.pricing.snapshot()
+    }
+
+    pub(crate) fn pricing_status(&self) -> CatalogStatus {
+        self.pricing.status()
+    }
+
+    pub(crate) fn model_metadata_loader(&self) -> Arc<ModelMetadataCatalogLoader> {
+        self.model_metadata.clone()
+    }
+
+    pub(crate) fn model_metadata_catalog(&self) -> Arc<ModelMetadataCatalog> {
+        self.model_metadata.snapshot()
+    }
+
+    pub(crate) fn record_performance(
+        &self,
+        name: &str,
+        duration_ms: f64,
+        context: Option<&str>,
+    ) -> Result<()> {
+        if !crate::diagnostics::is_debug_enabled() {
+            return Ok(());
+        }
+        self.telemetry
+            .record_performance(name, duration_ms, context)
+    }
+
+    pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.setup_lock.lock().await
+    }
+
+    pub(crate) async fn runtime_snapshot_permit(&self) -> Result<OwnedSemaphorePermit> {
+        self.runtime_snapshot_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                LocalPoolError::new(ErrorCode::Io, "Runtime snapshot worker is unavailable")
+            })
+    }
+
+    pub(crate) fn account_check_url(&self) -> &Url {
+        &self.account_check_url
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_account_check_url_for_test(&mut self, endpoint: Url) {
+        Arc::get_mut(&mut self.owner)
+            .expect("test endpoint must be set before sharing state")
+            .account_check_url = endpoint;
+    }
+
+    pub(crate) fn quota_account_lock(&self, account_id: &str) -> Result<Arc<AsyncMutex<()>>> {
+        let mut locks = self
+            .quota_account_locks
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota account lock poisoned"))?;
+        Ok(locks
+            .entry(account_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone())
+    }
+
+    pub(crate) fn weekly_reset_was_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .store()?
+            .automations()
+            .weekly_reset_fingerprints
+            .get(account_id)
+            .is_some_and(|applied| applied == fingerprint))
+    }
+
+    pub(crate) async fn reset_redemption_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.reset_redemption_lock.lock().await
+    }
+
+    /// Records a redeemed or dispatch-uncertain cycle pending provider recovery evidence.
+    pub(crate) fn mark_weekly_reset_applied(
+        &self,
+        account_id: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut store = self.store()?;
+        let mut automations = store.automations().clone();
+        automations
+            .weekly_reset_fingerprints
+            .insert(account_id.to_string(), fingerprint.to_string());
+        store.replace_automations(automations)
+    }
+
+    pub(crate) fn remove_quota_account_lock(&self, account_id: &str) -> Result<bool> {
+        let removed = self
+            .quota_account_locks
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota account lock poisoned"))?
+            .remove(account_id)
+            .is_some();
+        Ok(removed)
+    }
+
+    pub(crate) fn clear_weekly_reset_attempt(
+        &self,
+        fence: &crate::local_pool::store::AccountRefreshFence,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let mut store = self.store()?;
+        store.ensure_account_refresh_current(fence)?;
+        let account_id = &fence.account_id;
+        let mut automations = store.automations().clone();
+        if automations
+            .weekly_reset_fingerprints
+            .get(account_id)
+            .is_some_and(|current| current == fingerprint)
+        {
+            automations.weekly_reset_fingerprints.remove(account_id);
+            store.replace_automations(automations)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn subscription_refresh_guard(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, subscription::SubscriptionRefreshState> {
+        self.subscription_refresh_lock.lock().await
+    }
+
+    pub(crate) fn set_background_session_active(&self, active: bool) {
+        if *self.background_session_active.borrow() == active {
+            return;
+        }
+        self.background_session_active.send_replace(active);
+        if let Ok(store) = self.store() {
+            store.notify_refresh_changed();
+        }
+    }
+
+    pub(crate) fn background_session_active(&self) -> bool {
+        *self.background_session_active.borrow()
+    }
+
+    pub(crate) async fn wait_for_background_session_active(&self) {
+        let mut receiver = self.background_session_active.subscribe();
+        loop {
+            if *receiver.borrow() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_background_session_inactive(&self) {
+        let mut receiver = self.background_session_active.subscribe();
+        loop {
+            if !*receiver.borrow() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

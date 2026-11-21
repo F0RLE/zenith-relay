@@ -6,6 +6,20 @@ fn catalog(raw: &str) -> ModelMetadataCatalog {
 }
 
 #[test]
+fn models_dev_json_enforces_the_import_byte_limit() {
+    let mut raw = String::with_capacity(MAX_MODELS_DEV_JSON_BYTES + 1);
+    raw.push_str(r#"{"vendor/model":{}}"#);
+    let padding = MAX_MODELS_DEV_JSON_BYTES - raw.len();
+    raw.extend(std::iter::repeat_n(' ', padding));
+    assert!(ModelMetadataCatalog::from_models_dev_json(&raw).is_ok());
+    raw.push(' ');
+    assert!(matches!(
+        ModelMetadataCatalog::from_models_dev_json(&raw),
+        Err(ModelMetadataError::InvalidCatalog)
+    ));
+}
+
+#[test]
 fn resolves_exact_and_unique_leaf_ids() {
     let catalog = catalog(
         r#"{
@@ -343,12 +357,4 @@ fn preferred_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
         catalog.preferred_protocol_for("gpt-capabilities-only"),
         None
     );
-}
-
-#[test]
-fn cache_hash_rejects_modified_payload() {
-    let payload = serde_json::json!({"openai/test":{"name":"Test","family":"gpt"}});
-    let mut envelope = MetadataCacheEnvelope::new(payload, 1).unwrap();
-    envelope.payload = serde_json::json!({"openai/other":{"name":"Other","family":"gpt"}});
-    assert_eq!(envelope.validate(), Err(ModelMetadataError::InvalidCache));
 }

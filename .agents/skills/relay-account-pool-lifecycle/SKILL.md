@@ -17,15 +17,17 @@ For additional implementations read the relevant
 
 ## Trace the account through its owners
 
-- Admission: `src-tauri/src/local_pool/commands/pool/membership.rs`,
+- Admission: `desktop/src-tauri/src/local_pool/commands/pool/membership.rs`,
   `accounts/records.rs`, and `crates/relay-core/src/runtime/build/accounts.rs`.
 - Renewal: `crates/relay-core/src/accounts/token_authority/`
-  and desktop `accounts/authority/`.
-- Availability and observations: `accounts/quota_refresh/`, shared
-  `quota/`, `scheduler/`, and `runtime/selection/`. Keep the current ownership
+  and `crates/relay-core/src/providers/chatgpt/connector/authority/`;
+  Desktop `accounts/authority/` supplies process locks and diagnostics.
+- Availability and observations: shared `providers/chatgpt/connector/monitoring.rs`
+  and Desktop `accounts/quota_refresh/` adapters, shared `quota/`, `scheduler/`,
+  and `runtime/selection/`. Keep the current ownership
   and resource-refresh revisions rather than adding another health registry.
-- Removal/replacement: desktop `accounts/mutations/delete/` and
-  `accounts/import_orchestrator/`.
+- Removal/replacement: shared `accounts/removal.rs` and connector `import.rs`,
+  with Desktop `accounts/mutations/delete/` and `accounts/import_orchestrator/` adapters.
   Follow callers to the durable commit and runtime fences.
 
 ## Preserve the lifecycle distinctions

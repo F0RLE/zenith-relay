@@ -10,6 +10,9 @@ pub(in crate::gateway) struct FastResponseDelta {
     pub(in crate::gateway) output_index: Option<u64>,
     pub(in crate::gateway) sequence_number: Option<u64>,
     pub(in crate::gateway) nonempty_text: bool,
+    pub(in crate::gateway) output_text: bool,
+    pub(in crate::gateway) reasoning_text: bool,
+    pub(in crate::gateway) tool_arguments: bool,
 }
 
 /// Classifies one complete JSON payload without building a `serde_json::Value`.
@@ -41,6 +44,15 @@ pub(in crate::gateway) fn fast_response_delta_json(
         output_index: parsed.output_index,
         sequence_number: parsed.sequence_number,
         nonempty_text: parsed.delta_text.is_some_and(|delta| !delta.0.is_empty()),
+        output_text: event_type == "response.output_text.delta",
+        reasoning_text: matches!(
+            event_type,
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta"
+        ),
+        tool_arguments: matches!(
+            event_type,
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta"
+        ),
     })
 }
 
@@ -99,6 +111,8 @@ struct FastDeltaBody<'a> {
     #[serde(default)]
     prompt_cache_options: Option<IgnoredAny>,
     #[serde(default)]
+    prompt_cache_retention: Option<IgnoredAny>,
+    #[serde(default)]
     prompt_cache_diagnostics: Option<IgnoredAny>,
 }
 
@@ -120,6 +134,7 @@ impl FastDeltaBody<'_> {
             || self.model.is_some()
             || self.model_version.is_some()
             || self.prompt_cache_options.is_some()
+            || self.prompt_cache_retention.is_some()
             || self.prompt_cache_diagnostics.is_some()
     }
 }
@@ -240,6 +255,7 @@ mod tests {
         for (field, value) in [
             ("modelVersion", serde_json::json!("synthetic-model")),
             ("prompt_cache_options", serde_json::json!({"ttl":"12h"})),
+            ("prompt_cache_retention", serde_json::json!("in_memory")),
             (
                 "prompt_cache_diagnostics",
                 serde_json::json!({"status":"unavailable"}),

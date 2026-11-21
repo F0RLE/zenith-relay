@@ -89,6 +89,18 @@ fn combines_multiple_files_and_nested_account_containers() {
 }
 
 #[test]
+fn selecting_multiple_files_preserves_each_bundle_parser() {
+    let zenith = r#"{"format":"zenith","version":1,"accounts":[{"auth":{"type":"oauth","accessToken":"synthetic-access"},"identity":{"accountId":"fixture-owner"}}]}"#;
+    let foreign = r#"{"type":"portable_account_bundle","accounts":[{"platform":"other","credentials":{"access_token":"synthetic-other"}}]}"#;
+    let combined = combine_import_documents(&[zenith.into(), foreign.into()]).unwrap();
+    let parsed = parse_import(&combined, None, &[]).unwrap();
+    assert_eq!(parsed.preview.rows[0].source_name, "zenith");
+    assert_eq!(parsed.items.len(), 1);
+    assert_eq!(parsed.items[0].account_id.as_deref(), Some("fixture-owner"));
+    assert!(!parsed.preview.rows[1].selectable);
+}
+
+#[test]
 fn combines_valid_files_with_malformed_files_as_error_rows() {
     let documents = vec![
         format!(r#"{{"account_id":"account-one","access_token":"{ACCESS}"}}"#),

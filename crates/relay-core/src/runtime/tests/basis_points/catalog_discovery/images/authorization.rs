@@ -32,7 +32,7 @@ async fn attachment_rotation_does_not_send_old_file_ids_with_new_credentials() {
             )
             .await
             .expect("the synthetic upload must reach its gate");
-            runtime.chatgpt_accounts["account-1"]
+            runtime.account_state.executors["account-1"]
                 .token_authority
                 .register(
                     "account-1",

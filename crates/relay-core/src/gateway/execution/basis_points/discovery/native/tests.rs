@@ -11,13 +11,24 @@ fn request() -> Value {
 fn prepare(request: &Value, budget: usize) -> (Value, Option<DiscoverySession>) {
     let mut upstream = request.clone();
     crate::providers::chatgpt::prepare_siwc_request(&mut upstream).unwrap();
-    prepare_dispatch(
+    let PreparedDiscovery {
+        body,
+        session,
+        relay_prefix_items,
+    } = prepare_dispatch(
         request,
         &upstream,
         &SharedRequestBudget::for_incoming_request(budget),
         &mut ToolUseDiagnostics::default(),
     )
-    .unwrap()
+    .unwrap();
+    assert_eq!(
+        relay_prefix_items == 2,
+        body["input"][1]["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Relay local tool catalog."))
+    );
+    (body, session)
 }
 
 fn native_wire_tool_count(body: &Value) -> usize {

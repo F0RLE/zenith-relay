@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { repoRoot, tauriInvocation, withZenithRustEnv } from "../lib/tauri-env.mjs";
 import { tauriDevOptions } from "./tauri-dev-args.mjs";
 
@@ -21,7 +22,7 @@ console.log(options.watch
   : "[dev] Rust auto-restart is OFF. Frontend hot reload stays enabled; restart manually to apply Rust edits.");
 const invocation = tauriInvocation(options.args);
 const buildResult = spawnSync(invocation.command, invocation.args, {
-  cwd: repoRoot(),
+  cwd: join(repoRoot(), "desktop"),
   env: withZenithRustEnv(),
   shell: invocation.shell,
   stdio: "inherit",

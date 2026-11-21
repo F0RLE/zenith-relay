@@ -52,6 +52,7 @@ pub(in crate::gateway) fn usage_event(
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
         account_token_generation: route.account_token_generation,
+        account_token_revision: route.account_token_revision.clone(),
         client_context_id: route.client_context_id.clone(),
         routing,
         requested_model: Some(requested_model.to_string()),
@@ -75,9 +76,7 @@ pub(in crate::gateway) fn usage_event(
         input_tokens: None,
         cached_input_tokens: None,
         cache_write_input_tokens: None,
-        // Usage records describe what the upstream actually reported, not the
-        // configured preference. Upstream usage or applied response metadata
-        // supplies the window; a request preference alone is not evidence.
+        // Read the applied window from upstream usage or response metadata.
         cache_write_ttl: None,
         reasoning_tokens: None,
         output_tokens: None,
@@ -148,7 +147,12 @@ pub(in crate::gateway) fn emit_repair(runtime: &GatewayRuntime, event: &mut Usag
 }
 
 pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
-    normalize_client_cancellation(&mut event);
+    if !runtime.diagnostics_enabled()
+        && let Some(routing) = event.routing.as_mut()
+    {
+        routing.images = None;
+    }
+    event.normalize_client_cancellation();
     if event.success
         && event.error_category.is_none()
         && let Some(origin) = runtime.request_origin(&event.request_id)
@@ -173,25 +177,34 @@ pub(in crate::gateway) fn emit_usage(runtime: &GatewayRuntime, mut event: UsageE
 
 pub(in crate::gateway) fn emit_callback(callback: &crate::UsageCallback, event: UsageEvent) {
     let mut event = event;
-    normalize_client_cancellation(&mut event);
+    event.normalize_client_cancellation();
+    let local_failure = event.error_origin() == Some(crate::ErrorOrigin::Relay);
+    if !event.success
+        && event.error_category.as_deref() != Some(crate::error_codes::CLIENT_CANCELLED)
+        && let Some(transport) = event
+            .routing
+            .as_mut()
+            .and_then(|routing| routing.transport.as_mut())
+        && transport.failure_kind.is_none()
+    {
+        transport.failure_kind = if local_failure {
+            Some(crate::usage::TransportFailureKind::Local)
+        } else if event.upstream_error.is_some()
+            || transport
+                .upstream_http_status
+                .is_some_and(|status| status >= 400)
+        {
+            Some(crate::usage::TransportFailureKind::Upstream)
+        } else {
+            None
+        };
+    }
     if let Some(routing) = event.routing.as_mut()
         && event.success
     {
         routing.attempt_outcome = Some(crate::AttemptOutcome::Completed);
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(event)));
-}
-
-fn normalize_client_cancellation(event: &mut UsageEvent) {
-    // Internal telemetry only: the disconnected client cannot receive a status.
-    if !event.success
-        && event.error_category.as_deref() == Some(crate::error_codes::CLIENT_CANCELLED)
-    {
-        event.http_status = 499;
-        if let Some(routing) = event.routing.as_mut() {
-            routing.attempt_outcome = Some(crate::AttemptOutcome::ClientDisconnected);
-        }
-    }
 }
 
 pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
@@ -239,17 +252,14 @@ pub(in crate::gateway) fn apply_usage(event: &mut UsageEvent, usage: &Value) {
     if let Some(cached_input_tokens) = cached_input_tokens {
         event.cached_input_tokens = Some(cached_input_tokens);
     }
-    let cache_write_input_tokens = usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cache_write_tokens"))
-        .or_else(|| {
-            usage
-                .get("prompt_tokens_details")
-                .and_then(|details| details.get("cache_write_tokens"))
-        })
-        .or_else(|| usage.get("cache_write_tokens"))
-        .or_else(|| usage.get("cache_creation_input_tokens"))
-        .and_then(Value::as_u64);
+    let cache_write_input_tokens = [
+        "/input_tokens_details/cache_write_tokens",
+        "/prompt_tokens_details/cache_write_tokens",
+        "/cache_write_tokens",
+        "/cache_creation_input_tokens",
+    ]
+    .into_iter()
+    .find_map(|path| usage.pointer(path).and_then(Value::as_u64));
     if let Some(cache_write_input_tokens) = cache_write_input_tokens {
         event.cache_write_input_tokens = Some(cache_write_input_tokens);
     }
@@ -329,19 +339,20 @@ pub(in crate::gateway) fn has_generated_tokens(response_payload: &Value) -> bool
 }
 
 pub(in crate::gateway) fn find_usage(response_payload: &Value) -> Option<&Value> {
-    response_payload
-        .get("usage")
-        .or_else(|| response_payload.pointer("/interaction/usage"))
-        .or_else(|| response_payload.get("usageMetadata"))
-        .or_else(|| response_payload.pointer("/message/usage"))
-        .or_else(|| {
-            let nested_response = response_payload.get("response")?;
-            nested_response.get("usage").or_else(|| {
-                nested_response
-                    .get("response")
-                    .and_then(|nested| nested.get("usage"))
-            })
-        })
+    [
+        "/usage",
+        "/interaction/usage",
+        "/usageMetadata",
+        "/message/usage",
+        "/response/usage",
+        "/response/response/usage",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        response_payload
+            .pointer(path)
+            .filter(|usage| usage.as_object().is_some_and(|fields| !fields.is_empty()))
+    })
 }
 
 pub(in crate::gateway) fn response_id(response_payload: &Value) -> Option<&str> {

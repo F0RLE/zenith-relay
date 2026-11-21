@@ -19,7 +19,7 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             json!({"type":"response.completed", "response":{"id":"synthetic-response","status":"completed", "output":output}}),
         ]))).await;
         let authority = ready_authority("compat-account", "synthetic-old").await;
-        let (gateway, _, _, _) = spawn_mixed_gateway(
+        let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
             vec![],
             vec![account(
                 "compat-account",
@@ -31,6 +31,10 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             authority.clone(),
             refresh_adapter(),
             Arc::new(PersistenceAdapter::default()),
+            GatewayRuntimeOptions {
+                diagnostics_enabled: || true,
+                ..Default::default()
+            },
         )
         .await;
         let mut socket = reqwest::Client::new()
@@ -51,6 +55,17 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             .await
             .unwrap();
         receive_websocket_completion(&mut socket).await;
+        assert_eq!(
+            events.lock().unwrap()[0]
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .reauth,
+            Some(false)
+        );
         authority
             .register(
                 "compat-account",
@@ -64,25 +79,51 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
             )
             .await
             .unwrap();
-        socket.send(ClientWsMessage::Text(json!({"type":"response.create", "model":MODEL, "previous_response_id":"synthetic-response", "input":"synthetic follow-up"}).to_string())).await.unwrap();
+        socket.send(ClientWsMessage::Text(json!({"type":"response.create", "model":MODEL, "previous_response_id":"synthetic-response", "input":"synthetic follow-up", "tools":[{"type":"web_search"}]}).to_string())).await.unwrap();
         if portable {
             receive_websocket_completion(&mut socket).await;
-            let headers = observed.headers.lock().unwrap();
-            assert_eq!(headers.len(), 2);
+            {
+                let headers = observed.headers.lock().unwrap();
+                assert_eq!(headers.len(), 2);
+                assert_eq!(
+                    header(&headers[1], "authorization").as_deref(),
+                    Some(format!("Bearer {replacement}").as_str())
+                );
+                let requests = observed.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                assert!(requests[1].get("previous_response_id").is_none());
+                assert!(
+                    requests[1]["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["role"] == "assistant")
+                );
+            }
             assert_eq!(
-                header(&headers[1], "authorization").as_deref(),
-                Some(format!("Bearer {replacement}").as_str())
-            );
-            let requests = observed.requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert!(requests[1].get("previous_response_id").is_none());
-            assert!(
-                requests[1]["input"]
-                    .as_array()
+                events.lock().unwrap()[1]
+                    .routing
+                    .as_ref()
                     .unwrap()
-                    .iter()
-                    .any(|item| item["role"] == "assistant")
+                    .transport
+                    .as_ref()
+                    .unwrap()
+                    .reauth,
+                Some(true)
             );
+            socket.send(ClientWsMessage::Text(json!({"type":"response.create", "model":MODEL, "previous_response_id":"synthetic-response", "input":"synthetic reused follow-up", "tools":[{"type":"web_search"}]}).to_string())).await.unwrap();
+            receive_websocket_completion(&mut socket).await;
+            assert_eq!(observed.headers.lock().unwrap().len(), 2);
+            let events = events.lock().unwrap();
+            let reused = events[2]
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap();
+            assert_eq!(reused.connection_reused, Some(true));
+            assert_eq!(reused.reauth, None);
         } else {
             let failure = receive_websocket_json(&mut socket).await;
             assert_eq!(
@@ -97,10 +138,15 @@ async fn websocket_credential_change_reconnects_only_with_portable_history() {
 
 #[tokio::test]
 async fn turn_state_is_exact_and_invalidated_by_in_band_auth_refresh() {
-    let (upstream, state) = spawn_upstream(vec![
+    for initial_status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+        let (upstream, state) = spawn_upstream(vec![
         Reply::JsonWithHeaders(
-            StatusCode::OK,
-            json!({"id":"first","status":"completed","output":[]}),
+            initial_status,
+            if initial_status.is_success() {
+                json!({"id":"first","status":"completed","output":[]})
+            } else {
+                json!({"error":{"code":"invalid_request_error","message":"synthetic rejection"}})
+            },
             vec![("x-codex-turn-state", "synthetic-state")],
         ),
         success_reply("second"),
@@ -112,62 +158,212 @@ async fn turn_state_is_exact_and_invalidated_by_in_band_auth_refresh() {
         success_reply("refreshed"),
     ])
     .await;
-    let authority = Arc::new(TokenAuthority::new(4).unwrap());
-    authority
-        .register(
-            "relay-refresh-account",
-            TokenSet::new(
-                "old-access",
-                Some("refresh-secret".into()),
-                None,
-                Some(current_time_ms() + 600_000),
-                current_time_ms(),
-                1,
+        let authority = Arc::new(TokenAuthority::new(4).unwrap());
+        authority
+            .register(
+                "relay-refresh-account",
+                TokenSet::new(
+                    "old-access",
+                    Some("refresh-secret".into()),
+                    None,
+                    Some(current_time_ms() + 600_000),
+                    current_time_ms(),
+                    1,
+                )
+                .unwrap(),
+                AccountAuthState::Active,
             )
-            .unwrap(),
-            AccountAuthState::Active,
+            .await
+            .unwrap();
+        let (gateway, _, refresh, _) = spawn_mixed_gateway(
+            vec![],
+            vec![account(
+                "relay-refresh-account",
+                "synthetic-provider",
+                &upstream,
+                10,
+            )],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
         )
-        .await
-        .unwrap();
-    let (gateway, _, refresh, _) = spawn_mixed_gateway(
-        vec![],
-        vec![account(
-            "relay-refresh-account",
-            "synthetic-provider",
-            &upstream,
-            10,
-        )],
-        vec![mixed_key(None, None)],
-        authority,
-        refresh_adapter(),
-        Arc::new(PersistenceAdapter::default()),
-    )
+        .await;
+        let client = reqwest::Client::new();
+        for (index, state) in [
+            None,
+            Some("synthetic-state"),
+            Some("unknown-state"),
+            Some("synthetic-state"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut request = client
+                .post(format!("{}/v1/responses", gateway.base_url))
+                .bearer_auth(LOCAL_KEY)
+                .header("x-session-id", "synthetic-session")
+                .json(&json!({"model":MODEL,"input":"synthetic input"}));
+            if let Some(state) = state {
+                request = request.header("x-codex-turn-state", state);
+            }
+            assert_eq!(
+                request.send().await.unwrap().status(),
+                if index == 0 {
+                    initial_status
+                } else {
+                    StatusCode::OK
+                }
+            );
+        }
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].turn_state, None);
+        assert_eq!(requests[1].turn_state.as_deref(), Some("synthetic-state"));
+        assert_eq!(requests[2].turn_state, None);
+        assert_eq!(requests[3].turn_state.as_deref(), Some("synthetic-state"));
+        assert_eq!(requests[4].turn_state, None);
+    }
+}
+
+#[tokio::test]
+async fn failed_response_turn_state_cannot_cross_sessions() {
+    let (gateway, _upstream, observed, events) = setup(vec![
+        Reply::JsonWithHeaders(
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"code":"invalid_request_error","message":"synthetic rejection"}}),
+            vec![("x-codex-turn-state", "synthetic-failed-state")],
+        ),
+        success_reply("other-session"),
+        success_reply("original-session"),
+    ])
     .await;
-    let client = reqwest::Client::new();
-    for state in [
-        None,
-        Some("synthetic-state"),
-        Some("unknown-state"),
-        Some("synthetic-state"),
+    for (session, status) in [
+        ("original-session", StatusCode::BAD_REQUEST),
+        ("other-session", StatusCode::OK),
+        ("original-session", StatusCode::OK),
     ] {
-        let mut request = client
+        let response = reqwest::Client::new()
             .post(format!("{}/v1/responses", gateway.base_url))
             .bearer_auth(LOCAL_KEY)
-            .header("x-session-id", "synthetic-session")
-            .json(&json!({"model":MODEL,"input":"synthetic input"}));
-        if let Some(state) = state {
-            request = request.header("x-codex-turn-state", state);
-        }
-        assert_eq!(request.send().await.unwrap().status(), StatusCode::OK);
+            .header("x-session-id", session)
+            .header("x-codex-turn-state", "synthetic-failed-state")
+            .json(&json!({"model":MODEL,"input":"synthetic full history"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        let _ = response.bytes().await.unwrap();
     }
-    let requests = state.requests.lock().unwrap();
-    assert_eq!(refresh.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(requests.len(), 5);
+    let requests = observed.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].turn_state, None);
-    assert_eq!(requests[1].turn_state.as_deref(), Some("synthetic-state"));
-    assert_eq!(requests[2].turn_state, None);
-    assert_eq!(requests[3].turn_state.as_deref(), Some("synthetic-state"));
-    assert_eq!(requests[4].turn_state, None);
+    assert_eq!(requests[1].turn_state, None);
+    assert_eq!(
+        requests[2].turn_state.as_deref(),
+        Some("synthetic-failed-state")
+    );
+    assert_eq!(events.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn native_output_limit_rejection_is_forwarded_without_replaying() {
+    let (gateway, _upstream, observed, events) = setup(vec![Reply::Json(
+        StatusCode::BAD_REQUEST,
+        json!({"error":{"code":"unsupported_parameter","param":"max_output_tokens","message":"synthetic unsupported parameter"}}),
+    )]).await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":MODEL,"input":"synthetic request","max_output_tokens":64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let _ = response.bytes().await.unwrap();
+    let requests = observed.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["max_output_tokens"], 64);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+}
+
+#[tokio::test]
+async fn session_budget_http_refusals_never_rotate_or_refresh() {
+    for (sse, stream) in [(false, false), (false, true), (true, false), (true, true)] {
+        let refusal = || {
+            if sse {
+                Reply::Stream(vec![StreamChunk::Data(concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"synthetic-budget\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n",
+                    "data: {\"type\":\"error\",\"error\":{\"code\":\"budget_reached\",\"retry_after\":1,\"message\":\"previous_response_id not found\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"late\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":999}}}\n\n",
+                ))])
+            } else {
+                Reply::JsonWithHeaders(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":{"code":"budget_reached","message":"previous_response_id not found"}}),
+                    vec![("retry-after", "1")],
+                )
+            }
+        };
+        let (first, first_state) = spawn_upstream(vec![refusal()]).await;
+        let (second, second_state) = spawn_upstream(vec![refusal()]).await;
+        let authority = ready_authority("budget-first", "synthetic-first").await;
+        register_ready(&authority, "budget-second", "synthetic-second").await;
+        let (gateway, events, refresh, _) = spawn_mixed_gateway(
+            vec![],
+            vec![
+                account("budget-first", "synthetic-first", &first, 10),
+                account("budget-second", "synthetic-second", &second, 20),
+            ],
+            vec![mixed_key(None, None)],
+            authority,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+        )
+        .await;
+        let response = request(&gateway, stream).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "sse={sse}, stream={stream}"
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("budget_reached"), "{body}");
+        assert!(!body.contains("response.completed"), "{body}");
+        assert_eq!(
+            first_state.requests.lock().unwrap().len()
+                + second_state.requests.lock().unwrap().len(),
+            1
+        );
+        assert_eq!(refresh.calls.load(Ordering::SeqCst), 0);
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "sse={sse}, stream={stream}, events={:?}",
+            events
+                .iter()
+                .map(|event| (
+                    &event.request_id,
+                    event.attempt,
+                    event.http_status,
+                    &event.error_category
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(!events[0].success);
+        if sse {
+            assert_eq!(events[0].input_tokens, Some(7));
+            assert_eq!(events[0].output_tokens, Some(2));
+        }
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some("upstream_session_budget_exceeded")
+        );
+    }
 }
 
 async fn setup(

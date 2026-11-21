@@ -6,13 +6,17 @@ use super::telemetry::{
 };
 use super::{ConnectProgress, ConnectScope};
 
-pub(super) enum TerminalAction {
+#[cfg(test)]
+#[path = "initial_terminal/tests.rs"]
+mod tests;
+
+pub(in crate::gateway::websocket) enum TerminalAction {
     Continue,
     Break,
     Proceed,
 }
 
-pub(super) fn handle_initial_terminal(
+pub(in crate::gateway::websocket) fn handle_initial_terminal(
     initial_messages: &[UpstreamMessage],
     scope: &mut ConnectScope<'_>,
     progress: &mut ConnectProgress<'_>,
@@ -37,9 +41,12 @@ pub(super) fn handle_initial_terminal(
         _ => None,
     });
     let (status, category) = resolved_terminal_failure(&terminal);
-    if category == error_codes::UPSTREAM_TURN_RATE_LIMITED {
+    if matches!(
+        category,
+        error_codes::UPSTREAM_TURN_RATE_LIMITED | error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED
+    ) {
         // Forward the original terminal frame and let the bridge settle it.
-        // A turn limit must not enter any history repair or candidate retry.
+        // Request-scoped limits must not enter history repair or candidate retry.
         return Ok(TerminalAction::Proceed);
     }
     if continue_after_item_prefix_repair(terminal_body, scope, progress) {
@@ -267,10 +274,7 @@ fn continue_after_cache_write_rejection(
     if !terminal_body.is_some_and(super::super::super::errors::prompt_cache_write_rejected) {
         return false;
     }
-    scope.runtime.invalidate_prompt_affinity(
-        scope.request.prompt_affinity_key.as_deref(),
-        &scope.route.candidate_id,
-    );
+    scope.runtime.reject_prompt_affinity(scope.lease);
     let failure =
         classified_terminal_failure(status, category, scope.source_error_origin, terminal);
     record_connect_failure_with_outcome(
@@ -317,7 +321,10 @@ fn retry_initial_terminal(
             terminal.body_hint,
             Some(crate::AttemptOutcome::RetrySelection),
         );
-        if scope.response_affinity_hit && !scope.request.requires_affinity_owner {
+        if scope.response_affinity_hit
+            && !scope.request.requires_affinity_owner
+            && !scope.lease.has_transient_retry()
+        {
             scope.request.response_affinity_key = None;
         }
     }
@@ -339,6 +346,7 @@ fn classified_terminal_failure(
 ) -> GatewayFailure {
     GatewayFailure::classified(status, category, origin)
         .with_upstream_error(terminal.upstream_error.clone())
+        .with_retry_hint(terminal.body_hint)
 }
 
 fn remember_terminal_rejection(

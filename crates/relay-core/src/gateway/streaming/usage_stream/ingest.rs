@@ -26,10 +26,8 @@ impl<S> UsageStream<S> {
                 },
             );
         }
-        if !event.success && event.error_category.as_deref() == Some(error_codes::CLIENT_CANCELLED)
-        {
-            event.http_status = 499;
-        } else if !event.success
+        event.normalize_client_cancellation();
+        if !event.success
             && event.http_status < 400
             && event.error_category.as_deref() != Some(error_codes::RESPONSE_INCOMPLETE)
         {
@@ -180,6 +178,26 @@ impl<S> UsageStream<S> {
 
     fn apply_fast_response_delta(&mut self, delta: FastResponseDelta) {
         self.observe_sequence(delta.sequence_number);
+        if self.native_timing
+            && let Some(transport) = self
+                .event
+                .as_mut()
+                .and_then(|event| event.routing.as_mut())
+                .and_then(|routing| routing.transport.as_mut())
+        {
+            let elapsed_ms = self.started.elapsed().as_millis() as u64;
+            let timing = transport.stream_response.get_or_insert_default();
+            timing.observe_event(true, delta.nonempty_text, elapsed_ms);
+            timing.observe_delta(
+                delta.output_text,
+                delta.tool_arguments,
+                delta.nonempty_text,
+                elapsed_ms,
+            );
+            if delta.reasoning_text {
+                timing.observe_reasoning_delta(delta.nonempty_text, elapsed_ms);
+            }
+        }
         if self.native_response.is_some() {
             self.native_replay_capture
                 .observe_response_delta(delta.output_index);
@@ -418,6 +436,32 @@ impl<S> UsageStream<S> {
             }
             if let Some(usage_event) = self.event.as_mut() {
                 usage_event.observe_response_metadata(terminal_event_payload);
+                if let Some(transport) = usage_event
+                    .routing
+                    .as_mut()
+                    .and_then(|routing| routing.transport.as_mut())
+                {
+                    if self.native_timing {
+                        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+                        let timing = transport.stream_response.get_or_insert_default();
+                        timing.observe_event(
+                            terminal.valid,
+                            terminal.has_output_delta && !terminal.is_compaction,
+                            elapsed_ms,
+                        );
+                        timing.observe_output(terminal_event_payload, elapsed_ms);
+                        if terminal.outcome.is_some() {
+                            transport.upstream_response_ms.get_or_insert(elapsed_ms);
+                        }
+                    }
+                    transport
+                        .stream_response
+                        .get_or_insert_default()
+                        .observe_reasoning(
+                            terminal_event_payload,
+                            self.started.elapsed().as_millis() as u64,
+                        );
+                }
                 usage_event
                     .tool_use
                     .observe_stream_payload(terminal_event_payload);

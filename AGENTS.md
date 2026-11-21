@@ -10,12 +10,12 @@ workspace [AGENTS.md](../AGENTS.md) when present and Relay's own product contrac
   [BASIS_POINTS.md](docs/project/BASIS_POINTS.md) owns BPS executor details.
 - [ROADMAP.md](docs/project/ROADMAP.md) owns open Desktop work and acceptance;
   the [Hosted roadmap](docs/hosted/HOSTED_RELAY_ROADMAP.md) owns planned Hosted delivery.
-- Localized Help owns user steps; `CONTRIBUTING.md` owns development/releases.
+- Localized Help owns user steps; `docs/CONTRIBUTING.md` owns development/releases.
 
 Resolve conflicts at the owning code and document; do not duplicate contracts.
 Load guidance for the affected task only:
 
-- API/protocol work: [official references](CONTRIBUTING.md#api-and-protocol-references)
+- API/protocol work: [official references](docs/CONTRIBUTING.md#api-and-protocol-references)
   and [protocol skill](.agents/skills/relay-protocol-adapters/SKILL.md).
 - BPS-specific research, transport, tools, or context handling:
   [BPS development](.agents/skills/relay-bps-development/SKILL.md).
@@ -25,9 +25,9 @@ Load guidance for the affected task only:
 - Pool admission/renewal/quota/removal: [lifecycle](.agents/skills/relay-account-pool-lifecycle/SKILL.md).
 - Frontend-to-Rust commands: [Tauri commands](.agents/skills/tauri-calling-rust/SKILL.md).
 - Rust-to-frontend events/progress: [Tauri events](.agents/skills/tauri-calling-frontend/SKILL.md).
-- Agent instructions and skills: [agent guidance](CONTRIBUTING.md#agent-guidance).
+- Agent instructions and skills: [agent guidance](docs/CONTRIBUTING.md#agent-guidance).
 - Substantial changes with unresolved architectural choices:
-  [design and independent review](CONTRIBUTING.md#design-and-independent-review).
+  [design and independent review](docs/CONTRIBUTING.md#design-and-independent-review).
 
 Read only the skills relevant to the affected boundary. Reuse the workspace's
 shared provider-contract, browser, build, and CLI guidance when present; do not
@@ -37,9 +37,11 @@ apply production Zenith billing, route-evidence, or operations skills to Relay.
 
 | Area | Owns |
 | --- | --- |
-| `src/src` | React rendering, i18n, UI state, typed Tauri wrappers |
-| `src-tauri/src` | Desktop I/O, credentials, OAuth, profiles, process lifecycle |
-| `crates/relay-core` | Shared discovery, scheduling, protocols, gateway, quota, usage |
+| `desktop/frontend/src` | React rendering, i18n, UI state, typed Tauri wrappers |
+| `desktop/src-tauri/src` | Desktop I/O, secret-store adapters, sign-in windows, profiles, process lifecycle |
+| `hosted/server` | Closed installation, PostgreSQL and local first-owner provisioning; [server checks](hosted/server/README.md#verify) |
+| `hosted/web` | Production public/setup UI and development dashboards; no Desktop IPC or server authority |
+| `crates/relay-core` | Shared provider auth/lifecycle, account policies, discovery, scheduling, protocols, gateway, quota, usage |
 
 Keep validation/side effects in Rust and Hosted/local pool boundaries distinct.
 Keep production credentials, customer inventory and Gateway/Control business
@@ -56,7 +58,7 @@ Database migrations are append-only. Profile recovery uses
 inspect/snapshot/attach/verify/restore and
 preserves newer user logins.
 
-Use the affected [checks](CONTRIBUTING.md#verification); broaden only for a
+Use the affected [checks](docs/CONTRIBUTING.md#verification); broaden only for a
 changed contract or unresolved failure. Documentation edits use content/link
 and diff checks. Release gates remain separate.
 

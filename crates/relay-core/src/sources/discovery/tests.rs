@@ -1,3 +1,6 @@
+mod pagination;
+mod partial;
+
 use super::fetch::{merge_route_model_price, parse_upstream_models};
 use super::*;
 use crate::UpstreamProtocol;
@@ -133,6 +136,50 @@ fn native_gemini_catalog_requires_generate_content_capability() {
     assert_eq!(models.len(), 1);
 }
 
+#[test]
+fn malformed_model_rows_are_not_a_valid_catalog() {
+    for protocol in [
+        UpstreamProtocol::Responses,
+        UpstreamProtocol::ChatCompletions,
+        UpstreamProtocol::Messages,
+        UpstreamProtocol::GeminiGenerateContent,
+        UpstreamProtocol::GeminiInteractions,
+    ] {
+        let valid = serde_json::json!({
+            "id": "synthetic-model",
+            "name": "models/synthetic-model",
+            "supportedGenerationMethods": ["generateContent"]
+        });
+        assert!(
+            parse_upstream_models(protocol, &serde_json::json!({"data": [], "models": []}))
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(3),
+            serde_json::json!("synthetic-model"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"id": 3, "name": 3}),
+            serde_json::json!({"id": "", "name": ""}),
+            serde_json::json!({"id": "   ", "name": "   "}),
+            serde_json::json!({"id": "models/", "name": "models/"}),
+        ] {
+            for records in [
+                serde_json::json!([invalid.clone()]),
+                serde_json::json!([valid.clone(), invalid]),
+            ] {
+                let payload = serde_json::json!({"data": records, "models": records});
+                assert!(
+                    parse_upstream_models(protocol, &payload).is_none(),
+                    "{protocol:?} accepted malformed inventory: {payload}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn valid_empty_catalog_is_successful() {
     let app = Router::new().route(
@@ -222,6 +269,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         resolved_base_url: Some("https://resolved.example/v1".into()),
         detected_model_prices: BTreeMap::from([("model-a".into(), price)]),
         capabilities: vec![catalog.clone()],
+        ..Default::default()
     };
 
     resolved.apply_catalog(
@@ -249,6 +297,7 @@ fn apply_catalog_replaces_models_and_only_a_resolved_url() {
         resolved_base_url: None,
         detected_model_prices: BTreeMap::new(),
         capabilities: Vec::new(),
+        ..Default::default()
     };
     unresolved.apply_catalog(
         &mut base_url,
@@ -298,6 +347,7 @@ fn source_catalog_changed_follows_apply_catalog() {
         resolved_base_url: None,
         detected_model_prices: prices.clone(),
         capabilities: Vec::new(),
+        ..Default::default()
     };
     let previous_base = base_url.clone();
     let previous_models = models.clone();

@@ -1,0 +1,246 @@
+import type { CandidateRuntimeSnapshot, PoolRotationView, RuntimeActivitySnapshot, RuntimeSnapshot } from "./api/types";
+import { modelIdKey } from "./modelGroups";
+
+export function preferNewerPoolRotation(
+  current: PoolRotationView | undefined,
+  incoming: PoolRotationView | null | undefined,
+  runtimeAccepted: boolean,
+) {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  const revision = (incoming.inventoryRevision ?? 0) - (current.inventoryRevision ?? 0);
+  return revision > 0 || (revision === 0 && runtimeAccepted) ? incoming : current;
+}
+
+/** Render the backend's member projection; activity alone never grants readiness. */
+export function applyPoolRotation(
+  snapshot: RuntimeSnapshot,
+  rotation: PoolRotationView | undefined,
+  order = snapshot.gateway.routingOrder ?? [],
+): RuntimeSnapshot {
+  const statuses = rotation?.memberStatuses;
+  const project = <T extends { id: string; operationalStatus: string }>(members: T[], kind: "account" | "source") => {
+    let changed = false;
+    const projected = members.map((member) => {
+      const status = statuses?.[`${kind}:${member.id}`];
+      if (status == null || status === member.operationalStatus) return member;
+      changed = true;
+      return { ...member, operationalStatus: status };
+    });
+    return changed ? projected : members;
+  };
+  return {
+    ...snapshot,
+    accounts: project(snapshot.accounts, "account"),
+    sources: project(snapshot.sources, "source"),
+    gateway: { ...snapshot.gateway, routingOrder: order, ...(rotation ? { poolRotation: rotation } : {}) },
+  };
+}
+
+export function sameRuntimeOrder(
+  left: readonly CandidateRuntimeSnapshot[],
+  right: readonly CandidateRuntimeSnapshot[],
+) {
+  return left.length === right.length && left.every((candidate, index) => sameRuntimeCandidate(candidate, right[index]));
+}
+
+function sameRuntimeCandidate(left: CandidateRuntimeSnapshot | undefined, right: CandidateRuntimeSnapshot | undefined) {
+  if (!left || !right) return false;
+  return left.candidateId === right.candidateId
+    && left.kind === right.kind
+    && left.available === right.available
+    && left.quotaWait === right.quotaWait
+    && left.capacityWait === right.capacityWait
+    && left.nextForNewRequest === right.nextForNewRequest
+    && left.selectionRank === right.selectionRank
+    && left.resourceHeadroom?.quotaRemainingBasisPoints === right.resourceHeadroom?.quotaRemainingBasisPoints
+    && left.resourceHeadroom?.providerCreditsMicroUnits === right.resourceHeadroom?.providerCreditsMicroUnits
+    && left.resourceHeadroom?.providerCreditsUnlimited === right.resourceHeadroom?.providerCreditsUnlimited
+    && left.activityRevision === right.activityRevision
+    && left.runtimeId === right.runtimeId
+    && left.inFlight === right.inFlight
+    && left.activeRequestCount === right.activeRequestCount
+    && left.lastUsedAtMs === right.lastUsedAtMs
+    && left.nextRetryAtMs === right.nextRetryAtMs
+    && left.halfOpen === right.halfOpen
+    && left.dispatches === right.dispatches
+    && sameCounts(left.activeModels, right.activeModels)
+    && sameRetries(left.modelRetries, right.modelRetries);
+}
+
+function sameCounts(
+  left: CandidateRuntimeSnapshot["activeModels"],
+  right: CandidateRuntimeSnapshot["activeModels"],
+) {
+  const leftModels = left ?? [];
+  const rightModels = right ?? [];
+  return leftModels.length === rightModels.length
+    && leftModels.every((leftModel, index) => leftModel.model === rightModels[index]?.model
+      && leftModel.requestCount === rightModels[index]?.requestCount);
+}
+
+function sameRetries(
+  left: CandidateRuntimeSnapshot["modelRetries"],
+  right: CandidateRuntimeSnapshot["modelRetries"],
+) {
+  const leftRetries = left ?? [];
+  const rightRetries = right ?? [];
+  return leftRetries.length === rightRetries.length
+    && leftRetries.every((leftRetry, index) => leftRetry.model === rightRetries[index]?.model
+      && leftRetry.retryAtMs === rightRetries[index]?.retryAtMs);
+}
+
+export function routingOrderPositions(order: CandidateRuntimeSnapshot[]) {
+  const positions = new Map<string, number>();
+  const sourcePositions = new Map<string, { index: number; active: boolean }>();
+  for (const [index, candidate] of order.entries()) {
+    positions.set(candidate.candidateId, index);
+    if (candidate.kind !== "api_source") continue;
+    const separator = candidate.candidateId.indexOf("::");
+    if (separator > 0) {
+      const sourceId = candidate.candidateId.slice(0, separator);
+      // A source card combines protocol candidates: prefer its active route,
+      // then the first route supplied by the scheduler.
+      const active = activeRequestCount(candidate) > 0;
+      const previousSourcePosition = sourcePositions.get(sourceId);
+      if (!previousSourcePosition
+        || (active && !previousSourcePosition.active)
+        || (active === previousSourcePosition.active && index < previousSourcePosition.index)) {
+        sourcePositions.set(sourceId, { index, active });
+      }
+    }
+  }
+  for (const [sourceId, { index }] of sourcePositions) positions.set(sourceId, index);
+  return positions;
+}
+
+export function compareRoutingOrder(leftId: string, rightId: string, order: ReadonlyMap<string, number>, fallback?: ReadonlyMap<string, number>) {
+  const left = order.get(leftId);
+  const right = order.get(rightId);
+  if (left != null || right != null) return (left ?? Number.MAX_SAFE_INTEGER) - (right ?? Number.MAX_SAFE_INTEGER);
+  return (fallback?.get(leftId) ?? Number.MAX_SAFE_INTEGER) - (fallback?.get(rightId) ?? Number.MAX_SAFE_INTEGER);
+}
+
+export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefined) {
+  return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
+}
+
+/** Returns only currently active per-model cooldowns in their display order. */
+export function upcomingModelRetries(candidate: CandidateRuntimeSnapshot | undefined, nowMs: number) {
+  return [...(candidate?.modelRetries ?? [])]
+    .filter((retry) => retry.retryAtMs > nowMs)
+    .sort((left, right) => left.retryAtMs - right.retryAtMs);
+}
+
+export function compareRuntimeActivity(
+  left: { runtimeId?: number | undefined; revision: number },
+  right: { runtimeId?: number | undefined; revision: number },
+) {
+  return (left.runtimeId ?? 0) - (right.runtimeId ?? 0) || left.revision - right.revision;
+}
+
+export function currentRuntimeActivities(
+  order: readonly CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  const runtimeId = order[0]?.runtimeId;
+  return [...activities].filter((activity) => runtimeId == null || activity.runtimeId == null || activity.runtimeId >= runtimeId);
+}
+
+/** A late poll must not resurrect activity already retired by a newer snapshot. */
+export function preferNewerRuntimeOrder(currentOrder: CandidateRuntimeSnapshot[], incomingOrder: CandidateRuntimeSnapshot[]) {
+  const currentSnapshot = currentOrder[0];
+  const incomingSnapshot = incomingOrder[0];
+  if (currentSnapshot?.runtimeId == null || currentSnapshot.activityRevision == null
+    || incomingSnapshot?.runtimeId == null || incomingSnapshot.activityRevision == null) return incomingOrder;
+  return compareRuntimeActivity(
+    { runtimeId: currentSnapshot.runtimeId, revision: currentSnapshot.activityRevision },
+    { runtimeId: incomingSnapshot.runtimeId, revision: incomingSnapshot.activityRevision },
+  ) > 0 ? currentOrder : incomingOrder;
+}
+
+export function applyRuntimeActivities(
+  order: CandidateRuntimeSnapshot[],
+  activities: Iterable<RuntimeActivitySnapshot>,
+) {
+  const latestActivityByCandidate = new Map<string, RuntimeActivitySnapshot>();
+  for (const activity of currentRuntimeActivities(order, activities)) {
+    const previousActivity = latestActivityByCandidate.get(activity.candidateId);
+    if (!previousActivity || compareRuntimeActivity(activity, previousActivity) > 0) {
+      latestActivityByCandidate.set(activity.candidateId, activity);
+    }
+  }
+  if (!latestActivityByCandidate.size) return order;
+
+  const snapshotRevision = order.reduce((revision, candidate) => Math.min(revision, candidate.activityRevision ?? 0), Infinity);
+  const activityAheadOfSnapshot = [...latestActivityByCandidate.values()].some((activity) =>
+    (activity.runtimeId ?? 0) > (order[0]?.runtimeId ?? 0) || activity.revision > snapshotRevision);
+  let orderChanged = false;
+  const updatedOrder = order.map((candidate) => {
+    const activity = latestActivityByCandidate.get(candidate.candidateId);
+    const candidateWithReset = activityAheadOfSnapshot && (candidate.nextForNewRequest || candidate.selectionRank != null)
+      ? { ...candidate, nextForNewRequest: false, selectionRank: null }
+      : candidate;
+    orderChanged ||= candidateWithReset !== candidate;
+    if (!activity || compareRuntimeActivity(activity, { runtimeId: candidate.runtimeId, revision: candidate.activityRevision ?? -1 }) <= 0) return candidateWithReset;
+    orderChanged = true;
+    return {
+      ...candidateWithReset,
+      inFlight: activity.inFlight,
+      activeRequestCount: activity.activeRequestCount,
+      activeModels: activity.activeModels,
+    };
+  });
+  if (!orderChanged) return order;
+
+  // `PoolScheduler::runtime_order` puts leased candidates first. Apply the
+  // whole burst before one stable sort, preserving order within each group
+  // without allocating a wrapper object for every candidate.
+  return updatedOrder
+    .sort((left, right) => Number(activeRequestCount(right) > 0) - Number(activeRequestCount(left) > 0));
+}
+
+/**
+ * Reconcile activity tombstones with a fresh runtime snapshot.
+ *
+ * A release event is kept as a tombstone so a stale lightweight poll cannot
+ * resurrect a completed request. Once a newer full snapshot reports that the
+ * same candidate is active again, that old tombstone must be discarded or it
+ * would hide the new request until another activity event arrives.
+ */
+export function reconcileRuntimeActivityOverlay(
+  order: readonly CandidateRuntimeSnapshot[],
+  overlay: Map<string, RuntimeActivitySnapshot>,
+) {
+  const candidates = new Map(order.map((candidate) => [candidate.candidateId, candidate]));
+  for (const [candidateId, activity] of overlay) {
+    const candidate = candidates.get(candidateId);
+    const runtimeId = candidate?.runtimeId ?? order[0]?.runtimeId;
+    if (runtimeId != null && activity.runtimeId != null && runtimeId !== activity.runtimeId) {
+      if (runtimeId > activity.runtimeId) overlay.delete(candidateId);
+      continue;
+    }
+    const revision = candidate?.activityRevision ?? order[0]?.activityRevision;
+    if (revision != null) {
+      if (revision >= activity.revision) overlay.delete(candidateId);
+    } else if (!candidate || (activeRequestCount(candidate) > 0 && activity.activeRequestCount === 0)) {
+      overlay.delete(candidateId);
+    }
+  }
+}
+
+export function activeModelCounts(candidates: Iterable<Pick<CandidateRuntimeSnapshot, "activeModels">>) {
+  const requestCountsByModel = new Map<string, { model: string; requestCount: number }>();
+  for (const candidate of candidates) {
+    for (const activeModel of candidate.activeModels ?? []) {
+      if (!activeModel.model || activeModel.requestCount <= 0) continue;
+      const key = modelIdKey(activeModel.model);
+      const existingModel = requestCountsByModel.get(key);
+      if (existingModel) existingModel.requestCount += activeModel.requestCount;
+      else requestCountsByModel.set(key, { model: activeModel.model, requestCount: activeModel.requestCount });
+    }
+  }
+  return [...requestCountsByModel.values()].sort((left, right) =>
+    right.requestCount - left.requestCount || left.model.localeCompare(right.model),
+  );
+}

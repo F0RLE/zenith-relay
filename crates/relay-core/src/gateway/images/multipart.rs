@@ -9,6 +9,14 @@ pub(super) async fn source_body(
     request: &PreparedImageRequest,
     model: &str,
 ) -> Result<Vec<u8>, ()> {
+    rewritten_body(request, model, false).await
+}
+
+pub(super) async fn rewritten_body(
+    request: &PreparedImageRequest,
+    model: &str,
+    omit_false_stream: bool,
+) -> Result<Vec<u8>, ()> {
     let boundary =
         multer::parse_boundary(request.content_type.to_str().map_err(|_| ())?).map_err(|_| ())?;
     let mut parts = Multipart::new(
@@ -25,6 +33,10 @@ pub(super) async fn source_body(
         let bytes = field.bytes().await.map_err(|_| ())?;
         if name == "model"
             || (name == "response_format" && crate::model_id_key(model).starts_with("gpt-image-"))
+            || (omit_false_stream
+                && name == "stream"
+                && std::str::from_utf8(&bytes)
+                    .is_ok_and(|value| matches!(value.trim(), "false" | "null")))
         {
             continue;
         }

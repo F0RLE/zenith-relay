@@ -36,6 +36,8 @@ impl DesktopCapabilities {
             "account_proxies",
             "runtime_routing",
             "rotation_v3",
+            "rotation_edits",
+            "rotation_subscription_expiry",
             "configuration_presets",
             "codex_background_tasks",
             "codex_websockets",

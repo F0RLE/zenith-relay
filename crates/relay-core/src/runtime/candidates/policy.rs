@@ -52,12 +52,13 @@ impl GatewayRuntime {
                 &update.policy.excluded_models,
             );
             let mut matched = false;
-            for (candidate_id, binding) in &self.source_candidate_bindings {
+            for (candidate_id, binding) in &self.source_state.candidate_bindings {
                 if binding.source_id != update.source_id {
                     continue;
                 }
                 matched = true;
-                let Some(mut candidate) = scheduler.candidate(candidate_id).cloned() else {
+                let Some(mut candidate) = scheduler.candidate_for_update(candidate_id).cloned()
+                else {
                     return false;
                 };
                 if candidate.kind != CandidateKind::ApiSource
@@ -73,12 +74,12 @@ impl GatewayRuntime {
                 return false;
             }
         }
+        // Publish both halves under scheduler -> recovery-delay lock order.
+        // Releasing the scheduler first lets a newer edit overtake this delay.
+        let mut recovery_delays = crate::poison::mutex(&self.source_state.recovery_delays_ms);
         for candidate in candidates {
             scheduler.upsert(candidate);
         }
-        drop(scheduler);
-
-        let mut recovery_delays = crate::poison::mutex(&self.source_recovery_delays_ms);
         for (candidate_id, recovery_delay_seconds) in recovery_updates {
             if recovery_delay_seconds == 0 {
                 recovery_delays.remove(&candidate_id);
@@ -87,6 +88,7 @@ impl GatewayRuntime {
             }
         }
         drop(recovery_delays);
+        drop(scheduler);
         self.candidate_availability.notify_waiters();
         true
     }
@@ -99,7 +101,7 @@ impl GatewayRuntime {
         }
         let rules = model_rules(&policy.allowed_models, &policy.excluded_models);
         let mut scheduler = self.lock_scheduler();
-        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+        let Some(mut candidate) = scheduler.candidate_for_update(account_id).cloned() else {
             return false;
         };
         if candidate.kind != CandidateKind::OAuthAccount

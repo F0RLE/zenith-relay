@@ -1,8 +1,18 @@
 use super::*;
 use zenith_relay_core::providers::chatgpt::OAuthClientKind;
 
+#[path = "native_images/catalog.rs"]
+mod catalog;
+#[path = "native_images/diagnostics.rs"]
+mod diagnostics;
+#[path = "native_images/regressions.rs"]
+mod regressions;
+#[path = "native_images/retry_safety.rs"]
+mod retry_safety;
+
 #[tokio::test]
 async fn native_image_edits_preserve_json_and_multipart_inputs_through_http() {
+    const PROMPT: &str = "\n  synthetic edit\twith exact spacing  \r\n";
     for multipart in [false, true] {
         let (upstream, state) = spawn_upstream(vec![Reply::Json(
             StatusCode::OK,
@@ -40,7 +50,7 @@ async fn native_image_edits_preserve_json_and_multipart_inputs_through_http() {
             let mut body = String::new();
             for (name, value) in [
                 ("model", "gpt-image-2.5-sunburst"),
-                ("prompt", "synthetic edit"),
+                ("prompt", PROMPT),
                 ("quality", "low"),
                 ("response_format", "url"),
                 ("output_format", "webp"),
@@ -64,7 +74,7 @@ async fn native_image_edits_preserve_json_and_multipart_inputs_through_http() {
                 .body(body)
         } else {
             request.json(&json!({
-                "model": "gpt-image-2.5-sunburst", "prompt": "synthetic edit",
+                "model": "gpt-image-2.5-sunburst", "prompt": PROMPT,
                 "quality": "low", "response_format": "url", "output_format": "webp",
                 "images": [
                     {"image_url": "data:image/png;base64,YQ=="},
@@ -92,6 +102,7 @@ async fn native_image_edits_preserve_json_and_multipart_inputs_through_http() {
         );
         let body = &requests[0].body;
         assert_eq!(body["model"], "gpt-image-2.5-sunburst");
+        assert_eq!(body["prompt"], PROMPT);
         assert_eq!(body["quality"], "low");
         assert_eq!(body["output_format"], "webp");
         assert_eq!(
@@ -147,13 +158,16 @@ async fn images_only_host_blocks_text_endpoints_and_executes_native_generation()
     let image_model = zenith_relay_core::IMAGE_API_MODEL;
     for models in [vec![MODEL.into()], vec!["gpt-refreshed".into()], Vec::new()] {
         assert!(runtime.update_account_models("image-account", &models));
-        assert_eq!(
-            runtime.visible_models_for_secret(LOCAL_KEY, &[WireApi::Responses], current_time_ms()),
-            [image_model]
-        );
+        let visible =
+            runtime.visible_models_for_secret(LOCAL_KEY, &[WireApi::Responses], current_time_ms());
+        assert_eq!(visible.len(), zenith_relay_core::CODEX_IMAGE_MODELS.len());
+        for model in zenith_relay_core::CODEX_IMAGE_MODELS {
+            assert!(visible.iter().any(|value| value == model));
+        }
     }
     let client = reqwest::Client::new();
-    for model in [MODEL, image_model] {
+    for model in std::iter::once(MODEL).chain(zenith_relay_core::CODEX_IMAGE_MODELS.iter().copied())
+    {
         for (path, body) in [
             (
                 "/v1/responses",
@@ -230,7 +244,7 @@ async fn images_only_host_blocks_text_endpoints_and_executes_native_generation()
 #[tokio::test]
 async fn native_image_routes_respect_transport_and_key_scope() {
     for (kind, deny_accounts) in [
-        (OAuthClientKind::ExcelBps, false),
+        (OAuthClientKind::ExcelBps, true),
         (OAuthClientKind::Siwc, false),
         (OAuthClientKind::Codex, true),
     ] {
@@ -376,9 +390,34 @@ async fn native_image_forbidden_is_not_replayed_as_a_responses_tool_request() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/images/generations");
     assert!(requests[0].image_turn_id.is_some());
+    assert_eq!(
+        requests[0].body["model"],
+        zenith_relay_core::IMAGE_API_MODEL
+    );
     assert!(requests[0].body.get("tools").is_none());
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
     assert_eq!(events[0].http_status, 403);
+    let physical = events[0]
+        .routing
+        .as_ref()
+        .unwrap()
+        .request_timing
+        .as_ref()
+        .unwrap();
+    let final_request = events[1]
+        .routing
+        .as_ref()
+        .unwrap()
+        .request_timing
+        .as_ref()
+        .unwrap();
+    assert!(!physical.projection_only);
+    assert!(final_request.projection_only);
+    assert_eq!(events[1].request_id, events[0].request_id);
+    assert_eq!(events[1].attempt, events[0].attempt);
+    assert_eq!(events[1].http_status, 403);
+    assert!(!events[1].success);
+    assert!(final_request.duration_ms >= physical.duration_ms);
 }

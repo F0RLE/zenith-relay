@@ -105,7 +105,7 @@ fn zenith_bundle_preserves_description_and_nested_account_data() {
         Some("org_zenith")
     );
 
-    let unsupported = input.replacen("\"version\":1", "\"version\":2", 1);
+    let unsupported = input.replacen("\"version\":1", "\"version\":3", 1);
     assert_eq!(
         parse_import(&unsupported, None, &[]).unwrap_err().code,
         ImportErrorCode::UnsupportedBundleVersion

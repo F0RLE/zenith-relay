@@ -1,0 +1,9 @@
+# Public account endpoints exclude URL credentials/query/fragment and remote
+# plaintext HTTP. Diagnostic roots are explicit local CLI operator selections.
+name: f0rle/zenith-relay-boundaries
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: ^0.2.25
+dataExtensions:
+  - models/*.json

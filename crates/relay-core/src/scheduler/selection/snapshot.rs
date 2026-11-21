@@ -101,6 +101,8 @@ pub struct RoutingDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_response_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<crate::usage::ImageDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<crate::usage::TransportDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_context: Option<crate::usage::CacheContextDiagnostics>,
@@ -115,6 +117,9 @@ pub struct RoutingDiagnostics {
     pub request_timing: Option<RequestTiming>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_latency: Option<super::super::rotation::RouteLatencyDiagnostics>,
+    /// Explicit normalized provider deadline; local recovery delays stay separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_backoff: Option<super::super::ProviderBackoff>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -127,6 +132,43 @@ pub struct RequestTiming {
     /// Observed local waits, cumulative across retries and transport handoffs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<super::super::rotation::RequestWaitDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phases: Option<RequestTimingPhases>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestTimingPhases {
+    pub pre_attempt_ms: u64,
+    /// Wall time from the first executor start to this executor start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_attempts_ms: Option<u64>,
+    pub post_attempt_ms: Option<u64>,
+    pub upstream_ttft_ms: Option<u64>,
+    pub client_first_output_ms: Option<u64>,
+    pub after_client_ready_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_read_and_parse_ms: Option<u64>,
+    #[serde(
+        default,
+        alias = "basisPointsAccessRefreshMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub bps_access_refresh_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_context_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_selection_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_preparation_ms: Option<u64>,
+}
+
+impl RequestTimingPhases {
+    pub(crate) fn executor_offset_ms(&self) -> Option<u64> {
+        // Older observations stored the final executor offset in preAttemptMs.
+        self.pre_attempt_ms
+            .checked_add(self.prior_attempts_ms.unwrap_or(0))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,7 +202,7 @@ impl PoolScheduler {
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
         self.clone()
-            .into_runtime_order(scope, models, protocols, now_ms)
+            .into_runtime_order(scope, |model| models.allows(model), protocols, now_ms)
     }
 
     /// Own a cloned scheduler so the live lock can be released before preview.
@@ -169,12 +211,12 @@ impl PoolScheduler {
     pub(crate) fn into_runtime_order(
         mut self,
         scope: &CandidateScope,
-        models: &crate::ModelRules,
+        allows_model: impl Fn(&str) -> bool,
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<CandidateRuntimeSnapshot> {
         self.sync_all_rotation_candidates();
-        let selection_order = self.preview_selection_order(scope, models, protocols, now_ms);
+        let selection_order = self.preview_selection_order(scope, &allows_model, protocols, now_ms);
         let selection_ranks = selection_order
             .iter()
             .enumerate()
@@ -190,7 +232,7 @@ impl PoolScheduler {
                 let mut half_open = false;
                 let mut retries = BTreeMap::<String, u64>::new();
                 for model in &candidate.models {
-                    if !models.allows(model)
+                    if !allows_model(model)
                         || !self.rotation_visible(candidate, model, protocols, scope, now_ms)
                     {
                         continue;
@@ -213,8 +255,7 @@ impl PoolScheduler {
                         now_ms,
                     ) {
                         super::super::rotation::CandidateAvailability::Ready { .. } => {
-                            let lane_ready = operation != RotationOperation::Image
-                                || self.lane_allows(candidate, InFlightLane::Image);
+                            let lane_ready = self.lane_allows(candidate, operation.into());
                             available |= lane_ready;
                             capacity_wait |= !lane_ready;
                         }
@@ -230,7 +271,7 @@ impl PoolScheduler {
                                 || (reason
                                     == super::super::rotation::CandidateBlockReason::RateLimited
                                     && self.cooldown_reason_for(candidate, model, now_ms)
-                                        == CooldownReason::RateLimit);
+                                        == CooldownReason::QuotaExhausted);
                             retries
                                 .entry(model.clone())
                                 .and_modify(|at| *at = (*at).max(at_ms))
@@ -280,11 +321,36 @@ impl PoolScheduler {
                 }
             })
             .collect::<Vec<_>>();
-        snapshots.sort_by_key(|snapshot| {
+        let automatic = self
+            .pool_routing
+            .as_ref()
+            .is_none_or(|policy| policy.mode.is_adaptive());
+        snapshots.sort_by_cached_key(|snapshot| {
+            let resources = snapshot.resource_headroom.as_ref();
+            let quota = resources
+                .and_then(|headroom| headroom.quota_remaining_basis_points)
+                .unwrap_or_default();
+            let credits = resources.map_or(0, |headroom| {
+                if headroom.provider_credits_unlimited {
+                    u64::MAX
+                } else {
+                    headroom.provider_credits_micro_units.unwrap_or_default()
+                }
+            });
             (
                 !snapshot.active_request_count.gt(&0),
                 !snapshot.available,
-                !snapshot.next_for_new_request,
+                snapshot.selection_rank.unwrap_or(usize::MAX),
+                if automatic {
+                    self.rotation
+                        .expiry_priority_key(&snapshot.candidate_id, now_ms)
+                        .unwrap_or(u64::MAX)
+                } else {
+                    0
+                },
+                if automatic { snapshot.in_flight } else { 0 },
+                std::cmp::Reverse(if automatic { quota } else { 0 }),
+                std::cmp::Reverse(if automatic && quota == 0 { credits } else { 0 }),
                 self.member_policy(&self.candidates[&snapshot.candidate_id])
                     .map_or(usize::MAX, |(rank, _)| rank),
                 snapshot.candidate_id.clone(),
@@ -296,7 +362,7 @@ impl PoolScheduler {
     fn preview_selection_order(
         &mut self,
         scope: &CandidateScope,
-        models: &crate::ModelRules,
+        allows_model: &impl Fn(&str) -> bool,
         protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<String> {
@@ -309,7 +375,7 @@ impl PoolScheduler {
                     .iter()
                     .filter(|model| {
                         !crate::runtime::is_image_model_id(model)
-                            && models.allows(model)
+                            && allows_model(model)
                             && candidate.is_configured(model, protocols, scope)
                     })
                     .flat_map(|model| {
@@ -350,11 +416,7 @@ impl PoolScheduler {
                     ) else {
                         return order;
                     };
-                    if let Some(allowed) = &mut request.allowed_candidates {
-                        allowed.retain(|id| {
-                            self.lane_allows(&self.candidates[id], InFlightLane::Text)
-                        });
-                    }
+                    self.retain_free_lanes(&mut request);
                     requests.push(request);
                 }
                 let request = &requests[route_index];
@@ -408,12 +470,14 @@ impl PoolScheduler {
             dispatches_before: self.dispatch_count(candidate_id, lane),
             endpoint_kind: None,
             upstream_response_model: None,
+            images: None,
             transport: None,
             cache_context: None,
             cache_affinity: None,
             attempt_outcome: None,
             request_timing: None,
             route_latency: None,
+            provider_backoff: None,
         })
     }
 }

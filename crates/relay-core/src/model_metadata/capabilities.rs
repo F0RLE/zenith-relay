@@ -85,6 +85,10 @@ impl ModelCapabilities {
                 ProtocolFeature::Reasoning,
                 capability_status(self.reasoning),
             ),
+            (
+                ProtocolFeature::InterleavedSystem,
+                capability_status(self.interleaved_system),
+            ),
         ])
     }
 
@@ -95,7 +99,7 @@ impl ModelCapabilities {
     /// unsupported evidence from either layer is a hard deny. Route evidence
     /// may fill an unknown reference field, but it cannot turn a reference
     /// exclusion into support.
-    pub(crate) fn protocol_features_for_route(
+    pub fn protocol_features_for_route(
         &self,
         route: Option<&crate::ModelEndpointCapability>,
     ) -> std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus> {
@@ -178,8 +182,12 @@ impl ModelCapabilities {
             .collect()
     }
 
-    pub(crate) fn for_route(&self, route: Option<&crate::ModelEndpointCapability>) -> Self {
+    /// Clone reference metadata with the exact selected endpoint's generation
+    /// controls and numeric restrictions. Callers retain route/model ownership;
+    /// the shared reference and protocol-specific media contract are unchanged.
+    pub fn for_route(&self, route: Option<&crate::ModelEndpointCapability>) -> Self {
         let mut capabilities = self.clone().with_defaults();
+        let features = capabilities.protocol_features_for_route(route);
         let route_efforts = if capabilities.reasoning_effort_conflict {
             Vec::new()
         } else {
@@ -190,21 +198,80 @@ impl ModelCapabilities {
             && route_efforts.is_empty();
         capabilities.reasoning_effort_levels = route_efforts;
         capabilities.reasoning_effort_conflict |= conflicting_efforts;
-        if self
-            .protocol_features_for_route(route)
-            .get(&crate::ProtocolFeature::Reasoning)
-            == Some(&crate::CapabilityStatus::Unsupported)
-        {
-            capabilities.reasoning = Some(false);
-            capabilities.reasoning_effort_conflict = false;
-        }
-        capabilities.default_reasoning_effort = capabilities
-            .default_reasoning_effort
-            .filter(|default| capabilities.reasoning_effort_levels.contains(default));
+        capabilities.apply_generation_features(&features);
         if let Some(route) = route {
             route.token_limits.constrain(&mut capabilities);
         }
         capabilities
+    }
+
+    /// Apply already-resolved alternatives without treating an empty effort
+    /// intersection as missing evidence or synthesizing an endpoint record.
+    pub(crate) fn for_resolved_route(
+        &self,
+        features: &std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus>,
+        efforts: &[String],
+        token_limits: crate::ModelTokenLimits,
+    ) -> Self {
+        let mut capabilities = self.clone().with_defaults();
+        let features = capabilities
+            .protocol_features()
+            .into_iter()
+            .map(|(feature, reference)| {
+                let resolved = features
+                    .get(&feature)
+                    .copied()
+                    .unwrap_or(crate::CapabilityStatus::Unknown);
+                (feature, merge_route_capability_status(reference, resolved))
+            })
+            .collect();
+        let levels = crate::canonicalize_reasoning_levels(efforts);
+        let had_reference_levels = !capabilities.reasoning_effort_levels.is_empty();
+        let levels = levels
+            .into_iter()
+            .filter(|level| {
+                !capabilities.reasoning_effort_conflict
+                    && (!had_reference_levels
+                        || capabilities.reasoning_effort_levels.contains(level))
+            })
+            .collect::<Vec<_>>();
+        capabilities.reasoning_effort_conflict |= had_reference_levels && levels.is_empty();
+        capabilities.reasoning_effort_levels = levels;
+        capabilities.apply_generation_features(&features);
+        token_limits.constrain(&mut capabilities);
+        capabilities
+    }
+
+    fn apply_generation_features(
+        &mut self,
+        features: &std::collections::BTreeMap<crate::ProtocolFeature, crate::CapabilityStatus>,
+    ) {
+        use crate::{CapabilityStatus, ProtocolFeature};
+
+        let flag = |feature| match features.get(&feature) {
+            Some(CapabilityStatus::Declared | CapabilityStatus::Confirmed) => Some(true),
+            Some(CapabilityStatus::Unsupported) => Some(false),
+            _ => None,
+        };
+        self.tool_call = flag(ProtocolFeature::FunctionTools);
+        self.tool_choice = flag(ProtocolFeature::ToolChoice);
+        self.structured_output = flag(ProtocolFeature::StructuredOutput);
+        self.streaming = flag(ProtocolFeature::Streaming);
+        self.reasoning = flag(ProtocolFeature::Reasoning);
+        self.interleaved_system = flag(ProtocolFeature::InterleavedSystem);
+        if self.tool_call == Some(false) {
+            self.parallel_tool_call = Some(false);
+        }
+        if self.reasoning == Some(false) {
+            self.reasoning_effort_levels.clear();
+            self.reasoning_effort_conflict = false;
+        } else if !self.reasoning_effort_levels.is_empty() {
+            self.reasoning = Some(true);
+        }
+        self.default_reasoning_effort = self
+            .default_reasoning_effort
+            .take()
+            .filter(|default| self.reasoning_effort_levels.contains(default));
     }
 
     /// Project reference semantics while retaining the owning account's Codex
@@ -333,6 +400,9 @@ fn merge_route_capability_status(
     }
     CapabilityStatus::Unknown
 }
+
+#[cfg(test)]
+mod route_projection_tests;
 
 #[cfg(test)]
 mod tests {
@@ -477,6 +547,52 @@ mod tests {
             reference.reasoning_effort_levels_for_route(Some(&route)),
             ["low"]
         );
+    }
+
+    #[test]
+    fn interleaved_system_evidence_keeps_unknowns_and_both_sources_of_exclusion() {
+        use crate::{CapabilityStatus, ModelEndpointCapability, ProtocolFeature};
+        for reference in [None, Some(false), Some(true)] {
+            let capabilities = ModelCapabilities {
+                interleaved_system: reference,
+                ..Default::default()
+            };
+            assert_eq!(capabilities.for_route(None).interleaved_system, reference);
+            for status in [
+                CapabilityStatus::Unknown,
+                CapabilityStatus::Declared,
+                CapabilityStatus::Confirmed,
+                CapabilityStatus::Unsupported,
+            ] {
+                let mut route: ModelEndpointCapability = serde_json::from_value(json!({
+                    "modelId":"synthetic-model", "upstreamWireApi":"messages",
+                    "status":"declared", "origin":"manual", "checkedAtMs":1
+                }))
+                .unwrap();
+                route
+                    .features
+                    .insert(ProtocolFeature::InterleavedSystem, status);
+                let expected =
+                    if reference == Some(false) || status == CapabilityStatus::Unsupported {
+                        Some(false)
+                    } else if reference == Some(true) || status.available() {
+                        Some(true)
+                    } else {
+                        None
+                    };
+                let encoded = serde_json::to_value(&route).unwrap();
+                let restored: ModelEndpointCapability = serde_json::from_value(encoded).unwrap();
+                assert_eq!(
+                    capabilities.for_route(Some(&restored)).interleaved_system,
+                    expected
+                );
+                route.status = CapabilityStatus::Unsupported;
+                assert_eq!(
+                    capabilities.for_route(Some(&route)).interleaved_system,
+                    Some(false)
+                );
+            }
+        }
     }
 
     #[test]

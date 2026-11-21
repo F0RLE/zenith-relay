@@ -1,5 +1,53 @@
 use super::*;
 
+pub(super) fn assert_local_continuation_rejection(events: &[UsageEvent]) {
+    assert_local_continuation_rejection_transport(events, zenith_relay_core::UsageTransport::Http);
+}
+
+pub(super) fn assert_local_continuation_rejection_transport(
+    events: &[UsageEvent],
+    transport: zenith_relay_core::UsageTransport,
+) {
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert!(!event.success);
+    assert_eq!(event.http_status, 409);
+    assert_eq!(event.attempt, 0);
+    assert_eq!(event.source_id, "relay");
+    assert_eq!(event.transport, transport);
+    assert_eq!(event.wire_api, WireApi::Responses);
+    assert_eq!(event.requested_model.as_deref(), Some(MODEL));
+    assert_eq!(
+        event.error_category.as_deref(),
+        Some("response_continuation_unavailable")
+    );
+    assert!(event.candidate_id.is_none());
+    assert!(event.account_id.is_none());
+    assert!(event.account_token_generation.is_none());
+    assert!(event.routing.is_none());
+    assert!(event.input_tokens.is_none());
+    assert!(event.cached_input_tokens.is_none());
+    assert!(event.output_tokens.is_none());
+    assert!(event.total_tokens.is_none());
+    assert!(event.cooldown_scope.is_none());
+    assert!(event.retry_at_ms.is_none());
+    assert!(event.consecutive_failures.is_none());
+    let details = serde_json::to_string(&event.upstream_error).unwrap();
+    assert!(details.contains("relay_continuation"));
+    for private_value in [
+        "response-from-before-restart",
+        "orphaned-response",
+        "response-created-by-old-model",
+        "response-created-by-previous-model",
+        "ctc_stale_tool",
+        "toolu_stale_tool",
+        "Get-ChildItem",
+        "call_1",
+    ] {
+        assert!(!details.contains(private_value));
+    }
+}
+
 #[tokio::test]
 async fn unknown_http_response_owner_is_rejected_before_candidate_selection() {
     let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
@@ -49,7 +97,7 @@ async fn unknown_http_response_owner_is_rejected_before_candidate_selection() {
     assert!(wrong_state.requests.lock().unwrap().is_empty());
     assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
 }
 
 #[tokio::test]
@@ -98,7 +146,7 @@ async fn unknown_http_response_owner_never_reaches_an_arbitrary_candidate() {
     assert!(wrong_state.requests.lock().unwrap().is_empty());
     assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
 }
 
 #[tokio::test]
@@ -143,7 +191,7 @@ async fn orphaned_http_response_is_rejected_without_materialized_history() {
     assert_eq!(body["error"]["code"], "response_continuation_unavailable");
     assert!(state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
 }
 
 #[tokio::test]
@@ -198,7 +246,7 @@ async fn opaque_http_continuation_is_rejected_before_model_switch() {
     assert!(old_state.requests.lock().unwrap().is_empty());
     assert!(new_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
 }
 
 #[tokio::test]
@@ -291,7 +339,11 @@ async fn assert_opaque_continuation_is_rejected(path: &str) {
     assert!(recovered_state.requests.lock().unwrap().is_empty());
 
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
+    assert_eq!(
+        events[0].resolved_model.as_deref(),
+        (path == "/v1/responses/compact").then_some(MODEL)
+    );
 }
 
 #[tokio::test]
@@ -350,7 +402,7 @@ async fn opaque_custom_tool_history_is_rejected_before_upstream_selection() {
     assert!(state.requests.lock().unwrap().is_empty());
 
     let events = events.lock().unwrap();
-    assert!(events.is_empty());
+    assert_local_continuation_rejection(&events);
 }
 
 #[tokio::test]
@@ -395,7 +447,7 @@ async fn orphaned_http_tool_output_is_rejected_before_upstream_selection() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["error"]["code"], "response_continuation_unavailable");
     assert!(state.requests.lock().unwrap().is_empty());
-    assert!(events.lock().unwrap().is_empty());
+    assert_local_continuation_rejection(&events.lock().unwrap());
 }
 
 #[tokio::test]

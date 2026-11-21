@@ -4,12 +4,12 @@ Use the [official Tauri v2 communication guide](https://v2.tauri.app/develop/cal
 for event/channel APIs. Relay's current event names and lifecycle live in its
 own source:
 
-- [Typed subscriptions](../../../../src/src/features/relay/api/commands.ts):
+- [Typed subscriptions](../../../../desktop/frontend/src/features/relay/api/commands.ts):
   `onStateChanged`, `onRuntimeActivity`, and `onUsageRecorded`.
-- [Runtime event hook](../../../../src/src/features/relay/state/useRuntimeEvents.ts):
+- [Runtime event hook](../../../../desktop/frontend/src/features/relay/state/useRuntimeEvents.ts):
   active-state guards, delayed refresh, subscription completion and cleanup.
-- [Native state notifications](../../../../src-tauri/src/local_pool/state/adapters.rs)
-  and [background loops](../../../../src-tauri/src/local_pool/background/loops.rs).
+- [Native state notifications](../../../../desktop/src-tauri/src/local_pool/state/adapters.rs)
+  and [background loops](../../../../desktop/src-tauri/src/local_pool/background/loops.rs).
 
 `zenith-state-changed` requests a state reread; `zenith-runtime-activity` carries
 a typed activity payload. Preserve that distinction and inspect the emitting

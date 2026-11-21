@@ -3,7 +3,61 @@
 use super::super::super::{AdapterError, AdapterResult, optional_bool, required_text};
 use crate::WireApi;
 use serde_json::{Value, json};
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
+
+pub(super) fn discoveries(
+    request: &Value,
+    active: &[super::super::super::Function],
+) -> Option<BTreeMap<String, Vec<String>>> {
+    let mut deferred: BTreeMap<_, Vec<String>> = request
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| tool["defer_loading"] == true)
+        .filter_map(|tool| tool["name"].as_str())
+        .map(|name| (name.to_owned(), Vec::new()))
+        .collect();
+    if deferred.is_empty() {
+        return None;
+    }
+    let active: BTreeSet<_> = active.iter().map(|tool| tool.name.as_str()).collect();
+    deferred.retain(|name, _| active.contains(name.as_str()));
+    for block in request
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+    {
+        // Inline changes own final schemas and availability. Their established
+        // projection must not move a replacement ahead of its original turn.
+        if matches!(
+            block["type"].as_str(),
+            Some("tool_addition" | "tool_removal")
+        ) {
+            return None;
+        }
+        if block["type"] == "tool_result"
+            && let Some(id) = block["tool_use_id"].as_str()
+        {
+            for reference in block["content"].as_array().into_iter().flatten() {
+                if reference["type"] == "tool_reference"
+                    && let Some(ids) = reference["tool_name"]
+                        .as_str()
+                        .and_then(|name| deferred.get_mut(name))
+                {
+                    ids.push(id.to_owned());
+                }
+            }
+        }
+    }
+    Some(deferred)
+}
 
 pub(super) fn prepare(request: &Value) -> AdapterResult<Cow<'_, Value>> {
     let has_deferral = request

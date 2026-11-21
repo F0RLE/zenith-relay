@@ -7,6 +7,7 @@
 //! is shared from `gateway::continuation`; account-only calls use `account`.
 
 use super::super::request::{RequestToolPolicy, ServiceTierPolicy};
+use super::state::AttemptState;
 use crate::runtime::AuthenticatedKey;
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::{GatewayRuntime, UsageTransport, WireApi};
@@ -23,6 +24,8 @@ pub(in crate::gateway) struct ReservedCandidate {
 }
 
 pub(super) struct RequestExecution {
+    pub(super) started: tokio::time::Instant,
+    pub(super) ingress_timing: crate::runtime::RequestIngressTiming,
     pub(super) tool_policy: RequestToolPolicy,
     pub(super) runtime: Arc<GatewayRuntime>,
     pub(super) key: AuthenticatedKey,
@@ -35,12 +38,11 @@ pub(super) struct RequestExecution {
     pub(super) forwarded_headers: HeaderMap,
     pub(super) client_context_id: Option<String>,
     pub(super) client_affinity_id: Option<String>,
-    pub(super) response_affinity_key: Option<String>,
-    pub(super) requires_affinity_owner: bool,
+    pub(super) siwc_socket_context: Option<String>,
+    pub(super) state: AttemptState,
     pub(super) client_wire_api: WireApi,
     pub(super) responses_lite: Option<HeaderValue>,
     pub(super) allow_previous_response_reset: bool,
-    pub(super) attempt_offset: u16,
     pub(super) budget: SharedRequestBudget,
     pub(super) transport: UsageTransport,
     pub(super) transport_fallback: Option<crate::usage::TransportFallbackReason>,
@@ -56,7 +58,6 @@ mod prelude;
 mod prepare;
 mod recovery;
 mod selection;
-mod state;
 mod stream;
 mod translate;
 

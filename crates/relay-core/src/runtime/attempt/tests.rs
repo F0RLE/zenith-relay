@@ -9,6 +9,7 @@ use crate::{
 mod fences;
 mod observation;
 mod principal_scope;
+mod retry;
 
 fn runtime() -> Arc<GatewayRuntime> {
     Arc::new(
@@ -33,7 +34,7 @@ fn runtime() -> Arc<GatewayRuntime> {
             })],
             GatewayRuntimeOptions {
                 pool_routing: Some(PoolRoutingPolicy {
-                    mode: PoolRoutingMode::InOrder,
+                    mode: PoolRoutingMode::RoundRobin,
                     members: ["source-a", "source-b"]
                         .into_iter()
                         .map(|id| PoolRoutingMember {

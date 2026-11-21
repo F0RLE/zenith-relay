@@ -7,6 +7,7 @@ impl PoolScheduler {
         &mut self,
         reservation_id: ReservationId,
         budget: &mut RotationRequestBudget,
+        now_ms: u64,
     ) -> Result<RotationAttemptId, crate::scheduler::rotation::DispatchStartError> {
         if self.retired {
             return Err(crate::scheduler::rotation::DispatchStartError::CandidateChanged);
@@ -18,7 +19,7 @@ impl PoolScheduler {
             .ok_or(crate::scheduler::rotation::DispatchStartError::UnknownLease)?;
         let attempt = self
             .rotation
-            .begin_transport_dispatch(lease.lease_id, budget)?;
+            .begin_transport_dispatch(lease.lease_id, budget, now_ms)?;
         self.record_reservation_dispatch(reservation_id);
         Ok(attempt)
     }
@@ -51,7 +52,7 @@ impl PoolScheduler {
         budget: &RotationRequestBudget,
         now_ms: u64,
     ) -> Result<RotationSettlement, RotationSettlementError> {
-        self.settle_rotation_with_latency(reservation_id, observation, budget, now_ms, None)
+        self.settle_rotation_with_latency(reservation_id, observation, budget, now_ms, None, true)
     }
 
     pub(crate) fn settle_rotation_with_latency(
@@ -61,6 +62,7 @@ impl PoolScheduler {
         budget: &RotationRequestBudget,
         now_ms: u64,
         first_output_latency_ms: Option<u64>,
+        observation_owner_current: bool,
     ) -> Result<RotationSettlement, RotationSettlementError> {
         let lease = self
             .rotation_leases
@@ -73,6 +75,7 @@ impl PoolScheduler {
             budget,
             now_ms,
             first_output_latency_ms,
+            observation_owner_current,
         )?;
         self.rotation_leases.remove(&reservation_id);
         Ok(settlement)
@@ -83,15 +86,19 @@ impl PoolScheduler {
         reservation_id: ReservationId,
         budget: &RotationRequestBudget,
         now_ms: u64,
+        observation_owner_current: bool,
     ) -> Result<RotationSettlement, RotationSettlementError> {
-        let lease = self
-            .rotation_leases
-            .get(&reservation_id)
-            .cloned()
-            .ok_or(RotationSettlementError::UnknownLease)?;
-        let settlement = self.rotation.cancel(lease.lease_id, budget, now_ms)?;
-        self.rotation_leases.remove(&reservation_id);
-        Ok(settlement)
+        self.settle_rotation_with_latency(
+            reservation_id,
+            RotationAttemptObservation {
+                execution: crate::scheduler::rotation::ExecutionObservation::unknown(),
+                health: crate::scheduler::rotation::HealthObservation::Cancelled,
+            },
+            budget,
+            now_ms,
+            None,
+            observation_owner_current,
+        )
     }
 
     pub(crate) fn release_rotation_unstarted(&mut self, reservation_id: ReservationId) -> bool {

@@ -1,0 +1,111 @@
+import { expect } from "@playwright/test";
+import { readFixture } from "../../test-support/files.mjs";
+import { join } from "node:path";
+
+export async function pairDesktop({owner, ownerRead, origin, exchange, wait, issue}) {
+  const api=origin+"/api/hosted/v1/", url=api+"admin/devices", client=owner.context().request;
+  const options=url+"/options", verify=api+"admin/desktop/confirmations/";
+  const csrf=(await ownerRead()).csrf_token;
+  const post=(path,body,token=csrf,site=origin)=>client.post(path,{headers:{"X-Relay-CSRF":token,Origin:site},data:body});
+  const read=async()=>(await (await client.get(url)).json()).data;
+  const id=crypto.randomUUID();
+  const unsigned={action:"invite",operation_id:id,device_id:id,expected_revision:"0",label:"Unsigned invitation"};
+  const denied=await post(url,unsigned);
+  expect(denied.status()).toBe(403);
+  expect((await denied.json()).error.code).toBe("fresh_passkey_required");
+  expect((await read()).items).toHaveLength(0);
+  await owner.getByRole("button",{name:"Desktop",exact:true}).click();
+  await owner.getByText("Paired devices",{exact:true}).click();
+  await owner.getByLabel("Device name").fill("Operator laptop");
+  const overview=owner.getByRole("checkbox",{name:"View overview"});
+  const usage=owner.getByRole("checkbox",{name:"View request history"});
+  const pool=owner.getByRole("checkbox",{name:"Change pool membership"});
+  await expect(overview).not.toBeChecked();
+  await expect(usage).not.toBeChecked();
+  await expect(pool).not.toBeChecked();
+  await usage.check();
+  await overview.check();
+  await pool.check();
+  const posted=()=>owner.waitForRequest(r=>r.method()==="POST"&&r.url()===options);
+  const first=posted();
+  await owner.getByRole("button",{name:"Create invitation"}).click();
+  const invitation=await owner.getByLabel("Paste this invitation into Relay Desktop").inputValue();
+  const cmd=(await first).postDataJSON();
+  expect(cmd.read_scopes).toEqual(["overview.read","usage.read"]);
+  expect(cmd.manage_pool).toBe(true);
+  await expect(owner.getByText("Awaiting approval · View connections · View overview · View request history · Change pool membership")).toBeVisible();
+  expect((await post(url,cmd)).status()).toBe(200);
+  expect((await post(options,{...cmd,label:"Different laptop"})).status()).toBe(409);
+  expect((await post(options,{...cmd,read_scopes:["usage.read"]})).status()).toBe(409);
+  expect((await post(options,{...cmd,manage_pool:false})).status()).toBe(409);
+  expect((await post(options,cmd,"0".repeat(64))).status()).toBe(403);
+  expect((await post(options,cmd,csrf,"https://different.example")).status()).toBe(403);
+  expect((await client.get(api+"device/connections")).status()).toBe(401);
+  expect((await fetch(url)).status).toBe(401);
+  issue("device-invited",invitation);
+  await wait("device-review");
+  const code=readFixture(exchange,"device-review");
+  const input=owner.getByLabel("Approval code from your Desktop");
+  await input.fill(code.replace(cmd.device_id,crypto.randomUUID()));
+  const approve=owner.getByRole("button",{name:"Allow access for 24 hours"});
+  await expect(approve).toBeDisabled();
+  await input.fill(code);
+  const approval={action:"approve",operation_id:crypto.randomUUID(),device_id:cmd.device_id,expected_revision:"1",approval_code:code};
+  expect((await post(options,{...approval,read_scopes:["overview.read"]})).status()).toBe(409);
+  expect((await post(options,{...approval,read_scopes:cmd.read_scopes})).status()).toBe(409);
+  const changed=posted();
+  let expiration;
+  await owner.route(`${verify}*/verify`,async route=>{
+    const response=await route.fetch();
+    expect(response.status()).toBe(200);
+    await response.dispose();
+    expiration=(await read()).items[0].expires_at_s;
+    const replay=await post(route.request().url(),route.request().postDataJSON());
+    expect(replay.status()).toBe(409);
+    expect((await replay.json()).error.code).toBe("passkey_ceremony_expired");
+    await route.abort("failed");
+  },{times:1});
+  await approve.click();
+  const applied=(await changed).postDataJSON();
+  expect(applied.read_scopes).toEqual(cmd.read_scopes);
+  expect(applied.manage_pool).toBe(true);
+  await expect(owner.getByRole("alert")).toHaveText("The device change was not confirmed. Retry the same action.");
+  const acknowledged=owner.waitForResponse(r=>r.url()===options);
+  await approve.click();
+  const receipt=await acknowledged;
+  expect(receipt.request().postDataJSON()).toEqual(applied);
+  expect((await receipt.json()).data).toEqual({operation_id:applied.operation_id,applied:true});
+  await expect(owner.getByText("Active · View connections · View overview · View request history · Change pool membership")).toBeVisible();
+  for (const width of [320,1024]) {
+    await owner.setViewportSize({width,height:760});
+    expect(await owner.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    if (process.env.RELAY_TEST_CATALOG_CAPTURE)
+      await owner.screenshot({path:join(process.env.RELAY_TEST_CATALOG_CAPTURE,`paired-devices-${width}.png`),fullPage:true});
+  }
+  expect((await ownerRead()).csrf_token).toBe(csrf);
+  expect((await post(url,applied)).status()).toBe(200);
+  expect((await post(url,{...applied,read_scopes:["overview.read"]})).status()).toBe(409);
+  expect((await post(options,{...applied,operation_id:crypto.randomUUID()})).status()).toBe(409);
+  const response=await client.get(url);
+  expect(response.headers()["cache-control"]).toBe("no-store");
+  const data=(await response.json()).data;
+  expect(data.items).toHaveLength(1);
+  expect(Object.keys(data.items[0]).sort()).toEqual(["expires_at_s","id","label","last_used_at_s","manage_pool","read_scopes","revision","scope","state"]);
+  expect(data.items[0].scope).toBe("connections.read");
+  expect(data.items[0].revision).toBe("2");
+  expect(data.items[0].expires_at_s).toBe(expiration);
+  issue("device-approved"); await wait("device-checked");
+  await owner.getByRole("dialog",{name:"Desktop"}).getByRole("button",{name:"Close",exact:true}).click();
+}
+
+export async function revokeDesktop(owner) {
+  await owner.getByRole("link",{name:"Connections",exact:true}).click();
+  await owner.getByRole("button",{name:"Desktop",exact:true}).click();
+  await owner.getByText("Paired devices",{exact:true}).click();
+  await expect(owner.getByText(/Last used:/)).toBeVisible();
+  await owner.getByRole("button",{name:"Revoke access"}).click();
+  await expect(owner.getByText("Active · View connections · View overview · View request history · Change pool membership")).toBeVisible();
+  await owner.getByRole("button",{name:"Confirm revocation"}).click();
+  await expect(owner.getByText("Revoked · View connections · View overview · View request history · Change pool membership")).toBeVisible();
+  await owner.getByRole("dialog",{name:"Desktop"}).getByRole("button",{name:"Close",exact:true}).click();
+}

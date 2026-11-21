@@ -1,6 +1,217 @@
 use super::*;
 
 #[tokio::test]
+async fn native_websocket_activates_search_on_a_fresh_owner_scoped_connection() {
+    for (native, initially_searching, prewarm) in [
+        (true, false, false),
+        (true, true, false),
+        (false, false, false),
+        (true, false, true),
+    ] {
+        let (upstream, observed) = if prewarm {
+            spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+                json!({"type":"response.completed","response":{"id":"replayable-ws-response","status":"completed","output":[]}}),
+            ]))).await
+        } else {
+            spawn_replayable_websocket_upstream().await
+        };
+        let (sources, accounts) = if native {
+            (
+                vec![],
+                vec![account(
+                    "search-account",
+                    "synthetic-provider",
+                    &upstream,
+                    10,
+                )],
+            )
+        } else {
+            (
+                vec![source("search-source", &upstream, "synthetic-key", 10)],
+                vec![],
+            )
+        };
+        let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
+            sources,
+            accounts,
+            vec![mixed_key(None, None)],
+            ready_authority("search-account", "synthetic-access").await,
+            refresh_adapter(),
+            Arc::new(PersistenceAdapter::default()),
+            GatewayRuntimeOptions {
+                diagnostics_enabled: || true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut socket = reqwest::Client::new()
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap()
+            .into_websocket()
+            .await
+            .unwrap();
+        let mut first = json!({"type":"response.create","model":MODEL,"input":"synthetic input"});
+        if initially_searching {
+            first["tools"] = json!([{"type":"web_search"}]);
+        }
+        if prewarm {
+            first["generate"] = json!(false);
+        }
+        socket
+            .send(ClientWsMessage::Text(first.to_string()))
+            .await
+            .unwrap();
+        receive_websocket_completion(&mut socket).await;
+        for index in 0..2 {
+            let tools = if initially_searching && index == 0 {
+                json!([])
+            } else {
+                json!([{"type":"web_search"}])
+            };
+            socket
+                .send(ClientWsMessage::Text(
+                    json!({
+                        "type":"response.create","model":MODEL,
+                        "previous_response_id":"replayable-ws-response",
+                        "input":"synthetic follow-up","tools":tools
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+            receive_websocket_completion(&mut socket).await;
+        }
+        let requests = observed.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let reconnected = native && !initially_searching;
+        assert_eq!(
+            observed.headers.lock().unwrap().len(),
+            if reconnected { 2 } else { 1 }
+        );
+        if reconnected {
+            assert!(requests[1].get("previous_response_id").is_none());
+            assert!(
+                prewarm
+                    || requests[1]["input"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item["role"] == "assistant")
+            );
+        } else {
+            assert_eq!(
+                requests[1]["previous_response_id"],
+                "replayable-ws-response"
+            );
+        }
+        assert_eq!(
+            requests[2]["previous_response_id"],
+            "replayable-ws-response"
+        );
+        assert!(requests[1].get("generate").is_none());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events.iter().all(|event| event.success));
+        assert_eq!(
+            events[0]
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .reauth,
+            Some(false)
+        );
+        assert_eq!(
+            events[1]
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .reauth,
+            reconnected.then_some(false)
+        );
+        assert_eq!(
+            events[2]
+                .routing
+                .as_ref()
+                .unwrap()
+                .transport
+                .as_ref()
+                .unwrap()
+                .reauth,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_search_activation_never_moves_an_unmaterialized_previous_response() {
+    let (upstream, observed) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::Events(Arc::new(vec![
+            json!({"type":"response.output_text.delta","delta":"synthetic output"}),
+            json!({"type":"response.completed","response":{"id":"uncaptured-response","status":"completed","output":[]}}),
+        ])),
+    ).await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        vec![],
+        vec![account(
+            "search-account",
+            "synthetic-provider",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        ready_authority("search-account", "synthetic-access").await,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let mut socket = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap()
+        .into_websocket()
+        .await
+        .unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type":"response.create","model":MODEL,"input":"synthetic input"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    receive_websocket_completion(&mut socket).await;
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type":"response.create","model":MODEL,"previous_response_id":"uncaptured-response",
+                "input":"synthetic follow-up","tools":[{"type":"web_search"}]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let failure = receive_websocket_json(&mut socket).await;
+    assert_eq!(
+        failure["error"]["code"],
+        "response_continuation_unavailable"
+    );
+    assert_eq!(observed.requests.lock().unwrap().len(), 1);
+    assert_eq!(observed.headers.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn guarded_websocket_reuses_decoding_without_changing_text_or_binary_frames() {
     let frames = Arc::new(vec![
         AxumWsMessage::Text(r#"{ "type":"response.output_text.delta", "output_index":0, "delta":"hello\n\"quoted\"" }"#.into()),
@@ -47,11 +258,8 @@ async fn guarded_websocket_reuses_decoding_without_changing_text_or_binary_frame
             .await
             .unwrap();
         for expected in frames.iter() {
-            let actual = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let actual =
+                receive_websocket_data_with_timeout(&mut socket, Duration::from_secs(5)).await;
             match (expected, actual) {
                 (AxumWsMessage::Text(expected), ClientWsMessage::Text(actual)) => {
                     assert_eq!(actual.as_bytes(), expected.as_bytes());
@@ -829,9 +1037,12 @@ async fn account_websocket_keeps_connection_after_max_output_incomplete() {
     assert_eq!(state.requests.lock().unwrap().len(), 2);
     assert_eq!(state.headers.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
+    http_rejection::assert_local_continuation_rejection(&events[1..2]);
+    assert_ne!(events[0].request_id, events[1].request_id);
+    assert_ne!(events[1].request_id, events[2].request_id);
     let first = serde_json::to_value(&events[0].routing.as_ref().unwrap().transport).unwrap();
-    let reused = serde_json::to_value(&events[1].routing.as_ref().unwrap().transport).unwrap();
+    let reused = serde_json::to_value(&events[2].routing.as_ref().unwrap().transport).unwrap();
     assert!(first["handshakeMs"].is_number());
     assert!(reused["handshakeMs"].is_null());
     assert_eq!(reused["upstream"], "websocket");
@@ -842,5 +1053,5 @@ async fn account_websocket_keeps_connection_after_max_output_incomplete() {
         events[0].error_category.as_deref(),
         Some("response_incomplete")
     );
-    assert!(events[1].success);
+    assert!(events[2].success);
 }

@@ -20,7 +20,7 @@ pub(super) fn parse_zenith_bundle(
                 "Zenith account bundle version is missing",
             )
         })?;
-    if version != 1 {
+    if !matches!(version, 1 | 2) {
         return Err(ImportError::new(
             ImportErrorCode::UnsupportedBundleVersion,
             "Zenith account bundle version is unsupported",
@@ -37,6 +37,38 @@ pub(super) fn parse_zenith_bundle(
             )
         })?;
     check_item_count(accounts.len())?;
+    let mut entries = account_entries(accounts);
+    let invalid_proxy = || {
+        ImportError::new(
+            ImportErrorCode::MalformedJson,
+            "Zenith proxy binding is invalid",
+        )
+    };
+    let mut proxies = Vec::new();
+    if version == 2 {
+        let table = bundle_object
+            .get("proxies")
+            .and_then(Value::as_array)
+            .ok_or_else(invalid_proxy)?;
+        if table.is_empty() || table.len() > accounts.len() {
+            return Err(invalid_proxy());
+        }
+        for value in table {
+            let url = crate::normalize_proxy_url(value.as_str().ok_or_else(invalid_proxy)?)
+                .map_err(|_| invalid_proxy())?;
+            proxies.push(url::Url::parse(&url).map_err(|_| invalid_proxy())?);
+        }
+    }
+    for (entry, account) in entries.iter_mut().zip(accounts) {
+        if let Some(reference) = account.get("proxyIndex") {
+            let proxy = reference
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| proxies.get(i))
+                .ok_or_else(invalid_proxy)?;
+            entry.proxy = Some(proxy.clone());
+        }
+    }
     let description = match bundle_object.get("description") {
         None | Some(Value::Null) => None,
         Some(Value::String(description)) => normalize_account_export_description(Some(description))
@@ -55,8 +87,12 @@ pub(super) fn parse_zenith_bundle(
         }
     };
     Ok((
-        ImportFormat::ZenithV1,
-        account_entries(accounts),
+        if version == 1 {
+            ImportFormat::ZenithV1
+        } else {
+            ImportFormat::ZenithV2
+        },
+        entries,
         Vec::new(),
         description,
     ))
@@ -167,7 +203,7 @@ fn account_entries(accounts: &[Value]) -> Vec<InputEntry> {
         .map(|(ordinal, account_value)| InputEntry {
             ordinal,
             import_value: Some(account_value),
-            issue: None,
+            ..Default::default()
         })
         .collect()
 }

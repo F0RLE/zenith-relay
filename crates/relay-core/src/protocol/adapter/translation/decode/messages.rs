@@ -1,14 +1,24 @@
 use super::super::{
-    AdapterError, AdapterResult, Message, Reasoning, Request, Role, checked, optional_bool,
-    optional_u64, required_text,
+    AdapterError, AdapterResult, Message, Reasoning, ReasoningDisplay, Request, Role, checked,
+    optional_bool, optional_u64, required_text,
 };
 use crate::WireApi;
 use serde_json::Value;
 
+mod context_management;
 mod inline_tools;
+mod system;
 mod tool_search;
 
 pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
+    let original = request_body;
+    system::validate_positions(
+        request_body
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(AdapterError::invalid_request)?,
+    )?;
+    context_management::validate(request_body)?;
     let discovery = inline_tools::prepare(request_body)?;
     let request_body = discovery.as_ref();
     super::super::options::messages_fields(
@@ -28,6 +38,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             "thinking",
             "output_config",
             "metadata",
+            "context_management",
         ],
     )?;
     let mut decoded_request = Request {
@@ -41,7 +52,7 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
     {
         decoded_request.messages.push(Message {
             role: Role::System,
-            blocks: super::content::text_blocks(system, WireApi::Messages)?,
+            blocks: system::text_blocks(system, "system", true)?,
         });
     }
     for message in request_body
@@ -50,15 +61,16 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         .ok_or_else(AdapterError::invalid_request)?
     {
         checked(message, &["role", "content"])?;
-        decoded_request.messages.push(Message {
-            role: super::content::role(message, WireApi::Messages)?,
-            blocks: super::content::text_blocks(
-                message
-                    .get("content")
-                    .ok_or_else(AdapterError::invalid_request)?,
-                WireApi::Messages,
-            )?,
-        });
+        let role = super::content::role(message, WireApi::Messages)?;
+        let content = message
+            .get("content")
+            .ok_or_else(AdapterError::invalid_request)?;
+        let blocks = if role == Role::System {
+            system::text_blocks(content, "messages[].content", false)?
+        } else {
+            super::content::text_blocks(content, WireApi::Messages)?
+        };
+        decoded_request.messages.push(Message { role, blocks });
     }
     decoded_request.tools = super::content::tools(request_body.get("tools"), WireApi::Messages)?;
     decoded_request.tool_choice =
@@ -96,9 +108,28 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
         .get("thinking")
         .filter(|thinking_value| !thinking_value.is_null())
     {
-        checked(thinking, &["type", "budget_tokens"])?;
+        let kind = required_text(thinking, "type")?;
+        checked(
+            thinking,
+            if kind == "disabled" {
+                &["type", "budget_tokens"]
+            } else {
+                &["type", "budget_tokens", "display"]
+            },
+        )?;
+        decoded_request.reasoning_display = match thinking
+            .get("display")
+            .filter(|value| !value.is_null())
+        {
+            None => None,
+            Some(Value::String(display)) if display == "summarized" => {
+                Some(ReasoningDisplay::Summarized)
+            }
+            Some(Value::String(display)) if display == "omitted" => Some(ReasoningDisplay::Omitted),
+            _ => return Err(AdapterError::parameter_unsupported_for("thinking.display")),
+        };
         let budget = optional_u64(thinking, "budget_tokens")?;
-        match required_text(thinking, "type")? {
+        match kind {
             "disabled" if budget.is_none() => {
                 if decoded_request.reasoning
                     .as_ref()
@@ -123,5 +154,6 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             _ => return Err(AdapterError::reasoning_unsupported()),
         }
     }
+    decoded_request.deferred_tools = tool_search::discoveries(original, &decoded_request.tools);
     Ok(decoded_request)
 }

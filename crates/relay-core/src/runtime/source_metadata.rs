@@ -1,4 +1,4 @@
-use super::{AuthenticatedKey, GatewayRuntime};
+use super::{AuthenticatedKey, ExecutorRoute, GatewayRuntime};
 use crate::catalog::{normalize_model_reasoning_allowed_levels, reasoning_policy_levels};
 use crate::{Error, Result, WireApi};
 use std::collections::{BTreeMap, HashSet};
@@ -18,7 +18,7 @@ impl GatewayRuntime {
                 let Some(model) = self.resolve_model(key, display_id) else {
                     return false;
                 };
-                self.chatgpt_accounts.values().any(|account| {
+                self.account_state.executors.values().any(|account| {
                     let inventory = crate::poison::read(&account.model_inventory);
                     inventory
                         .configured_models
@@ -40,7 +40,8 @@ impl GatewayRuntime {
     ) -> Vec<String> {
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .values()
             .filter(|account| {
                 crate::poison::read(&account.model_inventory)
@@ -69,7 +70,8 @@ impl GatewayRuntime {
         };
         let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .values()
             .filter(|account| {
                 account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
@@ -86,7 +88,11 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
-        self.source_candidate_bindings.keys().cloned().collect()
+        self.source_state
+            .candidate_bindings
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Model information comes from the shared reference catalog, never a
@@ -96,7 +102,8 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn codex_model_display_name(&self, model: &str) -> String {
-        self.model_metadata_catalog
+        self.provider_metadata
+            .reference_catalog
             .as_ref()
             .map(|catalog| catalog.snapshot().codex_display_name(model))
             .unwrap_or_else(|| crate::codex_model_display_name(model))
@@ -106,7 +113,8 @@ impl GatewayRuntime {
         &self,
         model: &str,
     ) -> crate::model_metadata::ModelCapabilities {
-        self.model_metadata_catalog
+        self.provider_metadata
+            .reference_catalog
             .as_ref()
             .map(|catalog| catalog.snapshot().capabilities_for(model))
             .unwrap_or_else(crate::model_metadata::ModelCapabilities::unknown_model)
@@ -117,16 +125,36 @@ impl GatewayRuntime {
         reasoning_policy_levels(&configured, model).map(ToOwned::to_owned)
     }
 
-    /// Most restrictive known limits among this key's routes. This projection
-    /// is for a shared API picker, never an owning account's native model card.
-    pub(crate) fn client_token_limits(
+    /// Match picker projections to the client's required execution mode without
+    /// changing generic inventory or replacing request admission checks.
+    pub(crate) fn client_catalog_routes(
         &self,
         key: &AuthenticatedKey,
         model: &str,
         client: WireApi,
+        stream: bool,
+    ) -> Vec<ExecutorRoute> {
+        self.configured_executor_routes(key, model, &[client], stream)
+            .into_iter()
+            .filter(|route| {
+                !stream
+                    || self
+                        .model_capabilities(&route.source_model)
+                        .protocol_features_for_route(route.route_capability.as_ref())
+                        .get(&crate::ProtocolFeature::Streaming)
+                        != Some(&crate::CapabilityStatus::Unsupported)
+            })
+            .collect()
+    }
+
+    /// Most restrictive known limits among the supplied routes. This projection
+    /// is for a shared API picker, never an owning account's native model card.
+    pub(crate) fn token_limits_for_routes(
+        &self,
+        routes: &[ExecutorRoute],
     ) -> crate::ModelTokenLimits {
         let mut limits = crate::ModelTokenLimits::default();
-        for route in self.configured_executor_routes(key, model, &[client], false) {
+        for route in routes {
             let capabilities = self
                 .model_capabilities(&route.source_model)
                 .for_route(route.route_capability.as_ref());
@@ -144,9 +172,14 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         model: &str,
         client: WireApi,
+        stream: bool,
     ) -> Vec<String> {
+        self.reasoning_levels_for_routes(&self.client_catalog_routes(key, model, client, stream))
+    }
+
+    pub(crate) fn reasoning_levels_for_routes(&self, routes: &[ExecutorRoute]) -> Vec<String> {
         let mut levels = Vec::new();
-        for route in self.configured_executor_routes(key, model, &[client], false) {
+        for route in routes {
             let capabilities = self
                 .model_capabilities(&route.source_model)
                 .for_route(route.route_capability.as_ref());

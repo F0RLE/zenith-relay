@@ -20,6 +20,7 @@ pub(super) fn parse_item(
     ordinal: usize,
     format: ImportFormat,
     source_file: Option<&str>,
+    proxy: Option<url::Url>,
 ) -> Result<ParsedItem, ImportIssue> {
     let import_object = import_item_json.as_object().ok_or_else(|| {
         ImportIssue::new(
@@ -86,6 +87,12 @@ pub(super) fn parse_item(
         refresh_token.is_some(),
         explicit_auth_mode,
     )?;
+    if proxy.is_some() && (!use_tokens || use_api_key || use_agent_identity) {
+        return Err(ImportIssue::new(
+            ImportIssueCode::UnsupportedValue,
+            "Zenith proxy binding requires an OAuth account",
+        ));
+    }
     let jwt = imported_jwt_metadata(id_token.as_deref(), access_token.as_deref());
     if import_object.contains_key("concurrency") {
         warnings.push(ImportWarning::new(ImportWarningCode::ConcurrencyIgnored));
@@ -124,6 +131,7 @@ pub(super) fn parse_item(
         ordinal,
         format,
         source_file,
+        proxy,
         import_object,
         meta,
         tags_value,

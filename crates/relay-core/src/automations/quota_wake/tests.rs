@@ -68,6 +68,7 @@ fn account() -> AccountRecord {
 
 fn task(max_attempts: u8, jitter_seconds: u32) -> WakeTask {
     WakeTask {
+        weekly_reset_remaining_basis_points: None,
         id: "task-1".into(),
         name: "Primary wake".into(),
         enabled: true,

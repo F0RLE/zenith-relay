@@ -1,7 +1,7 @@
 # Hosted Relay Web Design
 
 **Design specification for future implementation.**
-Some screens already exist in the [web preview](../../web/README.md); its guide
+Some screens already exist in the [web preview](../../hosted/web/README.md); its guide
 describes what can run locally and which integrations are still pending.
 This document owns visuals, screen composition and interaction states.
 [Architecture](HOSTED_RELAY_ARCHITECTURE.md) owns routes, permissions and data/money
@@ -50,8 +50,8 @@ field. Four first questions follow on the same page, with all answers visible.
 Native scrolling and the Questions anchor move to them; scrolling is not intercepted.
 There is no helper note under the
 hero actions, product-data showcase, pricing fixtures or placeholder
-connection settings. Start opens the cabinet's brief, skippable first-use guide;
-the header's cabinet link enters directly. Help can reopen the guide later.
+connection settings. Start and Open cabinet enter Overview directly; Models and
+pricing opens the catalog. Login may guard a target, but no welcome dialog precedes it.
 The connection field is illustrative, not live traffic: three SVG thread bundles
 connect an application through Relay to a model. Request strokes travel at constant
 speed with staggered 4.8–6.4 second cycles. Hover and theme changes do not reset the
@@ -60,9 +60,9 @@ Golos Text is served locally for the landing, customer/owner workspaces and entr
 screens with Cyrillic coverage and its SIL OFL license; no font-service requests
 are made. The shared mark, palette and type connect the surfaces; decorative
 traffic remains exclusive to the landing. Shared and surface-specific tokens live in
-`web/DESIGN.md` and the development-only Impeccable surface brief.
+`hosted/web/DESIGN.md` and the development-only Impeccable surface brief.
 The public landing omits demo/development labels; synthetic
-money and account data remain labelled inside the development cabinet. The frontend
+money and account data are confined to development fixtures. The frontend
 now exposes the customer `/app/*` shell and the separate owner `/admin/*` shell;
 the landing enters the customer shell. Production builds omit fixtures and show
 unavailable data/actions until backend integration, without inventing a session,
@@ -71,10 +71,10 @@ between landing and cabinet. Local mode, application launching, profiles and Des
 runtime/credentials are not copied into the web application.
 The cabinet reuses base components with a Hosted-only composition layer:
 232-pixel sidebar (56-pixel collapsed rail), 32-pixel content gutters (24 below
-1100px; 16 on phones), a compact joined metric panel and a full-width token chart. At a
+1100px; 16 on phones) and a full-width token chart. At a
 workspace-container width of 960px, related charts form pairs below the primary
-series; narrower layouts stack them. Overview's four headline cells are 88px high
-on desktop and form a two-by-two grid on phones. Usage joins headline totals,
+series; narrower layouts stack them. Overview starts with charts, without
+a second row of headline totals. Usage joins headline totals,
 token counters and generation measurements in one panel before its data table;
 secondary metrics share its lower section rather than a separate speed card.
 Exact charges and uncertainty hints remain available. Navigation retains pine
@@ -82,12 +82,10 @@ green in both themes, pale supporting text and a cream selected row. The pine ba
 panel sits beside payment history at wide widths. Its demo top-up form is inline:
 amount input, quick amounts and a payment-method selector sourced from the demo
 snapshot. Errors and success stay on the page; no payment provider is called.
-Keys, connections, pool members
-and customers use full-width resource rows. Settings align section headings beside
-their controls. The logo toggles the rail without navigation, or closes the phone
-drawer. Settings stay above the footer divider; logout is the only footer action.
-The customer help page/dialog and footer preview label are removed. First-use
-onboarding and owner connections remain separate, unchanged capabilities.
+Keys, connections and pool members use full-width resource rows. The logo toggles
+the rail without navigation or closes the phone drawer. Customer balance and keys
+sit above the footer divider; sign-out is the footer action. No Help/Settings
+sidebar entry. Security and setup actions appear in context when their APIs exist.
 These compositions collapse to one column when their container is narrow.
 Request details place model/status above key and UTC context, with diagnostics
 at the trailing edge. Exact posted charge leads the left-aligned timing row;
@@ -167,10 +165,13 @@ is not a certification of every rendered combination.
 ### Language, numbers and time
 
 Use concise descriptions of the current function, state and next action.
-Keep necessary warnings visible; supporting detail belongs in tooltips or Help.
-Ship complete Russian/English variants. Browser
-locale selects the initial language; an explicit user choice wins. Changing locale
+Keep necessary warnings visible; supporting detail belongs with the relevant action.
+Use the [locale registry](../../hosted/web/src/i18n/registry.ts): English is the
+initial language and fallback unless a supported preference was saved; Russian
+and Simplified Chinese are also shipped. Browser language does not override it. Changing locale
 does not restart a payment/login operation or translate machine model IDs/codes.
+Keep source documentation and its example copy in English. Additional languages
+belong in separate locale files or explicitly localized documents.
 Allow longer Russian labels to wrap; never solve overflow by shrinking everything.
 
 Follow architecture's exact money and UTC report definitions. Wallet headlines
@@ -193,11 +194,10 @@ wrapped content. A breakpoint cannot override reading order or reachable actions
 
 ### Public shell
 
-Use a centered content column, maximum 1200 pixels, 32-pixel desktop gutters and
-16-pixel mobile gutters. Header is 72 pixels on wide screens, 64 on mobile, with
-product mark/name left, section navigation center and language/theme/sign-in right.
-At narrow widths, keep brand and sign-in visible; put section links in a labelled
-menu. The header may be sticky but must not cover anchor headings or focused fields.
+Align hero, FAQ and footer with the existing landing column in
+[the web design system](../../hosted/web/DESIGN.md). Keep the mark on the left,
+language, theme and cabinet entry on the right; no extra section-navigation menu.
+The sticky header must not cover anchor headings or focused fields.
 Footer groups product/help and operator-provided legal/support links compactly.
 No fixed deployment domain or unverifiable trust logo.
 
@@ -207,32 +207,23 @@ brand files. Favicon remains recognizable at small size without text.
 
 ### Customer shell
 
-At 1200 pixels and above, use a 240-pixel left sidebar, 64-pixel header and main
-content with 32-pixel padding. Main content has a maximum width of 1440 pixels;
-forms remain at most 720 pixels. Sidebar contains brand, the seven customer
-destinations in the canonical order, then Help/support context near the bottom.
-No duplicate Help navigation item is required if it already occupies its main row.
-
-Header: page context left; current personal-workspace label, balance shortcut,
-notifications and account menu right. Workspace is a label, not an unsupported
-organization switcher. Balance links to Billing. Account menu has account name,
-Settings, theme/language and Sign out; it does not contain an owner-role toggle.
-Place the page title, one-sentence description and main page action in the content
-header below it. A service-condition banner appears above page content when needed.
-
-At 768–1199 pixels, use a 72-pixel labelled-on-demand navigation rail with accessible
-names, visible current-page title and 24-pixel content gutters. At less than 768,
-replace the rail with a menu drawer: 56-pixel header, 16-pixel gutters, full-width
-content and no icon-only bottom navigation competing with seven sections. Keep
-menu, title, notifications and account control visible; put wallet summary in page
-content or menu. A drawer traps focus,
-closes on explicit action/Escape and returns focus to its trigger.
+Keep the existing rail, responsive drawer and six [primary destinations](../../hosted/web/src/features/app/routes.ts)
+in order: Overview, Usage, Models, Status, Keys, Balance. The header holds page
+context, notifications, language and theme; account security is a contextual task,
+not a role switch or another sidebar item. Show a service-condition banner only
+when relevant. The mobile drawer traps focus, closes on explicit action/Escape
+and returns focus to its trigger.
 
 ### Owner shell
 
-Reuse the geometry/primitives, with a persistent textual `Owner / Владелец` context
-and service mode in the header. Group navigation into Overview; Capacity; Customers
-and access; Activity; Settings. No CSS class or selected role grants permissions.
+Authenticated owner pages use the same sidebar and content geometry as the
+preview, with `Owner` in the header and service access mode in Overview.
+Production links to Overview, Connections, Pool, Payment methods, Usage and
+Notifications. The preview's Models screen has no production sidebar entry;
+published model configuration remains in Pool. Sign-in stays outside the
+workspace. Link guarded setup, security, refund and audit tasks from their
+owning context without adding sidebar entries.
+No CSS class or selected role grants permissions.
 The customer cabinet is a separate authenticated destination, not an admin preview
 that can display another customer's session. Do not show an impersonation button.
 
@@ -260,7 +251,7 @@ that can display another customer's session. Do not show an impersonation button
 
 | Component | Content and behavior contract |
 | --- | --- |
-| Page header | One H1, concise explanation, one primary task and quiet secondary actions; buttons wrap below title on mobile. |
+| Page header | One H1 and the controls needed for this task. A read-only page need not have a primary button or a subtitle. |
 | Action button | Verb plus object; default, focus, hover, submitting, disabled-reason and result. Submission locks the same operation, not the entire page indefinitely. |
 | Field group | Persistent label, optional hint, input, inline error; required marker explained once. Never use a placeholder as the only label. |
 | Amount display | Exact server value/currency/basis; distinguish current, held, posted and pending. Copy exposes the safe exact value. |
@@ -278,36 +269,43 @@ that can display another customer's session. Do not show an impersonation button
 
 ## Screen inventory
 
-Screen IDs are design references, not new implementation packages. Architecture
-owns canonical routes; this inventory binds them to presentation passports below.
-Tabs, sheets and dialogs do not create a new top-level app for each operation.
+The two sidebars follow the [route registry](../../hosted/web/src/features/app/routes.ts)
+in the order below. WS IDs describe tasks, not additional navigation. Follow the
+[customer walkthrough](HOSTED_RELAY_ARCHITECTURE.md#first-customer-request-walkthrough)
+or the [owner import walkthrough](HOSTED_RELAY_ARCHITECTURE.md#from-connection-import-to-first-offer)
+to see how the tabs connect.
 
-| ID | Audience and destination | Main task |
+| Customer tab | What the person can do | What they get |
 | --- | --- | --- |
-| WS-01 | Public `/` and section anchors | Understand service, inspect published models/prices, start sign-in |
-| WS-02 | Customer `/login` and configured identity handoff | Sign in or create own account safely |
-| WS-03 | Customer `/app/overview` | Understand current funds/access and period usage |
-| WS-04 | Customer `/app/usage` | Filter requests and explain a specific charge/error |
-| WS-05 | Customer `/app/models` | Inspect authorized models, prices and connection requirements |
-| WS-06 | Customer `/app/keys` | Issue, restrict, replace and revoke an inference key |
-| WS-07 | Customer `/app/billing` | Fund access and reconcile payments, holds and journal |
-| WS-08 | Customer `/app/settings` | Manage identity, sessions, preferences and account requests |
-| WS-09 | Removed | No standalone customer help route or dialog |
-| WS-10 | Customer header notice sheet | Read own notifications and follow permitted next actions |
-| WS-11 | Owner `/admin/login` | Authenticate an existing owner with a passkey |
-| WS-12 | Owner `/admin/operations/setup` | Complete explicit setup/readiness steps |
-| WS-13 | Owner `/admin/overview` | See present capacity, activity and action-worthy incidents |
-| WS-14 | Owner `/admin/connections` | Manage saved accounts/API providers and their states |
-| WS-15 | Owner `/admin/pools` | Manage admitted capacity and shared pool policies |
-| WS-16 | Owner `/admin/models`, `/admin/tariffs` | Qualify availability and publish revisioned retail prices |
-| WS-17 | Owner `/admin/access` | Manage client access, scoped keys and paired devices |
-| WS-18 | Owner `/admin/customers` | Inspect customer access/status and authorized actions |
-| WS-19 | Owner `/admin/payments` | Reconcile payments, refunds and audited adjustments |
-| WS-20 | Owner `/admin/usage` and request-detail route | Investigate logical requests, attempts and accounting |
-| WS-21 | Owner `/admin/operations` | Manage readiness, incidents, diagnostics and service lifecycle |
-| WS-22 | Owner `/admin/settings` | Configure security, identity, integration and presentation policy |
-| WS-23 | Owner `/admin/audit` | Inspect attributable administrative changes |
-| WS-24 | Shared exceptional views | Recover from denied/unavailable/expired/incompatible states safely |
+| Overview `/app/overview` (WS-03) | Choose period/model; open a chart interval in Usage. | Requests, tokens, spend and recorded speeds in that window. One contextual next step for a new or blocked account. |
+| Usage `/app/usage` (WS-04) | Filter Requests/Models/Keys/Errors, open a group then a request, copy its safe reference or export the filter. | Own execution result and charge status separately, with coverage and exact historical charge. No resend. |
+| Models `/app/models` (WS-05) | Inspect granted offers, compare published context bands, copy a model ID. | Model, protocol and applicable prices. Changing the displayed band does not configure the client. |
+| Status `/app/status` (WS-05) | Choose 24h/7d, find a model and inspect an interval by pointer, keyboard or touch. | Observed availability and scoped request/latency samples, or no evidence. No check/probe button. |
+| Keys `/app/keys` (WS-06) | Create, copy once, edit limits/expiry, reissue or revoke with inline confirmation; retrieve nonsecret client setup. | Masked list and effective policy. Reissue first, migrate client, revoke old key separately. |
+| Balance `/app/billing` (WS-07) | Top up, return to the same payment, inspect receipt/posting or request an eligible refund. | Available funds, outstanding holds when relevant, and authoritative payment/journal results. No duplicate cost graph. |
+
+| Owner tab | What the owner can do | What changes |
+| --- | --- | --- |
+| Overview `/admin/overview` (WS-13) | Choose 24h/7d/30d/All time; drill into Usage, readiness or an outstanding case. | Platform charts, including **posted customer charges**. Reading never restarts, tests or opens the service. |
+| Connections `/admin/connections` (WS-14) | Add/reauthenticate Accounts; edit an API's purchase rates, default markup and per-model selling prices; import/bind Proxies; park, trash or restore. Open the membership action or pair Desktop when needed. | Protected inventory and pricing drafts. Saving an API does not admit it to the pool or publish an offer. |
+| Pool `/admin/pools` (WS-15) | Participants: add from inventory, edit member rules, pause/resume, remove, configure rotation, see active model/member. Model rules: edit state/prices inline, reorder and publish. | Acknowledged membership/policy or tariff revision. A live highlight is observed work, never the predicted next member. |
+| Models `/admin/models` (WS-16) | Inspect the effective storefront, compare bands, copy the ID; open its Pool rule to edit. | What is actually published, without impersonating a customer or displaying drafts as prices. No second editor. |
+| Usage `/admin/usage` (WS-20) | Filter platform history/errors, inspect the request and its attempts, or follow an exact support reference to a guarded case. | What executed, what was charged, what remains unresolved. No replay, prompt viewer or editable charge. |
+| Notifications `/admin/notifications` (WS-10) | Create/edit/discard a draft; review audience, confirm publication, then check delivery. | One in-app notice per eligible recipient/revision. Saving a draft or reopening the tab sends nothing. |
+
+**Outside the sidebars:** WS-01/02 handle public entry and customer sign-in;
+WS-08 is signed-in account/security, WS-10 the customer's bell. WS-09 remains
+removed. Owner sign-in (WS-11) and setup (WS-12) lead to the same owner workspace.
+Reach pairing, support/refunds, operations, security and audit (WS-17–19/21–23)
+from the [owning context](HOSTED_RELAY_ARCHITECTURE.md#owner-browser-navigation).
+WS-24 applies everywhere, not as a destination.
+
+**What stays out of the cabinet:** no onboarding dashboard, playground or paid “test” button;
+no provider accounts, proxy/rotation settings or customer directory in the
+cabinet; no permanent admin menus for exceptional cases; no duplicate price,
+wallet or notification editor. Do not add a control just because an API exists:
+omit unsupported actions; explain a temporary blocker beside a real action.
+Keep a way to recover a payment, key issue or import after the original tab closes.
 
 ## Public entry and sign-in
 
@@ -317,40 +315,19 @@ Tabs, sheets and dialogs do not create a new top-level app for each operation.
 becomes Open cabinet. Never
 render personalized balances into public/cacheable HTML.
 
-**Current minimal composition:** `/` contains a full-screen hero and a second
-screen with four fully visible answers, reached by scroll or `/#faq` / `/#features`.
-Start and the questions-section cabinet action retain the skippable first-use guide.
-Customer authentication starts through the cabinet's sign-in flow.
+**Composition:** keep the hero and four visible FAQ answers (`/#faq` or `/#features`).
+Explain how to use a Relay key in an external client. If this site offers Image
+Studio, link it as a separate way to use the same balance, not as an API test.
+Start/Open cabinet targets Overview, via `/login` only when
+needed; no first-use dialog. Theme and language require no account. Keep
+configured terms, privacy, support and independent service status in the footer.
 
-**Planned expanded public content (not the current minimal preview):**
-
-1. Header: brand, How it works, Models and prices, FAQ, support, locale/theme,
-   Sign in. Section links use `/#how-it-works`, `/#models`, `/#faq`, `/#support`.
-2. Hero: left, a short product promise and two-line explanation; right, an
-   original static diagram `Your client -> Relay API -> Available model`.
-   Primary Start action opens `/app/overview` for a verified active session;
-   otherwise `/login` continues to that panel after authentication. Never infer
-   authentication from a browser preference. Secondary View models scrolls to prices.
-   Example RU headline: `Доступ к моделям. Расходы под контролем.` EN:
-   `Model access. Usage you can understand.` Do not promise unlimited capacity,
-   fixed availability, free trials or unqualified providers.
-3. How it works: three numbered steps, Sign in and inspect prices; Fund access
-   and issue a key; Configure a client and track usage. Explain that model execution
-   can incur usage charges.
-4. Models and prices: short explanation, published-model search, capability filter
-   and a table of public model name, supported protocol, input/cached-input/output
-   prices per million tokens, relevant band indicator and Details. Public prices
-   come from the architecture's read-only public model projection, not build-time
-   constants or customer `/models`. Show tariff revision/effective time and any
-   required band details. Missing components are not displayed as zero or hidden
-   in a misleading single minimum price. Published listing does not grant access.
-5. Product explanation: three concise blocks for configurable access, traceable
-   usage and explicit controls. Describe actual qualified capabilities only.
-6. FAQ: what is sold, compatible clients/protocols, how tokens are charged, why
-   funds may be held, what happens on errors and where to get support. Answers
-   link to reviewed policy; no invented refund, privacy or retention promises.
-7. Final Start action, then footer with operator identity/contact, terms, privacy,
-   support and independently reachable service-status destination from configuration.
+**Before paying:** one quiet Models and pricing link opens the planned public
+`/models` directly. Reuse the catalog table with the public projection only;
+visitors can compare prices/bands without registration. The preview currently
+links to `/app/models`, which in the service is the **authenticated** catalog.
+Do not stretch the landing with a second price table, invented discounts,
+performance counters or a seven-section sales funnel.
 
 **States/actions:** public configuration failure shows neutral branding and an
 unavailable message, not another installation's defaults. If prices cannot load,
@@ -362,7 +339,19 @@ A maintenance/closed banner is above the hero; do not hide outage/support links.
 **Mobile:** hero becomes text then diagram; diagram is decorative to assistive
 technology when its text is already stated. Pricing rows become model cards with
 labelled component prices and Details.
-No artificial customer counters, reviews, brand logos or product screenshots.
+No invented customer counters, reviews, endorsements or product screenshots.
+
+**Linked site pages:** put **API guide** (`/docs`) and **Policies** (`/legal`) in
+the footer. Link to the same guide from the key setup example and to the operator's
+terms/refund policy before checkout. No sign-in is needed to read either page.
+When offered, **Image Studio** (`/studio`) follows the
+[sign-in and key selection flow](HOSTED_RELAY_ARCHITECTURE.md#entering-studio-with-a-relay-key).
+After sign-in, show the key picker before the model controls. When there are no
+keys, put **Create key** in the picker's place; it opens **Keys** in the cabinet,
+not an inline form. Once a key is selected, show its eligible models and rates.
+If the selected key or offer becomes unavailable, do not switch it silently.
+Keep these entries out of both sidebars. Use the content and branding of the
+[current installation](HOSTED_RELAY_ARCHITECTURE.md#public-source-and-operator-installations).
 
 ### WS-02 — Customer sign-in and return
 
@@ -371,7 +360,7 @@ session. Store only a validated same-origin destination, not arbitrary redirects
 Returning to a protected detail still requires a fresh authorized lookup.
 
 **Composition:** centered surface up to 440 pixels wide: brand/back-to-site;
-`Войти в Relay / Sign in to Relay`; short statement that a new account may be
+`Sign in to Relay`; short statement that a new account may be
 created if registration is open; vertical configured provider buttons; required
 policy/terms disclosure; support and theme/language controls. Do not render empty
 email/password fields, an unsupported password reset or a separate duplicate
@@ -382,7 +371,7 @@ server-created provider flow -> return through the configured callback -> verify
 session/workspace -> open Overview or the validated destination. First registration
 shows only the policy acceptance required by the reviewed server contract; no
 preselected optional marketing consent. Same-email identities are not silently
-merged. Identity linking is initiated from authenticated Settings instead.
+merged. Identity linking starts in the signed-in account context instead.
 
 **States:** user cancelled, provider temporarily unavailable, attempt expired,
 identity needs explicit linking, registration closed and session confirmation
@@ -400,63 +389,38 @@ provider controls remain usable with the software keyboard, zoom and back gestur
 Each customer page uses the customer API only. The displayed customer is the
 authenticated personal workspace, never a chosen owner-panel filter. Each passport
 inherits WS-24's loading, denied, unavailable and session-expiry behavior.
+After session verification, use the shared sidebar and mobile drawer. Keep keys
+and balance above sign-out. The header links to Balance and Account security,
+then shows the bell, language and theme controls.
 
 ### WS-03 — Overview
 
-On the first authenticated visit, offer a short welcome dialog with the steps
-Models, Funding, Key and Client setup. Include Skip and close/Escape; neither
-performs a financial action or affects access. Keep the guide available in Help
-after dismissal. A stored dismissal is a UI preference, not authentication or
-proof of a completed request. The local preview exercises this journey with
-explicit synthetic data; it does not qualify Hosted login or billing.
+Start with the period/model selector and the charts: normalized tokens, posted
+usage charges, logical requests and observed speeds. Default to rolling 24h;
+7d/30d also end at the server snapshot, not midnight. Selecting a bucket opens
+Usage with the same model, exact UTC bounds and report revision. Missing samples
+stay missing. Keep wallet and key shortcuts in the rail, notices in the bell and
+request lists/breakdowns in Usage; do not repeat them above or below the charts.
 
-**Header:** `Обзор / Overview`, short period context, primary Top up; Create key
-is secondary unless the account has no key, when the onboarding block highlights it.
-
-**Placement:**
-
-```text
-Page title                                      Top up   Create key
-Service condition / actionable account notice, when present
-CURRENT: Available | Held for requests | Held for refunds | Active / queued
-FIRST USE: Models -> Funding -> Key -> Client setup (only when useful)
-HISTORY: UTC period | model | key | supported outcome | Reset | Refresh
-Requests | Normalized tokens | Posted usage charges | Completion rate
-Request outcomes over time                     Token components over time
-Posted usage charges over time                 Observed latency / sample count
-By model                                       By key
-Recent requests                                Important notices
-```
-
-These groups use the canonical metrics; the layout does not permit adding token
-subcomponents twice. Every period panel shares a snapshot/filter contract. Current
-funds/activity have their own observation time and are visibly outside the history
-filter area. Chart totals are not sums of whatever series happen to be visible.
-
-**Interactions:** period defaults to the last seven UTC calendar days including
-today; Today/7 days/30 days/custom use retained coverage. Model/key rows and chart
-selection open Usage with supported matching filters. Recent request opens safe
-detail; pending payment opens its Billing record; a notice opens its authorized
-target. Refresh reads data only. Onboarding completion is based on server evidence;
-creating a key and funding may happen in either
-order. Successful first usage is never simulated to finish the checklist.
-
-**States/mobile:** a genuinely new account gets useful steps, not fake chart data.
-No matching history offers Reset filters; incomplete data explains coverage.
-Unavailable wallet remains unknown even if charts loaded. On mobile, keep funds,
-first-use/urgent notice, filters, summaries, charts, breakdowns and recent requests
-in that order; collapse secondary breakdowns explicitly, not critical warnings.
+**First visit:** show at most one relevant next action in the empty state, from
+confirmed account data: no eligible offer → Models or support; unresolved top-up
+→ its payment status rather than another checkout; no funds → Balance; funded
+but no usable key → Keys; key and funds but no history → the client setup in
+Keys. The user can navigate freely and create a key before funding. With history,
+remove the hint. A failed read is not a new account; a filter with no matches
+offers Reset, not onboarding. On phones keep the same order, stacking the charts.
 
 ### WS-04 — Usage and safe request detail
 
-**Header:** `Использование / Usage`; Export is the main action, not Generate again.
-Below: UTC period and model/key/outcome filters; query summary/as-of; compact
-canonical totals; optional time-series panel; request table; cursor navigation.
+**Header:** `Usage`; Requests, Models, Keys and Errors are views of the same
+authorized history. Select a group to drill into Requests; Back restores the
+filters. Filter, reset, refresh or export the selection; none sends inference.
+Below: query summary/as-of, compact totals, request table and cursor navigation.
 
 **Table order:** started at UTC; public model; masked key label; protocol; execution
 outcome; duration/TTFT where available; normalized token summary; customer charge;
-accounting status; Details. Start with 25 rows where the server bound permits;
-50 is a permitted choice only when supported. Do not invent a total-page count for
+accounting status; Details. Preserve the preview's 8/16/32 row choices within
+server bounds. Do not invent a total-page count for
 cursor pagination. Revoked keys retain safe historical labels.
 
 **Detail sheet:** top request ID with Copy and separate execution/accounting
@@ -472,10 +436,11 @@ Include safe error guidance and Copy support summary. Keep User-Agent labelled a
 client description, separate from authenticated user attribution. Never include
 physical account identity, provider tokens, prompts, answers or the owner timeline.
 
-**Export flow:** choose request versus retained aggregate data, see current filters,
-coverage and bounds, then Create export. A pending job row exposes status; completed
-download remains authorized and expires. Polling/refresh recovers the same job;
-there is no silent second export or claim of completeness after truncation.
+**Export flow:** Download CSV exports the selected bounded request snapshot,
+including rows beyond the current page. Retained aggregate exports show current
+filters, coverage and bounds before Create export. A pending job row exposes
+status; the completed download remains authorized and expires. Refresh recovers
+the same job; no export claims completeness after truncation.
 
 **States/mobile:** missing usage is Unknown, estimated charge has its basis, and
 expired detail links to retained aggregate information only where available.
@@ -483,47 +448,68 @@ Unknown execution offers status/support, never blind resend. Mobile rows keep
 model/time, both states and charge visible; the remaining fields move to detail.
 Closing a sheet restores filters/scroll. A direct `request` query opens only the
 current customer's permitted record and does not disclose an unauthorized ID.
+When opened from a chart snapshot, show the receipt at that watermark or label
+a newer correction and offer Refresh. Never silently compare a new charge with
+the old chart total.
 
 ### WS-05 — Models and prices
 
-**Header:** `Модели и цены / Models and prices`; explanatory subtitle says these
-are the models/prices applicable to this account. Search and supported capability/
-protocol filters precede the list. Group by a clear public model family only where
-the authorized projection provides one; do not infer capability from a name.
+**Header:** `Models`; start directly with the read-only grouped catalog, without
+a generic filter toolbar, unit banner or key action. Use the authorized publisher groups and relative
+model order from the [catalog contract](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order),
+without alphabetical/popularity re-sorting or inferring capability from a name.
 
-**Row/card:** public name and exact model ID; supported protocols/capabilities;
+**Row/card:** readable public name, with exact model ID available for copying/details;
+supported protocols/capabilities;
 input, cached input and output rates with currency/per-million unit; band/details
-indicator; availability explanation; Connect. Desktop uses a comparative table;
+indicator and evidence-backed availability. No Get key/Connect action. Desktop uses a comparative table;
 mobile uses labelled stacked rows. Never show internal account counts or inventories.
 
-**Detail:** supported operations, protocol endpoints, context/service-tier/cache
-bands and exact component prices; effective tariff revision; safe availability
-explanation; placeholder configuration example. Connect opens Help with model/
-protocol preselected. Show unavailable or not-granted information
+**Detail:** the server chooses the displayed pricing variant. Show published
+context bands once: a single band is static, two switch inline, more use the
+existing compact selector. Leave missing bounds blank. Units remain unambiguous
+in column labels/accessible descriptions; exact component rates and effective
+revision are inspectable. This is a comparison, not a runtime tier selector.
+Keep model-ID copy separate from key creation. Show unavailable or not-granted information
 only where the server deliberately exposes that public descriptor; no hidden-catalog
 discovery via client guesses. Scheduled revisions show effective time and scope;
 historical request prices stay in Usage.
+
+The restricted catalog supplies the exact model ID, Responses protocol, published
+input/output/cache-read rates and nullable publisher in the saved display order.
+Group unknown publishers under **Other** when there are known groups. Missing
+context and cache-write rates use a dash; omit savings without a reference price.
 
 **States:** no authorized models points to support/account policy; temporary
 capacity is different from absent grant, disabled route or missing tariff. A model
 without a complete qualified price cannot look ready for paid use. Do not present
 roadmap connectors as available options.
 
+**Status (`/app/status`):** keep 24h/7d beside the heading, the summary above
+the model table, and one legend beside search. Read only the
+[authorized history](HOSTED_RELAY_ARCHITECTURE.md#model-status-history).
+Missing samples stay neutral with accessible text; fewer observations are not
+an outage, 100% uptime or a measured zero latency. Latency uses measured
+time to completion, with sample coverage in the detail.
+
 ### WS-06 — API keys
 
-**Header:** `API-ключи / API keys`, primary Create key. A short explanation separates
-the Relay inference key from upstream accounts and from customer/owner sessions.
+**Header:** `API keys`, primary Create key. Use the existing inline editor and
+row actions, not a key-settings screen.
 List columns: name/prefix, status, allowed models/operations, effective limits,
 expiry, last use and Actions. Never fetch a stored full secret for this list.
 
-**Create form:** name; permitted models/operations; supported spending/rate/concurrency
-limits; expiry; summary of effective inherited workspace policy. Units, reset time,
-default versus explicitly configured value and upper bounds are visible. Empty
-does not silently mean Unlimited. No user-selected value can widen workspace grants.
-Final Create button names the operation; server field errors stay next to fields.
+**Create form:** name, optional daily spend limit and expiry; inherit the
+workspace's server policy. Do not ask a user to reselect every allowed model.
+Display narrower effective scope/limits when relevant; offer a restriction only
+where supported. Units, reset time, inheritance and upper bounds are explicit;
+empty is not Unlimited. Server field errors stay beside their fields.
 
 **One-time result:** replace the form with a transient secret panel, explicit Copy,
-warning that the secret cannot be shown again, and Continue to setup. Do not copy
+warning that the secret cannot be shown again, and Done. Done closes the panel in
+place; arriving from Studio adds no return button. Provide the configured
+inference base URL, exact model/protocol and a copyable placeholder configuration
+here and from the masked key row later; the secret never returns with them. Do not copy
 automatically, put it in a URL or announce it through a live region. Leaving warns
 that the display will be lost, not that the key will be undone. If issuance committed
 but the response was lost, show the resulting masked key/status and the replacement
@@ -532,40 +518,57 @@ path; never silently issue another key or claim the key is absent.
 **Edit/replacement/revoke:** edit only server-supported mutable fields with revision
 checks. For a replacement, explain creation of a new key, client migration and
 explicit revocation of the old key; do not promise revocation until acknowledged.
-Revoke dialog names key/prefix and explains new-use blocking versus in-flight work;
-confirm with an explicit action. A successful revoke is visible
+The first Reissue or Revoke click arms only that key's row. Show the target and
+Confirm/Cancel inline; Escape, another row or navigation disarms it. A deliberate
+second activation, not a double click or key repeat, submits once. Explain
+new-use blocking versus in-flight work at confirmation. A successful revoke is visible
 in the list; repeated confirmation addresses the same operation.
 
-**States/mobile:** empty list has Create key and Help; expired/revoked entries are
+**States/mobile:** empty list has Create key; expired/revoked entries are
 readable, not deleted. Policy changes/conflicts require reload and review. Full
 secret display is private even in responsive screenshots/test fixtures; use synthetic
 values. The mobile key card keeps name/status/scope and an accessible action menu.
 
 ### WS-07 — Billing, payments and refunds
 
-**Header:** `Баланс и платежи / Balance and payments`; primary Top up. First row
-shows current available funds, request holds and refund holds, with snapshot time
-and explanations. Pending payment amounts are a separate block, not part of funds.
-Below use Payments and Wallet journal tabs, with bounded filters and pagination.
+**Header:** `Balance`; available amount and inline Top up beside payment history,
+stacked on phones. Show actual holds when they explain unavailable funds; avoid
+a permanent reserve tutorial. Journal detail is reachable from the balance or
+a linked request/payment. Pending payments are history rows, not spendable funds.
+Use bounded filters/pagination, not a second spending dashboard.
 
 **Top-up steps:**
 
-1. Amount and qualified payment method: server-supported min/max/currency, no
-   invented preset amounts, hidden fees, recurring subscription or automatic top-up.
-2. Review: amount paid, wallet credit in USD, fees/conversion if applicable,
+1. Show the selected method's quick amounts as USD wallet credits in the order
+   returned by the server. Show **Custom amount** and its limits only when allowed;
+   fixed-only checkout has buttons and no amount field. Respect the server's
+   method order: show one method by name, several in one selector. Switching
+   methods clears an ineligible selection rather than changing the amount.
+   With no eligible method, show `Top-ups unavailable` and leave balance and
+   history visible. Each top-up is a one-time payment, not an automatic refill.
+2. Review inline: amount paid, wallet credit in USD, fees/conversion if applicable,
    quote expiry, method and applicable policy. Change means requote, not local math.
-3. Create payment: one durable operation; redirect to the returned approved hosted
-   payment flow. Relay does not collect raw card details in its own generic form.
+   If the customer chooses another method while an invoice is open, keep that
+   invoice available; only confirming the new quote creates a second invoice.
+3. Create payment: one durable operation; redirect to the approved checkout.
+   If the open-invoice limit is reached, show the count beside **Top up** and
+   link to the customer's open payments in the existing history. Do not cancel
+   the oldest invoice or submit the form automatically when a slot opens.
+   Relay does not collect raw card details in its own generic form.
 4. Return/status: stable payment reference, status and What happens next. Query the
    same payment; provider redirect text is never proof of credited money.
 5. Confirmed credit: server acknowledgement, receipt where available, fresh wallet
    snapshot and Return to overview. Never show a success animation while pending.
 
-**Payments table:** created UTC, reference/method, amount/currency, wallet-credit
-amount, canonical status and Details/receipt. Detail includes current state/history,
-quote facts, confirmed credit/refund and permitted next action; no merchant secrets
-or raw webhook. Pending/expired/cancelled/failed are distinct. Do not start a new
-payment automatically after a timeout; explain an existing unresolved intent.
+**Payments table:** one row per invoice, even when the amounts match. Show creation
+time (UTC), reference, method, amount/currency, wallet credit, status and Details/receipt.
+Detail includes current state/history, quote facts, confirmed credit/refund and
+permitted next action; no merchant secrets
+or raw webhook. Show **Continue payment** on the history row only when the server
+offers it; `Pending` alone is not enough. On click, open the same invoice. If it
+was paid or expired in the meantime, refresh the row instead. When the outcome is
+unknown, offer **Check status**, not a second checkout. Expired, cancelled and
+failed payments remain distinct in history.
 
 **Wallet journal:** posting time, operation/reason, reference, signed posted amount
 and resulting balance only if authoritative. Inference debit links to safe Usage;
@@ -585,9 +588,9 @@ Check status; never display guessed balances or invite an unqualified duplicate.
 
 ### WS-08 — Settings and account security
 
-**Layout:** page header, section navigation, then a maximum-720-pixel form column.
-Sections: Account; Sign-in methods; Sessions; Notifications; Appearance; Account
-closure/help. On mobile navigation becomes a labelled section selector, not tiny tabs.
+**Layout:** open account/security from the signed-in account context rather than a
+primary Settings destination. Group sign-in methods, sessions, notice preferences
+and account closure; keep appearance controls in the shell.
 
 - Account shows server-provided identity/workspace context; no editable field can
   reassign the authenticated user. Only supported profile edits are offered.
@@ -595,17 +598,18 @@ closure/help. On mobile navigation becomes a labelled section selector, not tiny
   begins a server-bound authenticated linking flow; unlink explains the remaining
   access method and fresh-proof requirements. The last usable method is protected.
   Same email is not automatic account merge; failures preserve existing access.
-- Sessions show bounded safe device/client description, last activity and current
-  session marker. Revoke other/current session has clear consequences; revoking
-  customer sessions leaves inference keys and owner sessions active.
+- **Browser sessions** is available from the signed-in header at
+  `/app/overview?panel=account`. Show the current session first, then other active
+  sessions by last activity, with sign-in and activity times. No device names are
+  inferred. End a session with inline confirmation; ending the current session
+  returns to sign-in. If the result is unknown, refresh the list before retrying.
 - Notifications show supported event preferences and threshold semantics. External
   delivery appears only for a qualified channel with verified recipient/consent;
   in-app read status is not acceptance of a tariff or resolution of an incident.
-- Appearance has RU/EN and System/Light/Dark controls. These are the only broadly
-  persistent client preferences. Sensitive page content stays out of this store.
-- Closure area explains what access ends, which unsettled obligations remain and
-  which records must be retained under reviewed policy. Use the documented request/
-  support process; no fake instant-delete button before a supported domain contract.
+- Only non-sensitive presentation preferences may persist in the browser.
+- With a configured support link, **Close account** shows the workspace
+  reference and how to save receipts and request a refund before closure.
+  Contacting support does not change account state.
 
 Each editable section has its own Save/Cancel state, revision conflict and result.
 Navigating away warns about ordinary unsaved edits; credentials/proof are not saved
@@ -613,14 +617,14 @@ in a browser draft. Failed save never marks unrelated sections as successfully s
 
 ### WS-09 — Removed standalone help
 
-The customer help route, modal, navigation entry and connection-help actions were
-removed. `/app/help` and its legacy preview URL use the normal not-found state.
-This does not remove first-use onboarding, model ID copying, safe Usage details,
-or the owner's connection inventory.
+There is no cabinet Help tab, modal or `/app/help` route; its legacy preview URL
+also uses the normal not-found state. Connection instructions live beside key
+issuance and link to the public `/docs` guide.
 
 ### WS-10 — Notices
 
-**Entry:** header bell with unread count, also accessible by a text label. Desktop
+**Entry:** header bell indicates unread state without a second badge; include
+the state in its accessible label and respect reduced motion. Desktop
 uses a right sheet; mobile uses a full-screen sheet. Header has Notifications and
 Close, then a bounded newest-first list, pagination and Notification settings.
 
@@ -630,9 +634,14 @@ price acceptance. Open rechecks target permission/current state; a deleted/expir
 target gives a safe explanation. Notices are not HTML supplied by a provider.
 
 Low funds opens Billing; payment opens its status; delayed settlement opens own
-Usage; security change opens Settings; scheduled change opens the published safe
+Usage; security change opens account controls; scheduled change opens the published safe
 detail. Persistent service restrictions remain in the page banner even after the
 notice is read. Empty means no retained notices; failed load is not an empty list.
+
+**Owner (`/admin/notifications`):** keep Draft, Publish and delivery progress
+distinct. Confirm content and audience before the first send. Refresh or a lost
+acknowledgement looks up the same publication; draft saving never rings a
+customer bell. The customer's view contains no editor or delivery administration.
 
 ## Owner panel
 
@@ -641,6 +650,13 @@ visual layout. They never infer owner authority from a customer login, client-si
 role flag or direct URL. Browser routes and their API calls are separate namespaces.
 Use the architecture's [owner navigation](HOSTED_RELAY_ARCHITECTURE.md#owner-browser-navigation)
 and [permission boundaries](HOSTED_RELAY_ARCHITECTURE.md#owner-and-customer-permissions).
+
+**First installation:** provision the owner on the host → sign in with a passkey
+→ follow Overview's readiness link → configure customer entry, funding and recovery
+→ add a connection → admit the member → review and publish a qualified offer
+→ inspect the effective catalog. Return to readiness for the separately authorized
+funded qualification and explicit opening. Saving an offer does not open the
+service. On later visits Overview opens normally; show unresolved tasks only.
 
 ### WS-11 — Owner sign-in
 
@@ -689,47 +705,79 @@ evidence. Do not display production-ready from a percentage-complete progress ba
 **Header:** Overview, current service mode plus observed health as separate labels,
 last refresh and Review operations action. Setup blockers appear before metrics.
 
-**Order:** current active logical requests/physical attempts/queued work; capacity
-summary by public model and saved/admitted/healthy source states; actionable
-incidents; historical request/error/latency panels; posted customer charges and
-separately evidenced provider expense; recent administrative changes.
-
-Capacity table columns: model, eligibility/availability, active logical requests,
-active attempts, bounded queue, quota/reset evidence where known and observed at.
-Counts describe current ownership, not requests started in the last minute.
-Historical filters do not affect those counts. Expense unavailable is not zero
-and does not create a fabricated profit number. Noncustomer operational work is
-labelled separately from sold requests and customer wallet charges.
+**Order:** show a setup blocker or actionable incident only when applicable, then
+the rolling-period charts, including **posted customer charges**. No permanent
+top panel duplicating capacity data. Put current active members and their models
+in Pool; queued work and physical attempts are not extra sales. Historical
+filters never change current activity. Keep separately evidenced provider expense
+in the relevant detail, not a guessed profit curve.
 
 Click model/source opens the corresponding permitted detail; an incident opens
 Operations or the filtered Errors view. A card has no implicit Enable all, probe,
-reauthenticate or retry action. On mobile show mode/critical incidents first, then
-current activity/capacity, then historical charts; do not put essential warnings
+reauthenticate or retry action. On mobile show critical incidents before charts;
+do not put essential warnings
 below a long analytics dashboard.
 
 ### WS-14 — Connections and credential inventory
 
-**Header:** Connections; primary Add connection with explicit Account/API-provider
-choice. Tabs Accounts and API providers, status/family/search filters and Trash
-view. Saved inventory and pool membership are separate facts everywhere.
+**Tabs:** Accounts → Add account/reauthenticate; API providers → Add/edit provider;
+Proxies → import, rename and assign; Trash → restore or guarded removal, no Add
+action. Open the appropriate form from the current tab without asking for the
+type twice. Search, filter or select visible rows without changing their state.
 
 **Table:** safe label/family, credential/auth state, pool membership, enabled models
-summary, observed quota/reset, last refresh/action and row menu. Show freshness
-and partial data. API provider rows show safe endpoint/label and masked credential
-metadata, never query credentials or full secrets. Endpoint display is sanitized.
+summary, observed quota with known renewal timing, last refresh/action and row
+menu. Show freshness and partial data; additional resets are separate and appear
+only where supported. API provider rows show safe endpoint/label and masked
+credential metadata, never query credentials or full secrets. Endpoint display is
+sanitized.
 
-**Detail sheet/extended page:** Summary; Authentication; Models/quota; Connection
-settings; Automation; Recent safe events. Show only supported controls for that
-source type. Private owner metadata never appears in customer Usage or public APIs.
+**Row detail:** show authentication, observed models/quota, relevant settings
+and recent events for this source; no empty tabs for unsupported features.
+Private owner metadata never appears in customer Usage or public APIs.
 Refresh displayed status is a read; Check source/Refresh credentials is a separate
 explicit domain action with scope and any external effect disclosed.
 
-**Add flow:** choose a qualified connector -> show supported sign-in/import/API-key
-method -> obtain explicit authority/consent -> validate/save to protected storage
--> show Saved and whether parked -> separately review pool admission. No automatic
-sale/enablement just because login succeeded. Credential entry is transient, never
-browser-drafted; imported files use bounded approved formats, not executable content.
-Do not offer unqualified future connectors or accept arbitrary callback URLs.
+**API purchase control:** in **Edit → Connection**, show **Relay purchase limit**:
+**No Relay limit** (default) or **Monthly limit** with one USD amount. In capped
+mode show this month's accounted spend, the amount reserved for open attempts
+and when the allowance renews (UTC). Keep **Provider balance** separate, in the
+units the connector reports, with its freshness. The seller tops up directly
+with the provider; there is no second wallet or checkout here. If new sends are
+blocked, identify whether provider credit or the Relay limit needs attention.
+This control is owner-only; model prices still belong in **Edit → Models**.
+
+**Import:** follow [SC-09: choose source, preview, confirm, inspect each result](HOSTED_RELAY_ARCHITECTURE.md#from-connection-import-to-first-offer).
+For a qualified provider login use its consent flow; for a supported file show
+only safe selectable rows. For an API source use the compact Connection/Models
+editor: endpoint/protocol, write-only credential, proxy, then declared versus
+observed models. **Edit → Models** shows the API-wide default markup once above
+the model list. On a model row the seller edits **Purchase** and **Sale**
+together using the [shared price editor](#ws-16--models-and-tariffs). Saving
+the connection does not publish the prices.
+In the static API inventory, open this editor from the connection card's model
+count. It edits rates for admitted models; declared IDs and verified models
+outside the pool remain read-only.
+For a Desktop transfer, the browser opens pairing/status only;
+Desktop selects the local data. The result's next action is **Review in Pool**,
+not an automatic admission. An interrupted operation can be reopened by reference.
+
+On HTTPS installations with web intake enabled, **API providers → Add API
+connection** uses the Connection/Models editor with the supported Responses
+protocol, masked key and proxy fields, and optional declared IDs. Save confirms
+with a passkey. A lost reply offers **Check connection save**, without resending
+the key. The card separates declared models from current verified observations.
+In local HTTPS qualification, the same **Models** dialog offers **Check model**
+with explicit billing bounds and passkey confirmation. The short check may
+incur upstream charges. Reopening the dialog reads the last receipt and does
+not start a check. A passed check updates verified observations only.
+
+**Proxies:** preview valid/error rows without echoing authentication. Choose the
+connection's effective binding (specific, inherit, explicitly direct) and save
+with its revision. Before removing a used proxy, show affected connections;
+require explicit reassignment or leave them blocked, never silently send direct.
+An authorized connection check is distinct from refreshing the list. No passive
+speed tests or promise that a proxy reachable from Desktop works on the server.
 
 **Action semantics:**
 
@@ -743,6 +791,12 @@ Do not offer unqualified future connectors or accept arbitrary callback URLs.
 | Permanently remove | Explicit target and irreversibility; fresh proof/fencing per policy; never promise removal erases financial/audit obligations. |
 | Export credentials | Separate deliberate secret-export action with fresh proof, scope and protected delivery; no generic export from a filtered table. |
 
+In the static API inventory, keep pause/resume and a compact **Actions**
+disclosure on the source row. Park and trash confirm inline; a trashed row
+offers restore in place. Show membership separately from pause and draining.
+Pool Participants reads those states without treating a retained publishing
+anchor as a member.
+
 Bulk operations begin with current-page selection. All-matching selection, if
 supported, names the bounded snapshot/count and allowed action; never assume every
 filtered source is eligible. Review individual outcomes, revision conflicts and
@@ -754,7 +808,9 @@ settings in detail. No hover-only credential or destructive controls.
 
 **Layout:** title and explicit pool selector only when more than one supported
 pool exists; active configuration revision and pending-activation banner; tabs
-Participants, Routing/policies, Model rules. Add participant selects saved eligible
+Participants and Model rules. Rotation settings open from Participants, not a
+third tab. Highlight observed active work only, never a predicted next member.
+Add participant selects saved eligible
 inventory.
 
 Participant rows show order, source label, enabled/draining state, model eligibility,
@@ -762,11 +818,45 @@ observed quota and active work. Reorder with accessible Move up/down controls;
 dragging may be additional, never required. Park/remove membership is not Delete
 connection. Explain stale state and revision conflicts before changing a live pool.
 
-The policy editor covers existing shared controls: order/rotation, model enablement,
-context/reasoning/service-tier settings, quota automation, supported tool rules,
-automatic proxy-derived timezones and other qualified parity items. Use labelled sections with units and
-effective inherited values. Pricing links to the canonical tariff flow.
-Unsupported controls show an explanation only when useful; never appear enabled.
+**Participants:** the pencil opens the member's supported model switches, pause
+state, note and applicable source settings. The rotation control opens *on this
+tab*: only show supported modes and their relevant inputs (e.g. member order
+or shares); cancel discards the draft. Read current member/model and simultaneous
+work from the server. No animation from a click or preview speed, and no “next”.
+Advanced route/quota/tool options appear only on a member/policy that supports
+them, not as a permanent control strip.
+
+The restricted API pool's pencil opens the Desktop-style member editor.
+**Models** shows only admitted exact model IDs and their switches. One
+**Save** confirms the whole draft with a passkey. A conflict reloads the current
+flags for review. **Settings** holds whole-connection pause, resume and removal.
+Neither tab becomes a second price or publication editor.
+
+Keep participant rotation separate from model display order. The rotation editor
+shows only backend-qualified strategies and connector-supported controls. The
+restricted API pool supports **Automatic** and **Primary & reserve**. Show member
+order controls only in the latter; **Save** confirms the change with one passkey.
+After a conflict show the current policy and discard the stale draft. Show the
+saved mode beside observed dispatches without marking a predicted member. Quota
+uses shared terminology with provider-specific units and windows; unknown data
+is not unlimited capacity. Additional reset controls appear only when supported,
+independently of quota display. Authentication methods vary by provider. A
+provider account, an authorization method and a model publisher are distinct.
+
+**Model rules** owns catalog state, ordering and publication. Its rows expose
+price components/bands inline using the same editor as Connections. Collapse a company
+locally to navigate, or deliberately move a company/model to change display
+order. Draft/save, publish and effective state are distinct. See WS-16 below
+for the editor's price review and the storefront readback.
+
+On a subscription offer with a qualified API alternative, show one owner control:
+**Use paid API when subscription quota runs out** (off by default). In the
+existing change review, name the exact offer and let the seller confirm which
+API connections may be used. Show their purchase rates and monthly limit, or
+**No Relay limit**; link to Connections to change them. Saving the rule does
+not send a request or publish a new price. Keep a saved rule visible and
+revocable even if its backup becomes unavailable. No extra rotation mode,
+customer prompt or storefront badge.
 
 Review shows changed fields, affected models/sources, validation and impact on new
 versus in-flight requests. Save with expected revision, then display durable saved
@@ -776,21 +866,53 @@ writes. Mobile uses stacked policy sections and full-width review.
 
 ### WS-16 — Models and tariffs
 
-**Navigation:** Models and Tariffs are related tabs linked to `/admin/models` and
-`/admin/tariffs`, not two conflicting editors. Model detail connects them by exact
-public identity and version. Search/filter state survives the return to a list.
+**Navigation:** `/admin/models` answers “What offer is published now?” It is a
+read-only storefront view, not a simulated customer session or proof of any
+particular key's grant. Use the same catalog presentation as WS-05. An owner
+edit link opens **Pool → Model rules** on that model; preserve its identity and
+return context. Connections and Pool use the same pricing draft and publish review.
 
-**Models:** columns public ID, supported operations/protocols, qualification/grant
+**Editing a rule:** readable model name with exact ID available for copying/details,
+supported operations/protocols, qualification/grant
 evidence, effective availability, public-publication state, tariff completeness
 and Actions. Qualification, publication and paid enablement are separate decisions.
 No switch creates capability or upstream permission. Explain why a route is blocked
 and which permitted setup action can resolve it without exposing data to customers.
 
-**Tariff editor:** public model; currency and per-million unit; supported input/cache/
-output components; applicable context/service-tier bands; exact decimal values;
-effective time; change reason. Blank price differs from an explicitly confirmed
-zero. Unsupported/overlapping components cannot be billed twice. Show a synthetic,
-clearly labelled server-calculated example if supported, not browser-priced quotes.
+**Grouped workspace:** use the existing compact publisher-group pattern, such as
+OpenAI with its model rows, under the [canonical model-order contract](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order).
+Group headers collapse/expand and expose accessible reorder controls; model rows
+move only within their publisher group. Dragging has keyboard/button equivalents.
+Collapse changes presentation only, not enablement. Keep disabled rows editable
+for the owner and retain their saved positions.
+
+Align model name, configured state and currency/per-million price components in
+one readable surface rather than nested model cards. Preserve the Hosted design
+system; on narrow screens use labelled rows with reachable state/order controls.
+Show the selected context/service-tier variant and distinguish input, cache and
+output prices without guessed zeroes. Customer views project the authorized order
+and published tariffs, not private routes, draft prices or management switches.
+Conflicting saves retain the user's draft and offer a fresh server revision; never
+silently overwrite newer order, model settings or prices.
+
+**Shared price editor:** one row per supported component for the selected
+variant, with **Purchase · [API label]** and **Sale · [public model]** side by
+side in USD per million tokens. In Connections the source is already selected;
+in Pool show a source choice only when there is more than one. Switching the
+source changes the purchase column, not the model's selling rule. For
+subscription-only supply, show fixed selling prices without inventing a token
+purchase cost.
+
+On the model row choose **Use API default**, **Model markup** or **Fixed prices**.
+For a percentage show the server's proposed selling rates; for fixed prices
+edit those same cells directly. Show the inherited percentage and let the seller
+return an override to the default without retyping. If another API sets a proposed
+selling rate, identify it in review. Changing an API default previews only the
+offers it affects. Mark missing required fields on their rows;
+warn when a sale component is below known cost without blocking a deliberate price.
+Review compares the proposed prices with the published ones and shows effective
+time and reason. The [pricing rules](HOSTED_RELAY_ARCHITECTURE.md#api-source-rates-and-the-public-tariff)
+stay on the server. Customers see no purchase costs, markups or source picker.
 
 **Publish flow:** draft -> validate -> review old/new revision and affected scope
 -> required notice/effective-time check -> fresh verification -> explicit publish
@@ -802,16 +924,11 @@ On mobile stack component/band rows, keep units visible and use a full-page revi
 
 ### WS-17 — Access and paired devices
 
-**Layout:** API connection information followed by separate tabs Customer keys and
-Paired devices; owner security links to Settings.
-Display public protocol endpoints, compatible instructions and safe copy controls.
-There is no Desktop Applications launcher in this panel.
-
-Customer-key rows show assigned customer/user, label/prefix, scopes, effective
-budgets/rates/concurrency, expiry, last use and status. Server-authorized issuance,
-restriction/replacement/revoke actions follow the same domain rules as customer
-keys, with owner audit and no disclosure of stored secrets. An owner cannot convert
-an inference key into a management credential by changing a UI field.
+Open **Paired devices** from Connections when authorizing or revoking a Desktop.
+For key abuse, open only the affected customer's masked key from its authorized
+case; show scope, expiry and last use, with guarded restriction/emergency revoke.
+No browse-all key inventory, owner-issued customer keys or Applications launcher.
+Customer instructions for connecting a client belong in Keys, not here.
 
 Paired devices show label, granted scope, proof/expiry, last use and revocation.
 Pairing has explicit begin/review/confirm/expiry steps with narrowly scoped authority;
@@ -831,7 +948,7 @@ authority without silently upgrading or recreating the device grant.
 **Explicit Desktop transfer:** show this as a separate paired-device operation,
 not automatic synchronization or a website credential scrape. Desktop initiates
 local inspection/selection; the owner sees scoped source/destination, sanitized
-snapshot, differences, authority and proposed membership changes before confirming.
+snapshot, differences, authority and the proposed credential/proxy bindings before confirming.
 Show stage/drain/activation/verification and recovery states from the canonical
 [transfer contract](HOSTED_RELAY_ARCHITECTURE.md#local-and-hosted-pool-transfer).
 Saving a connection is not proof of safe ownership transfer. Failed acknowledgement
@@ -840,27 +957,30 @@ or silently retain two dispatch owners. No transfer is implied by opening Access
 
 ### WS-18 — Customers
 
-**Table:** safe customer identifier/label, status, available/held money, key count,
-recent activity and Details. Filters are bounded and server-owned; do not expose
-identities through public search. Avoid unnecessary personally identifying columns.
+**Entry:** from request detail, a refund case or an exact workspace filter in
+owner Usage. Open one authorized workspace, not a customer directory, Add user form
+or empty global dashboard. Standard shared access follows the approved offer
+policy; no one adds each new customer as a participant in the physical pool.
 
-**Detail:** summary of verified identity references and current restrictions;
-wallet/holds; keys and limits; usage; payments; relevant audit. Tabs query the same
-authorized customer context. No impersonation, raw session view or provider-secret
-pane. Distinguish label edits from verified identity changes.
+**Detail:** show the verified workspace reference and restrictions; expose only
+the keys/limits, payment, request or audit evidence needed for the case. Link to
+its authoritative record. No impersonation, raw session view or provider secrets.
 
-Suspend/reinstate explains reason, new admission/funding/access effects and existing
-settlement obligations; use a guarded action with expected revision. Limit/grant
-changes show affected keys, not a silent policy overwrite. Money adjustments link
+Show the current access state and latest receipt. Suspend, reinstate and close
+use inline review and passkey confirmation. **Check result** recovers the same
+receipt after a lost acknowledgement. Limit/grant changes show affected keys,
+not a silent policy overwrite. Money adjustments link
 to WS-19's audited journal flow; no editable Balance input on the customer profile.
 Deletion/closure follows reviewed retained-record policy, not hard-delete shortcuts.
-On mobile keep customer context pinned above its tabs so an action cannot appear
+On mobile keep customer context visible above case actions so an action cannot appear
 to target the previous customer after a delayed response.
 
 ### WS-19 — Owner payments and money actions
 
-**Layout:** independent tabs Payments, Refunds and Journal; period/status/customer
-filters; reconciliation-needed summary; bounded table. Columns include normalized
+**Entry:** Overview links to the bounded list of refunds/payments needing action,
+including when no inference request exists. An exact payment reference or a
+customer case opens its detail directly. No permanent Payments sidebar or
+all-customer banking dashboard. The case shows normalized
 reference, customer, provider/method label, paid amount/currency, USD credit/hold,
 current state and observed/posted time. Never add mixed currencies into one total.
 
@@ -883,7 +1003,7 @@ amount and target visible above confirmation rather than only in a tooltip.
 
 ### WS-20 — Usage, errors and request timeline
 
-**List:** `/admin/usage` with Requests and Errors tabs. Seven-day UTC default;
+**List:** `/admin/usage` with Requests, model/key groupings and Errors. Seven-day UTC default;
 time/model/source/customer/key/origin/category/stage/severity/execution/accounting
 filters as supported; explicit request-ID lookup; visible as-of/coverage. Secondary
 filters collapse into a labelled panel, never silently persist across customer scope.
@@ -929,9 +1049,9 @@ scheduled announcements. Use tabs/sections, not embedded third-party dashboards.
   and event/size budgets, safe data categories and fresh verification. Active state
   shows remaining lifetime/budget and Stop. Expiry, revocation and server enforcement
   do not depend on the tab staying open. No raw payload toggle or endless debug mode.
-- Announcements reference a real planned tariff/model/service change, audience and
-  effective time. Preview RU/EN safe text, validate notice policy, then explicitly
-  publish/cancel. Publishing a notice does not itself enable a model or mutate price.
+- A scheduled tariff/model/service change links to its authoritative revision
+  and required notice. For a general broadcast, open Notifications, not a second
+  announcement composer in Operations. A notice cannot enable a model or set a price.
 
 Mobile stacks critical incidents, mode, readiness and then secondary operational
 sections. Unreachable monitoring/status/support destinations have clear fallback
@@ -939,10 +1059,10 @@ text; public status links must be reachable independently of this backend.
 
 ### WS-22 — Owner settings
 
-Use section navigation and bounded forms: General/presentation; Customer sign-in;
-Owner security; Payments; Limits/data/outbound policy; Notifications. Explain which
-changes are application settings versus host-managed configuration; the web form
-cannot silently rewrite deployment files or replace certificates.
+Enter a named configuration task from its setup/readiness step or Owner security
+from the signed-in owner context. Provide a form only for an operator change that
+belongs to the service; quote host-managed settings read-only with a runbook link.
+No general settings hub or web controls to rewrite deployment files/certificates.
 
 General covers configured product name, own logo/theme, language defaults and
 reviewed legal/support/status links. A labelled local preview is not published
@@ -953,10 +1073,27 @@ buttons. Testing an integration is explicit and distinct from reading its status
 
 Owner security lists passkeys/recovery guidance and authorized pairing context.
 Adding/removing privileged access needs fresh proof and the server's remaining-
-access guards; customer login linking does not grant owner rights. Payment settings
-show qualified method/merchant readiness and vault references, not retail tariff
-editing or raw merchant credentials. Runtime policy values show units, bounds and
-effects; unknown mandatory launch values remain blockers, not attractive defaults.
+access guards; customer login linking does not grant owner rights. Runtime policy
+values show units, bounds and effects; unknown mandatory launch values remain blockers.
+
+**Setup → Money → Payment methods** opens the [checkout builder](HOSTED_RELAY_ARCHITECTURE.md#payment-method-builder),
+not a new sidebar tab or the refund queue. An empty installation shows one action:
+**Add connection**. Pick an installed provider, fill only its fields, then choose
+the methods to offer. For each method with a fee, show **Who pays the fee?**
+with **Merchant** and **Customer** as the choices. If the channel allows only
+one, show the fixed value instead of a switch. Show the callback address with
+Copy when needed; a saved secret shows `Configured`, not its value. A compact
+preview shows customer labels in order without starting payment.
+**Save draft**, **Check** and **Enable** have
+distinct effects. Show a failed check beside the field or method that needs work.
+Existing connections are editable rows with their enabled methods and status;
+support reordering without drag and disabling a method without deleting its history.
+
+Under **Top-up amounts**, set **Minimum (USD)** and **Quick amounts (USD)**.
+**Allow custom amount** starts on. Turning it off previews just the quick buttons;
+if no valid quick amount is configured, show the error beside the list before publishing.
+Keep **Open invoices per customer** in the same form; a lower limit affects new
+payments only.
 
 Each section has reviewable changes, expected revision, Save/Cancel and invalidation
 impact on readiness. Sensitive updates require fresh proof. Lost acknowledgement
@@ -967,8 +1104,9 @@ it is not an automatic deployment triggered by saving branding.
 
 ### WS-23 — Audit
 
-**Composition:** title, scope/privacy explanation, UTC/actor/action/object filters,
-bounded table and detail sheet. Columns: time, actor/device, action, target safe ID,
+**Composition:** open History on a changed object, operation or incident, already
+scoped to that target. Use bounded filters and a detail view, not a permanent
+Audit sidebar or log console. Columns: time, actor/device, action, target safe ID,
 result, change/operation reference and reason where authorized.
 
 Detail shows allowlisted changed fields, before/after revisions, reason and links
@@ -1037,7 +1175,7 @@ allowlist below specifies presentation state, not a new API or authorization inp
 | Public landing | Named section anchors; configured locale/theme preferences | No personalized IDs, key or identity callback material in landing links |
 | Customer reports | `from`, `to`, `model`, `key`, `outcome`; `request` for own detail | UTC bounded range, public model ID and opaque own key/request IDs only; `key` is never a bearer secret |
 | Customer billing | Supported `tab`, `payment` | Own opaque payment reference; amount/success in a URL is not trusted evidence |
-| Settings | Supported section/tab only | No linked identity secrets or editable private fields in the URL |
+| Account controls | `panel=account` on Overview; supported section only | No linked identity secrets or editable private fields in the URL |
 | Owner reports | Supported time/model/source/customer/key/origin/category/stage/severity/state selectors | Bounded opaque authorized IDs/enums; no freeform provider body or unbounded query |
 | Owner connection/pool detail | Supported tab and opaque object reference | Fresh authority/revision lookup; URL does not grant mutation scope |
 
@@ -1093,7 +1231,7 @@ Money/secret/error explanations are visible in text, not only in hover tooltips.
 | Mobile filters | WS-03/04/20 | Supported fields, active-count, Apply/Reset | Cancel preserves applied query; no fetched data from an unsubmitted filter |
 | Model detail | WS-01/05/16 | Appropriate public/customer/owner projection, exact bands and scope | Unauthorized/private fields never fall back into a public sheet |
 | Customer request detail | WS-03/04 | Both outcome dimensions, usage/charge basis, safe support | Expired/foreign detail has no raw fallback |
-| Key creation / one-time display | WS-06/17 | Effective policy, confirmed issue, explicit copy warning | Lost response checks issuance; leaving cannot reveal it later |
+| Key creation / one-time display | WS-06 | Own workspace, effective policy, confirmed issue, explicit copy warning | Lost response checks issuance; leaving cannot reveal it later |
 | Key/session revoke | WS-06/08/17 | Exact target and future-use effect | Unknown result checks same action; no promise of refund/cancelled upstream work |
 | Top-up review / payment status | WS-07 | Quote, fees/currency, stable reference and server state | Return/cancelled tab does not invent paid/failed state |
 | Refund request / approval | WS-07/19 | Eligible amount, policy, reason and affected holds | Request/approval/returned money remain different states |
@@ -1151,7 +1289,7 @@ Private routes are not included in public sitemaps/previews and carry appropriat
 no-index intent, which is not a substitute for server authorization/no-store.
 Public social metadata contains only reviewed generic product text and own artwork.
 
-### Core RU and EN wording
+### Core English wording
 
 #### Outcome badges
 
@@ -1161,21 +1299,21 @@ separate from admitted request rows; show a phase only when the API exposes it.
 Customer `active` is a grouping, not another persisted state. Owner detail may show
 finer phases, but it uses the same underlying execution/accounting evidence.
 
-| State dimension | Canonical value | RU / EN caption | Visual meaning |
+| State dimension | Canonical value | English caption | Visual meaning |
 | --- | --- | --- | --- |
-| Execution | `received`, `admitted`, `reserved` | Подготовка / Preparing | Neutral; no claim of provider execution or completion |
-| Execution | `queued` | В очереди / Queued | Informational; bounded wait, not a failed request |
-| Execution | `dispatched`, `streaming` | Выполняется / In progress | Informational; output/terminal evidence is still independent |
-| Execution | `completed` | Завершён / Completed | Success for execution only, not a settlement result |
-| Execution | `incomplete` | Не завершён полностью / Incomplete | Warning with evidenced reason; not automatic refund eligibility |
-| Execution | `failed` | Ошибка выполнения / Failed | Failure; safe cause explanation, not automatic blame on Relay or an account |
-| Execution | `cancelled` | Отменён / Cancelled | Neutral confirmed cancellation; disconnect alone does not select this badge |
-| Execution | `uncertain` | Результат неизвестен / Outcome unknown | Warning; Check status/support, not an inferred retry |
-| Accounting | `none` | Нет записи расчёта / No accounting record | Neutral; no claim that usage was free |
-| Accounting | `held` | Зарезервировано / Held | Informational hold, not a posted additional charge |
-| Accounting | `held_for_reconciliation` | Проверяется расчёт / Reconciling | Pending accounting; retain its actual deadline/basis |
-| Accounting | `settled` | Рассчитано / Settled | Show posted amount and basis; execution may still have failed |
-| Accounting | `released` | Резерв снят / Hold released | Hold release, not a fabricated payment refund or second credit |
+| Execution | `received`, `admitted`, `reserved` | Preparing | Neutral; no claim of provider execution or completion |
+| Execution | `queued` | Queued | Informational; bounded wait, not a failed request |
+| Execution | `dispatched`, `streaming` | In progress | Informational; output/terminal evidence is still independent |
+| Execution | `completed` | Completed | Success for execution only, not a settlement result |
+| Execution | `incomplete` | Incomplete | Warning with evidenced reason; not automatic refund eligibility |
+| Execution | `failed` | Failed | Failure; safe cause explanation, not automatic blame on Relay or an account |
+| Execution | `cancelled` | Cancelled | Neutral confirmed cancellation; disconnect alone does not select this badge |
+| Execution | `uncertain` | Outcome unknown | Warning; Check status/support, not an inferred retry |
+| Accounting | `none` | No accounting record | Neutral; no claim that usage was free |
+| Accounting | `held` | Held | Informational hold, not a posted additional charge |
+| Accounting | `held_for_reconciliation` | Reconciling | Pending accounting; retain its actual deadline/basis |
+| Accounting | `settled` | Settled | Show posted amount and basis; execution may still have failed |
+| Accounting | `released` | Hold released | Hold release, not a fabricated payment refund or second credit |
 
 Estimated settlement and partial/missing usage are separate explanatory badges,
 not new execution states. Refund/payment statuses use their own domain contracts;
@@ -1184,41 +1322,42 @@ never map a provider callback string directly to these request badges.
 #### Shared labels
 
 These are semantic wording baselines, not the final complete translation catalog.
-Every screen/action/state still needs reviewed RU/EN copy before implementation.
+Every screen/action/state still needs reviewed English copy and translations in
+the corresponding locale files before implementation.
 
-| Meaning | Russian | English |
-| --- | --- | --- |
-| Overview | Обзор | Overview |
-| Usage | Использование | Usage |
-| Models/prices | Модели и цены | Models and prices |
-| Inference keys | API-ключи | API keys |
-| Billing | Баланс и платежи | Balance and payments |
-| Account settings | Аккаунт и безопасность | Account and security |
-| Available money | Доступно | Available |
-| Request hold | Зарезервировано для запросов | Held for requests |
-| Refund hold | Зарезервировано для возврата | Held for refunds |
-| Posted customer usage charge | Списано за использование | Posted usage charges |
-| Execution completed | Запрос завершён | Request completed |
-| Execution unknown | Результат выполнения неизвестен | Execution outcome unknown |
-| Pending accounting | Расчёт ещё не завершён | Settlement pending |
-| Estimated accounting | Расчёт по оценке | Estimated settlement |
-| Payment awaiting confirmation | Ожидаем подтверждения платежа | Awaiting payment confirmation |
-| Confirmed wallet credit | Средства зачислены | Funds credited |
-| Refund requested | Запрос на возврат отправлен | Refund requested |
-| Read failed | Не удалось получить данные | Unable to load data |
-| Status check, not repeat | Проверить статус | Check status |
-| Data freshness | Данные на | Data as of |
-| Stale snapshot | Данные устарели | Data is stale |
-| Unknown evidence | Нет подтверждённых данных | No confirmed data |
-| Safe support copy | Скопировать данные для поддержки | Copy safe support details |
-| Saved inventory only | Сохранено, не в пуле | Saved, not in pool |
-| Stop new work and finish existing | Завершение текущих запросов | Draining current requests |
-| Privileged context | Панель владельца | Owner panel |
+| Meaning | English |
+| --- | --- |
+| Overview | Overview |
+| Usage | Usage |
+| Models/prices | Models and prices |
+| Inference keys | API keys |
+| Billing | Balance and payments |
+| Account settings | Account and security |
+| Available money | Available |
+| Request hold | Held for requests |
+| Refund hold | Held for refunds |
+| Posted customer usage charge | Posted usage charges |
+| Execution completed | Request completed |
+| Execution unknown | Execution outcome unknown |
+| Pending accounting | Settlement pending |
+| Estimated accounting | Estimated settlement |
+| Payment awaiting confirmation | Awaiting payment confirmation |
+| Confirmed wallet credit | Funds credited |
+| Refund requested | Refund requested |
+| Read failed | Unable to load data |
+| Status check, not repeat | Check status |
+| Data freshness | Data as of |
+| Stale snapshot | Data is stale |
+| Unknown evidence | No confirmed data |
+| Safe support copy | Copy safe support details |
+| Saved inventory only | Saved, not in pool |
+| Stop new work and finish existing | Draining current requests |
+| Privileged context | Owner panel |
 
 Error sentence order: what is known -> what it means -> safe next action -> safe
-reference. Example: `Статус запроса пока неизвестен. Повторная отправка может создать
-новый платный запрос. Проверьте статус или передайте ID в поддержку.` Its English
-counterpart must carry the same uncertainty, not promise failure or a refund.
+reference. Example: `The request status is still unknown. Sending it again may
+create a new billable request. Check the status or share the request ID with
+support.` Translations must carry the same uncertainty, not promise failure or a refund.
 No accusatory customer wording, raw stack traces, unexplained HTTP-only errors or
 generic Retry labels for actions with different financial consequences.
 
@@ -1242,21 +1381,21 @@ case when needed.
 | --- | --- | --- |
 | WS-01/02: public entry, prices, identity | H06, H07, H13 | Anonymous publication has no private fields; empty/unavailable/configured-provider states and safe return/closed registration |
 | WS-03/04: overview, reports, request detail | H10, H12, H14 | Current versus historical separation, chart/table/export reconciliation, coverage/retention, both outcomes and no raw content |
-| WS-05/06: models and keys | H07, H09, H14 | Exact bands/scopes, unavailable grants, bounded limits, one-time key, lost acknowledgement and revoke semantics |
+| WS-05/06: models, status and keys | H07, H09, H12, H14 | Exact bands/scopes, grant removal, neutral history without observations, bounded limits, one-time key, lost acknowledgement and revoke semantics |
 | WS-07: money | H04, H08, H14 | Quote/intent/credit/refund distinctions, duplicate/lost return, holds and exact monetary display |
-| WS-08/10: settings, notices | H06, H09, H12, H14 | Last-login/session safety, safe support, verified consent and permitted notice targets |
+| WS-08/10: account, notices | H06, H09, H12, H14, H15 | Last-login/session safety, confirmed owner publication, per-recipient read state and permission |
 | WS-11/12: owner auth/setup | H03, H05, H15, H16 | No public ownership claim, fresh proof, real readiness evidence, invalidation and guarded opening |
 | WS-13/14/15/16: capacity/pool/prices | H01, H04, H07, H15 | Parity, saved versus admitted, current counts, stale/partial mutations and revisioned publication |
 | WS-17/18/19: access/customers/payments | H04, H05, H08, H09, H15 | Separate authorities, no impersonation, audited restrictions/adjustments and money outcome recovery |
 | WS-20/21/22/23: diagnosis/operations/config/audit | H03, H05, H12, H15, H16 | Safe timeline, bounded diagnostics, service lifecycle, protected settings and attributable noneditable audit |
-| WS-24 and shared presentation | H00, H13, H14, H15, H17 | Responsive/state/copy/focus checks across both roles/locales/themes; no guessed outcomes or stale-account leakage |
+| WS-24 and shared presentation | H00, H13, H14, H15, H17 | Responsive/state/copy/focus checks across roles, locales and themes; no guessed outcomes or stale-account leakage |
 
 ### Required design review set
 
 - End-to-end customer and owner flows, including uncertain money, one-time secrets,
   service closure, stale revisions and partial actions; preserve role boundaries.
 - Widths 1440, 1024, 768, 390 and 320 CSS pixels, zoom and keyboard/software keyboard.
-- RU/EN, light/dark, long labels/IDs, fractional/large amounts and every shared state.
+- English, Russian and Simplified Chinese; light/dark, long labels/IDs, fractional/large amounts and every shared state.
 - Clear actions, units, errors, confirmations and recovery; no unexplained icons or
   invented backend behavior. Use labelled synthetic fixtures, not assumed prices.
 - Retain asset/license provenance with the assets and distinguish proposals from

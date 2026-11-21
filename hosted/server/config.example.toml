@@ -1,0 +1,51 @@
+[server]
+bind = "127.0.0.1:1443"
+public_origin = "http://localhost:1443"
+# With HTTPS and the transfer worker routed at the TLS edge, enable Add API connection.
+# web_api_intake = true
+# On local HTTPS qualification only, with the separate qualifier running.
+# web_model_checks = true
+
+[auth]
+admin_rp_id = "localhost"
+
+[database]
+max_connections = 4
+connect_timeout_ms = 3000
+lock_timeout_ms = 1000
+statement_timeout_ms = 5000
+
+[branding]
+name = "Relay"
+
+# Optional public HTTPS pages published by this operator.
+[policies]
+# terms = "https://docs.example.org/terms"
+# privacy = "https://docs.example.org/privacy"
+# refunds = "https://docs.example.org/refunds"
+# support = "https://docs.example.org/support"
+
+# Optional restricted customer sign-in. Register this site as a public OIDC
+# client (RS256, code + PKCE S256, token_endpoint_auth_method=none).
+# [customer_oidc]
+# id = "3edd7789-ffb4-40af-9d1e-b2d9025ea1d4"
+# issuer = "https://identity.example.org"
+# client_id = "relay-web"
+# authorization_endpoint = "https://identity.example.org/authorize"
+# token_endpoint = "https://identity.example.org/token"
+# jwks_uri = "https://identity.example.org/jwks"
+
+# Optional direct HTTPS text route for a closed qualification installation.
+# Pin the exact source and reviewed public IPv4 address on port 443.
+# [[network.outbound_policy.text_sources]]
+# source = "<vault source UUID>"
+# endpoint = "https://provider.example.org/v1"
+# ipv4 = "<reviewed public IPv4 address>"
+
+# Optional owner capture. Unset event, byte or rate caps disable it.
+# [diagnostics.capture]
+# default_seconds = 600
+# max_seconds = 1800
+# max_events = 32
+# max_bytes = 4096
+# max_events_per_second = 12

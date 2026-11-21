@@ -27,11 +27,20 @@ struct SchemaDiagnostic {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotDiagnostic {
+    item_kind: &'static str,
+    reason: &'static str,
+    before: &'static str,
+    after: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterDiagnostic {
     Json(JsonParseDiagnostic),
     Shape(ShapeDiagnostic),
     Schema(SchemaDiagnostic),
     ToolIdentity(&'static str),
+    Snapshot(SnapshotDiagnostic),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +52,15 @@ pub struct AdapterError {
 }
 
 impl AdapterError {
+    pub(crate) const fn upstream_protocol_unavailable() -> Self {
+        Self {
+            code: error_codes::UPSTREAM_PROTOCOL_UNAVAILABLE,
+            message: "no compatible route supports the application's selected upstream protocol",
+            parameter: Some("upstream_protocol"),
+            diagnostic: None,
+        }
+    }
+
     pub const fn code(self) -> &'static str {
         self.code
     }
@@ -87,6 +105,48 @@ impl AdapterError {
         self
     }
 
+    pub(crate) fn with_snapshot_diagnostic(
+        mut self,
+        item: &serde_json::Value,
+        reason: &'static str,
+        before: Option<&serde_json::Value>,
+        after: Option<&serde_json::Value>,
+    ) -> Self {
+        let shape = |value: Option<&serde_json::Value>| match value {
+            None => "missing",
+            Some(serde_json::Value::Null) => "null",
+            Some(serde_json::Value::Bool(_)) => "boolean",
+            Some(serde_json::Value::Number(_)) => "number",
+            Some(serde_json::Value::String(_)) => "string",
+            Some(serde_json::Value::Array(_)) => "array",
+            Some(serde_json::Value::Object(_)) => "object",
+        };
+        let item_kind = match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => "message",
+            Some("reasoning") => "reasoning",
+            Some("function_call") => "function_call",
+            Some("custom_tool_call") => "custom_tool_call",
+            Some("web_search_call") => "web_search_call",
+            Some("file_search_call") => "file_search_call",
+            Some("computer_call") => "computer_call",
+            Some("image_generation_call") => "image_generation_call",
+            Some("code_interpreter_call") => "code_interpreter_call",
+            Some("mcp_call") => "mcp_call",
+            Some("mcp_list_tools") => "mcp_list_tools",
+            Some("mcp_approval_request") => "mcp_approval_request",
+            Some("tool_search_call") => "tool_search_call",
+            Some("compaction") => "compaction",
+            _ => "other",
+        };
+        self.diagnostic = Some(AdapterDiagnostic::Snapshot(SnapshotDiagnostic {
+            item_kind,
+            reason,
+            before: shape(before),
+            after: shape(after),
+        }));
+        self
+    }
+
     pub(crate) const fn with_tool_identity_diagnostic(mut self, reason: &'static str) -> Self {
         self.diagnostic = Some(AdapterDiagnostic::ToolIdentity(reason));
         self
@@ -128,6 +188,13 @@ impl AdapterError {
 
     pub(crate) const fn parameter_unsupported_for(parameter: &'static str) -> Self {
         Self::parameter_unsupported().with_parameter(parameter)
+    }
+
+    pub(crate) fn siwc_parameter_unsupported_for(parameter: &'static str) -> Self {
+        Self {
+            message: "Sign in with ChatGPT (SIWC) does not support this request parameter; remove it in the client or use a compatible pool route",
+            ..Self::parameter_unsupported_for(parameter)
+        }
     }
 
     pub fn is_upstream_failure(self) -> bool {
@@ -368,6 +435,13 @@ impl fmt::Display for AdapterError {
         }
         if let Some(AdapterDiagnostic::ToolIdentity(reason)) = self.diagnostic {
             write!(formatter, " (tool_identity_reason={reason})")?;
+        }
+        if let Some(AdapterDiagnostic::Snapshot(diagnostic)) = self.diagnostic {
+            write!(
+                formatter,
+                " (item_kind={}, snapshot_reason={}, before={}, after={})",
+                diagnostic.item_kind, diagnostic.reason, diagnostic.before, diagnostic.after
+            )?;
         }
         Ok(())
     }

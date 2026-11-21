@@ -1,0 +1,31 @@
+.payment-refund { flex: 1 0 100%; grid-column: 1 / -1; min-width: 0; display: grid; gap: 8px; }
+.refund-line, .refund-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.refund-line:empty { display: none; }
+.refund-trigger { margin-inline-start: auto; }
+.refund-state { color: var(--secondary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.refund-state:is([data-state="queued"], [data-state="reconciling"]) { color: var(--warning); }
+.refund-state[data-state="succeeded"] { color: var(--accent); }
+.refund-state[data-state="failed"] { color: var(--error); }
+.refund-form.owner-setup-form { width: 100%; gap: 8px; }
+.refund-form label { max-width: 14rem; }
+.refund-form small { color: var(--secondary); font-size: 13px; }
+.refund-actions .key-button, .refund-trigger.button { min-height: 44px; white-space: normal; }
+.refund-problem { color: var(--error); font-size: 14px; }
+.owner-refunds { display: grid; gap: 12px; width: 100%; min-width: 0; text-align: start; }
+.owner-refunds h2 { font-size: 16px; font-weight: 550; }
+.owner-refund-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.owner-refunds .own-key-list li { align-items: start; }
+.owner-refund-confirm { flex: 1 0 100%; display: grid; min-width: 0; gap: 8px; }
+.hosted-entry .owner-refund-confirm p { margin: 0; font-size: 14px; }
+.owner-refunds .refund-pager { justify-self: start; }
+.owner-refunds .refund-id { overflow-wrap: anywhere; font-size: 12px; }
+.owner-refunds .refund-refresh { width: 44px; min-height: 44px; padding: 0; }
+.refund-refresh svg { width: 16px; height: 16px; }
+.entry-refunds-link { display: inline-flex; align-items: center; min-height: 44px; }
+.wallet-reserve-breakdown { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 4px 12px;
+  margin: -12px 0 0; color: var(--secondary); text-align: start; font-size: 13px; }
+.wallet-reserve-breakdown dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .refund-form label input { font-size: 16px; }
+  .refund-actions .key-button { padding-inline: 10px; }
+}

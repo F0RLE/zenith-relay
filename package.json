@@ -10,7 +10,7 @@
     "start:browsers": "bun scripts/setup/start-dev.mjs --with-browsers",
     "app:dev": "bun scripts/build/tauri-dev.mjs",
     "app:dev:watch": "bun scripts/build/tauri-dev.mjs --watch",
-    "web:dev": "bun run --cwd web dev",
+    "web:dev": "bun run --cwd hosted/web dev",
     "app:build": "bun scripts/build/tauri-build.mjs"
   }
 }

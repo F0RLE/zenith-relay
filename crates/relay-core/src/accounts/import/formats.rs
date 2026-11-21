@@ -10,10 +10,13 @@ use bundles::{
 };
 use lines::{normalize_token_value, parse_json_lines};
 
+#[derive(Default)]
 pub(super) struct InputEntry {
     pub(super) ordinal: usize,
     pub(super) import_value: Option<Value>,
     pub(super) issue: Option<ImportIssue>,
+    pub(super) format: Option<ImportFormat>,
+    pub(super) proxy: Option<url::Url>,
 }
 
 pub(super) type ParsedEntries = (
@@ -34,36 +37,50 @@ pub(super) fn parse_entries(import_document: &str) -> Result<ParsedEntries, Impo
     }
 }
 
+fn bundle_entries(value: &Value) -> Option<Result<ParsedEntries, ImportError>> {
+    let object = value.as_object()?;
+    if is_zenith_bundle(object) {
+        Some(parse_zenith_bundle(object))
+    } else if let Some(payload) = wrapped_sub2api_payload(object) {
+        Some(parse_portable_bundle(payload))
+    } else if is_portable_bundle(object) {
+        Some(parse_portable_bundle(object))
+    } else if object.get("accounts").is_some_and(Value::is_array) {
+        Some(parse_account_container(object))
+    } else {
+        None
+    }
+}
+
 fn parse_json_document(json_document: Value) -> Result<ParsedEntries, ImportError> {
     ensure_depth(&json_document)?;
-    if let Some(object) = json_document.as_object() {
-        if is_zenith_bundle(object) {
-            return parse_zenith_bundle(object);
-        }
-        if let Some(wrapped_payload) = wrapped_sub2api_payload(object) {
-            return parse_portable_bundle(wrapped_payload);
-        }
-        if is_portable_bundle(object) {
-            return parse_portable_bundle(object);
-        }
-        if object.get("accounts").is_some_and(Value::is_array) {
-            return parse_account_container(object);
-        }
-        return Ok(single_import_entry(json_document));
+    if let Some(bundle) = bundle_entries(&json_document) {
+        return bundle;
     }
-    if let Some(array_items) = json_document.as_array() {
+    if let Value::Array(array_items) = json_document {
         check_item_count(array_items.len())?;
-        let parsed_entries = array_items
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(ordinal, item_value)| InputEntry {
-                ordinal,
-                import_value: Some(normalize_token_value(item_value)),
-                issue: None,
-            })
-            .collect();
-        return Ok((ImportFormat::JsonArray, parsed_entries, Vec::new(), None));
+        let mut entries = Vec::with_capacity(array_items.len());
+        let mut warnings = Vec::new();
+        for value in array_items {
+            if let Some(bundle) = bundle_entries(&value) {
+                let (format, inner, issues, _) = bundle?;
+                check_item_count(entries.len() + inner.len())?;
+                for mut entry in inner {
+                    entry.ordinal = entries.len();
+                    entry.format = Some(format);
+                    entries.push(entry);
+                }
+                warnings.extend(issues);
+            } else {
+                check_item_count(entries.len() + 1)?;
+                entries.push(InputEntry {
+                    ordinal: entries.len(),
+                    import_value: Some(normalize_token_value(value)),
+                    ..Default::default()
+                });
+            }
+        }
+        return Ok((ImportFormat::JsonArray, entries, warnings, None));
     }
     Ok(single_import_entry(normalize_token_value(json_document)))
 }
@@ -74,7 +91,7 @@ fn single_import_entry(import_value: Value) -> ParsedEntries {
         vec![InputEntry {
             ordinal: 0,
             import_value: Some(import_value),
-            issue: None,
+            ..Default::default()
         }],
         Vec::new(),
         None,

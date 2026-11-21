@@ -69,7 +69,7 @@ third-party proxies.
 ## Establish the result
 
 Use the affected [protocol acceptance](../relay-protocol-adapters/references/acceptance.md)
-and [repository checks](../../../CONTRIBUTING.md#verification). For a behavior
+and [repository checks](../../../docs/CONTRIBUTING.md#verification). For a behavior
 change, compare the relevant synthetic regression before and after; qualify the
 complete call/result/next-turn cycle when that boundary changes. Measure bytes,
 tokens, cache hits, and latency separately on comparable inputs.

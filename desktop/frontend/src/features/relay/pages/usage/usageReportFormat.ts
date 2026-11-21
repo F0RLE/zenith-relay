@@ -1,0 +1,174 @@
+import type { TFunction } from "i18next";
+import type { ErrorOrigin, ToolUseDiagnostics, UsageTotals } from "../../api/types";
+import { formatNumber } from "../../numberFormatting";
+import { normalizeReasoningEffort } from "../../poolFormatting";
+import { observedTokensPerSecond } from "../../usageSpeed";
+import { totalsFromRows } from "./usageData";
+import type { CodexRequestOrigin, UsageRow } from "./usageData";
+
+export function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
+  const first = ttft == null ? "—" : formatDurationMs(ttft, locale, t);
+  return `${first} / ${formatDurationMs(duration, locale, t)}`;
+}
+
+export function compactRequestId(requestId: string | null): string {
+  if (!requestId) return "—";
+  return requestId.length > 20 ? `${requestId.slice(0, 6)}…${requestId.slice(-10)}` : requestId;
+}
+
+export { formatModelId } from "./usageModelIdentity";
+
+export function missingRequiredToolCall(tools: ToolUseDiagnostics | null | undefined): boolean {
+  return Boolean(tools && tools.forwardedToolCount > 0 && tools.toolCallCount === 0
+    && tools.terminalOutput === "text" && (tools.toolChoice === "required" || tools.toolChoice === "specific"));
+}
+
+export type AggregateRow = {
+  name: string;
+  requests: number;
+  success: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cachedInputSamples: number;
+  cacheWriteInputTokens: number;
+  cacheWriteInputSamples: number;
+  reasoningTokens: number;
+  outputTokens: number;
+  tokens: number;
+  ttft: number;
+  ttftCount: number;
+  duration: number;
+  generationSpeed: number | null;
+  apiEquivalent: UsageTotals["apiEquivalent"];
+};
+
+export function formatDurationMs(elapsedMs: number | null, locale: string, t: TFunction): string {
+  if (elapsedMs == null || !Number.isFinite(elapsedMs)) return "—";
+  if (elapsedMs >= 1000) return t("usage.durationSeconds", { value: formatNumber(elapsedMs / 1000, locale, { maximumFractionDigits: 1 }) });
+  return t("usage.durationMilliseconds", { value: Math.round(elapsedMs) });
+}
+
+type RequestStatusRow = Pick<UsageRow, "success" | "requestOrigin">
+  & Partial<Pick<UsageRow, "routing" | "errorCategory" | "httpStatus">>;
+
+export function requestStatusKind(row: RequestStatusRow) {
+  if (row.requestOrigin?.startsWith("blocked_")) return "warning";
+  if (row.success) return "success";
+  if (row.errorCategory === "client_cancelled" || row.routing?.attemptOutcome === "client_disconnected") return "cancelled";
+  if (row.routing?.attemptOutcome === "tool_discovery" && !row.errorCategory
+    && row.httpStatus != null && row.httpStatus >= 200 && row.httpStatus < 300) return "pending";
+  return "error";
+}
+
+export function requestStatusLabel(row: RequestStatusRow, t: TFunction): string {
+  const status = requestStatusKind(row);
+  if (status === "warning") return t("codex.backgroundBlocked");
+  if (status === "pending") return t("usage.execution.decisions.tool_discovery");
+  if (status === "cancelled") return t("usage.errorCategories.client_cancelled");
+  return status === "success" ? t("common.success") : t("common.failed");
+}
+
+export function requestStatusHint(row: RequestStatusRow, t: TFunction): string {
+  const status = requestStatusKind(row);
+  const label = requestStatusLabel(row, t);
+  const error = status === "error" && row.errorCategory ? formatErrorCategory(row.errorCategory, t) : null;
+  if (!row.requestOrigin) return error ?? label;
+  return [
+    label,
+    formatRequestOrigin(row.requestOrigin, t),
+    error,
+  ].filter(Boolean).join(" · ");
+}
+
+export function formatRequestOrigin(origin: Exclude<CodexRequestOrigin, null>, t: TFunction): string {
+  if (origin === "memory_extraction" || origin === "blocked_memory_extraction") return t("codex.memoryExtractionTitle");
+  if (origin === "memory_consolidation" || origin === "blocked_memory_consolidation") return t("codex.memoryConsolidationTitle");
+  if (origin === "activity_summary" || origin === "blocked_activity_summary") return t("codex.activitySummary");
+  return t("codex.taskTitle");
+}
+
+export function formatReasoningEffort(effort: string | null, t: TFunction): string {
+  return effort ? t(`usage.reasoningEfforts.${normalizeReasoningEffort(effort)}`) : "-";
+}
+
+export function formatReasoningSummary(row: Pick<UsageRow, "requestedReasoningEffort" | "effectiveReasoningEffort">, t: TFunction): string {
+  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && normalizeReasoningEffort(row.requestedReasoningEffort) !== normalizeReasoningEffort(row.effectiveReasoningEffort)) {
+    return t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(row.requestedReasoningEffort, t), effective: formatReasoningEffort(row.effectiveReasoningEffort, t) });
+  }
+  return formatReasoningEffort(row.effectiveReasoningEffort ?? row.requestedReasoningEffort, t);
+}
+
+export function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {
+  return row.serviceTier ? t(`pool.serviceTiers.${row.serviceTier}`) : fallback;
+}
+
+export function differentAppliedTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction): string | null {
+  const tier = row.appliedServiceTier;
+  const display = tier === "default" ? "standard" : tier === "priority" ? "fast" : tier;
+  if (!display || display === (row.serviceTier ?? "standard")) return null;
+  if (display === "flex") return "Flex";
+  return display === "standard" || display === "fast" || display === "ultrafast" ? t(`pool.serviceTiers.${display}`) : tier;
+}
+
+export function formatWireApi(wireApi: string | null, t: TFunction): string {
+  if (wireApi === "responses") return t("usage.protocols.responses");
+  if (wireApi === "messages") return t("usage.protocols.messages");
+  if (wireApi === "chat_completions") return t("usage.protocols.chatCompletions");
+  if (wireApi === "gemini") return t("usage.protocols.gemini");
+  if (wireApi === "gemini_interactions") return t("usage.protocols.gemini_interactions");
+  return wireApi ?? "—";
+}
+
+export function formatTransport(transportKind: string | null | undefined, t: TFunction): string {
+  if (transportKind === "websocket") return t("usage.transports.websocket");
+  if (transportKind === "http") return t("usage.transports.http");
+  return transportKind ?? "—";
+}
+
+export function formatErrorCategory(category: string | null, t: TFunction): string {
+  if (!category) return t("common.unknown");
+  return t(`usage.errorCategories.${category}`, { defaultValue: category.replace(/_/g, " ") });
+}
+
+export function formatErrorOrigin(origin: ErrorOrigin | null, t: TFunction): string {
+  return origin ? t(`usage.errorOrigins.${origin}`) : t("common.unknown");
+}
+
+export function prefixErrorOrigin(origin: ErrorOrigin | null | undefined, message: string): string {
+  if (!origin) return message;
+  const label = origin === "account" ? "Account" : origin === "provider" ? "Provider" : "Relay";
+  const unprefixed = message.replace(/^(?:Account|Provider|Relay):\s*/i, "");
+  return `${label}: ${unprefixed}`;
+}
+
+export function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
+  const groups = new Map<string, UsageRow[]>();
+  for (const row of rows) {
+    const key = row[field] || unknown;
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+  return [...groups.entries()].map(([groupLabel, groupRows]) => aggregateRowFromTotals(groupLabel, totalsFromRows(groupRows)));
+}
+
+export function aggregateRowFromTotals(rowLabel: string, totals: UsageTotals): AggregateRow {
+  return {
+    name: rowLabel,
+    requests: totals.requests,
+    success: totals.successfulRequests,
+    inputTokens: totals.inputTokens,
+    cachedInputTokens: totals.cachedInputTokens,
+    cachedInputSamples: totals.cachedInputSamples,
+    cacheWriteInputTokens: totals.cacheWriteInputTokens ?? 0,
+    cacheWriteInputSamples: totals.cacheWriteInputSamples ?? 0,
+    reasoningTokens: totals.reasoningTokens,
+    outputTokens: totals.outputTokens,
+    tokens: totals.totalTokens,
+    ttft: totals.ttftMs,
+    ttftCount: totals.ttftSamples,
+    duration: totals.latencyMs,
+    generationSpeed: observedTokensPerSecond(totals.generationOutputTokens, totals.generationMs),
+    apiEquivalent: totals.apiEquivalent,
+  };
+}

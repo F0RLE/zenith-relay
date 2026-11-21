@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[tokio::test]
 async fn native_catalog_hints_retry_rejected_callbacks_and_fence_replaced_credentials() {
     let runtime = quota_runtime(QuotaSnapshot::default());
-    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
     let token = TokenSet::access_only("synthetic-first", None, 1).unwrap();
     authority
         .register("account-1", token.clone(), AccountAuthState::Active)
@@ -23,7 +23,7 @@ async fn native_catalog_hints_retry_rejected_callbacks_and_fence_replaced_creden
     let mut headers = HeaderMap::new();
     headers.insert("x-models-etag", HeaderValue::from_static("v1"));
     runtime.observe_codex_models_etag("account-1", &url, &headers, &prepared);
-    assert!(crate::poison::mutex(&runtime.codex_catalog_hints).is_empty());
+    assert!(crate::poison::mutex(&runtime.provider_metadata.catalog_hints).is_empty());
     accepted.store(true, Ordering::Release);
     runtime.observe_codex_models_etag("account-1", &url, &headers, &prepared);
     runtime.observe_codex_models_etag("account-1", &url, &headers, &prepared);
@@ -59,7 +59,7 @@ async fn native_catalog_hints_retry_rejected_callbacks_and_fence_replaced_creden
 #[tokio::test]
 async fn catalog_hints_ignore_non_codex_accounts_and_untrusted_origins() {
     let mut runtime = quota_runtime(QuotaSnapshot::default());
-    runtime.chatgpt_accounts["account-1"]
+    runtime.account_state.executors["account-1"]
         .token_authority
         .register(
             "account-1",
@@ -85,11 +85,12 @@ async fn catalog_hints_ignore_non_codex_accounts_and_untrusted_origins() {
         crate::providers::chatgpt::OAuthClientKind::ExcelBps,
     ] {
         runtime
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get_mut("account-1")
             .unwrap()
             .oauth_client_kind = kind;
         runtime.observe_codex_models_etag("account-1", &url, &headers, &prepared);
     }
-    assert!(crate::poison::mutex(&runtime.codex_catalog_hints).is_empty());
+    assert!(crate::poison::mutex(&runtime.provider_metadata.catalog_hints).is_empty());
 }

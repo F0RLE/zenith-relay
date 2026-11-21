@@ -123,20 +123,23 @@ impl AffinityCache {
             .alternatives
             .retain(|(_, expires_at)| *expires_at > now_ms);
         let expires_at = now_ms.saturating_add(binding.ttl_ms);
-        if let Some((_, existing_expiry)) = binding
+        if let Some(index) = binding
             .alternatives
-            .iter_mut()
-            .find(|(id, _)| id == candidate_id)
+            .iter()
+            .position(|(id, _)| id == candidate_id)
         {
-            *existing_expiry = (*existing_expiry).max(expires_at);
-        } else {
-            binding
-                .alternatives
-                .push((candidate_id.to_owned(), expires_at));
+            if binding.alternatives[index].1 > expires_at {
+                return;
+            }
+            binding.alternatives.remove(index);
         }
-        binding.alternatives.sort_unstable_by(|left, right| {
-            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
-        });
+        // A new completion wins a same-millisecond tie, including at the eviction boundary.
+        let index = binding
+            .alternatives
+            .partition_point(|(_, expiry)| *expiry > expires_at);
+        binding
+            .alternatives
+            .insert(index, (candidate_id.to_owned(), expires_at));
         binding.alternatives.truncate(MAX_WARM_ALTERNATIVES);
     }
 
@@ -304,6 +307,21 @@ mod tests {
         cache.remember_alternative("thread", "warm-again", 140);
         assert!(cache.alternatives("thread", 150).is_empty());
         assert_eq!(cache.get("thread", 150), None);
+    }
+
+    #[test]
+    fn simultaneous_spillovers_keep_the_latest_success_not_the_lowest_id() {
+        let mut cache = AffinityCache::new(1, 100);
+        cache.bind("chat", "owner", 0);
+        for id in ["a", "b", "c", "d", "z"] {
+            cache.remember_alternative("chat", id, 10);
+        }
+        assert_eq!(cache.alternatives("chat", 10), ["z", "d", "c", "b"]);
+        cache.remember_alternative("chat", "b", 9);
+        assert_eq!(cache.alternatives("chat", 10), ["z", "d", "c", "b"]);
+        cache.remember_alternative("chat", "c", 10);
+        assert_eq!(cache.alternatives("chat", 10), ["c", "z", "d", "b"]);
+        assert_eq!(cache.get_with_expiry("chat", 10), Some(("owner", 100)));
     }
 
     #[test]

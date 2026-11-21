@@ -50,6 +50,7 @@ fn runtime_quota_wait_preserves_the_cause_without_inventing_missing_counters() {
         CooldownReason::Mandatory,
         CooldownReason::Transient,
         CooldownReason::RateLimit,
+        CooldownReason::QuotaExhausted,
     ] {
         let mut paused = scheduler.clone();
         assert_eq!(
@@ -57,7 +58,12 @@ fn runtime_quota_wait_preserves_the_cause_without_inventing_missing_counters() {
             reason != CooldownReason::Transient
         );
         let waiting = paused.runtime_order(100).remove(0);
-        assert_eq!(waiting.quota_wait, reason == CooldownReason::RateLimit);
+        assert_eq!(waiting.quota_wait, reason == CooldownReason::QuotaExhausted);
+        assert_eq!(waiting.available, reason == CooldownReason::Transient);
+        assert_eq!(
+            waiting.next_retry_at_ms,
+            (reason != CooldownReason::Transient).then_some(200)
+        );
         let recovered = paused.runtime_order(200).remove(0);
         assert!(recovered.available);
         assert!(!recovered.quota_wait);
@@ -68,6 +74,96 @@ fn runtime_quota_wait_preserves_the_cause_without_inventing_missing_counters() {
     let exhausted = scheduler.runtime_order(200).remove(0);
     assert!(!exhausted.available);
     assert!(exhausted.quota_wait);
+}
+
+#[test]
+fn runtime_quota_wait_uses_the_last_exhausted_window_reset() {
+    use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowInput, QuotaWindowKind, ResetTime};
+
+    for secondary_reset in [Some(5_000), None] {
+        let window = |kind: QuotaWindowKind, reset: Option<u64>| {
+            QuotaWindow::normalize(
+                QuotaWindowInput {
+                    kind,
+                    available_percent: Some(0.0),
+                    explicitly_full: None,
+                    reset: reset.map(ResetTime::AbsoluteUnixMilliseconds),
+                    window_minutes: Some(if kind == QuotaWindowKind::Primary {
+                        300
+                    } else {
+                        10_080
+                    }),
+                    provider_cycle_id: None,
+                    observed_at_ms: 100,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let quota = QuotaSnapshot {
+            primary: Some(window(QuotaWindowKind::Primary, Some(2_000))),
+            secondary: Some(window(QuotaWindowKind::Secondary, secondary_reset)),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        };
+        let state = crate::CandidateQuotaState::from_snapshot(&quota, 100, 60_000);
+        let mut member = oauth_candidate("synthetic-exhausted-windows");
+        member.quota = state.quota;
+        member.quota_updated_at_ms = state.updated_at_ms;
+        member.quota_reset_at_ms = state.reset_at_ms;
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(member);
+        let waiting = scheduler.runtime_order(100).remove(0);
+        assert!(!waiting.available);
+        assert!(waiting.quota_wait);
+        assert_eq!(waiting.next_retry_at_ms, secondary_reset);
+        assert_eq!(
+            waiting.model_retries.first().map(|retry| retry.retry_at_ms),
+            secondary_reset
+        );
+    }
+}
+
+#[test]
+fn full_quota_refresh_keeps_rate_limit_until_its_deadline() {
+    for scope in ["*", "gpt-5"] {
+        let mut scheduler = PoolScheduler::new();
+        let mut member = candidate("member");
+        member.quota = CandidateQuota::Exhausted;
+        member.quota_updated_at_ms = Some(100);
+        scheduler.upsert(member);
+        assert!(scheduler.runtime_order(100)[0].quota_wait);
+        assert!(scheduler.set_cooldown_with_reason(
+            "member",
+            scope,
+            300,
+            CooldownReason::RateLimit,
+        ));
+        assert!(scheduler.update_candidate_availability_at(
+            "member",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Available(10_000),
+            Some(200),
+        ));
+
+        let waiting = scheduler.runtime_order(200).remove(0);
+        assert!(!waiting.available);
+        assert!(!waiting.quota_wait);
+        assert_eq!(waiting.next_retry_at_ms, Some(300));
+        assert_eq!(
+            waiting
+                .resource_headroom
+                .unwrap()
+                .quota_remaining_basis_points,
+            Some(10_000)
+        );
+
+        let recovered = scheduler.runtime_order(300).remove(0);
+        assert!(recovered.available);
+        assert!(!recovered.quota_wait);
+        assert_eq!(recovered.next_retry_at_ms, None);
+    }
 }
 
 #[test]

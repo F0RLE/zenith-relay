@@ -1,10 +1,17 @@
 import { lstatSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+export function incrementalArtifactPaths(repositoryRoot) {
+  return [
+    join(repositoryRoot, "desktop", "src-tauri", "target", "debug", "incremental"),
+    join(repositoryRoot, "crates", "relay-core", "target", "debug", "incremental"),
+  ];
+}
+
 /** Resolve only Relay artifacts; the caller's working directory is irrelevant. */
 export function artifactPathsToClean(repositoryRoot, includeAllArtifacts = false) {
-  const desktopFrontendRoot = join(repositoryRoot, "src");
-  const webPreviewRoot = join(repositoryRoot, "web");
+  const desktopFrontendRoot = join(repositoryRoot, "desktop", "frontend");
+  const webPreviewRoot = join(repositoryRoot, "hosted", "web");
   const frontendBuildPaths = [
     join(desktopFrontendRoot, ".build"),
     join(desktopFrontendRoot, "dist"),
@@ -18,10 +25,10 @@ export function artifactPathsToClean(repositoryRoot, includeAllArtifacts = false
     join(desktopFrontendRoot, "output", "playwright"),
     join(webPreviewRoot, "test-results"),
     join(webPreviewRoot, "playwright-report"),
-    join(repositoryRoot, "src-tauri", "target"),
-    join(repositoryRoot, "src-tauri", "gen", "schemas"),
+    join(repositoryRoot, "desktop", "src-tauri", "target"),
+    join(repositoryRoot, "desktop", "src-tauri", "gen", "schemas"),
     join(repositoryRoot, "crates", "relay-core", "target"),
-    join(repositoryRoot, "target"),
+    join(repositoryRoot, ".build", "desktop"),
   ];
 }
 

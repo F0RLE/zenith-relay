@@ -15,6 +15,8 @@ pub use limits::RefreshLimits;
 
 const ACTIVE_QUOTA_INTERVAL_MS: u64 = 5 * 60 * 1_000;
 const IDLE_QUOTA_INTERVAL_MS: u64 = 15 * 60 * 1_000;
+const RESET_PROPAGATION_RETRY_MS: u64 = 30_000;
+const RESET_PROPAGATION_WINDOW_MS: u64 = 5 * 60 * 1_000;
 const ACTIVE_MODELS_INTERVAL_MS: u64 = 8 * 60 * 60 * 1_000;
 const IDLE_MODELS_INTERVAL_MS: u64 = 24 * 60 * 60 * 1_000;
 const ACTIVE_BALANCE_INTERVAL_MS: u64 = 5 * 60 * 1_000;
@@ -146,8 +148,8 @@ pub fn source_stats_outcome(stats: &crate::SourceProviderStats, now_ms: u64) -> 
 /// Schedule a quota verification shortly after the provider's reported reset.
 /// The stable per-account jitter spreads simultaneous resets without replacing
 /// the ordinary cadence or shortening a provider Retry-After floor.
-/// An elapsed deadline remains due until the window is observed at or after
-/// that deadline. Otherwise a read crossing reset can drop the pending check.
+/// If the provider still reports the elapsed cycle, retry every 30 seconds for
+/// five minutes after reset, then resume the ordinary cadence.
 pub fn quota_reset_delay(
     account_id: &str,
     quota: &crate::quota::QuotaSnapshot,
@@ -162,9 +164,18 @@ pub fn quota_reset_delay(
         .iter()
         .chain(quota.secondary.iter())
         .filter_map(|window| {
-            let verification_at_ms = window.reset_at_ms?.saturating_add(jitter);
-            (window.observed_at_ms < verification_at_ms)
-                .then(|| verification_at_ms.saturating_sub(now_ms))
+            let reset_at_ms = window.reset_at_ms?;
+            let verification_at_ms = reset_at_ms.saturating_add(jitter);
+            if window.observed_at_ms < verification_at_ms {
+                return Some(verification_at_ms.saturating_sub(now_ms));
+            }
+            let retry_until_ms = reset_at_ms.saturating_add(RESET_PROPAGATION_WINDOW_MS);
+            (now_ms < retry_until_ms && window.observed_at_ms < retry_until_ms).then(|| {
+                window
+                    .observed_at_ms
+                    .saturating_add(RESET_PROPAGATION_RETRY_MS)
+                    .saturating_sub(now_ms)
+            })
         })
         .min()
 }

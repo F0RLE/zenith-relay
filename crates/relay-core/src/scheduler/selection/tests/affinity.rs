@@ -137,7 +137,7 @@ fn prompt_cache_affinity_breaks_an_equal_quota_tie() {
 #[test]
 fn successful_quota_rebalance_moves_prompt_affinity_to_the_warmed_member() {
     let mut scheduler = PoolScheduler::new();
-    for (id, remaining) in [("owner", 4_000), ("next-a", 9_000), ("next-b", 9_000)] {
+    for (id, remaining) in [("owner", 1_000), ("next-a", 9_000), ("next-b", 9_000)] {
         let mut member = oauth_candidate(id);
         member.quota = CandidateQuota::Available(remaining);
         member.quota_updated_at_ms = Some(100);
@@ -209,9 +209,9 @@ fn slight_parallel_load_keeps_prompt_affinity_and_its_diagnostics() {
 }
 
 #[test]
-fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
+fn successful_load_spillover_keeps_healthy_prompt_owner_despite_quota_gap() {
     let mut scheduler = PoolScheduler::new();
-    for (id, remaining) in [("owner", 8_000), ("spillover", 8_500)] {
+    for (id, remaining) in [("owner", 4_600), ("spillover", 8_000)] {
         let mut member = oauth_candidate(id);
         member.quota = CandidateQuota::Available(remaining);
         member.quota_updated_at_ms = Some(100);
@@ -245,6 +245,18 @@ fn successful_load_spillover_keeps_prompt_owner_inside_the_resource_band() {
         scheduler.prompt_affinity.get("cache:thread", 103),
         Some("owner")
     );
+    let continued = scheduler
+        .select(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: Some("cache:thread"),
+            now_ms: 103,
+        })
+        .unwrap();
+    assert_eq!(continued.candidate_id, "owner");
 }
 
 #[test]
@@ -284,6 +296,28 @@ fn sticky_prompt_affinity_does_not_rebind_to_spillover_candidate() {
             .unwrap()
             .candidate_id,
         "spillover"
+    );
+}
+
+#[test]
+fn late_prompt_spillover_stays_warm_without_replacing_a_newer_lower_quota_owner() {
+    let mut scheduler = PoolScheduler::new();
+    for (id, remaining) in [("new-owner", 4_000), ("late-owner", 9_000)] {
+        let mut member = oauth_candidate(id);
+        member.quota = CandidateQuota::Available(remaining);
+        member.quota_updated_at_ms = Some(100);
+        scheduler.upsert(member);
+    }
+    assert!(scheduler.bind_prompt_affinity("session:late", "new-owner", 100));
+    let before = scheduler.prompt_affinity_snapshot("session:late", 100);
+    scheduler.remember_prompt_affinity_spillover("session:late", "late-owner", 101);
+    assert_eq!(
+        scheduler.prompt_affinity_snapshot("session:late", 101),
+        before
+    );
+    assert_eq!(
+        scheduler.prompt_affinity.alternatives("session:late", 101),
+        vec!["late-owner"]
     );
 }
 #[test]
@@ -470,6 +504,34 @@ fn removed_candidate_keeps_response_owner_only_until_a_replacement_id_is_upserte
     scheduler.upsert(candidate("owner"));
     assert_eq!(scheduler.response_affinity_candidate("response", 1), None);
 }
+
+#[test]
+fn replacement_registration_does_not_inherit_the_active_members_conversation() {
+    for drain in [true, false] {
+        let mut scheduler = PoolScheduler::new();
+        let owner = candidate("owner");
+        scheduler.upsert(owner.clone());
+        let slot = scheduler
+            .reserve_request("owner", "gpt-5", 0, false)
+            .unwrap();
+        assert!(scheduler.bind_response_affinity("response", "owner", 0));
+        assert!(scheduler.bind_prompt_affinity("prompt", "owner", 0));
+        let mut replacement = owner;
+        if drain {
+            scheduler.remove("owner").unwrap();
+            assert!(scheduler.candidate("owner").is_some(), "still draining");
+            assert!(scheduler.has_response_affinity("response", 1));
+        } else {
+            replacement.source_id = "different-source".into();
+        }
+        scheduler.upsert(replacement);
+        assert!(!scheduler.has_response_affinity("response", 2));
+        assert!(scheduler.prompt_affinity_binding("prompt", 2).is_none());
+        assert!(scheduler.release_reservation(slot));
+        assert!(scheduler.candidate("owner").is_some());
+    }
+}
+
 #[test]
 fn invalidated_response_affinity_allows_retry_on_another_candidate() {
     let mut scheduler = PoolScheduler::new();

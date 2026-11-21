@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 mod credential;
+mod economics;
 mod quota;
 mod source;
 
 pub use credential::{CredentialDiagnostics, CredentialRecovery, CredentialStatus};
+pub use economics::{AccountEconomics, AccountMethodUsage, project_account_economics};
 pub use quota::{QuotaWindowUsage, WeeklyValueCalibration, api_equivalent_projection_window};
 pub use source::{SourceRefreshState, SourceSummary, SourceSummaryRecord};
 
@@ -56,8 +58,8 @@ pub struct AccountSummary {
     pub route_group_id: Option<String>,
     #[serde(default)]
     pub route_inactive: bool,
-    #[serde(default)]
-    pub oauth_client_kind: crate::providers::chatgpt::OAuthClientKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_client_kind: Option<crate::providers::chatgpt::OAuthClientKind>,
     pub id: String,
     pub label: String,
     pub identity_hint: String,
@@ -81,12 +83,20 @@ pub struct AccountSummary {
     pub auth_state: AccountAuthState,
     pub health: String,
     pub models: Vec<String>,
+    /// Host-projected availability; clients do not infer this from plan names.
+    #[serde(default)]
+    pub pool_eligible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation_restriction: Option<crate::ImageGenerationRestriction>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub priority: i32,
     pub weight: u32,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
+    /// Lifetime economics of the explicitly linked account; route usage stays separate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<AccountEconomics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_window_usage: Option<QuotaWindowUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,7 +129,7 @@ pub struct AccountSummary {
 pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
     accounts.iter().any(|account| {
         account.in_pool
-            && account.oauth_client_kind == crate::providers::chatgpt::OAuthClientKind::Codex
+            && account.oauth_client_kind == Some(crate::providers::chatgpt::OAuthClientKind::Codex)
             && account
                 .models
                 .iter()

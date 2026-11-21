@@ -81,7 +81,14 @@ impl RotationEngine {
         let Some(first_output_latency_ms) = first_output_latency_ms else {
             return;
         };
-        health.first_output_latency_ms = Some(match health.first_output_latency_ms {
+        let previous = health.first_output_latency_ms.filter(|_| {
+            crate::quota::observation_is_fresh(
+                health.latency_observed_at_ms,
+                now_ms,
+                HEALTH_HALF_LIFE_MS,
+            )
+        });
+        health.first_output_latency_ms = Some(match previous {
             Some(previous) => {
                 let alpha = u64::from(HEALTH_EWMA_ALPHA_MILLI);
                 previous
@@ -126,7 +133,19 @@ impl RotationEngine {
         let key = (lease.candidate_id.clone(), lease.route_key.clone());
         let circuit = self.circuits.entry(key).or_default();
         if circuit.incident != lease.circuit_incident {
-            return (circuit.snapshot(), false);
+            // Each accepted success advances both counters; a failure or
+            // recovery abort advances only the epoch. Concurrent successes
+            // still supply measurements and recovery credit when no such
+            // transition intervened, without reopening an older incident.
+            let only_successes_since_dispatch = circuit
+                .epoch
+                .checked_sub(lease.circuit_epoch)
+                .zip(circuit.incident.checked_sub(lease.circuit_incident))
+                .is_some_and(|(transitions, successes)| transitions == successes);
+            let counted = health == HealthObservation::Success
+                && circuit.state == CircuitState::Closed
+                && only_successes_since_dispatch;
+            return (circuit.snapshot(), counted);
         }
         if circuit.half_open_lease == Some(lease.lease_id) {
             circuit.half_open_lease = None;

@@ -14,7 +14,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn request_timezone(&self, candidate_id: &str) -> Option<String> {
-        let account = self.chatgpt_accounts.get(candidate_id)?;
+        let account = self.account_state.executors.get(candidate_id)?;
         let proxy_timezone = crate::poison::read(&account.proxy_timezone);
         proxy_timezone
             .as_ref()
@@ -36,7 +36,7 @@ impl GatewayRuntime {
         {
             return Err(Error::Validation("invalid proxy timezone".into()));
         }
-        if let Some(account) = self.chatgpt_accounts.get(account_id) {
+        if let Some(account) = self.account_state.executors.get(account_id) {
             *crate::poison::write(&account.proxy_timezone) = timezone;
         }
         Ok(())
@@ -61,7 +61,7 @@ impl GatewayRuntime {
         &self,
         callback: impl Fn(Vec<String>) + Send + Sync + 'static,
     ) {
-        if let Ok(mut callback_slot) = self.chatgpt_team_breaker_callback.lock() {
+        if let Ok(mut callback_slot) = self.account_state.team_breaker_callback.lock() {
             *callback_slot = Arc::new(callback);
         }
     }
@@ -254,7 +254,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
-        crate::poison::mutex(&self.source_recovery_delays_ms)
+        crate::poison::mutex(&self.source_state.recovery_delays_ms)
             .get(candidate_id)
             .copied()
     }

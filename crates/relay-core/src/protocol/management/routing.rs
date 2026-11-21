@@ -6,6 +6,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod display;
+pub use display::{PoolRotationProjection, PoolRotationView, pool_rotation_view};
+
 pub fn pool_routing_summary(
     saved: Option<&crate::PoolRoutingPolicy>,
     sources: &[super::SourceSummary],

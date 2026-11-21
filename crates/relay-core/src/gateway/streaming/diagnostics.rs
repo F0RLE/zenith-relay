@@ -1,4 +1,4 @@
-use crate::{error_codes, usage::UpstreamErrorDetails};
+use crate::{error_codes, runtime::siwc_socket::SiwcStreamError, usage::UpstreamErrorDetails};
 use serde_json::json;
 
 pub(super) fn incomplete_stream(
@@ -44,6 +44,9 @@ pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> Upst
     let mut body = false;
     let mut decode = false;
     let mut io = "unknown";
+    let mut http2 = "none";
+    let mut http2_reason = "none";
+    let mut siwc = None;
     // Error Display strings and URLs may contain credentials or provider data.
     // Inspect a bounded source chain for fixed transport categories only.
     for _ in 0..8 {
@@ -52,6 +55,33 @@ pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> Upst
             timeout |= error.is_timeout();
             body |= error.is_body();
             decode |= error.is_decode();
+        }
+        if let Some(error) = current.downcast_ref::<h2::Error>() {
+            http2 = if error.is_reset() {
+                "reset"
+            } else if error.is_go_away() {
+                "go_away"
+            } else {
+                "other"
+            };
+            http2_reason = match error.reason() {
+                None => "none",
+                Some(h2::Reason::NO_ERROR) => "no_error",
+                Some(h2::Reason::PROTOCOL_ERROR) => "protocol_error",
+                Some(h2::Reason::INTERNAL_ERROR) => "internal_error",
+                Some(h2::Reason::FLOW_CONTROL_ERROR) => "flow_control_error",
+                Some(h2::Reason::SETTINGS_TIMEOUT) => "settings_timeout",
+                Some(h2::Reason::STREAM_CLOSED) => "stream_closed",
+                Some(h2::Reason::FRAME_SIZE_ERROR) => "frame_size_error",
+                Some(h2::Reason::REFUSED_STREAM) => "refused_stream",
+                Some(h2::Reason::CANCEL) => "cancel",
+                Some(h2::Reason::COMPRESSION_ERROR) => "compression_error",
+                Some(h2::Reason::CONNECT_ERROR) => "connect_error",
+                Some(h2::Reason::ENHANCE_YOUR_CALM) => "enhance_your_calm",
+                Some(h2::Reason::INADEQUATE_SECURITY) => "inadequate_security",
+                Some(h2::Reason::HTTP_1_1_REQUIRED) => "http_1_1_required",
+                Some(_) => "unknown",
+            };
         }
         if let Some(error) = current.downcast_ref::<std::io::Error>() {
             timeout |= error.kind() == std::io::ErrorKind::TimedOut;
@@ -64,14 +94,23 @@ pub(super) fn transport_error(error: &(dyn std::error::Error + 'static)) -> Upst
                 _ => "other",
             };
         }
-        source = current.source();
+        if let Some(error) = current.downcast_ref::<SiwcStreamError>() {
+            timeout |= *error == SiwcStreamError::HeartbeatTimeout;
+            siwc = Some(error.label());
+        }
+        source = current
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .map(|inner| inner as &(dyn std::error::Error + 'static))
+            .or_else(|| current.source());
     }
+    let siwc = siwc.map_or_else(String::new, |label| format!("; siwc={label}"));
     UpstreamErrorDetails::from_value(
         None,
         &json!({
             "code": error_codes::UPSTREAM_STREAM,
             "type": "relay_stream_transport",
-            "message": format!("Relay stream transport: timeout={timeout}; body={body}; decode={decode}; io={io}"),
+            "message": format!("Relay stream transport: timeout={timeout}; body={body}; decode={decode}; io={io}; http2={http2}; http2_reason={http2_reason}{siwc}"),
         }),
     )
 }
@@ -152,6 +191,32 @@ mod tests {
                     .contains("synthetic-private")
             );
         }
+    }
+
+    #[test]
+    fn http2_diagnostics_use_typed_reasons_not_untrusted_error_text() {
+        for (reason, label) in [
+            (h2::Reason::CANCEL, "cancel"),
+            (h2::Reason::REFUSED_STREAM, "refused_stream"),
+            (h2::Reason::ENHANCE_YOUR_CALM, "enhance_your_calm"),
+        ] {
+            let error = std::io::Error::other(h2::Error::from(reason));
+            let details = transport_error(&error);
+            assert_eq!(details.code.as_deref(), Some(error_codes::UPSTREAM_STREAM));
+            assert!(
+                details
+                    .message
+                    .unwrap()
+                    .contains(&format!("http2_reason={label}"))
+            );
+        }
+        let forged = std::io::Error::other(
+            "stream error: stream ID 1; CANCEL; received from peer; synthetic-private",
+        );
+        let details = transport_error(&forged);
+        let message = details.message.unwrap();
+        assert!(message.contains("http2=none; http2_reason=none"));
+        assert!(!message.contains("synthetic-private"));
     }
 
     #[test]

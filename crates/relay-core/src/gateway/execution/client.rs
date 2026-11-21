@@ -6,12 +6,14 @@ use super::super::continuation::{
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    CODEX_RESPONSES_LITE_HEADER, ServiceTierPolicy, candidate_protocols,
+    CODEX_RESPONSES_LITE_HEADER, RequestToolPolicy, ServiceTierPolicy, candidate_protocols,
     chat_request_has_supported_content, client_request_identity, codex_background_request_kind,
     forwarded_codex_headers, forwarded_messages_headers, is_managed_codex_client,
     normalize_codex_reasoning_placeholder, request_id,
 };
+use super::compatibility::{RejectedRequest, record_continuation_rejection};
 use super::request::{RequestExecution, ReservedCandidate, execute_request};
+use super::state::{AttemptState, ContinuationRecovery};
 use crate::error_codes;
 use crate::protocol::ClientWireApi;
 use crate::scheduler::rotation::SharedRequestBudget;
@@ -33,7 +35,9 @@ pub(in crate::gateway) struct RoutedRequestIdentity {
     pub(in crate::gateway) budget: SharedRequestBudget,
     pub(in crate::gateway) transport: UsageTransport,
     pub(in crate::gateway) transport_fallback: Option<crate::usage::TransportFallbackReason>,
+    pub(in crate::gateway) siwc_socket_context: Option<String>,
     pub(in crate::gateway) service_tier_policy: ServiceTierPolicy,
+    pub(in crate::gateway) recovery: Option<ContinuationRecovery>,
 }
 
 /// Internal compact-to-Responses dispatch is not an ordinary conversation turn.
@@ -92,15 +96,22 @@ async fn execute_client_request_inner(
     force_stream: bool,
     reserved_candidate: Option<ReservedCandidate>,
 ) -> Response<Body> {
+    let request_started = tokio::time::Instant::now();
+    let started = request_started.into_std();
     let (parts, request_body) = http_request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
         return invalid_host();
     }
     let key = super::super::auth::authenticate_client(&runtime, &headers, client_wire_api);
-    let Some(key) = key else {
+    let Some(mut key) = key else {
         return unauthorized();
     };
+    // A WebSocket-to-HTTP handoff belongs to the already admitted request.
+    // Reauthenticate permissions without replacing its protocol snapshot.
+    if let Some(policy) = parts.extensions.get::<crate::UpstreamProtocolPolicy>() {
+        key.upstream_protocol = *policy;
+    }
     let client_api = match client_wire_api {
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
@@ -111,11 +122,21 @@ async fn execute_client_request_inner(
     if !runtime.allows_client_wire_api(&key, client_api) {
         return client_api_forbidden();
     }
-    let mut request_json =
-        match super::super::request_body::read_json_object(&headers, request_body).await {
-            Ok(request_object) => Value::Object(request_object),
-            Err(error_response) => return *error_response,
-        };
+    let detailed = runtime.diagnostics_enabled();
+    let body_started = detailed.then(std::time::Instant::now);
+    let request_fields = if client_wire_api == WireApi::Responses {
+        super::super::request_body::read_responses_json_object(&headers, request_body).await
+    } else {
+        super::super::request_body::read_json_object(&headers, request_body).await
+    };
+    let mut ingress_timing = crate::runtime::RequestIngressTiming {
+        body_read_and_parse_ms: body_started.map(|start| start.elapsed().as_millis() as u64),
+        ..Default::default()
+    };
+    let mut request_json = match request_fields {
+        Ok(request_object) => Value::Object(request_object),
+        Err(error_response) => return *error_response,
+    };
     if client_wire_api == WireApi::GeminiInteractions
         && let Err(message) = crate::protocol::interactions::validate_request(&request_json)
     {
@@ -132,12 +153,17 @@ async fn execute_client_request_inner(
     {
         return super::request::adapter_error_response(error, None);
     }
-    runtime.refresh_basis_points_access(&key).await;
     let mut tool_policy = parts
         .extensions
-        .get::<super::super::request::RequestToolPolicy>()
+        .get::<RequestToolPolicy>()
         .cloned()
-        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
+        .unwrap_or_else(|| {
+            if client_wire_api == WireApi::Responses {
+                RequestToolPolicy::for_responses(&runtime, &request_json)
+            } else {
+                RequestToolPolicy::new(&runtime, &request_json)
+            }
+        });
     let managed_codex_client = is_managed_codex_client(&headers);
     if client_wire_api == WireApi::Responses {
         normalize_codex_reasoning_placeholder(&runtime, &key, &headers, &mut request_json);
@@ -191,6 +217,9 @@ async fn execute_client_request_inner(
         .then(|| codex_background_request_kind(&headers, &request_json))
         .flatten();
     let identity = parts.extensions.get::<RoutedRequestIdentity>().cloned();
+    let recovery = identity
+        .as_ref()
+        .and_then(|identity| identity.recovery.clone());
     let transport = identity
         .as_ref()
         .map(|identity| identity.transport)
@@ -247,6 +276,7 @@ async fn execute_client_request_inner(
         && background_kind.is_none()
         && parts.extensions.get::<RoutedCompactionRequest>().is_none()
     {
+        let cache_started = detailed.then(std::time::Instant::now);
         tool_policy.capture_cache_context(
             &runtime,
             &request_json,
@@ -254,6 +284,8 @@ async fn execute_client_request_inner(
             &request_id,
             client_context_id.as_deref(),
         );
+        ingress_timing.cache_context_ms =
+            cache_started.map(|start| start.elapsed().as_millis() as u64);
     }
     let continuation = match client_wire_api {
         WireApi::GeminiInteractions => Some(crate::gateway::continuation::interactions::prepare(
@@ -281,6 +313,21 @@ async fn execute_client_request_inner(
     let continuation = match continuation {
         Ok(continuation) => continuation,
         Err(()) => {
+            record_continuation_rejection(
+                &runtime,
+                RejectedRequest {
+                    request_id: &request_id,
+                    attempt: 0,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: None,
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: client_wire_api,
+                    transport,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                started.elapsed().as_millis() as u64,
+            );
             return api_error(
                 StatusCode::CONFLICT,
                 RESPONSE_CONTINUATION_UNAVAILABLE_MESSAGE,
@@ -289,25 +336,38 @@ async fn execute_client_request_inner(
         }
     };
 
-    let resolved_model = runtime
-        .resolve_visible_model(
+    let protocols = candidate_protocols(client_wire_api);
+    let access_started = detailed.then(std::time::Instant::now);
+    let access_owner = continuation
+        .as_ref()
+        .filter(|continuation| continuation.requires_affinity_owner)
+        .and_then(|continuation| continuation.response_affinity_key.as_deref())
+        .and_then(|affinity| runtime.response_affinity_candidate(affinity, now_ms()));
+    runtime
+        .refresh_basis_points_access_for_request(
             &key,
             &requested_model,
-            candidate_protocols(client_wire_api),
-            now_ms(),
+            protocols,
+            access_owner.as_deref(),
         )
+        .await;
+    ingress_timing.bps_access_refresh_ms =
+        access_started.map(|start| start.elapsed().as_millis() as u64);
+    let resolved_model = runtime
+        .resolve_visible_model(&key, &requested_model, protocols, now_ms())
         .or_else(|| {
-            let resolved = runtime.resolve_configured_model(
+            runtime.resolve_retained_continuation_model(
                 &key,
                 &requested_model,
-                candidate_protocols(client_wire_api),
-            )?;
+                protocols,
+                &request_json,
+                now_ms(),
+            )
+        })
+        .or_else(|| {
+            let resolved = runtime.resolve_configured_model(&key, &requested_model, protocols)?;
             (runtime.route_recovery_enabled()
-                || runtime.basis_points_access_failed_for_model(
-                    &key,
-                    &resolved,
-                    candidate_protocols(client_wire_api),
-                ))
+                || runtime.basis_points_access_failed_for_model(&key, &resolved, protocols))
             .then_some(resolved)
         });
     let Some(resolved_model) = resolved_model else {
@@ -336,7 +396,23 @@ async fn execute_client_request_inner(
             super::super::request::forwarded_bridge_gemini_headers(&headers)
         }
     };
+    let (state, allow_previous_response_reset) = match recovery {
+        Some(recovery) => recovery.into_state(u16::from(budget.dispatches())),
+        None => (
+            AttemptState::new(
+                0,
+                continuation
+                    .as_ref()
+                    .and_then(|continuation| continuation.response_affinity_key.clone()),
+                continuation.is_some_and(|continuation| continuation.requires_affinity_owner),
+                &request_json,
+            ),
+            true,
+        ),
+    };
     execute_request(RequestExecution {
+        started: request_started,
+        ingress_timing,
         tool_policy,
         runtime: runtime.clone(),
         key,
@@ -349,15 +425,14 @@ async fn execute_client_request_inner(
         forwarded_headers,
         client_context_id,
         client_affinity_id: client_identity.affinity_id,
-        response_affinity_key: continuation
-            .as_ref()
-            .and_then(|continuation| continuation.response_affinity_key.clone()),
-        requires_affinity_owner: continuation
-            .is_some_and(|continuation| continuation.requires_affinity_owner),
+        siwc_socket_context: parts
+            .extensions
+            .get::<RoutedRequestIdentity>()
+            .and_then(|identity| identity.siwc_socket_context.clone()),
+        state,
         client_wire_api,
         responses_lite,
-        allow_previous_response_reset: true,
-        attempt_offset: 0,
+        allow_previous_response_reset,
         budget,
         transport,
         transport_fallback,

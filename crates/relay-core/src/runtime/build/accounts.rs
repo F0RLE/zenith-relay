@@ -1,7 +1,6 @@
 use super::super::{
-    AccountModelInventory, ChatGptAccountExecutor, IMAGE_API_MODEL, PassiveQuotaState,
-    RuntimeHttpClients, model_rules, normalized_responses_url, normalized_set,
-    require_runtime_value,
+    AccountModelInventory, ChatGptAccountExecutor, PassiveQuotaState, RuntimeHttpClients,
+    model_rules, normalized_responses_url, normalized_set, require_runtime_value,
 };
 use super::{AccountRuntimeParts, SourceRuntimeParts};
 use crate::providers::chatgpt::{
@@ -31,7 +30,18 @@ pub(super) fn build_accounts(
     let mut executors = BTreeMap::new();
     let mut passive_quotas = BTreeMap::new();
     let mut team_members = BTreeMap::<String, BTreeSet<String>>::new();
-    for account in accounts {
+    for mut account in accounts {
+        account.models.retain(|model| {
+            super::super::images::account_model_enabled(
+                account.oauth_client_kind,
+                model,
+                account.subscription_plan_type.as_deref(),
+            )
+        });
+        let images_available = super::super::images::account_images_available(
+            account.oauth_client_kind,
+            account.subscription_plan_type.as_deref(),
+        );
         require_runtime_value("account candidate id", &account.id)?;
         require_runtime_value("account source id", &account.source_id)?;
         require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
@@ -86,18 +96,22 @@ pub(super) fn build_accounts(
         };
         let models = normalized_set(account.models.iter());
         // Native Images is a separate operation, not a GPT text-tool bridge.
-        // Publishing the route is not proof of the account's image quota.
-        let image_main_model = (account.oauth_client_kind == OAuthClientKind::Codex)
-            .then(|| IMAGE_API_MODEL.to_owned());
+        // Image quota is checked separately from route publication.
         let mut candidate_models = if images_only {
             BTreeSet::new()
         } else {
             models.clone()
         };
-        if image_main_model.is_some() {
-            candidate_models.insert(IMAGE_API_MODEL.to_string());
-            published_models.push(IMAGE_API_MODEL.to_string());
-        }
+        candidate_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
+        published_models.extend(
+            super::super::images::account_image_models(account.oauth_client_kind)
+                .filter(|_| images_available)
+                .map(str::to_owned),
+        );
         let candidate = RuntimeCandidate {
             id: account.id.clone(),
             kind: CandidateKind::OAuthAccount,
@@ -110,6 +124,7 @@ pub(super) fn build_accounts(
             priority: account.priority,
             weight: account.weight,
             models: candidate_models,
+            native_images: images_available,
             model_rules: model_rules(&account.allowed_models, &account.excluded_models),
             health: account.health,
             quota: account.quota,
@@ -129,6 +144,9 @@ pub(super) fn build_accounts(
         registry.replace(candidate.id.clone(), published_models.iter());
         let candidate_id = candidate.id.clone();
         scheduler.upsert(candidate);
+        if siwc {
+            scheduler.keep_unknown_quota_affinity(&candidate_id);
+        }
         team_members
             .entry(account.chatgpt_account_id.trim().to_ascii_lowercase())
             .or_default()
@@ -150,7 +168,6 @@ pub(super) fn build_accounts(
                 basis_points_url,
                 model_inventory: RwLock::new(AccountModelInventory {
                     configured_models: models,
-                    image_main_model,
                 }),
                 image_bridge_revision: Arc::new(AtomicU64::new(0)),
                 token_authority: auth.token_authority.clone(),

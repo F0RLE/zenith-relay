@@ -1,0 +1,271 @@
+use crate::local_pool::{
+    accounts::proxy::{ProxyPool, common_proxy_available, common_proxy_pool_id},
+    error::CommandError,
+    state::{DesktopState, SnapshotInputs},
+};
+use crate::platform;
+use std::sync::Arc;
+use zenith_relay_core::protocol::{
+    DesktopCapabilities, GatewaySummary, ModelDisplayProjection, PoolModelConfigurationInput,
+    PoolModelProjection, RuntimeStateSnapshot, apply_model_metadata,
+    apply_pool_model_configuration_with_context, pool_candidate_count,
+    pool_model_projection_with_pricing,
+};
+use zenith_relay_core::{GatewayRuntime, PricingMetadata, unix_time_ms};
+
+mod members;
+#[cfg(test)]
+mod performance_tests;
+mod summary;
+mod timing;
+mod worker;
+use members::{
+    AccountProjectionContext, append_missing_runtime_warnings, project_account_summaries,
+    project_quota_window_usages, project_source_summaries,
+};
+#[cfg(test)]
+pub(super) use summary::oauth_account_runtime_available;
+
+/// Build the prepared runtime projection shared by the UI and integration
+/// generators such as OpenCode.
+pub(crate) async fn build_local_runtime_state(
+    state: &DesktopState,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_runtime_state(state, false).await
+}
+
+pub(crate) async fn build_streaming_client_state(
+    state: &DesktopState,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    build_runtime_state(state, true).await
+}
+
+async fn build_runtime_state(
+    state: &DesktopState,
+    streaming: bool,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    let collect_timings = crate::diagnostics::is_debug_enabled();
+    #[cfg(test)]
+    let collect_timings =
+        collect_timings || std::env::var_os("RELAY_MEASURE_SNAPSHOT_STAGES").is_some();
+    let mut timing = timing::SnapshotTiming::new(collect_timings);
+    // Bound preparation per state before reading inputs. Waiting callers must
+    // project fresh inputs, not queue stale inventories or blocking workers.
+    let permit = state.runtime_snapshot_permit().await?;
+    timing.mark("worker_queue");
+    let state = state.clone();
+    worker::run(permit, move || {
+        timing.mark("worker_dispatch");
+        // Store/credential mutex waits belong to the same bounded worker as
+        // projection, not the async command executor. Read inputs before the
+        // runtime handle, preserving the snapshot's existing capture order.
+        let inputs = tauri::async_runtime::block_on(state.snapshot_inputs())?;
+        timing.mark("inputs");
+        timing.record_store_lock_wait(inputs.store_lock_wait);
+        let runtime = tauri::async_runtime::block_on(state.gateway.runtime());
+        timing.mark("runtime");
+        project_local_runtime_state(&state, inputs, runtime, timing, streaming)
+    })
+    .await
+}
+
+fn project_local_runtime_state(
+    state: &DesktopState,
+    inputs: SnapshotInputs,
+    runtime: Option<Arc<GatewayRuntime>>,
+    mut timing: timing::SnapshotTiming,
+    streaming: bool,
+) -> Result<RuntimeStateSnapshot, CommandError> {
+    let running = inputs.running;
+    let routing_order = runtime
+        .as_ref()
+        .map(|runtime| {
+            runtime.candidate_runtime_order_for_key(super::super::pool::SYSTEM_GATEWAY_KEY_ID)
+        })
+        .unwrap_or_default();
+    timing.mark("routing");
+    let common_proxy_available = common_proxy_available(&inputs.gateway);
+    let snapshot_at_ms = unix_time_ms();
+    let catalog = state.pricing_catalog();
+    let model_metadata = state.model_metadata_catalog();
+    let pricing = super::super::pricing_context(
+        &inputs.gateway,
+        &inputs.sources,
+        &inputs.accounts,
+        &model_metadata,
+    );
+    timing.mark("pricing_context");
+    let equivalents = state
+        .telemetry
+        .api_equivalents_with_pricing(&catalog, &pricing)?;
+    timing.mark("usage_totals");
+    let quota_window_usages =
+        project_quota_window_usages(&inputs, &state.telemetry, &catalog, snapshot_at_ms)?;
+    timing.mark("quota_windows");
+    // The pool stores the stable proxy identity separately from account credentials.
+    // Use it only for UI provenance; request dispatch still resolves the effective URL.
+    let proxy_pool = ProxyPool::load().unwrap_or_default();
+    let mut source_summaries =
+        project_source_summaries(&inputs, &routing_order, &equivalents, &model_metadata)?;
+    timing.mark("source_summaries");
+    for source in &mut source_summaries {
+        source.resolve_model_prices(&catalog, &pricing);
+    }
+    timing.mark("source_prices");
+    let mut account_summaries = project_account_summaries(AccountProjectionContext {
+        state,
+        inputs: &inputs,
+        routing_order: &routing_order,
+        equivalents: &equivalents,
+        quota_window_usages: &quota_window_usages,
+        proxy_pool: &proxy_pool,
+        common_proxy_available,
+        snapshot_at_ms,
+    })?;
+    timing.mark("account_summaries");
+    let mut inputs = inputs;
+    let mut warnings = std::mem::take(&mut inputs.warnings);
+    append_missing_runtime_warnings(
+        &mut warnings,
+        &inputs,
+        &routing_order,
+        common_proxy_available,
+    );
+    let PoolModelProjection {
+        mut models,
+        pricing_source,
+    } = pool_model_projection_with_pricing(
+        &source_summaries,
+        &account_summaries,
+        &inputs.gateway.hidden_models,
+        &catalog,
+        &pricing,
+    );
+    timing.mark("pool_models");
+    apply_model_metadata(&mut models, &model_metadata);
+    apply_pool_model_configuration_with_context(
+        &mut models,
+        PoolModelConfigurationInput {
+            sources: &source_summaries,
+            accounts: &account_summaries,
+            model_price_overrides: &inputs.gateway.model_price_overrides,
+            model_reasoning_allowed_levels: &inputs.gateway.model_reasoning_allowed_levels,
+            model_context_policies: &inputs.gateway.model_context_policies,
+            model_service_tier_overrides: &inputs.gateway.model_service_tier_overrides,
+            runtime: runtime.as_deref(),
+        },
+    );
+    if streaming {
+        zenith_relay_core::protocol::apply_streaming_model_protocol_routes(
+            &mut models,
+            &source_summaries,
+            &account_summaries,
+            &inputs.gateway.model_reasoning_allowed_levels,
+        );
+    }
+    timing.mark("model_configuration");
+    let mut display_projection = ModelDisplayProjection::new(&model_metadata);
+    display_projection.apply_model_order(&mut models, &inputs.gateway.model_display_order);
+    timing.mark("display_order");
+    display_projection.apply_member_order(
+        &mut source_summaries,
+        &mut account_summaries,
+        &inputs.gateway.model_display_order,
+    );
+    let visible_model_ids = models
+        .iter()
+        .filter(|model| model.enabled && !model.protocol_routes.is_empty())
+        .map(|model| model.id.clone())
+        .collect();
+    let candidate_count = pool_candidate_count(&source_summaries, &account_summaries);
+    let base_url = format!(
+        "http://{}:{}/v1",
+        inputs.gateway.client_host, inputs.gateway.port
+    );
+    let pricing_metadata = PricingMetadata::for_catalog_with_status(
+        &catalog,
+        state.pricing_status(),
+        pricing_source,
+        equivalents
+            .accounts
+            .values()
+            .chain(equivalents.sources.values())
+            .map(|equivalent_usage| equivalent_usage.unpriced_tokens)
+            .sum(),
+    );
+    let pool_routing = zenith_relay_core::protocol::pool_routing_summary(
+        inputs.gateway.pool_routing.as_ref(),
+        &source_summaries,
+        &account_summaries,
+    );
+    let projection = zenith_relay_core::protocol::PoolRotationProjection::new(
+        &pool_routing,
+        &source_summaries,
+        &account_summaries,
+        snapshot_at_ms,
+    );
+    let mut pool_rotation = projection.view(&routing_order, snapshot_at_ms);
+    {
+        let mut cached = state.pool_rotation_projection.lock().map_err(|_| {
+            crate::local_pool::error::LocalPoolError::invalid_state(
+                "pool rotation projection lock poisoned",
+            )
+        })?;
+        pool_rotation.inventory_revision = cached.as_ref().map_or(1, |(revision, previous)| {
+            if previous == &projection {
+                *revision
+            } else {
+                revision.saturating_add(1)
+            }
+        });
+        *cached = Some((pool_rotation.inventory_revision, projection));
+    }
+    let response = RuntimeStateSnapshot {
+        schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
+        weekly_capacity_revision: state.telemetry.weekly_capacity_revision(),
+        gateway: GatewaySummary {
+            tool_policy: inputs.gateway.tool_policy.clone(),
+            pool_routing: Some(pool_routing),
+            pool_rotation,
+            running,
+            base_url,
+            candidate_count,
+            visible_model_ids,
+            max_retry_candidates: inputs.gateway.max_retry_candidates,
+            default_service_tier: inputs.gateway.default_service_tier,
+            models,
+            model_catalog: display_projection.member_catalog(
+                &source_summaries,
+                &account_summaries,
+                &inputs.gateway.model_display_order,
+            ),
+            common_proxy_configured: inputs.gateway.common_proxy_configured,
+            common_proxy_available,
+            common_proxy_id: common_proxy_pool_id(&inputs.gateway, &proxy_pool),
+            account_proxy_required: inputs.gateway.account_proxy_required,
+            quota_request_timeout_seconds: inputs.gateway.quota_request_timeout_seconds,
+            chatgpt_interface_quota_reserve_basis_points: Some(
+                inputs.gateway.chatgpt_interface_quota_reserve_basis_points,
+            ),
+            codex_background_tasks_enabled: inputs.gateway.codex_background_tasks_enabled,
+            codex_memory_extraction_enabled: inputs.gateway.codex_memory_extraction_enabled,
+            codex_memory_consolidation_enabled: inputs.gateway.codex_memory_consolidation_enabled,
+            codex_websockets_enabled: inputs.gateway.codex_websockets_enabled,
+            chatgpt_retry_until_available: inputs.gateway.chatgpt_retry_until_available,
+            block_degraded_routes_enabled: inputs.gateway.block_degraded_routes_enabled,
+            codex_text_models_enabled: inputs.gateway.codex_text_models_enabled,
+            routing_order,
+        },
+        platform: platform::platform_name().to_string(),
+        capabilities: DesktopCapabilities::current(),
+        sources: source_summaries,
+        accounts: account_summaries,
+        automations: inputs.automations.tasks,
+        wake_history: inputs.automations.state.history().iter().cloned().collect(),
+        warnings,
+        pricing: pricing_metadata,
+    };
+    timing.mark("catalog_projection");
+    timing.finish(state);
+    Ok(response)
+}

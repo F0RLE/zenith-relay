@@ -136,11 +136,11 @@ struct ReadyCandidate {
     first_output_latency_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct RoundRobinCursor {
     capacity_key: String,
-    candidate_id: String,
     priority: i32,
+    last_turn: BTreeMap<String, u64>,
 }
 
 mod admission;

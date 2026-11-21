@@ -40,7 +40,7 @@ async fn compacted_history_resets_stale_ids_for_http_and_account_compact() {
                 )],
             )
         };
-        let (gateway, _, _, _) = spawn_mixed_gateway(
+        let (gateway, events, _, _) = spawn_mixed_gateway(
             sources,
             accounts,
             vec![mixed_key(None, None)],
@@ -66,6 +66,20 @@ async fn compacted_history_resets_stale_ids_for_http_and_account_compact() {
             StatusCode::OK,
             "{path}, api source: {api_source}"
         );
+        let relay_request_id = response
+            .headers()
+            .get("x-zenith-relay-request-id")
+            .expect("ordinary and account-only responses retain the request identity")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        drop(response);
+        let recorded = events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].request_id, relay_request_id);
+        assert!(recorded[0].success);
+        assert!(!recorded[0].is_request_completion());
+        drop(recorded);
         let requests = state.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].body.get("previous_response_id").is_none());

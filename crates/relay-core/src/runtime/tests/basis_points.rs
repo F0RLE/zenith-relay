@@ -10,8 +10,14 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::{Notify, Semaphore};
 
+mod access_latency;
 mod cache_context;
 mod catalog_discovery;
+mod free_images;
+#[cfg(feature = "experimental-bps-images")]
+mod native_images;
+#[cfg(not(feature = "experimental-bps-images"))]
+mod native_images_disabled;
 mod quota_rotation;
 mod rate_limits;
 mod recovery;
@@ -21,6 +27,7 @@ mod retry_admission;
 mod routing;
 mod siwc;
 mod structured_output;
+mod structured_routing;
 
 struct AccessReply {
     status: StatusCode,
@@ -34,6 +41,12 @@ struct AccessState {
     generation_replies: Mutex<std::collections::VecDeque<(StatusCode, Value)>>,
     access_requests: AtomicUsize,
     generation_requests: AtomicUsize,
+    http_generation_requests: AtomicUsize,
+    websocket_generations: AtomicBool,
+    websocket_requests: AtomicUsize,
+    websocket_upgrade_reply: Mutex<Option<AccessReply>>,
+    websocket_upgrade_delay: Mutex<Duration>,
+    websocket_bodies: Mutex<Vec<Value>>,
     attachment_requests: AtomicUsize,
     attachment_file_id: Mutex<Option<String>>,
     attachment_failure: Mutex<Option<(StatusCode, HeaderMap)>>,
@@ -42,9 +55,11 @@ struct AccessState {
     generation_status: Mutex<StatusCode>,
     strict_request_schema: AtomicBool,
     stream_generations: AtomicBool,
+    stream_content_type: Mutex<Option<String>>,
     stream_bodies: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_prefixes: Mutex<std::collections::VecDeque<Vec<u8>>>,
     stream_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
+    stream_gate_after_tool_done: AtomicBool,
     generation_header_gates: Mutex<std::collections::VecDeque<Arc<Semaphore>>>,
     stream_closures: Mutex<std::collections::VecDeque<tokio::sync::oneshot::Sender<()>>>,
     first_started: Notify,
@@ -78,6 +93,12 @@ impl AccessServer {
             generation_replies: Mutex::new(Default::default()),
             access_requests: AtomicUsize::new(0),
             generation_requests: AtomicUsize::new(0),
+            http_generation_requests: AtomicUsize::new(0),
+            websocket_generations: AtomicBool::new(false),
+            websocket_requests: AtomicUsize::new(0),
+            websocket_upgrade_reply: Mutex::new(None),
+            websocket_upgrade_delay: Mutex::new(Duration::ZERO),
+            websocket_bodies: Mutex::new(Vec::new()),
             attachment_requests: AtomicUsize::new(0),
             attachment_file_id: Mutex::new(None),
             attachment_failure: Mutex::new(None),
@@ -86,9 +107,11 @@ impl AccessServer {
             generation_status: Mutex::new(StatusCode::OK),
             strict_request_schema: AtomicBool::new(false),
             stream_generations: AtomicBool::new(false),
+            stream_content_type: Mutex::new(Some("text/event-stream".into())),
             stream_bodies: Mutex::new(Default::default()),
             stream_prefixes: Mutex::new(Default::default()),
             stream_gates: Mutex::new(Default::default()),
+            stream_gate_after_tool_done: AtomicBool::new(false),
             generation_header_gates: Mutex::new(Default::default()),
             stream_closures: Mutex::new(Default::default()),
             first_started: Notify::new(),
@@ -99,15 +122,18 @@ impl AccessServer {
             .route("/responses/access", get(access))
             .route(
                 "/responses",
-                post(generation)
-                    .get(|State(state): State<Arc<AccessState>>| async move {
-                        // Count rejected upgrades so tests catch stray native WebSocket requests.
-                        state.generation_requests.fetch_add(1, Ordering::SeqCst);
-                        StatusCode::METHOD_NOT_ALLOWED
-                    })
-                    // Large-history regressions must exercise Relay's replay
-                    // budget, not Axum's unrelated 2 MiB JSON extractor limit.
-                    .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+                post(
+                    |state: State<Arc<AccessState>>, body: Json<Value>| async move {
+                        state
+                            .http_generation_requests
+                            .fetch_add(1, Ordering::SeqCst);
+                        generation(state, body).await
+                    },
+                )
+                .get(siwc::upstream::upgrade)
+                // Large-history regressions must exercise Relay's replay
+                // budget, not Axum's unrelated 2 MiB JSON extractor limit.
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
             )
             .route("/attachments", post(attachment))
             .with_state(state.clone());
@@ -243,13 +269,23 @@ fn generation_reply(
     );
     let mut pending = wire.clone();
     let mut split = wire.len();
+    let stop_after_tool = state.stream_gate_after_tool_done.load(Ordering::SeqCst);
     while let Some(frame) = crate::protocol::take_sse_event(&mut pending) {
         let event: Value =
             serde_json::from_slice(&crate::protocol::sse_data(&frame)).unwrap_or(Value::Null);
-        if matches!(
-            event["type"].as_str(),
-            Some("response.output_text.delta" | "response.function_call_arguments.delta")
-        ) {
+        let boundary = if stop_after_tool {
+            event["type"] == "response.output_item.done"
+                && matches!(
+                    event["item"]["type"].as_str(),
+                    Some("function_call" | "custom_tool_call")
+                )
+        } else {
+            matches!(
+                event["type"].as_str(),
+                Some("response.output_text.delta" | "response.function_call_arguments.delta")
+            )
+        };
+        if boundary {
             split = wire.len() - pending.len();
             break;
         }
@@ -274,9 +310,11 @@ fn generation_reply(
             }
             Ok(axum::body::Bytes::new())
         }));
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/event-stream")
+    let mut response = Response::builder().status(status);
+    if let Some(content_type) = crate::poison::mutex(&state.stream_content_type).as_deref() {
+        response = response.header("content-type", content_type);
+    }
+    response
         .body(axum::body::Body::from_stream(stream))
         .unwrap()
 }
@@ -314,7 +352,11 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
     let refresh = Arc::new(RecoveryRefresh {
         calls: AtomicUsize::new(0),
     });
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.refresh_adapter = refresh.clone();
     account
         .token_authority
@@ -355,7 +397,7 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
             .unwrap();
         assert_eq!(response.response.status(), status);
         assert_eq!(budget.dispatches(), 1);
-        let tokens = runtime.chatgpt_accounts["account-1"]
+        let tokens = runtime.account_state.executors["account-1"]
             .token_authority
             .tokens("account-1")
             .await
@@ -374,7 +416,11 @@ async fn bps_401_retains_refresh_token_and_recovers_only_on_the_next_request() {
 async fn runtime(server: &AccessServer) -> GatewayRuntime {
     let mut runtime = quota_runtime(QuotaSnapshot::default());
     runtime.diagnostics_enabled = || true;
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.oauth_client_kind = OAuthClientKind::ExcelBps;
     account.basis_points_url = server.responses_url.clone();
     account
@@ -386,14 +432,13 @@ async fn runtime(server: &AccessServer) -> GatewayRuntime {
         )
         .await
         .unwrap();
-    // The fixture starts as Codex; reconcile its inventory after changing the
-    // transport so it does not retain the native-only Images route.
+    // Reconcile the catalog and image transport after changing the login kind.
     assert!(runtime.update_account_models("account-1", &["gpt-test".to_string()]));
     runtime
 }
 
 fn expire_access(runtime: &GatewayRuntime) {
-    crate::poison::write(&runtime.chatgpt_accounts["account-1"].basis_points_access)
+    crate::poison::write(&runtime.account_state.executors["account-1"].basis_points_access)
         .as_mut()
         .unwrap()
         .expire();
@@ -521,7 +566,11 @@ async fn refreshed_free_id_token_keeps_bps_provider_access_checks() {
     let refresh = Arc::new(FreePlanRefresh {
         calls: AtomicUsize::new(0),
     });
-    let account = runtime.chatgpt_accounts.get_mut("account-1").unwrap();
+    let account = runtime
+        .account_state
+        .executors
+        .get_mut("account-1")
+        .unwrap();
     account.refresh_adapter = refresh.clone();
     account
         .token_authority
@@ -709,7 +758,8 @@ async fn native_free_account_keeps_its_route_and_never_uses_bps_access() {
     let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
     let mut runtime = runtime(&server).await;
     runtime
-        .chatgpt_accounts
+        .account_state
+        .executors
         .get_mut("account-1")
         .unwrap()
         .oauth_client_kind = OAuthClientKind::Codex;
@@ -769,7 +819,7 @@ async fn concurrent_access_reads_share_one_discovery_and_publish_inventory() {
         runtime
             .visible_models(&key, &[WireApi::Responses], crate::unix_time_ms())
             .len(),
-        2
+        2 + crate::account_image_models(OAuthClientKind::ExcelBps).count()
     );
     assert!(runtime.basis_points_reasoning_available("account-1", "gpt-new", "max"));
     assert!(!runtime.basis_points_reasoning_available("account-1", "gpt-new", "medium"));
@@ -785,7 +835,7 @@ async fn token_replacement_invalidates_access_even_with_identical_visible_fields
         .await
         .unwrap();
     let key = runtime.authenticate_secret("local-secret").unwrap();
-    let authority = &runtime.chatgpt_accounts["account-1"].token_authority;
+    let authority = &runtime.account_state.executors["account-1"].token_authority;
     let original = authority.tokens("account-1").await.unwrap();
     authority
         .register("account-1", original, AccountAuthState::Active)
@@ -823,7 +873,7 @@ async fn delayed_old_credential_response_cannot_publish_access_or_inventory() {
     )
     .await
     .unwrap();
-    runtime.chatgpt_accounts["account-1"]
+    runtime.account_state.executors["account-1"]
         .token_authority
         .register(
             "account-1",
@@ -845,7 +895,11 @@ async fn delayed_old_credential_response_cannot_publish_access_or_inventory() {
             .candidate("account-1")
             .unwrap()
             .models,
-        BTreeSet::from(["gpt-test".to_string()])
+        ["gpt-test"]
+            .into_iter()
+            .chain(crate::account_image_models(OAuthClientKind::ExcelBps))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
     );
 }
 
@@ -879,7 +933,11 @@ async fn failed_refresh_hides_stale_access_preserves_inventory_and_respects_retr
             .candidate("account-1")
             .unwrap()
             .models,
-        BTreeSet::from(["gpt-test".to_string()])
+        ["gpt-test"]
+            .into_iter()
+            .chain(crate::account_image_models(OAuthClientKind::ExcelBps))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
     );
 }
 

@@ -50,6 +50,7 @@ pub(in crate::gateway) fn has_generation_evidence(
 ) -> bool {
     has_semantic_output(event_payload, event_type)
         || crate::gateway::response::has_generated_tokens(event_payload)
+        || crate::protocol::response_models::has_executed_fallback(event_payload)
 }
 
 /// Known lifecycle and compaction frames are safe to buffer while selecting a

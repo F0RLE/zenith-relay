@@ -39,7 +39,8 @@ the affected acceptance checks within task and harness permissions.
 | Secret write, metadata commit, or runtime activation failure | Existing checkpoint/conditional rollback preserves prior state; no false success and no overwrite of newer work. |
 | Login succeeds but discovery/quota times out | Preserve the validated login; represent monitoring failure separately without inventing model access or quota. |
 
-Inspect the existing `accounts/oauth/tests.rs`, `oauth_flow/tests.rs`,
+Inspect shared `providers/chatgpt/connector/oauth/tests.rs` and
+`tests/host_management.rs`, Desktop `accounts/oauth_flow/tests.rs` and
 `commands/oauth/tests.rs`, import reconciliation, and persistence coverage.
 Document any changed auth grant, storage format, or user step in its existing
 owner. Leave an unimplemented connector or unperformed live acceptance in

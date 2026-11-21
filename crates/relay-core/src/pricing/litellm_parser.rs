@@ -44,6 +44,10 @@ pub(super) fn parse_entry(
         provider,
         token,
         image,
+        image_generation: matches!(
+            pricing_record.get("mode").and_then(Value::as_str),
+            Some("image_generation")
+        ),
         request_micro_usd,
     }))
 }
@@ -170,13 +174,29 @@ fn parse_image_price(
     let output_per_image = optional_request(pricing_record, "output_cost_per_image")?;
     let input_per_image = optional_request(pricing_record, "input_cost_per_image")?;
     let input_per_image_token = optional_token(pricing_record, "input_cost_per_image_token")?;
-    if output_per_image.is_none() && input_per_image.is_none() && input_per_image_token.is_none() {
+    let output_per_image_token = optional_token(pricing_record, "output_cost_per_image_token")?;
+    if output_per_image.is_none()
+        && input_per_image.is_none()
+        && input_per_image_token.is_none()
+        && output_per_image_token.is_none()
+    {
         return Ok(None);
     }
     Ok(Some(ImageModelPrice {
         input_micro_usd_per_image: input_per_image,
         output_micro_usd_per_image: output_per_image,
         input_micro_usd_per_image_token: input_per_image_token,
+        output_micro_usd_per_image_token: output_per_image_token,
+        cached_image_micro_usd_per_million: optional_token(
+            pricing_record,
+            "cache_read_input_image_token_cost",
+        )?,
+        input_text_micro_usd_per_million: optional_token(pricing_record, "input_cost_per_token")?,
+        cached_text_micro_usd_per_million: optional_token(
+            pricing_record,
+            "cache_read_input_token_cost",
+        )?,
+        output_text_micro_usd_per_million: optional_token(pricing_record, "output_cost_per_token")?,
     }))
 }
 
@@ -237,6 +257,36 @@ fn optional_micro_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn image_token_tariff_keeps_modalities_without_a_text_output_rate() {
+        let entry = parse_entry(
+            "synthetic-image",
+            &json!({
+                "litellm_provider": "openai", "mode": "image_generation",
+                "input_cost_per_token": 0.000005,
+                "cache_read_input_token_cost": 0.00000125,
+                "input_cost_per_image_token": 0.000008,
+                "cache_read_input_image_token_cost": 0.000002,
+                "output_cost_per_image_token": 0.00003,
+                "output_cost_per_image_token_batches": 0.000015
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(entry.token.is_none());
+        assert_eq!(
+            entry.image,
+            Some(ImageModelPrice {
+                input_text_micro_usd_per_million: Some(5_000_000),
+                cached_text_micro_usd_per_million: Some(1_250_000),
+                input_micro_usd_per_image_token: Some(8_000_000),
+                cached_image_micro_usd_per_million: Some(2_000_000),
+                output_micro_usd_per_image_token: Some(30_000_000),
+                ..Default::default()
+            })
+        );
+    }
 
     #[test]
     fn openai_creation_tariffs_keep_their_generic_component_and_schedules() {

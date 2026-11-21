@@ -841,7 +841,7 @@ async fn portable_tool_history_yields_to_fresh_quota_but_unpaired_outputs_keep_t
             let first: Value = first.json().await.unwrap();
             assert_eq!(first["id"], "quota-tool-response");
 
-            set_account_remainder(runtime, "owner-account", 2_000);
+            set_account_remainder(runtime, "owner-account", 1_000);
             set_account_remainder(runtime, "other-account", 8_000);
             let mut input = Vec::new();
             if include_call {
@@ -988,7 +988,7 @@ async fn websocket_quota_handoff_preserves_materialized_reasoning() {
             .await
             .unwrap();
         let first = receive_websocket_completion(&mut socket).await;
-        set_account_remainder(runtime, "owner-account", 2_000);
+        set_account_remainder(runtime, "owner-account", 1_000);
         set_account_remainder(runtime, "other-account", 8_000);
         let next_input = json!([{"role":"user", "content":"continue"}]);
         socket
@@ -1079,7 +1079,7 @@ async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_th
             .unwrap();
         let first = receive_websocket_completion(&mut socket).await;
         assert_eq!(first["response"]["id"], "quota-tool-response");
-        set_account_remainder(runtime, "owner-account", 2_000);
+        set_account_remainder(runtime, "owner-account", 1_000);
         set_account_remainder(runtime, "other-account", 8_000);
         if reconnect {
             drop(socket);
@@ -1152,7 +1152,7 @@ async fn websocket_portable_tool_history_yields_to_fresh_quota_without_losing_th
 }
 
 #[tokio::test]
-async fn account_compact_replays_plaintext_history_only_for_a_larger_fresh_remainder() {
+async fn account_compact_keeps_a_warm_owner_until_low_quota_then_replays_plaintext_history() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![
         success_reply("owner-compact"),
         success_reply("owner-stays"),
@@ -1193,6 +1193,8 @@ async fn account_compact_replays_plaintext_history_only_for_a_larger_fresh_remai
         .unwrap();
     assert_eq!(first["id"], "owner-compact");
 
+    set_account_remainder(&runtime, "owner-account", 2_000);
+    set_account_remainder(&runtime, "other-account", 8_000);
     let stayed: Value = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
@@ -1217,7 +1219,7 @@ async fn account_compact_replays_plaintext_history_only_for_a_larger_fresh_remai
     );
     assert!(other_state.requests.lock().unwrap().is_empty());
 
-    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "owner-account", 1_000);
     set_account_remainder(&runtime, "other-account", 9_800);
     let moved = client
         .post(format!("{}/v1/responses/compact", gateway.base_url))
@@ -1297,7 +1299,7 @@ async fn account_continuation_without_saved_history_stays_on_its_owner() {
         .unwrap();
     assert_eq!(first["id"], "owner-opaque");
 
-    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "owner-account", 1_000);
     set_account_remainder(&runtime, "other-account", 9_800);
     let stayed: Value = client
         .post(format!("{}/v1/alpha/search", gateway.base_url))
@@ -1329,7 +1331,7 @@ async fn account_continuation_without_saved_history_stays_on_its_owner() {
 }
 
 #[tokio::test]
-async fn account_search_continuation_moves_when_another_account_has_more_quota() {
+async fn account_search_continuation_moves_at_low_quota_when_another_account_has_more() {
     let (owner_upstream, owner_state) = spawn_upstream(vec![success_reply("owner-response")]).await;
     let (other_upstream, other_state) = spawn_upstream(vec![success_reply("other-search")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -1363,7 +1365,7 @@ async fn account_search_continuation_moves_when_another_account_has_more_quota()
         .unwrap();
     assert_eq!(first["id"], "owner-response");
 
-    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "owner-account", 1_000);
     set_account_remainder(&runtime, "other-account", 9_800);
     let moved: Value = client
         .post(format!("{}/v1/alpha/search", gateway.base_url))
@@ -1415,7 +1417,7 @@ async fn account_wake_stays_on_its_account_when_another_has_more_quota() {
     )
     .await;
     let runtime = gateway.runtime.as_ref().unwrap().clone();
-    set_account_remainder(&runtime, "owner-account", 3_200);
+    set_account_remainder(&runtime, "owner-account", 1_000);
     set_account_remainder(&runtime, "other-account", 9_800);
 
     let response = gateway::execute_account_wake(

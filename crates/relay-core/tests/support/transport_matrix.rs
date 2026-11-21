@@ -134,11 +134,8 @@ async fn matrix_http(
     let WebSocketBehavior::GatedSuccess(barrier) = state.behavior else {
         panic!("matrix upstream requires a shared generation gate");
     };
-    state
-        .requests
-        .lock()
-        .unwrap()
-        .push(serde_json::from_slice(&body).unwrap());
+    let request = zenith_relay_core::bounded_json::from_slice(&body).unwrap();
+    state.requests.lock().unwrap().push(request);
     upstream(
         State(UpstreamState {
             replies: Arc::new(Mutex::new(VecDeque::from([successful_sse_reply()]))),

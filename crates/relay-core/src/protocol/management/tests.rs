@@ -11,10 +11,13 @@ use crate::{
     quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription, SubscriptionStatus},
 };
 use std::sync::Arc;
+mod account_economics;
 mod accounts;
+mod endpoint_projection;
 mod inventory;
 mod pricing;
 mod reasoning;
+mod rotation_display;
 mod saved_presets;
 mod speed;
 
@@ -65,7 +68,7 @@ fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
         route_group_id: None,
         route_inactive: false,
         credit_balance_key: None,
-        oauth_client_kind: Default::default(),
+        oauth_client_kind: Some(Default::default()),
         id: "account".into(),
         label: "Account".into(),
         identity_hint: "account".into(),
@@ -80,11 +83,14 @@ fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
         auth_state: AccountAuthState::Active,
         health: "healthy".into(),
         models: models.iter().map(ToString::to_string).collect(),
+        pool_eligible: !models.is_empty(),
+        image_generation_restriction: None,
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         priority: 0,
         weight: 1,
         api_equivalent: ApiEquivalentSummary::default(),
+        economics: None,
         quota_window_usage: None,
         purchase_cost_micro_usd: None,
         subscription: Subscription::default(),

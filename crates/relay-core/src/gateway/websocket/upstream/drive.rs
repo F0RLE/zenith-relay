@@ -1,7 +1,5 @@
-use std::collections::HashSet;
 use std::time::Instant;
 
-use super::super::super::execution::AttemptRepairs;
 use super::super::*;
 use super::handshake::{
     AuthorizationUpgrade, can_use_optional_fast_path, upgrade_with_authorization_refresh,
@@ -9,7 +7,7 @@ use super::handshake::{
 use super::open::{OpenedSocket, open_upgraded_socket};
 use super::telemetry::record_connect_failure;
 use super::upgrade_reject::{UpgradeAction, handle_upgrade_rejection};
-use super::{ConnectProgress, ConnectScope, ConnectTrace, Connected, HttpFallback};
+use super::{ConnectRecovery, ConnectScope, ConnectTrace, Connected, HttpFallback};
 use crate::runtime::{AccountTransport, WebsocketTransportPreference};
 
 #[allow(clippy::large_enum_variant)]
@@ -29,11 +27,7 @@ pub(super) struct DriveCandidateInput<'a> {
     pub(super) key: &'a AuthenticatedKey,
     pub(super) client_headers: &'a HeaderMap,
     pub(super) attempt: &'a mut u16,
-    pub(super) tried: &'a mut HashSet<String>,
-    pub(super) repairs: &'a mut AttemptRepairs,
-    pub(super) confirmed_response_missing: &'a mut bool,
-    pub(super) last_failure: &'a mut Option<GatewayFailure>,
-    pub(super) http_fallback_origin: &'a mut Option<ErrorOrigin>,
+    pub(super) recovery: &'a mut ConnectRecovery,
 }
 
 /// Drive one reserved WebSocket candidate through upgrade. Continue and break
@@ -50,13 +44,9 @@ pub(super) async fn drive_selected_candidate(
         key,
         client_headers,
         attempt,
-        tried,
-        repairs,
-        confirmed_response_missing,
-        last_failure,
-        http_fallback_origin: websocket_http_fallback_origin,
+        recovery,
     } = connect_input;
-    tried.insert(selected.candidate_id.clone());
+    recovery.tried.insert(selected.candidate_id.clone());
     let response_affinity_hit = selected.response_affinity_hit;
     runtime.set_route_streaming(&mut route, false);
     route.client_transport = crate::UsageTransport::Websocket;
@@ -73,22 +63,20 @@ pub(super) async fn drive_selected_candidate(
     let basis_points = route.account_transport == AccountTransport::ExcelBasisPoints;
     let siwc = route.account_transport == AccountTransport::Siwc;
     if basis_points || siwc {
-        let reserved_candidate = super::super::super::execution::ReservedCandidate {
-            local_key_id: key.id.clone(),
-            model: request.resolved_model.clone(),
-            selection: selected,
-            lease,
-        };
-        return Ok(DrivenConnect::Http(Box::new(HttpFallback {
+        return Ok(DrivenConnect::Http(Box::new(HttpFallback::for_candidate(
             request,
-            reserved_candidate,
-        })));
+            key,
+            selected,
+            lease,
+            crate::usage::TransportFallbackReason::WebsocketUnavailable,
+            source_error_origin,
+        ))));
     }
-    route.routing = Some(selected.diagnostics);
+    route.routing = Some(selected.diagnostics.clone());
     if !route.adapter.is_passthrough() {
         drop(lease);
-        *websocket_http_fallback_origin = Some(source_error_origin);
-        *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
+        recovery.http_fallback_origin = Some(source_error_origin);
+        recovery.last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
         return Ok(DrivenConnect::Continue(request));
     }
     let started = Instant::now();
@@ -96,6 +84,7 @@ pub(super) async fn drive_selected_candidate(
     macro_rules! connect_trace {
         () => {
             &ConnectTrace {
+                event: None,
                 runtime,
                 lease: &lease,
                 key,
@@ -111,10 +100,18 @@ pub(super) async fn drive_selected_candidate(
         Err(error) => {
             let failure = GatewayFailure::prepare(error, source_error_origin);
             record_connect_failure(connect_trace!(), &failure, None);
-            *last_failure = Some(failure);
+            recovery.last_failure = Some(failure);
             return Ok(DrivenConnect::Continue(request));
         }
     };
+    if request.websocket_reauth(&route.candidate_id, &prepared)
+        && request.has_previous_response_id()
+        && !request.drop_previous_response_id(runtime, &key.id)
+    {
+        let failure = GatewayFailure::continuation_unavailable();
+        record_connect_failure(connect_trace!(), &failure, None);
+        return Err(failure);
+    }
     let capability_scope = GatewayRuntime::websocket_capability_scope(&route, &prepared);
     let transport_preference = runtime.websocket_transport_preference(
         &capability_scope,
@@ -125,14 +122,19 @@ pub(super) async fn drive_selected_candidate(
     if transport_preference == WebsocketTransportPreference::SlowHandshake
         && can_use_optional_fast_path(&route, &request)
     {
-        return Err(GatewayFailure::websocket_slow_handshake(
+        return Ok(DrivenConnect::Http(Box::new(HttpFallback::for_candidate(
+            request,
+            key,
+            selected,
+            lease,
+            crate::usage::TransportFallbackReason::WebsocketSlowHandshake,
             source_error_origin,
-        ));
+        ))));
     }
     if transport_preference == WebsocketTransportPreference::HttpOnly {
         drop(lease);
-        *websocket_http_fallback_origin = Some(source_error_origin);
-        *last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
+        recovery.http_fallback_origin = Some(source_error_origin);
+        recovery.last_failure = Some(GatewayFailure::websocket_http_fallback(source_error_origin));
         return Ok(DrivenConnect::Continue(request));
     }
     let mut prepared = prepared;
@@ -147,16 +149,21 @@ pub(super) async fn drive_selected_candidate(
         started,
         source_error_origin,
         &mut prepared,
-        last_failure,
+        &mut recovery.last_failure,
     )
     .await
     {
         AuthorizationUpgrade::ContinueCandidate => return Ok(DrivenConnect::Continue(request)),
         AuthorizationUpgrade::BudgetExhausted => return Ok(DrivenConnect::Break(request)),
         AuthorizationUpgrade::FastPathMissed => {
-            return Err(GatewayFailure::websocket_slow_handshake(
+            return Ok(DrivenConnect::Http(Box::new(HttpFallback::for_candidate(
+                request,
+                key,
+                selected,
+                lease,
+                crate::usage::TransportFallbackReason::WebsocketSlowHandshake,
                 source_error_origin,
-            ));
+            ))));
         }
         AuthorizationUpgrade::Upgraded(upgrade) => upgrade,
     };
@@ -165,11 +172,14 @@ pub(super) async fn drive_selected_candidate(
     // request-local route so every later WebSocket usage event is tied to
     // the credential that actually performed the upgrade.
     route.account_token_generation = prepared.token_generation;
+    route.account_token_revision = prepared.token_revision.clone();
+    lease.retain_wire_authorization(&prepared);
     let status = upgrade.status();
     let response_headers = upgrade.headers().clone();
     runtime.observe_codex_quota_headers(
         &route.candidate_id,
         prepared.token_generation,
+        prepared.token_revision.as_ref(),
         status,
         &response_headers,
         now_ms(),
@@ -181,17 +191,10 @@ pub(super) async fn drive_selected_candidate(
             &response_headers,
             &prepared,
         );
-        let turn_scope = request_scope(
-            &key.id,
-            client_headers,
-            route.account_id.as_deref(),
-            &route.source_model,
-            route.upstream_url.as_str(),
-        );
-        runtime.observe_turn_state(&response_headers, turn_scope.as_ref(), &prepared);
     }
     if status != StatusCode::SWITCHING_PROTOCOLS {
         let mut scope = ConnectScope {
+            event: None,
             runtime,
             key,
             request: &mut request,
@@ -202,20 +205,13 @@ pub(super) async fn drive_selected_candidate(
             source_error_origin,
             response_affinity_hit,
         };
-        let mut progress = ConnectProgress {
-            tried,
-            repairs,
-            confirmed_response_missing,
-            last_failure,
-            http_fallback_origin: websocket_http_fallback_origin,
-        };
         match handle_upgrade_rejection(
             upgrade,
             status,
             &response_headers,
             &prepared,
             &mut scope,
-            &mut progress,
+            &mut recovery.progress(),
         )
         .await?
         {
@@ -241,16 +237,11 @@ pub(super) async fn drive_selected_candidate(
         started,
         source_error_origin,
         response_affinity_hit,
-        tried,
-        repairs,
-        confirmed_response_missing,
-        last_failure,
-        websocket_http_fallback_origin,
+        &mut recovery.last_failure,
     )
     .await?
     {
         OpenedSocket::Continue(returned) => Ok(DrivenConnect::Continue(returned)),
-        OpenedSocket::Break(returned) => Ok(DrivenConnect::Break(returned)),
         OpenedSocket::Ready(connected) => Ok(DrivenConnect::Ready(connected)),
     }
 }

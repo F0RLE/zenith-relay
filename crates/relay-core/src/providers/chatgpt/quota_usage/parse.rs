@@ -37,13 +37,13 @@ struct RateLimitStatus {
     allowed: Option<bool>,
     #[serde(default)]
     limit_reached: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_window")]
     primary_window: Option<RateLimitWindow>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_window")]
     secondary_window: Option<RateLimitWindow>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct RateLimitWindow {
     #[serde(default)]
     used_percent: Option<f64>,
@@ -55,11 +55,22 @@ struct RateLimitWindow {
     reset_at: Option<i64>,
 }
 
+fn deserialize_window<'de, D>(deserializer: D) -> Result<Option<RateLimitWindow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    // A malformed observation belongs to this window, not its valid neighbors.
+    // Keep it present so a successful partial refresh replaces stale capacity
+    // with unknown rather than retaining it or inventing an empty/full window.
+    Ok(value.map(|value| serde_json::from_value(value).unwrap_or_default()))
+}
+
 #[derive(Deserialize)]
 struct SupplementalRateLimitStatus {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_window")]
     primary_window: Option<RateLimitWindow>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_window")]
     secondary_window: Option<RateLimitWindow>,
 }
 
@@ -118,18 +129,32 @@ pub fn parse_codex_usage(
                 _ => true,
             });
     let (primary, secondary, allowed, limit_reached) = match usage_payload.rate_limit {
-        Some(rate_limit) => (
-            rate_limit
-                .primary_window
-                .map(|window| map_window(window, QuotaWindowKind::Primary, observed_at_ms))
-                .transpose()?,
-            rate_limit
-                .secondary_window
-                .map(|window| map_window(window, QuotaWindowKind::Secondary, observed_at_ms))
-                .transpose()?,
-            rate_limit.allowed,
-            rate_limit.limit_reached,
-        ),
+        Some(rate_limit) => {
+            let primary = rate_limit.primary_window.map(|window| {
+                map_observed_window(window, QuotaWindowKind::Primary, observed_at_ms)
+            });
+            let secondary = rate_limit.secondary_window.map(|window| {
+                map_observed_window(window, QuotaWindowKind::Secondary, observed_at_ms)
+            });
+            let windows = [primary.as_ref(), secondary.as_ref()];
+            if windows.iter().any(Option::is_some)
+                && !windows
+                    .iter()
+                    .flatten()
+                    .any(|window| window.available_percent.is_some())
+            {
+                return Err(QuotaRefreshFailure::new(
+                    error_codes::QUOTA_INVALID_PERCENTAGE,
+                    false,
+                ));
+            }
+            (
+                primary,
+                secondary,
+                rate_limit.allowed,
+                rate_limit.limit_reached,
+            )
+        }
         None => (None, None, None, None),
     };
     let limit_reached = explicit_limit_reached.then_some(true).or(limit_reached);
@@ -362,6 +387,22 @@ fn supplemental_service_tier(label: &str) -> Option<DefaultServiceTier> {
                 None
             }
         })
+}
+
+fn map_observed_window(
+    window: RateLimitWindow,
+    kind: QuotaWindowKind,
+    observed_at_ms: u64,
+) -> QuotaWindowInput {
+    map_window(window, kind, observed_at_ms).unwrap_or(QuotaWindowInput {
+        kind,
+        available_percent: None,
+        explicitly_full: None,
+        reset: None,
+        window_minutes: None,
+        provider_cycle_id: None,
+        observed_at_ms,
+    })
 }
 
 fn map_window(

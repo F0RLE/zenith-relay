@@ -71,6 +71,11 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub cached_input_samples: u64,
+    /// Paired physical-send measurements used for the observed cache-hit rate.
+    #[serde(default)]
+    pub cache_rate_input_tokens: u64,
+    #[serde(default)]
+    pub cache_rate_cached_input_tokens: u64,
     #[serde(default)]
     pub cache_write_input_tokens: u64,
     #[serde(default)]
@@ -89,8 +94,8 @@ impl UsageTotals {
     /// successes, latency, time to first token and its sample count,
     /// generation time, generation samples, generation output, input, cached
     /// input and its samples, cache writes and their samples, reasoning,
-    /// output, total, speed output, and speed duration. A negative SQL count
-    /// becomes zero.
+    /// output, total, speed output, speed duration, and paired cache-rate input
+    /// and cached input. A negative SQL count becomes zero.
     pub fn from_sql_counts<E>(mut count: impl FnMut(usize) -> Result<i64, E>) -> Result<Self, E> {
         use crate::usage::sql_count_u64 as nonnegative;
         Ok(Self {
@@ -112,6 +117,8 @@ impl UsageTotals {
             total_tokens: nonnegative(count(15)?),
             speed_output_tokens: nonnegative(count(16)?),
             speed_duration_ms: nonnegative(count(17)?),
+            cache_rate_input_tokens: nonnegative(count(18)?),
+            cache_rate_cached_input_tokens: nonnegative(count(19)?),
             api_equivalent: ApiEquivalentSummary::default(),
         })
     }
@@ -183,6 +190,17 @@ pub enum UsageWorkload {
     Conversation,
     Memory,
     Background,
+}
+
+impl UsageWorkload {
+    /// Classify the runtime's pre-dispatch origin, before usage is finalized.
+    pub fn from_request_origin(origin: Option<&str>) -> Self {
+        match origin {
+            Some("memory_extraction" | "memory_consolidation") => Self::Memory,
+            Some("activity_summary" | "task_title" | "wake") => Self::Background,
+            _ => Self::Conversation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -412,6 +430,8 @@ mod tests {
         assert_eq!(totals.total_tokens, 16);
         assert_eq!(totals.speed_output_tokens, 17);
         assert_eq!(totals.speed_duration_ms, 18);
+        assert_eq!(totals.cache_rate_input_tokens, 19);
+        assert_eq!(totals.cache_rate_cached_input_tokens, 20);
         assert_eq!(
             UsageTotals::from_sql_counts(|index| Ok::<i64, ()>(if index == 3 { -1 } else { 0 }))
                 .unwrap()

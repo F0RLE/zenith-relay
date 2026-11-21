@@ -2,10 +2,15 @@ mod export;
 mod import;
 mod jwt;
 mod login_notes;
+pub mod management;
 mod quota_state;
 mod record;
+pub mod removal;
 mod routes;
+mod secrets;
 mod token_authority;
+
+pub use secrets::{SecretBackend, SecretBackendError};
 
 /// Upper bound for a user-entered account purchase cost in micro-USD.
 /// This is presentation metadata used only for the payback ratio.
@@ -28,7 +33,7 @@ pub use import::{
     ImportPreview, ImportPreviewRow, ImportPreviewStatus, ImportQuotaStatus, ImportSecretMaterial,
     ImportWarning, ImportWarningCode, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, MAX_JSON_DEPTH,
     ParsedImport, ParsedImportItem, chatgpt_token_identity_key, combine_import_documents,
-    parse_import,
+    normalize_selected_item_ids, parse_import,
 };
 pub use jwt::decode_unverified_jwt_payload;
 pub use login_notes::{
@@ -44,12 +49,12 @@ pub use record::{
     recover_model_discovery_state, reduce_account_usage, repair_model_discovery_block,
 };
 pub use routes::{
-    AccountRouteGroup, AccountRouteIdentity, detach_account_route, select_account_route_group,
-    validate_account_route_connection, validate_account_route_groups,
+    AccountRouteGroup, AccountRouteIdentity, associate_account_route_groups, detach_account_route,
+    select_account_route_group, validate_account_route_connection, validate_account_route_groups,
 };
 pub use token_authority::{
     PrepareStatus, PreparedToken, TOKEN_REFRESH_SKEW_MS, TokenAuthority, TokenAuthorityError,
     TokenDispatchRevision, TokenDispatchRevisionGuard, TokenPersistenceAdapter,
     TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
-    TokenRefreshFailureKind, TokenSet, access_token_is_usable,
+    TokenRefreshFailureKind, TokenRefreshStage, TokenSet, access_token_is_usable,
 };
