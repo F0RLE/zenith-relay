@@ -1,0 +1,66 @@
+.hosted-app .live-pool-summary .owner-resource-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.hosted-app .live-pool-summary .owner-resource-summary-band:last-child { border-bottom: 0; }
+.hosted-app .live-pool-summary .live-pool-toolbar { display: flex; align-items: flex-start; min-height: 80px; }
+.live-pool-toolbar .owner-pool-runtime:has(.live-pool-strategy) { grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; }
+.live-pool-toolbar :is(.owner-pool-route, .owner-pool-active-models) { grid-column: 1 / -1; }
+.live-pool-strategy { color: var(--secondary); font-size: 12px; line-height: 18px; }
+.hosted-app .live-pool-toolbar .live-rotation-trigger { flex: none; min-width: 44px; min-height: 44px; }
+.hosted-app .request-dialog.live-rotation-dialog { width: min(620px, calc(100% - 24px)); overflow: hidden; }
+.hosted-app .request-dialog.live-rotation-dialog .dialog-body {
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+}
+.live-rotation-pane { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.live-rotation-form { min-width: 0; margin: 0; padding: 0; border: 0; }
+.live-rotation-dialog .owner-rotation-editor[data-restricted] { grid-template-columns: minmax(0, 1fr); }
+.live-rotation-dialog .owner-rotation-modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.live-rotation-dialog .owner-rotation-editor :is(.owner-rotation-columns, .owner-rotation-member) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.live-rotation-dialog .owner-rotation-order-actions button { width: 44px; height: 44px; }
+.live-rotation-dialog .dialog-body :is(.live-rotation-hint, .live-rotation-note) {
+  margin: 0; color: var(--secondary); font-size: 13px; line-height: 1.45;
+}
+.live-rotation-note { flex: none; padding: 12px 20px; }
+.live-rotation-dialog .dialog-body .live-rotation-note[role="alert"] { color: var(--error); }
+.live-rotation-footer {
+  display: flex; flex: none; justify-content: flex-end; flex-wrap: wrap; gap: 8px;
+  padding: 14px 20px; border-top: 1px solid var(--border);
+}
+@media (max-width: 540px) {
+  .live-rotation-dialog .owner-rotation-modes button { flex-direction: row; gap: 6px; }
+  .live-rotation-dialog .owner-rotation-modes button span { min-height: 0; }
+  .live-rotation-dialog .owner-rotation-member { gap: 6px; }
+  .live-rotation-dialog .owner-rotation-identity { grid-column: auto; }
+  .live-rotation-dialog .owner-rotation-avatar { display: none; }
+  .live-rotation-dialog .owner-rotation-order-actions { align-self: center; }
+  .live-rotation-footer { padding: 12px 16px; }
+}
+@media (max-width: 380px) {
+  .live-rotation-dialog .owner-rotation-handle { display: none; }
+}
+.live-pool > .source-serving { margin-block: 8px 12px; }
+.live-member-dialog .owner-member-identity { flex-wrap: wrap; }
+.live-member-dialog .owner-member-identity strong { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.live-member-dialog .owner-member-model-group label:has(input:disabled) { cursor: default; }
+.live-member-dialog .owner-member-model-group label:has(input:focus-visible) { background: var(--accent-soft); }
+.live-member-settings { margin: 8px 0; flex-wrap: wrap; }
+.live-member-dialog .owner-member-footer button[aria-disabled="true"] { cursor: wait; opacity: .65; }
+.live-pool-picker form { display: grid; min-width: 0; gap: 12px; }
+.live-pool-options { min-width: 0; margin: 0; padding: 0; border: 0; }
+.live-pool-option {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 8px 12px; min-height: 48px; border-radius: 8px; cursor: pointer;
+}
+.live-pool-option > span { display: grid; min-width: 0; gap: 2px; overflow-wrap: anywhere; }
+.live-pool-option strong { font-size: 13px; }
+.live-pool-option code { color: var(--secondary); font-size: 12px; }
+.live-pool-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.live-pool-option:has(input:checked) { background: var(--accent-soft); }
+.live-pool-option:has(input:focus-visible) { outline: 1px solid var(--accent); outline-offset: -1px; }
+@media (hover: hover) {
+  .live-pool-option:hover:not(:has(input:checked, input:disabled)) { background: var(--subtle); }
+}
+@container relay-page (max-width: 440px) {
+  .hosted-app .live-pool > .relay-workspace-header { grid-template-columns: minmax(0, 1fr); }
+  .hosted-app .live-pool > .relay-workspace-header .relay-page-actions { grid-column: 1; grid-row: 3; justify-content: start; }
+}

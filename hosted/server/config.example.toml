@@ -1,6 +1,10 @@
 [server]
 bind = "127.0.0.1:1443"
 public_origin = "http://localhost:1443"
+# With HTTPS and the transfer worker routed at the TLS edge, enable Add API connection.
+# web_api_intake = true
+# On local HTTPS qualification only, with the separate qualifier running.
+# web_model_checks = true
 
 [auth]
 admin_rp_id = "localhost"

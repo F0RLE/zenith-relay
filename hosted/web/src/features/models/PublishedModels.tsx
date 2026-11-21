@@ -1,19 +1,10 @@
 import { useEffect, useState } from "react";
-import { components, readListings, type Listing, type Prices } from "../../api/catalog";
+import { readListings, type Listing } from "../../api/catalog";
 import { ControlError, observeControl } from "../../api/control";
-import { useLocale } from "../../i18n/LocaleProvider";
-import { modelRate } from "./retailRate";
-
-export const priceLabels = { input: "modelCatalog.input", cached: "modelCatalog.cacheRead", output: "modelCatalog.output" } as const;
-export function PriceStrip({ prices }: { prices: Prices }) {
-  const { t } = useLocale();
-  return <dl className="catalog-prices">{components.map(k => <div key={k}>
-    <dt>{t(priceLabels[k])}</dt><dd title={t("modelRules.units")}>${modelRate(prices[k])}<span className="sr-only"> {t("modelRules.units")}</span></dd>
-  </div>)}</dl>;
-}
+import { ModelsPage } from "./ModelsPage";
+import type { CustomerModel } from "./model";
 
 export function PublishedModels() {
-  const { t } = useLocale();
   const [rows, setRows] = useState<Listing[]>();
   const [failed, setFailed] = useState(false);
   const [reload, setReload] = useState(0);
@@ -22,12 +13,14 @@ export function PublishedModels() {
       if (err instanceof ControlError && err.status === 401) location.replace("/login");
       else { setRows(undefined); setFailed(true); }
     }), [reload]);
-  if (failed) return <div><p role="alert">{t("unavailable.server")}</p><button className="key-button key-secondary"
-    onClick={() => { setFailed(false); setReload(n => n + 1); }}>{t("common.retry")}</button></div>;
-  if (!rows) return <p role="status">{t("unavailable.connecting")}</p>;
-  if (!rows.length) return <p>{t("modelStatus.noModels")}</p>;
-  return <div className="entry-catalog">
-    <ul className="catalog-list">{rows.map(row => <li key={row.model} className="catalog-listing">
-      <div className="catalog-identity"><strong>{row.model}</strong><small>Responses</small></div><PriceStrip prices={row.rates} />
-    </li>)}</ul></div>;
+  const models = rows?.map((row): CustomerModel => ({
+    id: row.model, name: row.model, protocols: ["Responses"], description: "", revision: row.revision,
+    ...(row.publisher !== null && { publisher: row.publisher }),
+    rates: { input: row.rates.input, output: row.rates.output, cacheRead: row.rates.cached },
+  }));
+  if (failed) return <ModelsPage state={{ kind: "unavailable", retry: () => {
+    setFailed(false);
+    setReload(n => n + 1);
+  } }} />;
+  return models ? <ModelsPage models={models} /> : <ModelsPage state={{ kind: "loading" }} />;
 }

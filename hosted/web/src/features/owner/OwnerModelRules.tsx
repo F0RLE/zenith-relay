@@ -1,6 +1,5 @@
 import { useEffect, useId, useState } from "react";
 import { OptionMenu } from "../../components/OptionMenu";
-import { ChevronDown, GripVertical } from "../../components/Icons";
 import { useLocale } from "../../i18n/LocaleProvider";
 import type { MessageKey } from "../../i18n/types";
 import { modelContextRanges, selectedModelVariant } from "../models/model";
@@ -10,6 +9,7 @@ import type { OwnerModelRules } from "./modelRules";
 import type { OwnerConnection } from "./model";
 import { catalogGroups, moveCatalogItem } from "../models/catalogOrder";
 import type { CatalogMove } from "../models/catalogOrder";
+import { ModelGroupHeading, ModelOrderGrip } from "./ModelOrderControls";
 import { useCatalogReorder } from "./useCatalogReorder";
 import "./owner-model-rules.css";
 
@@ -70,11 +70,7 @@ export function OwnerModelRulesView({ models, connections, rules, onChange, disp
   }
   const reorder = useCatalogReorder(groups, move, active);
   function handle(kind: CatalogMove["kind"], id: string, name: string, count: number) {
-    return <button type="button" className="owner-model-drag-handle" data-kind={kind} disabled={!onOrderChange || count < 2}
-      aria-label={t(kind === "group" ? "modelRules.moveCompany" : "modelRules.moveModel", { name })} aria-describedby={dragHelp} aria-keyshortcuts="ArrowUp ArrowDown Home End"
-      data-relay-tooltip={t("modelRules.dragHint")} onPointerDown={event => reorder.start(event, { kind, id })} onKeyDown={event => reorder.key(event, { kind, id })}>
-      <GripVertical aria-hidden="true" />
-    </button>;
+    return <ModelOrderGrip kind={kind} id={id} name={name} available={!!onOrderChange && count > 1} help={dragHelp} reorder={reorder} />;
   }
   function offerLabel(model: CustomerModel, variant: NonNullable<CustomerModel["pricingVariants"]>[number]) {
     const range = modelContextRanges(model, variant.tier).find(item => item.band === variant.contextBand);
@@ -100,20 +96,16 @@ export function OwnerModelRulesView({ models, connections, rules, onChange, disp
         <th scope="col">{t("modelRules.enabled")}</th>
       </tr></thead>
       {groups.map(group => <tbody key={group.id} data-group-id={group.id} data-collapsed={collapsedGroups.has(group.id) || undefined} {...reorder.state("group", group.id)}>
-        <tr className="owner-model-group"><th scope="rowgroup" colSpan={7}><div className="owner-model-group-heading">
-          <button type="button" className="owner-model-group-toggle" aria-expanded={!collapsedGroups.has(group.id)}
-            aria-label={t(collapsedGroups.has(group.id) ? "modelRules.expandCompany" : "modelRules.collapseCompany", { name: groupLabel(group) })}
-            aria-controls={group.models.map(model => `${modelRowsId}-${encodeURIComponent(model.id)}`).join(" ")}
-            onClick={() => setCollapsedGroups(current => {
+        <tr className="owner-model-group"><th scope="rowgroup" colSpan={7}>
+          <ModelGroupHeading name={groupLabel(group)} count={group.models.length} expanded={!collapsedGroups.has(group.id)}
+            controls={group.models.map(model => `${modelRowsId}-${encodeURIComponent(model.id)}`).join(" ")}
+            grip={handle("group", group.id, groupLabel(group), groups.length)}
+            toggle={() => setCollapsedGroups(current => {
               const next = new Set(current);
               if (next.has(group.id)) next.delete(group.id); else next.add(group.id);
               return next;
-            })}>
-            <ChevronDown aria-hidden="true" />
-          </button>
-          {handle("group", group.id, groupLabel(group), groups.length)}
-          <strong>{groupLabel(group)}</strong><small>{group.models.length.toLocaleString(locale)}</small>
-        </div></th></tr>
+            })} />
+        </th></tr>
         {group.models.map(original => {
           const model = applyOwnerModelRule(original, rules[original.id]);
           const enabled = rules[model.id]?.enabled !== false;

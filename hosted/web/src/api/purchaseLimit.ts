@@ -1,4 +1,5 @@
 import { control, csrfText, record, uuidText } from "./control";
+import { confirmSupplyAction } from "./ownerSession";
 
 const maxMicros = 9_223_372_036_854_775_807n;
 const scale = 1_000_000n;
@@ -58,9 +59,5 @@ export const readPurchaseLimit = async (source: string) => parsePurchaseLimit(aw
 
 export async function changePurchaseLimit(source: string, csrf: string, change: PurchaseLimitChange) {
   if (csrf.length !== 64 || !csrfText.test(csrf)) throw new Error("Invalid CSRF token");
-  const data = await control(pathFor(source), {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Relay-CSRF": csrf },
-    body: JSON.stringify(change),
-  });
-  if (data.applied !== true || data.operation_id !== change.operation_id) throw new Error("Purchase limit not acknowledged");
+  return confirmSupplyAction(pathFor(source), csrf, change);
 }

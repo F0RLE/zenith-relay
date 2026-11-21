@@ -1,19 +1,17 @@
 import { useRef, useState } from "react";
 import { ControlError } from "../../api/control";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
-import { reviewSourceCopy, validSourceCopyCode, type CopyPreview } from "../../api/sourceCopy";
+import { approveSourceCopy, reviewSourceCopy, validSourceCopyCode, type CopyPreview } from "../../api/sourceCopy";
 import { useLocale } from "../../i18n/LocaleProvider";
 import type { MessageKey } from "../../i18n/types";
 
-type Session = Awaited<ReturnType<typeof readOwnerOverview>>;
-type Props = { session: Session; onSession: (s: Session) => void; onCommitted: () => void };
+type Props = { csrf: string; onCommitted: () => void };
 const stateLabels = {
   approved: "copy.approved",
   expired: "copy.expired",
   committed: "copy.committed",
 } as const;
 
-export function DesktopSourceCopy({ session, onSession, onCommitted }: Props) {
+export function DesktopSourceCopy({ csrf, onCommitted }: Props) {
   const { t } = useLocale();
   const [code, setCode] = useState("");
   const [preview, setPreview] = useState<CopyPreview>();
@@ -30,22 +28,17 @@ export function DesktopSourceCopy({ session, onSession, onCommitted }: Props) {
     setError(undefined);
     const input = code.trim();
     try {
-      let result: CopyPreview;
-      try { result = await reviewSourceCopy(input, approve, session.csrf); }
-      catch (e) {
-        if (!(e instanceof ControlError && e.code === "fresh_passkey_required")) throw e;
-        await signInOwner();
-        const next = await readOwnerOverview(AbortSignal.timeout(10000));
-        onSession(next);
-        result = await reviewSourceCopy(input, approve, next.csrf);
-      }
+      if (approve && preview) await approveSourceCopy(input, preview, csrf);
+      const result = await reviewSourceCopy(input, csrf);
+      if (approve && (result.operation !== preview?.operation || result.state === "awaiting_approval"))
+        throw new Error("Source copy approval not visible");
       setPreview(result);
       if (result.state === "committed") onCommitted();
     } catch (e) {
       if (e instanceof ControlError && e.status === 401) location.replace("/admin/login");
       else setError(e instanceof ControlError && e.status === 409 ? "copy.conflict"
         : e instanceof ControlError && e.status === 400 ? "copy.invalid"
-        : e instanceof ControlError && e.status === 429 ? "copy.limit" : "copy.retry");
+        : e instanceof ControlError && e.code === "copy_limit" ? "copy.limit" : "copy.retry");
     } finally {
       running.current = false;
       setBusy(false);

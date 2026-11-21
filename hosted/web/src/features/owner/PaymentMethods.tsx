@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ControlError } from "../../api/control";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
+import { OwnerPasskeyError, type readOwnerOverview } from "../../api/ownerSession";
 import { changePaymentBuilder, checkoutSettings, readPaymentBuilder, type BuilderAction,
   type BuilderCommand, type PaymentBuilder } from "../../api/paymentBuilder";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -11,7 +11,7 @@ import "./payment-methods.css";
 type Session = Awaited<ReturnType<typeof readOwnerOverview>>;
 type Confirmation = Extract<BuilderAction, { action: "publish" | "disable" }>;
 
-export function PaymentMethods({ session, onSession }: { session: Session; onSession: (s: Session) => void }) {
+export function PaymentMethods({ session }: { session: Session }) {
   const { t, locale } = useLocale();
   const [view, setView] = useState<PaymentBuilder>();
   const [fields, setFields] = useState<DraftFields>();
@@ -51,18 +51,8 @@ export function PaymentMethods({ session, onSession }: { session: Session; onSes
     if (running.current) return;
     running.current = true;
     setBusy(true); setFault(undefined); setStatus(undefined);
-    let newPasskey = false;
     try {
-      try {
-        await changePaymentBuilder(session.csrf, command);
-      } catch (error) {
-        if (!(error instanceof ControlError) || error.code !== "fresh_passkey_required") throw error;
-        newPasskey = true;
-        await signInOwner();
-        const renewed = await readOwnerOverview(AbortSignal.timeout(10000));
-        onSession(renewed); newPasskey = false;
-        await changePaymentBuilder(renewed.csrf, command);
-      }
+      await changePaymentBuilder(session.csrf, command);
       apply(await readPaymentBuilder());
       setRetry(undefined); setConfirming(undefined);
       const action = command.command.action;
@@ -73,7 +63,7 @@ export function PaymentMethods({ session, onSession }: { session: Session; onSes
       }
     } catch (error) {
       if (error instanceof ControlError && error.status === 401) location.replace("/admin/login");
-      else if (newPasskey) { setFault("paymentBuilder.verifyFailed"); }
+      else if (error instanceof OwnerPasskeyError) { setFault("paymentBuilder.verifyFailed"); }
       else if (error instanceof ControlError && (error.code === "revision_conflict" || error.code === "checkout_check_required"
           || error.code === "invalid_checkout_configuration" || error.code === "checkout_closed")) {
         setRetry(undefined); setConfirming(undefined);

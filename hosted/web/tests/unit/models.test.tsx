@@ -196,6 +196,14 @@ describe("Server-owned model pricing", () => {
     expect(html).not.toContain('class="catalog-price"');
   });
 
+  test("ungrouped publications keep their exact IDs and incoming order", () => {
+    const ids = ["Z-model", "A-model", "z-model"];
+    const html = render(ids.map(id => ({ ...base, id, name: id, protocols: ["Responses"] })));
+    expect([...html.matchAll(/data-model-id="([^"]+)"/g)].map(match => match[1])).toEqual(ids);
+    expect(html).not.toContain('class="catalog-company"');
+    expect(html).not.toContain('class="catalog-model-id"');
+  });
+
   test("catalog keeps price comparisons without demo or unit header labels", () => {
     const html = render(previewModels);
     expect(html).not.toContain("Illustrative data");

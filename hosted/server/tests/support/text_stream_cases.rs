@@ -78,6 +78,14 @@ async fn sse_requires_its_own_check_streams_original_bytes_and_charges_once() {
     assert_eq!(receipt["execution"], "completed");
     assert_eq!(receipt["basis"], "provider_final");
     assert_eq!(receipt["total_tokens"], "1020");
+    let elapsed: i32 = sqlx::query_scalar(
+        "SELECT elapsed_ms FROM relay_hosted.text_completion_timings WHERE request_id=$1",
+    )
+    .bind(request)
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!((15..=90_000).contains(&elapsed));
     duplicate(
         &f,
         "native-stream",
@@ -136,6 +144,15 @@ async fn sse_distinguishes_incomplete_failed_and_invalid_upstream_responses() {
         }
         verify_receipt(&f.admin, id, f.a.item, charge, 2300, purchase).await;
         assert_eq!(at_status(&f, id).await["execution"], state);
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT FROM relay_hosted.text_completion_timings WHERE request_id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&f.admin)
+            .await
+            .unwrap()
+        );
     }
 
     let _wrong_mime = StreamWriter::arm(&f.a, "application/json");

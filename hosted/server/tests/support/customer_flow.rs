@@ -78,7 +78,9 @@ pub async fn journey(with_inference: bool) {
     let issuer = format!("http://127.0.0.1:{issuer_port}");
     let provider = Uuid::new_v4();
     let cfg = c.temp.path().join("identity.toml");
-    let mut toml = include_str!("../../config.example.toml").replace("1443", &port.to_string())
+    let mut toml = include_str!("../../config.example.toml")
+        .replace("1443", &port.to_string())
+        .replace("# support = ", "support = ")
         + &format!(
             "\n[customer_oidc]\nid=\"{provider}\"\nissuer=\"{issuer}\"\nclient_id=\"relay-fixture\"\n\
          authorization_endpoint=\"{issuer}/authorize\"\ntoken_endpoint=\"{issuer}/token\"\njwks_uri=\"{issuer}/keys\"\n"
@@ -213,6 +215,13 @@ pub async fn journey(with_inference: bool) {
             .unwrap();
     assert_ne!(a, b);
     assert_eq!(counts().await.unwrap(), (3, 2, 2, 0));
+    let confirmations = || {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT count(*),count(confirmed_by_passkey_id) FROM relay_hosted.configuration_revisions",
+        )
+        .fetch_one(&admin)
+    };
+    assert_eq!(confirmations().await.unwrap(), (1, 1));
     payment::assert_wallet(&admin, a, 0, 0).await;
     payment::assert_wallet(&admin, b, 0, 0).await;
     let worker = db::connect(&config, &c.dsn("fixture_payments"))
@@ -299,9 +308,14 @@ pub async fn journey(with_inference: bool) {
     );
     for query in [
         "SELECT verifier FROM relay_hosted.management_devices",
+        "SELECT id FROM relay_hosted.customer_sessions",
+        "SELECT operation_id FROM relay_hosted.customer_access_changes",
+        "SELECT relay_hosted.replay_customer_access('http://localhost:1443',gen_random_uuid(),gen_random_uuid(),'[]')",
         "SELECT relay_hosted.connection_page(gen_random_uuid(),NULL::uuid)",
         "SELECT operation FROM relay_hosted.device_changes",
+        "SELECT confirmed_by_passkey_id FROM relay_hosted.text_rule_changes",
         "SELECT limit_micro_usd FROM relay_hosted.text_purchase_limit_changes",
+        "SELECT relay_hosted.lock_supply_signer(gen_random_uuid(),decode('00','hex'))",
         "SELECT accounted_micro_usd FROM relay_hosted.text_purchase_periods",
         "SELECT valued_micro_usd FROM relay_hosted.text_late_usage",
         "SELECT percent FROM relay_hosted.text_source_markups",
@@ -316,6 +330,7 @@ pub async fn journey(with_inference: bool) {
         "SELECT relay_hosted.finish_checkout_resume(gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),NULL)",
         "SELECT provider_reference FROM relay_hosted.payment_refunds",
         "SELECT actor_id FROM relay_hosted.payment_refund_reviews",
+        "SELECT relay_hosted.lock_owner_payment_session('http://127.0.0.1', decode(repeat('00',32),'hex'))",
         "SELECT * FROM relay_hosted.claim_payment_refund(gen_random_uuid())",
         "SELECT * FROM relay_hosted.pending_refund_lookups(gen_random_uuid(),NULL::uuid)",
         "SELECT * FROM relay_hosted.refund_for_lookup(gen_random_uuid(),gen_random_uuid())",
@@ -336,6 +351,14 @@ pub async fn journey(with_inference: bool) {
             .is_err()
     );
     fs::write(exchange.join("keys-verified"), []).unwrap();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT has_function_privilege('relay_hosted.own_active_customer_sessions(relay_hosted.customer_sessions,timestamptz)', 'EXECUTE')",
+        )
+        .fetch_one(&runtime)
+        .await
+        .unwrap()
+    );
     if with_inference {
         checkpoint(&mut browser, &exchange.join("funding-keys")).await;
         let b_key = read_key();
@@ -350,9 +373,30 @@ pub async fn journey(with_inference: bool) {
             &b_key,
             &paired,
             &mut browser,
+            async || {
+                server.0.kill().unwrap();
+                server.0.wait().unwrap();
+                server = serve();
+                support::ready(&mut server, &http, &config_url).await;
+            },
         )
         .await;
         fs::write(exchange.join("charge-complete"), []).unwrap();
+    } else {
+        let request = exchange.join("age-customer-session");
+        checkpoint(&mut browser, &request).await;
+        let id: Uuid = fs::read_to_string(request).unwrap().parse().unwrap();
+        let aged = sqlx::query(
+            "UPDATE relay_hosted.customer_sessions SET last_seen_at=clock_timestamp()-interval '31 minutes'
+             WHERE id=$1 AND workspace_id=$2",
+        )
+        .bind(id)
+        .bind(a)
+        .execute(&admin)
+        .await
+        .unwrap();
+        assert_eq!(aged.rows_affected(), 1);
+        fs::write(exchange.join("customer-session-aged"), []).unwrap();
     }
     checkpoint(&mut browser, &exchange.join("restart")).await;
     assert_eq!(
@@ -385,16 +429,20 @@ pub async fn journey(with_inference: bool) {
     let mut server = serve();
     support::ready(&mut server, &http, &config_url).await;
     let inventory = paired.connections(None).await.unwrap();
+    device::assert_observations(&paired).await;
     assert_eq!(inventory.items.len(), if with_inference { 32 } else { 0 });
     if with_inference {
-        let after = inventory.next_after.expect("cursor for the 33rd source");
+        let after = inventory
+            .next_after
+            .expect("cursor for the remaining sources");
         assert_eq!(
             paired.connections(Some(after)).await.unwrap().items.len(),
-            1
+            2
         );
     } else {
         assert!(inventory.next_after.is_none());
     }
+    device::reject_customer_case(&http, &origin, &paired, a).await;
     fs::write(exchange.join("restarted"), []).unwrap();
     checkpoint(&mut browser, &exchange.join("after-restart")).await;
     if let Some(id) = notice {
@@ -406,24 +454,45 @@ pub async fn journey(with_inference: bool) {
             .unwrap(),
         Some(a)
     );
-    sqlx::query("UPDATE relay_hosted.users SET disabled_at=clock_timestamp() WHERE id=(SELECT owner_user_id FROM relay_hosted.workspaces WHERE id=$1)")
-        .bind(a).execute(&admin).await.unwrap();
+    checkpoint(&mut browser, &exchange.join("suspension-checked")).await;
     assert_eq!(
         qualified_workspace(&admin, &origin, &replacement)
             .await
             .unwrap(),
         None
     );
-    fs::write(exchange.join("suspended"), []).unwrap();
-    checkpoint(&mut browser, &exchange.join("suspension-checked")).await;
+    let changes: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT action,expected_revision FROM relay_hosted.customer_access_changes
+         WHERE workspace_id=$1 ORDER BY expected_revision",
+    )
+    .bind(a)
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        changes,
+        [
+            ("suspend".into(), 1),
+            ("reinstate".into(), 2),
+            ("close".into(), 3)
+        ]
+    );
+    let session_count = || {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM relay_hosted.customer_sessions")
+            .fetch_one(&admin)
+    };
+    let sessions_before_expiry = session_count().await.unwrap();
     sqlx::query("UPDATE relay_hosted.configuration_revisions SET expires_at=created_at WHERE mode='qualification'")
         .execute(&admin).await.unwrap();
     fs::write(exchange.join("scope-expired"), []).unwrap();
     checkpoint(&mut browser, &exchange.join("paused")).await;
+    assert_eq!(session_count().await.unwrap(), sessions_before_expiry);
+    assert_eq!(confirmations().await.unwrap(), (2, 2));
     assert_eq!(
         paired.connections(None).await.err(),
         Some("device_not_authorized")
     );
+    device::assert_revoked(&paired).await;
     assert!(browser.0.wait().unwrap().success());
     assert_eq!(counts().await.unwrap(), (3, 2, 2, 0));
     if with_inference {

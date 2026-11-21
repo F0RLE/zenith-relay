@@ -4,8 +4,9 @@ mod stream;
 use crate::{db, inference, outbound::OutboundPolicy, vault::Vault};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::{future::Future, net::Ipv4Addr, path::Path, pin::Pin};
+use std::{future::Future, net::Ipv4Addr, path::Path, pin::Pin, time::Duration};
 use uuid::Uuid;
+use zenith_relay_core::ProviderSource;
 use zenith_relay_core::gateway::hosted::{
     ClaimError, HostedAttempt, HostedBodyBinding, HostedDispatchAuthority, HostedTextRuntime,
 };
@@ -52,10 +53,24 @@ struct Authorization {
     origin: String,
     profile: Profile,
     direct_ipv4: Option<Ipv4Addr>,
+    web: bool,
 }
 impl Authorization {
     async fn step(&self, step: &str) -> Result<String, &'static str> {
         let p = &self.profile;
+        let binding = sqlx::types::Json(BoundProfile {
+            profile: p,
+            direct_ipv4: self.direct_ipv4,
+        });
+        if self.web {
+            return sqlx::query_scalar("SELECT relay_hosted.step_web_model_check($1,$2,$3)")
+                .bind(&self.origin)
+                .bind(binding)
+                .bind(step)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|_| "qualification store unavailable");
+        }
         sqlx::query_scalar("SELECT relay_hosted.text_check_step($1,$2,$3,$4,$5,$6,$7,$8,$9)")
             .bind(&self.origin)
             .bind(p.scope)
@@ -64,36 +79,51 @@ impl Authorization {
             .bind(p.provider_revision)
             .bind(p.proxy_revision)
             .bind(p.uses_proxy)
-            .bind(sqlx::types::Json(BoundProfile {
-                profile: p,
-                direct_ipv4: self.direct_ipv4,
-            }))
+            .bind(binding)
             .bind(step)
             .fetch_one(&self.pool)
             .await
             .map_err(|_| "qualification store unavailable")
     }
 }
-impl HostedDispatchAuthority for Authorization {
+
+struct CatalogClaim<'a> {
+    authority: &'a Authorization,
+    source: &'a ProviderSource,
+    client: &'a reqwest::Client,
+}
+
+impl HostedDispatchAuthority for CatalogClaim<'_> {
     fn claim<'a>(
         &'a self,
         a: &'a HostedAttempt,
     ) -> Pin<Box<dyn Future<Output = Result<(), ClaimError>> + Send + 'a>> {
         Box::pin(async move {
-            if a.request_id != self.profile.id.to_string()
-                || a.model_id != self.profile.model
-                || a.source_id != self.profile.source.to_string()
+            let authority = self.authority;
+            if a.request_id != authority.profile.id.to_string()
+                || a.model_id != authority.profile.model
+                || a.source_id != authority.profile.source.to_string()
             {
                 return Err(ClaimError::Denied);
             }
-            db::closed_setup(&self.pool, &self.origin)
+            db::closed_setup(&authority.pool, &authority.origin)
                 .await
                 .map_err(|_| ClaimError::Unconfirmed)?;
-            match self.step("claim").await.as_deref() {
-                Ok("claimed") => Ok(()),
-                Ok(_) => Err(ClaimError::Denied),
-                Err(_) => Err(ClaimError::Unconfirmed),
+            match authority.step("claim").await.as_deref() {
+                Ok("claimed") => {}
+                Ok("busy") => return Err(ClaimError::Busy),
+                Ok(_) => return Err(ClaimError::Denied),
+                Err(_) => return Err(ClaimError::Unconfirmed),
             }
+            // Include the upstream catalog read in the same bounded check permit.
+            if !matches!(tokio::time::timeout(Duration::from_secs(25),
+                zenith_relay_core::observed_responses_models(self.client, self.source)).await,
+                Ok(Ok(models)) if models.contains(&authority.profile.model))
+            {
+                let _ = authority.step("release").await;
+                return Err(ClaimError::Denied);
+            }
+            Ok(())
         })
     }
 }
@@ -108,21 +138,30 @@ impl Scope<'_> {
     }
 }
 
-pub async fn scope<'a>(pool: &'a PgPool, origin: &'a str) -> Result<Scope<'a>, &'static str> {
+async fn check_role(pool: &PgPool, origin: &str, web: bool) -> Result<(), &'static str> {
     db::closed_setup(pool, origin).await?;
     let permitted:bool=sqlx::query_scalar("SELECT NOT has_schema_privilege('relay_hosted','CREATE') AND NOT has_database_privilege(current_database(),'CREATE')
         AND has_function_privilege('relay_hosted.text_check_step(text,uuid,uuid,uuid,bigint,bigint,boolean,jsonb,text)','EXECUTE')
         AND has_function_privilege('relay_hosted.record_text_check(text,uuid,uuid,uuid,bigint,bigint,boolean,text,text,text,integer,integer,integer,integer,integer,integer,inet)','EXECUTE')
         AND has_function_privilege('relay_hosted.text_stream_check(text,uuid,uuid,uuid,text)','EXECUTE')
+        AND (NOT $1 OR (has_function_privilege('relay_hosted.take_web_model_check(text)','EXECUTE')
+        AND has_function_privilege('relay_hosted.step_web_model_check(text,jsonb,text)','EXECUTE')
+        AND has_function_privilege('relay_hosted.finish_web_model_check(text,uuid)','EXECUTE')))
         AND NOT EXISTS(SELECT FROM pg_proc WHERE pronamespace='relay_hosted'::regnamespace AND has_function_privilege(oid,'EXECUTE')
-        AND proname NOT IN ('record_text_check','text_check_step','text_check_scope','text_stream_check'))
+        AND proname NOT IN ('record_text_check','text_check_step','text_check_scope','text_stream_check',
+        'take_web_model_check','step_web_model_check','finish_web_model_check'))
         AND NOT EXISTS(SELECT FROM pg_class WHERE relnamespace='relay_hosted'::regnamespace AND relkind IN ('r','v')
         AND (has_table_privilege(oid,'DELETE,TRUNCATE,TRIGGER') OR has_any_column_privilege(oid,'INSERT,UPDATE,REFERENCES')
         OR (relname NOT IN ('closed_installation','_sqlx_migrations') AND has_any_column_privilege(oid,'SELECT'))))")
-        .fetch_one(pool).await.map_err(|_|"cannot verify qualification role")?;
+        .bind(web).fetch_one(pool).await.map_err(|_|"cannot verify qualification role")?;
     if !permitted || !crate::inference::local_origin(origin) {
         return Err("restricted local qualification role required");
     }
+    Ok(())
+}
+
+pub async fn scope<'a>(pool: &'a PgPool, origin: &'a str) -> Result<Scope<'a>, &'static str> {
+    check_role(pool, origin, false).await?;
     let id = sqlx::query_scalar::<_, Option<Uuid>>("SELECT relay_hosted.text_check_scope($1)")
         .bind(origin)
         .fetch_one(pool)
@@ -153,6 +192,54 @@ pub async fn check(
         }
         CheckProfile::Json(profile) => profile,
     };
+    check_json(scope, vault, spec, outbound_policy, false).await
+}
+
+// Claim once; a dead worker never puts a possibly sent check back on the queue.
+pub async fn watch(
+    pool: &PgPool,
+    origin: &str,
+    vault: &Vault,
+    outbound_policy: &OutboundPolicy,
+) -> Result<(), &'static str> {
+    if !origin.starts_with("https://") {
+        return Err("web model checks require local HTTPS");
+    }
+    check_role(pool, origin, true).await?;
+    loop {
+        let profile: Option<sqlx::types::Json<Profile>> =
+            sqlx::query_scalar("SELECT relay_hosted.take_web_model_check($1)")
+                .bind(origin)
+                .fetch_one(pool)
+                .await
+                .map_err(|_| "model check queue unavailable")?;
+        let Some(sqlx::types::Json(profile)) = profile else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
+        let id = profile.id;
+        let scope = Scope {
+            pool,
+            origin,
+            id: profile.scope,
+        };
+        let _ = check_json(scope, vault, profile, outbound_policy, true).await;
+        sqlx::query("SELECT relay_hosted.finish_web_model_check($1,$2)")
+            .bind(origin)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|_| "cannot acknowledge model check")?;
+    }
+}
+
+async fn check_json(
+    scope: Scope<'_>,
+    vault: &Vault,
+    spec: Profile,
+    outbound_policy: &OutboundPolicy,
+    web: bool,
+) -> Result<(), &'static str> {
     let Scope {
         pool,
         origin,
@@ -164,15 +251,21 @@ pub async fn check(
         || !valid_model(&p.model)
         || p.source_label.trim() != p.source_label
         || p.source_label.is_empty()
-        || p.source_label.len() > 96
+        || if web {
+            p.source_label.encode_utf16().count() > 80
+        } else {
+            p.source_label.len() > 96
+        }
         || p.source_label.chars().any(char::is_control)
         || p.provider_revision < 1
         || p.proxy_revision < 0
         || p.uses_proxy && p.proxy_revision == 0
-        || !(CHECK_INPUT.len() as i32..=60000).contains(&p.max_input_bytes)
-        || !(1..=1_000_000).contains(&p.max_output_tokens)
-        || !(1..=16).contains(&p.tokens_per_byte)
-        || !(0..=65536).contains(&p.overhead_tokens)
+        || !valid_bounds(
+            p.max_input_bytes,
+            p.max_output_tokens,
+            p.tokens_per_byte,
+            p.overhead_tokens,
+        )
         || !(65..=3600).contains(&p.close_after_s)
         || !(60..=86400).contains(&p.valid_for_s)
     {
@@ -186,6 +279,7 @@ pub async fn check(
         origin: origin.into(),
         profile: spec,
         direct_ipv4,
+        web,
     };
     match authority.step("prepare").await?.as_str() {
         "done" => return Ok(()),
@@ -203,15 +297,8 @@ pub async fn check(
         &route,
     )
     .await?;
-    if !zenith_relay_core::observed_responses_models(&client, &source)
-        .await
-        .map_err(|_| "source catalog unavailable")?
-        .contains(&p.model)
-    {
-        return Err("model not present in the observed source catalog");
-    }
-    let engine =
-        HostedTextRuntime::new(source, client).map_err(|_| "invalid qualification route")?;
+    let engine = HostedTextRuntime::new(source.clone(), client.clone())
+        .map_err(|_| "invalid qualification route")?;
     let output_cap = p.max_output_tokens.min(64);
     let body=serde_json::to_vec(&serde_json::json!({"model":p.model,"input":CHECK_INPUT,"max_output_tokens":output_cap,"store":false,"stream":false})).unwrap();
     let attempt = HostedAttempt {
@@ -234,7 +321,11 @@ pub async fn check(
             axum::http::Request::post("/v1/responses")
                 .body(body.as_slice())
                 .unwrap(),
-            &authority,
+            &CatalogClaim {
+                authority: &authority,
+                source: &source,
+                client: &client,
+            },
         )
         .await
         .map_err(|_| "model check not confirmed")?;
@@ -268,7 +359,7 @@ pub async fn check(
     if ok {
         Ok(())
     } else {
-        Err("scope or credential changed during check")
+        Err("scope, source state or credential changed during check")
     }
 }
 
@@ -285,10 +376,17 @@ fn valid_usage(
         && (1..=i64::from(output_cap)).contains(&output)
 }
 
-fn valid_model(id: &str) -> bool {
+pub(crate) fn valid_model(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id.as_bytes()[0].is_ascii_alphanumeric()
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+}
+
+pub(crate) fn valid_bounds(bytes: i32, output: i32, multiplier: i32, overhead: i32) -> bool {
+    (CHECK_INPUT.len() as i32..=60000).contains(&bytes)
+        && (1..=1_000_000).contains(&output)
+        && (1..=16).contains(&multiplier)
+        && (0..=65536).contains(&overhead)
 }

@@ -229,6 +229,24 @@ different actions. Drain fences new dispatch/refresh owners before destructive
 changes; in-flight outcomes must not resurrect a removed connection. Price edits
 create a new tariff revision and never rewrite already reserved requests.
 
+For [static API sources](../../hosted/server/README.md#api-source-lifecycle),
+the revisioned lifecycle retires physical bindings and check attempts on park,
+trash or restore without changing secret slots. A published offer retains its
+anchor and tariff and can route through other already admitted compatible
+supply. A hold pins binding IDs; fresh evidence and a separate admission can
+qualify a restored source only for new holds.
+Permanent removal requires drained trash and a fresh owner passkey. It
+revokes both secret slots in the same transaction as the receipt, keeping
+historical references and existing settlement. Vault cleanup is separate;
+an older backup must remain fenced until removals are reapplied.
+
+Per-member model policy belongs to the saved source and exact model ID, not
+an inventory or tariff revision. A confirmed batch pins the qualification
+scope, source lifecycle and model-policy revision. Blocks survive rechecks
+and readmission; they filter fresh supply at reservation and again under the
+physical-source lock at dispatch. They do not alter price inputs or the receipt
+for a committed permit. Allowing the model again is not evidence of readiness.
+
 Active counts come from current runtime ownership, not requests started in the
 last minute. Display logical requests separately from physical attempts/queued
 work; show timestamp and stale/unavailable states rather than a fabricated zero.
@@ -250,6 +268,10 @@ the full web administration panel. Its planned first-release scope has three are
 | Overview | Server-wide request/token/error statistics, generation speed and pool availability; distinguish active logical requests from physical attempts and show stale/unavailable data honestly. |
 | Usage | Server-wide request history with period/model/status filters and safe request/error details; no separate customer pages or customer-account administration. |
 | Connections and pool | Add supported provider-account/API connections to the server, inspect their status, and explicitly include them in or remove them from the server pool. |
+
+Desktop uses the same sidebar as Computer mode: Overview, Connections, Pool and
+Usage. Settings holds the device pairing and shared appearance preferences, not
+server administration. Sections without a grant do not request server data.
 
 Here an account means a provider connection, not a Hosted customer identity.
 Saving a connection does not silently admit it to the pool. Removing membership
@@ -281,14 +303,41 @@ invent automatic synchronization or source deletion. Inference runs on the serve
 and remains available when Desktop is closed.
 
 **Implemented boundary.** An owner can pair Desktop with one installation for
-`connections.read`. The public invitation and the returned approval code are
-not login credentials. Native code keeps the device secret in the OS credential
-store, and sends it only to the reviewed origin on an explicit inventory read.
-The server checks the grant, installation, owner authority and expiry on each
-page. **Forget** is local; **Revoke** ends the grant on the server. See the
-[pairing procedure](../../hosted/server/README.md#pair-a-desktop).
-Aggregate reads, membership changes and confirmed credential transfer remain
-separate work. The development web demo exercises none of these authorities.
+`connections.read` and optionally `overview.read`, `usage.read` and a pool-review grant. The
+invitation fixes the selected permissions; approval must match it. Existing
+pairings keep their original grant. Native code keeps the device secret in the
+OS credential store and sends it only to the reviewed origin. The server
+checks installation, owner authority, expiry and the specific grant on each
+read. **Forget** is local; **Revoke** ends the grant on the server.
+
+Overview shows rolling request, execution-issue and measured token totals plus
+current queued/dispatched work and in-flight attempts. Usage exposes a bounded
+history with safe request details, not the owner's diagnostic or financial DTO.
+Neither read contacts providers or extends the grant. The
+[pairing procedure](../../hosted/server/README.md#pair-a-desktop) also covers
+the separate owner-approved copy of a static API source. With the optional
+grant, Desktop [prepares one pool review](../../hosted/server/README.md#change-pool-membership-from-desktop)
+at a time. The web owner passkey confirms the reviewed device and source
+snapshot. Inclusion admits only current exact-model checks; exclusion uses
+the existing park transition. Neither operation accesses provider secrets or
+changes prices or publication.
+
+Pool capacity is a point-in-time count of distinct admitted sources in the
+active scope. Ready means at least one current published, compatible route can
+fit its published request bounds and is not blocked or busy. Occupied sources
+are counted separately. This is known scheduling state, not uptime or a probe.
+Outside an active scope the pool metric is unavailable.
+
+Overview speed divides the sum of visible output tokens after the first token
+by the sum of observed first-to-last text-delta durations. Include only paced
+streams with a matching successful terminal, final output usage and explicit
+reasoning count. Mixed output, buffered bursts and relay-imposed waits between
+text chunks do not supply samples. A rolling window groups samples by
+terminal observation time, shows the sample count and leaves speed unavailable
+when none qualify. The last 30 days of samples contain only timings and counts,
+not text or customer identifiers in the Desktop response. Reading the snapshot
+does not claim capacity or send inference. `/device/overview/metrics` uses the
+same `overview.read` grant as the unchanged legacy `/device/overview`.
 
 ## Reference-derived implementation decisions
 
@@ -705,7 +754,7 @@ use this table instead of introducing competing route names.
 | Usage / errors | `/admin/usage`, `/admin/usage/requests/{request_id}` | Logical request list, Errors tab, nested attempts and safe observed timeline |
 | Notifications | `/admin/notifications` | Owner drafts and confirms in-app service notices; publication is separate from saving or delivery |
 | Access (context) | `/admin/access` | Connections → Paired devices; authorized support case → restrict/revoke its affected key. No global key-issuance console |
-| Customer case (context) | `/admin/customers` | From a permitted request/payment or an exact customer support reference in Usage. Inspect or restrict that workspace; no browse-all directory or impersonation |
+| Customer case (context) | `/admin/customers/{workspace_id}` | From request detail, an exact workspace filter in Usage, or a refund case. Inspect, suspend, reinstate or close that workspace; no directory or impersonation |
 | Payment case (context) | `/admin/payments` | Overview → refunds or payments needing attention, or exact payment reference from support. Reconcile, review a refund or record an audited adjustment |
 | Operations / setup (context) | `/admin/operations`, `/admin/operations/setup` | Overview → service mode/readiness, incident or recovery task; reachable even when there are no requests |
 | Settings (context) | `/admin/settings` | Setup step → corresponding configuration; signed-in owner context → security/recovery. No general preferences dashboard |
@@ -846,7 +895,7 @@ site; no privileged default-frontend shortcut is allowed.
 | 6. Use the model | The user sends a real request from that client, not from the landing or cabinet. An admitted generation gets one logical ID and bounded hold. | Read the response in the client. For proven rejection correct funds in Balance, key in Keys, or model in Models. After a timeout with possible execution use the original ID/status or matching idempotency claim; do not promise an answer replay. |
 | 7. Reconcile in **Overview → Usage** | Select a rolling window/model, open a bucket, then its request. Compare execution, tokens, saved tariff and posted charge or pending hold. Export that filtered snapshot if needed. | Link a posted charge to the wallet entry. Usage groups by request start; Balance lists postings by posting time. **Status** answers whether the model has observations, not whether this particular request was billed. |
 | 8. Return or retire a client | Subsequent visits open Overview or an authorized deep link. Use Usage's safe request reference for support; replace a key, switch the client, then separately revoke the old key. | Past requests/receipts remain readable. Revoking the key blocks new use; browser sign-out does not revoke client keys or cancel existing work. |
-| 9. Close the personal workspace | Use the verified request/support process in **Account and security**. Explain how to obtain receipts and request a refund of eligible unused funds before access ends. Once closure is confirmed, block new key issuance, funding intents and dispatch for that workspace only. | Already accepted requests and payments reconcile under their original references. Closure is neither a refund nor instant erasure: [retention and restore](#initial-data-policy) preserve required records without reactivating keys. Other customers and the installation keep operating. |
+| 9. Close the personal workspace | Save receipts and contact configured support from **Account security**, with the workspace reference. Request any eligible refund separately before access ends. The owner verifies the request and confirms closure on that exact case. | Browser sessions and keys stop working, and queued requests cannot dispatch. Already sent requests and accepted payments reconcile under their original references. Closure is neither a refund nor instant erasure; other workspaces keep operating. |
 
 If key issuance committed but the response was lost, identify the resulting key
 by the same operation without disclosing its secret; explicitly revoke it and issue
@@ -1035,13 +1084,22 @@ Browser sessions use secure HTTP-only cookies and CSRF protection. Sessions
 are bounded/revocable; recovery and unlinking cannot orphan the owner.
 Payment intents resolve the owning workspace server-side.
 
+**Customer access.** Suspension, reinstatement and closure each advance the
+workspace owner's authorization epoch. A stale cookie or key cannot be reused
+after reinstatement. New sign-in, customer writes, request reservation and
+dispatch recheck the epoch under the customer lock. A reserved request that
+cannot dispatch releases its hold; a committed dispatch permit retains its
+settlement rules. The access receipt records the actor, confirming passkey,
+workspace, operation, expected epoch, reason and time. It neither modifies the
+wallet nor initiates a refund.
+
 **First restricted sign-in.** The installation pins one public OIDC client, its
 issuer, and its authorization, token and signing-key endpoints. `/login` starts a
 three-minute code flow with PKCE S256, nonce, state and a browser-bound attempt.
 In setup a verified subject receives only an opaque review ID (ten minutes).
 No name, email, login token, wallet or session is created from that ID. The
 tester gives the ID to the owner over a trusted channel. The owner confirms the
-IDs with a recent passkey, CSRF, expected revision and operation ID. This opens
+exact IDs, revision and operation with a one-use passkey assertion and CSRF. This opens
 only the named customer-identity qualification scope for up to 24 hours; it is
 not readiness evidence for payments or inference. Pausing invalidates its sessions.
 
@@ -1090,6 +1148,9 @@ Reuse the bounded core scheduler. H09 qualifies starvation/queue behavior with m
 short and long streams. Separate unauthenticated abuse controls from customer money
 and inference counters; an attacker cannot assign charges or sanctions using a
 supplied workspace ID. Do not trust arbitrary forwarded client-address headers.
+The [restricted customer sign-in profile](../../hosted/server/README.md#sign-in-limits)
+keeps start and callback budgets separate and leaves per-source enforcement at
+the trusted ingress.
 
 The outbound policy is installation-owned and purpose-scoped: provider/API source,
 identity metadata, payment adapter and notification channel. H16 specifies allowed
@@ -1154,9 +1215,11 @@ customer inference key or provider secret cannot create an administrator session
 
 **Privileged changes and recovery.** Require fresh passkey user verification for
 adding/removing passkeys, changing administrators, exporting credentials, and
-changing payment/security settings. Offer a second passkey during setup; do not
-remove the last usable credential without a verified replacement or explicit
-recovery. If all passkeys are lost, recovery requires an audited server-local
+changing payment/security settings. Offer a second passkey on the first
+signed-in Overview. Verify the new discoverable key before saving it. Revocation
+requires a different active passkey, ends sessions that used the revoked key and
+transactionally preserves at least one usable credential. If all passkeys are lost,
+recovery requires an audited server-local
 operator procedure, revokes existing sessions and lost credentials, and enrolls
 a replacement through a new bounded ceremony. No public reset endpoint, permanent
 master-key login, email/SMS bypass, or automatic trust in a matching email address.
@@ -1229,15 +1292,33 @@ at the read anchor. A fully covered interval displays its observed state, or
 degraded for mixed states. Any gap keeps the interval neutral and the tooltip
 distinguishes partial coverage from no observation. Availability is fully
 operational time divided by monitored time, with partial coverage disclosed.
-Catalog checks, absence of errors and customer requests cannot fill slots. The
-qualification installation has no continuous collector or monitor write grant.
-Qualified ingestion and retention must precede live monitoring.
+Catalog checks, absence of errors and customer requests cannot fill slots.
+The restricted installation has an opt-in PostgreSQL grant for a separate
+monitor login. It lists configured publication epochs even when no supplier is
+ready, and accepts an attestation only for a completed slot inside the current
+epoch and scope. An unrecorded slot can be written for one hour after it ends;
+an identical retained receipt can be recovered, but never overwritten. Cleanup
+retains slots that overlap the 7-day window. Web and inference credentials cannot
+attest. The optional [collector](../../hosted/server/README.md#model-status)
+matches raw, independently produced Prometheus outcomes to exact publication
+IDs. A slot requires one fresh, explicitly timestamped result in every UTC
+five-minute bin from a single series. All successes are operational, all
+failures unavailable, and a mix degraded. Incomplete or ambiguous coverage
+does not attest a slot. The collector only reads private loopback telemetry
+and cannot send inference. Live probes and alerts need deployment qualification.
 
 Requests are durable logical receipts started during the current publication
 and belonging to the caller. Before that coverage there is no count; within it
 zero is meaningful. Cache uses observed cached/nonzero input pairs, taking
 accepted late usage over earlier evidence, and reports sample coverage. Latency
-is unknown until instrumented; settlement timestamps are not timing samples.
+is the mean observed time from post-reservation dispatch preparation to a
+validated successful JSON or streaming completion, rounded to milliseconds.
+Measure it on the worker's monotonic clock, before settlement or client
+delivery of the terminal. Count each logical completion once and disclose
+sample coverage. Missing, incomplete, failed and unconfirmed results do not
+supply a sample. Model-status latency covers at most the last 168 hours; timing
+rows with a generation sample are retained for the Desktop 30-day window.
+Neither is a financial record or a service availability observation.
 The snapshot allows 64 listed models and scans at most 8193 workspace receipts;
 over 8192 receipts, usage metrics remain unknown instead of showing truncated
 counts. No physical member, foreign traffic or private model is exposed.
@@ -1282,6 +1363,16 @@ estimates using existing affinity and balancing. With one suitable source use
 it; with none, use the existing bounded wait/unavailable path. A cost change
 cannot move a pinned turn, authorize a retry after an uncertain send, or change
 the customer's tariff. This API preference does not redefine account rotation.
+
+The restricted API pool supports **Automatic** (default) and **Primary & reserve**.
+The latter uses core `Failover` on ready bindings in the confirmed physical-source
+order, bypassing cost rank, not purchase caps, cooldowns, model blocks or permits.
+New members follow the saved order, sorted by source ID. An edit binds the current
+qualification scope, policy and member snapshot to one passkey and receipt.
+Each hold pins the committed policy revision beside its existing supply IDs.
+Subsequent edits never change a held request's rank or a dispatched attempt.
+Parked sources cannot serve; a source readmitted under the same ID can retain
+its rank. A new qualification scope starts in Automatic.
 
 Qualify correctness separately from efficiency. Compare policies on matched
 synthetic workloads before permitted live measurements: completed/rejected work,
@@ -1478,8 +1569,8 @@ anything.
 The implemented [Desktop copy path](../../hosted/server/README.md#copy-one-desktop-api-source)
 saves one native Responses source at a time. The pairing grant reads inventory;
 it cannot write. In **Connections → Desktop source copy**, the owner uses a
-fresh passkey to approve a ten-minute grant for the exact installation, device,
-source, and reviewed route. Desktop confirms separately, checks the approval
+one-use passkey assertion to approve a ten-minute grant for the exact installation,
+device revision, source, and reviewed route. Desktop confirms separately, checks the approval
 and re-reads the saved source. A change to the reviewed address, key or proxy
 requires a new review. A private transfer worker commits the connection and
 receipt with its vault slots; the browser handles only review metadata. Resolve
@@ -1818,8 +1909,9 @@ funds, not an external top-up or a reason to add another Hosted wallet.
    qualifies the merchant, environment, method and channel. Use restricted
    qualification for an authorized funding/refund test before public activation.
    Editing a draft leaves the published revision in place.
-4. **Change or disable.** Check the expected revision and require fresh owner
-   proof for sensitive changes. A disabled method disappears from new checkouts;
+4. **Change or disable.** Check the expected revision and require
+   [confirmation of the exact action](#owner-confirmation-by-action).
+   A disabled method disappears from new checkouts;
    an old unconfirmed quote cannot start one. An already-created intent, late
    callback or refund still uses its original merchant binding, method and
    accepted amounts. Replaying an event cannot credit the wallet twice.
@@ -2637,6 +2729,10 @@ is stricter than ordinary maintenance. It prevents the restored server from
 starting and blocks new merchant claims and automatic credit replay until the
 missing interval can be reconciled. It does not affect callback handling on an
 untouched authority, and there is no supported reopening command yet.
+The [customer access replay procedure](../../hosted/server/README.md#reapply-customer-access-decisions)
+uses receipts kept independently of the database snapshot to reapply access
+changes on that exact fenced copy. It does not replace off-host backup and
+reconciliation evidence.
 
 ### Service closure and migration walkthrough
 
@@ -3010,9 +3106,11 @@ a file/URL or client-selected JSON. Its versioned allowlist binds registered pro
 IDs to digests of verified subject identities, digest version, optional resolved
 workspace IDs and grant expiry. H06 obtains an unregistered test identity through
 normal verified login-attempt evidence before owner approval; approval does not
-itself create a wallet or admin role. Registration/dispatch recheck the current
-scope revision and expiry. H05/06 specify allowed fields, bounds and digest rotation;
-raw assertions, tokens and email-based identity shortcuts are forbidden.
+itself create a wallet or admin role. New qualification and pause receipts record
+`confirmed_by_passkey_id`; older receipts leave it null. Registration/dispatch
+recheck the current scope revision and expiry. H05/06 specify allowed fields,
+bounds and digest rotation; raw assertions, tokens and email-based identity
+shortcuts are forbidden.
 
 Diagnostic reads compose current execution/accounting state from its domain owner
 with optional chronological observations; `diagnostic_events` is not another ledger,
@@ -3201,7 +3299,7 @@ complete merely because this inventory names it. Below, paths omit the prefix.
 | `GET /admin/overview` | Current closed service mode and session-bound CSRF token; never a combined preview snapshot |
 | `GET /account` | Current user/workspace, session capabilities and account restrictions |
 | `GET /account/identities`, `DELETE /account/identities/{id}` | Own verified identity links; fresh proof and remaining-method guard for removal |
-| `GET /account/sessions`, `DELETE /account/sessions/{id}` | Own customer sessions/revocation; never administrator session inventory |
+| `GET /account/sessions`, `DELETE /account/sessions/{id}` | Own active customer sessions: opaque IDs, sign-in and activity times. Same-origin CSRF required to revoke; unknown, inactive and foreign targets are indistinguishable. No change to API keys, funds or owner access. |
 | `GET /account/notifications`, `POST /account/notifications/{id}/read` | Own bounded in-app notice list and idempotent read marker; CSRF on mutation, no acknowledgement of money/incident resolution |
 | `GET /account/notification-preferences`, `PATCH /account/notification-preferences` | Own revision-checked event/threshold/consent policy; cannot select another user's recipient or an unqualified channel |
 | `POST /account/notification-recipient/begin`, `POST /account/notification-recipient/verify` | Optional qualified channel only; fresh customer proof + CSRF, bounded single-use verification and destination controls under HD-13 |
@@ -3221,14 +3319,19 @@ complete merely because this inventory names it. Below, paths omit the prefix.
 | `POST /usage/exports`, `GET /usage/exports/{id}` | Bounded scoped CSV job/status/download; authorization checked again on download |
 | `GET /requests/{id}/status` | Original workspace/key inference authority; safe duplicate/recovery status, no response replay |
 | `/admin/*` | Owner session; paired Desktop only for the explicit three-area operation allowlist, not wildcard admin authority; action matrix and fresh-proof requirements below |
+| `GET /admin/pools/activity` | Owner browser only: outstanding dispatches in the current pool grouped by serving source and model. No queue prediction, provider I/O or session renewal. |
+| `GET /admin/pools/members/{id}/models` | Owner browser only: exact admitted models and allow flags for one source, with scope and revision. POST to the same path looks up the exact receipt without applying a change. |
 | `POST /admin/connections/imports`, `GET /admin/connections/imports`, `GET /admin/connections/imports/{id}` | Owner or explicitly scoped device: prepare a bounded preview, find own recent operations after a tab closes, read safe per-item state. No provider check, admission or sale on status read |
 | `POST /admin/connections/imports/{id}/confirm`, `POST /admin/connections/imports/{id}/cancel` | Confirm reviewed item IDs and revision with one operation identity; cancel only uncommitted work. Reconcile ambiguous staged items before releasing a fence; a cancel cannot undo an acknowledged import |
 | `GET /admin/usage/requests`, `GET /admin/usage/errors` | Owner session: retained logical requests, exclusive cursor and rolling or exact UTC bounds. The Errors read uses canonical outcomes and independent accounting/evidence issues. Scoped Desktop requires its own reduced projection. |
 | `GET /admin/usage/requests/{id}` | Owner session: retained request timeline, physical attempts and live domain-derived accounting. Scoped Desktop must not receive customer-wallet/payment-management data. GET never probes/reexecutes. |
+| `GET /admin/customers/{workspace_id}`, `POST /admin/customers/{workspace_id}` | Owner browser only. Exact case state and latest receipt; POST with Origin and CSRF looks up the matching operation without applying it. No customer list. |
+| `POST /admin/customers/{workspace_id}/options`, `POST /admin/customers/confirmations/{id}/verify` | Owner browser + Origin and CSRF; one-use passkey for the reviewed workspace, revision, action and reason. Verification accepts the assertion only. |
 | `GET /admin/operations/status` | Owner current condition/coverage; scoped Desktop receives only the server/pool-health summary needed by Overview |
 | `GET /admin/operations/events` | Owner browser session, paginated retained job/component events; absence of events is not a health proof |
 | `GET /admin/operations/diagnostic-sessions`, `GET /admin/operations/diagnostic-sessions/{id}` | Owner browser session metadata: scope, original expiry, budget consumption, state and stop reason; no raw log download or paired Desktop access |
-| `POST /admin/operations/diagnostic-sessions` | Owner browser session + CSRF + fresh passkey; audited reason, finite scope/budgets and idempotent start operation; repeated operation returns the same unextended session |
+| `POST /admin/operations/diagnostic-sessions` | Owner browser session + CSRF; find the matching start receipt without extending the capture |
+| `POST /admin/operations/diagnostic-sessions/options`, `POST /admin/operations/diagnostic-sessions/{id}/verify` | Prepare and confirm the exact start in the same owner session; audited reason, finite scope/budgets and an idempotent start operation |
 | `POST /admin/operations/diagnostic-sessions/{id}/stop` | Owner browser session + CSRF; idempotent stop, no capture extension or inference/payment effect; automatic expiry/revocation also enforced server-side |
 | `GET /admin/operations/readiness`, `GET /admin/operations/service` | Owner browser session current checklist/mode/revision and missing prerequisites; reads do not run qualification checks; Desktop uses its reduced Overview status projection instead |
 | `POST /admin/operations/readiness-checks` | Owner + fresh passkey + CSRF; named allowlisted check, scoped operation and explicit approval of any cost/external effect; no arbitrary command/URL |
@@ -3269,7 +3372,70 @@ specify the exact permitted reads, connection-addition/transfer and pool-members
 mutations. All other actions are denied to paired-device credentials even when
 the owner could perform them through a separately authenticated browser session.
 
-Wire rules for the Hosted control API:
+#### Owner confirmation by action
+
+The chart below describes current write authority in the restricted installation.
+Revision, target, mode and idempotency checks still apply. All web-owner writes
+require the owner cookie, exact Origin and session CSRF. A paired Desktop
+device cannot authorize any row.
+
+| Action | Passkey requirement for a new effect |
+| --- | --- |
+| Approve or pause customer qualification | One-use confirmation of the exact transition, candidate IDs, operation and revision in the same owner session. PostgreSQL rechecks authority and records the confirming credential in the transition receipt. |
+| Suspend, reinstate or close a customer workspace | One-use confirmation of the exact workspace, revision, operation and reason in the same owner session. Closure requires a verified customer request and cannot be reversed. |
+| Add or revoke an owner passkey | One-use confirmation of that change in the same owner session. Adding proves the new key before commit; revoking requires a surviving key. |
+| Create, approve or revoke a Desktop pairing; approve a source copy | One-use confirmation of the exact command in the same owner session. Previewing a copy needs only the owner session and CSRF. |
+| Include or exclude a connection from the pool using a Desktop review | One-use confirmation of the exact device, connection, operation and reviewed revisions in the same owner session. Desktop can prepare the review, not apply it. |
+| Admit, publish or suspend a model rule; set or remove a purchase limit | One-use confirmation of the exact target, operation, revision and new limit (where applicable) in the same owner session. Saving prices and calculating a selling draft use the owner session without publishing. |
+| Pause or resume a static API source | One-use confirmation of the exact connection, serving revision and operation in the same owner session. Resume waits for accepted work to close. |
+| Change pool rotation | One-use confirmation of the exact scope, member order, mode, revision and operation in the same owner session. |
+| Publish or disable a checkout method; approve or decline a refund | One-use confirmation of the exact checkout revision or refund case and decision in the same owner session. Save or check a checkout draft with the owner session. |
+| Publish a service notice | One-use confirmation of the notice ID, draft revision and operation in the same owner session. Save or discard a draft with the owner session. |
+| Start diagnostic capture | One-use confirmation of the operation, request, reason, duration and effective limits in the same owner session. Stop capture with the owner session. |
+| Replace all lost owner passkeys | Separate local recovery, never a browser session or device grant. |
+
+For qualification, `POST /admin/operations/service/transitions/options` returns
+an intent-bound WebAuthn challenge (three-minute maximum lifetime), or the
+original result if that operation committed. The
+`POST /admin/operations/service/transitions/{id}/verify` operation consumes the challenge and
+accepts only its assertion, not another action payload. The unchanged
+`POST /admin/operations/service/transitions` can reconcile a matching receipt
+but cannot make a new change. No qualification action can open live service.
+
+Payments prepare at `POST /admin/payment-methods/options` or
+`POST /admin/payments/refunds/{id}/options`. Both return a challenge for
+`POST /admin/payments/confirmations/{id}/verify`, which takes only the assertion.
+Commit rechecks the owner, passkey, checkout check or refund state, and refund
+funds. The audit row identifies the confirming passkey. Retrying identical
+options after a commit returns the original receipt without a new prompt or effect.
+
+Supply controls prepare at `POST /admin/pools/model-rules/{id}/options`,
+`POST /admin/pools/members/{id}/models/options`, `POST /admin/pools/rotation/options`, or the connection's
+`purchase-limit/options` or `serving/options` route.
+`POST /admin/supply/confirmations/{id}/verify` takes only the assertion. Commit
+rechecks the affected revision and its conditions and records the confirming
+passkey. Retrying identical options returns the committed receipt; recent sign-in
+alone cannot admit, publish, withdraw, change the cap or change serving/rotation policy.
+
+Desktop operations prepare at `POST /admin/devices/options`,
+`POST /admin/source-copy/options` or `POST /admin/desktop/pool/options`.
+`POST /admin/desktop/confirmations/{id}/verify` applies the stored command and
+records the confirming passkey. Repeating the exact command returns its receipt
+without renewing the grant or repeating the effect. Pool review rechecks device,
+source and pool revisions at commit. Source-copy commit rechecks pairing
+authority and both deadlines under the vault transaction.
+
+Service notices prepare at `POST /admin/notifications/{id}/options` and verify
+at `POST /admin/notifications/confirmations/{id}/verify`. Commit rechecks the
+draft revision, freezes the eligible audience and records the confirming passkey
+with the publication receipt. Diagnostic starts prepare at
+`POST /admin/operations/diagnostic-sessions/options` and verify at
+`POST /admin/operations/diagnostic-sessions/{id}/verify`. Commit rechecks the
+active request and capture bounds and records the confirming passkey. Preparing
+either action has no effect. Retrying an identical committed operation returns
+its receipt, with the original capture ID and deadline where applicable.
+
+#### Control API wire rules
 
 - Successful object responses use `{data, meta}`. `meta` includes `request_id` and
   `api_version`; paginated/report responses additionally expose applicable cursor,

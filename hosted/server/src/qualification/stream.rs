@@ -149,6 +149,7 @@ pub(super) async fn check(
             kind,
             usage,
             text_delta,
+            ..
         } = frame.observation
         {
             if kind == HostedTerminalKind::Completed

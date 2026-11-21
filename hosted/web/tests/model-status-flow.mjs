@@ -36,7 +36,7 @@ export async function checkModelStatus({ page, foreign, owner, origin, api, mode
     await page.setViewportSize({ width, height: 760 });
     await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
     await page.reload();
-    await expect(page.locator(".hosted-entry")).toHaveAttribute("data-theme", theme);
+    await expect(page.locator('.hosted-app[data-workspace="customer"]')).toHaveAttribute("data-theme", theme);
     await page.getByRole("button", { name: "7 days" }).click();
     await expect(history.locator(":scope > span")).toHaveCount(28);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

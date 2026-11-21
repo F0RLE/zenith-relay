@@ -1,12 +1,15 @@
 //! Customer federation is a separate realm from owner passkeys and inference keys.
+mod attempts;
 mod oidc;
+mod sessions;
 pub use oidc::OidcSettings;
 
 use crate::{auth::browser, config::Config, db, http};
+use attempts::{Attempts, ClaimError, LIFE, Pending};
 use axum::{
     Router,
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -14,8 +17,7 @@ use oidc::{Failure, Nonce, PkceCodeVerifier, Provider};
 use ring::{hmac, rand::SystemRandom};
 use serde_json::json;
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
@@ -23,55 +25,37 @@ use uuid::Uuid;
 
 const SESSION: &str = "__Host-relay_customer";
 const ATTEMPT: &str = "__Host-relay_customer_attempt";
-const LIFE: Duration = Duration::from_secs(180);
 type App = Arc<http::StateData>;
 
 pub struct Customer {
     provider: Provider,
     key: hmac::Key,
-    attempts: Mutex<Book>,
+    browser_instance: Uuid,
+    attempts: Attempts,
 }
 
-struct Pending {
-    state: browser::Token,
-    nonce: Nonce,
-    verifier: PkceCodeVerifier,
-    until: Instant,
+#[derive(sqlx::FromRow)]
+struct LoginContext {
     revision: i64,
-    deadline: i64,
-}
-
-#[derive(Default)]
-struct Book {
-    starts: VecDeque<Instant>,
-    pending: HashMap<[u8; 32], Pending>,
-}
-
-impl Book {
-    fn start(&mut self, now: Instant) -> bool {
-        self.pending.retain(|_, p| p.until > now);
-        while self.starts.front().is_some_and(|t| *t + LIFE <= now) {
-            self.starts.pop_front();
-        }
-        if self.starts.len() >= 64 {
-            return false;
-        }
-        self.starts.push_back(now);
-        true
-    }
-
-    fn take(&mut self, browser: &browser::Token, state: &browser::Token) -> Option<Pending> {
-        let pending = self.pending.get(&**browser)?;
-        if !bool::from(pending.state.as_ref().ct_eq(state.as_ref())) {
-            return None;
-        }
-        self.pending
-            .remove(&**browser)
-            .filter(|p| p.until > Instant::now())
-    }
+    deadline_ms: i64,
 }
 
 impl Customer {
+    async fn login_context(
+        &self,
+        s: &http::StateData,
+        attempt: Option<&LoginContext>,
+    ) -> Result<Option<LoginContext>, sqlx::Error> {
+        sqlx::query_as("SELECT * FROM relay_hosted.customer_login_context($1,$2,$3,$4,$5)")
+            .bind(&s.origin)
+            .bind(self.provider_id())
+            .bind(self.binding())
+            .bind(attempt.map(|p| p.revision))
+            .bind(attempt.map(|p| p.deadline_ms))
+            .fetch_optional(&s.pool)
+            .await
+    }
+
     pub async fn configured(
         c: &Config,
         pool: &sqlx::PgPool,
@@ -113,7 +97,8 @@ impl Customer {
             provider,
             key: hmac::Key::generate(hmac::HMAC_SHA256, &SystemRandom::new())
                 .map_err(|_| "system randomness unavailable")?,
-            attempts: Mutex::default(),
+            browser_instance: Uuid::new_v4(),
+            attempts: Attempts::default(),
         }))
     }
 
@@ -207,12 +192,29 @@ fn forbidden() -> Response {
     )
 }
 
+fn rate_limited(wait: Duration) -> Response {
+    let mut response = http::error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "customer_rate_limited",
+        "Too many sign-in attempts.",
+    );
+    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() != 0);
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    response
+}
+
 pub(crate) fn routes() -> Router<App> {
     Router::new()
         .route("/api/hosted/v1/auth/customer/{id}/begin", post(begin))
-        .route("/api/hosted/v1/auth/customer/{id}/callback", get(callback))
+        .route(
+            "/api/hosted/v1/auth/customer/{id}/callback",
+            get(callback).head(http::wrong_method),
+        )
         .route("/api/hosted/v1/auth/customer/logout", post(logout))
         .route("/api/hosted/v1/account", get(account))
+        .merge(sessions::routes())
 }
 
 async fn begin(State(s): State<App>, Path(id): Path<String>, headers: HeaderMap) -> Response {
@@ -226,50 +228,35 @@ async fn begin(State(s): State<App>, Path(id): Path<String>, headers: HeaderMap)
     if !browser::same_origin(&headers, &s.origin) {
         return forbidden();
     }
-    let now = Instant::now();
-    if !c.attempts.lock().unwrap().start(now) {
-        return http::error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "customer_rate_limited",
-            "Too many sign-in attempts.",
-        );
-    }
+    let Some(fresh) = browser::random() else {
+        return unavailable();
+    };
+    let start = match c
+        .attempts
+        .start(browser::cookie(&headers, ATTEMPT), fresh, Instant::now)
+    {
+        Ok(start) => start,
+        Err(wait) => return rate_limited(wait),
+    };
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return unavailable();
     }
-    let Ok(Some((revision, deadline))) =
-        sqlx::query_as::<_, (i64, i64)>("SELECT * FROM relay_hosted.customer_login_context($1)")
-            .bind(&s.origin)
-            .fetch_optional(&s.pool)
-            .await
-    else {
+    let Ok(Some(context)) = c.login_context(&s, None).await else {
         return unavailable();
     };
-    let (Some(key), Some(state)) = (browser::random(), browser::random()) else {
+    let Some(state) = browser::random() else {
         return unavailable();
     };
     let nonce = Nonce::new_random();
     let (url, verifier) = c.provider.authorize(&hex::encode(state.as_ref()), &nonce);
-    let mut book = c.attempts.lock().unwrap();
-    if let Some(old) = browser::cookie(&headers, ATTEMPT) {
-        book.pending.remove(&*old);
+    if !start.issue(Instant::now, state, nonce, verifier, context) {
+        return unavailable();
     }
-    book.pending.insert(
-        *key,
-        Pending {
-            state,
-            nonce,
-            verifier,
-            until: now + LIFE,
-            revision,
-            deadline,
-        },
-    );
     let mut response = http::success(json!({"authorization_url":url.as_str()}));
     browser::set_policy(
         &mut response,
         ATTEMPT,
-        Some(&key),
+        Some(&start.cookie),
         LIFE.as_secs() as u32,
         "Lax",
     );
@@ -310,27 +297,30 @@ async fn callback(
     ) else {
         return failure();
     };
-    let pending = c.attempts.lock().unwrap().take(&key, &state);
-    let Some(p) = pending else {
-        return failure();
-    };
-    let response = match cb.code {
-        Some(code)
-            if cb.error.is_none()
-                && cb
-                    .iss
-                    .as_ref()
-                    .is_none_or(|iss| iss == &c.provider.settings.issuer)
-                && (1..=2048).contains(&code.len())
-                && code.bytes().all(|b| b.is_ascii_graphic()) =>
-        {
-            finish(&s, c, p, &code).await
+    let code = cb.code.filter(|code| {
+        cb.error.is_none()
+            && cb
+                .iss
+                .as_ref()
+                .is_none_or(|iss| iss == &c.provider.settings.issuer)
+            && (1..=2048).contains(&code.len())
+            && code.bytes().all(|b| b.is_ascii_graphic())
+    });
+    let (p, _permit) = match c.attempts.claim(&key, &state, code.is_some(), Instant::now) {
+        Ok(claim) => claim,
+        Err(ClaimError::Denied) => return failure(),
+        Err(ClaimError::Busy) => {
+            let mut r = Redirect::to("/login#busy").into_response();
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            return r;
         }
-        _ => failure(),
     };
-    let mut response = response;
-    browser::set_policy(&mut response, ATTEMPT, None, 0, "Lax");
-    response
+    // The proof is gone; keep the short-lived cookie for the browser budget.
+    match code {
+        Some(code) => finish(&s, c, p, &code).await,
+        None => failure(),
+    }
 }
 
 async fn finish(s: &App, c: &Customer, p: Pending, code: &str) -> Response {
@@ -339,9 +329,19 @@ async fn finish(s: &App, c: &Customer, p: Pending, code: &str) -> Response {
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return failed();
     }
-    let subject = match c.provider.subject(code, p.verifier, p.nonce).await {
-        Ok(subject) if Instant::now() < p.until => subject,
-        Err(Failure::Unavailable) => return failed(),
+    match c.login_context(s, Some(&p.context)).await {
+        Ok(Some(_)) if Instant::now() < p.until => (),
+        Ok(_) => return denied(),
+        Err(_) => return failed(),
+    }
+    let subject = match tokio::time::timeout_at(
+        p.until.into(),
+        c.provider.subject(code, p.verifier, p.nonce),
+    )
+    .await
+    {
+        Ok(Ok(subject)) if Instant::now() < p.until => subject,
+        Ok(Err(Failure::Unavailable)) => return failed(),
         _ => return denied(),
     };
     let Some(token) = browser::random() else {
@@ -349,7 +349,7 @@ async fn finish(s: &App, c: &Customer, p: Pending, code: &str) -> Response {
     };
     let registration = &c.provider.settings;
     let result = sqlx::query_as::<_, (String, Option<Uuid>)>(
-        "SELECT * FROM relay_hosted.finish_customer_login($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        "SELECT * FROM relay_hosted.finish_customer_login($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     )
     .bind(&s.origin)
     .bind(c.provider_id())
@@ -357,9 +357,10 @@ async fn finish(s: &App, c: &Customer, p: Pending, code: &str) -> Response {
     .bind(&registration.client_id)
     .bind(c.binding())
     .bind(subject.as_slice())
-    .bind(p.revision)
-    .bind(p.deadline)
+    .bind(p.context.revision)
+    .bind(p.context.deadline_ms)
     .bind(c.tag(b"customer-session-v1", &token).as_ref())
+    .bind(c.browser_instance)
     .fetch_optional(&s.pool)
     .await;
     match result {
@@ -419,19 +420,28 @@ async fn logout(State(s): State<App>, headers: HeaderMap) -> Response {
         .fetch_one(&s.pool)
         .await;
     match ended {
-        Ok(ok) => {
-            let mut r = if ok {
+        Ok(ok) => clear_browser_session(
+            &s,
+            &headers,
+            if ok {
                 http::success(json!({"signed_out":true}))
             } else {
                 denied()
-            };
-            browser::set(&mut r, SESSION, None, 0);
-            browser::set_policy(&mut r, ATTEMPT, None, 0, "Lax");
-            if let Some(attempt) = browser::cookie(&headers, ATTEMPT) {
-                c.attempts.lock().unwrap().pending.remove(&*attempt);
-            }
-            r
-        }
+            },
+        ),
         Err(_) => unavailable(),
     }
+}
+
+fn clear_browser_session(
+    s: &http::StateData,
+    headers: &HeaderMap,
+    mut response: Response,
+) -> Response {
+    browser::set(&mut response, SESSION, None, 0);
+    browser::set_policy(&mut response, ATTEMPT, None, 0, "Lax");
+    if let (Some(c), Some(attempt)) = (&s.customer, browser::cookie(headers, ATTEMPT)) {
+        c.attempts.cancel(&attempt);
+    }
+    response
 }

@@ -35,6 +35,7 @@ function UnavailablePage({ site }: { site?: ClosedSite } = {}) {
 function Entry() {
   const { t } = useLocale();
   if (import.meta.env.PROD && location.pathname === "/setup/owner") return <OwnerSetup />;
+  if (import.meta.env.PROD && location.pathname === "/setup/recovery") return <OwnerSetup recovery />;
   if (!import.meta.env.DEV) return <ServerEntry />;
   if (publicPage) return <PublicPage kind={publicPage} />;
   return location.pathname === "/" ? <LandingPage /> : Preview && /^\/(?:app|admin)(?:\/|$)/.test(location.pathname) && location.pathname !== "/admin/login" ? <Suspense fallback={<main className="integration-unavailable" role="status">{t("shell.openingDashboard")}</main>}><Preview /></Suspense> : <UnavailablePage />;
@@ -63,7 +64,8 @@ function ServerEntry() {
   const login = location.pathname === "/login";
   const customerPage = customerPages.find(p => location.pathname === `/app/${p.id}`);
   if (site.loginProvider && (customerPage || login || location.pathname === "/app"))
-    return <CustomerEntry brand={site.displayName} provider={site.loginProvider} login={login} page={customerPage?.id ?? "overview"} />;
+    return <CustomerEntry brand={site.displayName} provider={site.loginProvider} login={login}
+      page={customerPage?.id ?? "overview"} support={site.policyLinks?.support} />;
   if (publicPage) return <PublicPage kind={publicPage} site={site} />;
   return location.pathname === "/" ? <LandingPage site={site} /> : <UnavailablePage site={site} />;
 }

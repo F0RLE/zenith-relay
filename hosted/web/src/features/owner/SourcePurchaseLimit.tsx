@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { SavedSource } from "../../api/connections";
 import { ControlError, observeControl } from "../../api/control";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
+import type { readOwnerOverview } from "../../api/ownerSession";
 import { changePurchaseLimit, purchaseLimitInput, purchaseLimitMicros, readPurchaseLimit, type PurchaseLimitChange } from "../../api/purchaseLimit";
 import { useLocale } from "../../i18n/LocaleProvider";
 import type { MessageKey } from "../../i18n/types";
@@ -10,12 +10,11 @@ import { formatMoney } from "../usage/model";
 type Session = Awaited<ReturnType<typeof readOwnerOverview>>;
 type Draft = { capped: boolean; dollars: string; revision: string };
 
-export function SourcePurchaseLimit({ source, session, onSession }: {
-  source: SavedSource; session: Session; onSession: (s: Session) => void;
+export function SourcePurchaseLimit({ source, session }: {
+  source: SavedSource; session: Session;
 }) {
   const { t, locale } = useLocale();
   const name = useId(), hintId = `${name}-hint`;
-  const [open, setOpen] = useState(false);
   const [view, setView] = useState<Awaited<ReturnType<typeof readPurchaseLimit>>>();
   const [draft, setDraft] = useState<Draft>();
   const [reload, setReload] = useState(0);
@@ -23,10 +22,9 @@ export function SourcePurchaseLimit({ source, session, onSession }: {
   const [error, setError] = useState<MessageKey>();
   const flight = useRef(false), version = useRef(0);
   const pending = useRef<PurchaseLimitChange | undefined>(undefined);
-  const readOnly = source.credential_state === "revoked";
+  const readOnly = source.credential_state === "revoked" || source.serving?.state === "trashed";
 
   useEffect(() => {
-    if (!open) return;
     return observeControl(async () => {
       const current = version.current;
       try {
@@ -46,7 +44,7 @@ export function SourcePurchaseLimit({ source, session, onSession }: {
         setError("purchaseLimit.readFailed");
       }
     }, () => {});
-  }, [open, source.id, reload]);
+  }, [source.id, reload]);
 
   const fields = draft ?? (view && { capped: view.limit_micro_usd !== null, dollars: purchaseLimitInput(view.limit_micro_usd), revision: view.revision });
   const limit = fields?.capped ? purchaseLimitMicros(fields.dollars) : null;
@@ -61,15 +59,7 @@ export function SourcePurchaseLimit({ source, session, onSession }: {
       pending.current = { operation_id: crypto.randomUUID(), expected_revision: revision, limit_micro_usd: limit };
     const command = pending.current;
     try {
-      try {
-        await changePurchaseLimit(source.id, session.csrf, command);
-      } catch (e) {
-        if (!(e instanceof ControlError) || e.code !== "fresh_passkey_required") throw e;
-        await signInOwner();
-        const renewed = await readOwnerOverview(AbortSignal.timeout(10000));
-        onSession(renewed);
-        await changePurchaseLimit(source.id, renewed.csrf, command);
-      }
+      await changePurchaseLimit(source.id, session.csrf, command);
       const next = await readPurchaseLimit(source.id);
       pending.current = undefined;
       setView(next); setDraft(undefined);
@@ -87,9 +77,7 @@ export function SourcePurchaseLimit({ source, session, onSession }: {
     return formatMoney(n, Math.max(2, digits), locale) + " USD";
   }
 
-  return <details className="source-purchase" onToggle={e => setOpen(e.currentTarget.open)}>
-    <summary>{t("purchaseLimit.title")}</summary>
-    {open && <div className="source-purchase-body">
+  return <div className="source-purchase">
       {error && <small role="alert">{t(error)}</small>}
       {!view || !fields ? error === "purchaseLimit.readFailed"
         ? <button type="button" className="key-button key-secondary" onClick={() => { setError(undefined); setReload(n => n + 1); }}>{t("common.retry")}</button>
@@ -123,6 +111,5 @@ export function SourcePurchaseLimit({ source, session, onSession }: {
               {invalid && <small id={hintId}>{t("purchaseLimit.invalid")}</small>}
             </form>}
         </>}
-    </div>}
-  </details>;
+  </div>;
 }

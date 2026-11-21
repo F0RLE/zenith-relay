@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import type { CatalogMove, catalogGroups } from "../models/catalogOrder";
+import type { CatalogMove } from "../models/catalogOrder";
 
 type Item = { kind: CatalogMove["kind"]; id: string };
 type Drag = Item & { pointerId: number; clientX: number; clientY: number };
 
 /** Handle-only pointer/touch dragging; price inputs and switches never start a drag. */
-export function useCatalogReorder(groups: ReturnType<typeof catalogGroups>, onMove: (move: CatalogMove) => void, active: boolean) {
+export function useCatalogReorder(groups: readonly { id: string; models: readonly { id: string }[] }[], onMove: (move: CatalogMove) => void, active: boolean) {
   const root = useRef<HTMLElement>(null);
   const pointer = useRef<Drag | null>(null);
   const [drag, setDrag] = useState<Item | null>(null);
@@ -18,7 +18,7 @@ export function useCatalogReorder(groups: ReturnType<typeof catalogGroups>, onMo
   function targetAt(item: Item, x: number, y: number) {
     const element = document.elementFromPoint(x, y);
     if (!element || !root.current?.contains(element)) return null;
-    const row = element.closest<HTMLElement>(item.kind === "group" ? "[data-group-id]" : ".owner-model-row[data-model-id]");
+    const row = element.closest<HTMLElement>(item.kind === "group" ? "[data-group-id]" : "[data-model-id]");
     const id = row?.dataset[item.kind === "group" ? "groupId" : "modelId"];
     return id && id !== item.id && peers(item).some(peer => peer.id === id) ? id : null;
   }

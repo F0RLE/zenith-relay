@@ -266,6 +266,25 @@ impl ModelMetadataCatalog {
             }
             return order::inferred_provider(model);
         };
+        self.resolved_provider(metadata)
+    }
+
+    /// Publisher identity from reference records and unambiguous registered
+    /// names only. Do not apply the Desktop presentation fallback to Hosted.
+    pub fn reference_publishers(&self) -> BTreeMap<String, String> {
+        self.entries
+            .keys()
+            .chain(self.leaf_matches.keys())
+            .chain(
+                self.alias_matches
+                    .iter()
+                    .filter_map(|(id, entry)| entry.as_ref().map(|_| id)),
+            )
+            .filter_map(|id| Some((id.clone(), self.resolved_provider(self.resolve(id)?)?)))
+            .collect()
+    }
+
+    fn resolved_provider(&self, metadata: &ModelMetadata) -> Option<String> {
         metadata
             .canonical_model_id
             .as_deref()

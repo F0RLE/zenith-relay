@@ -44,7 +44,7 @@ export function StatusPage({ models = [], asOf, live = false }: { models?: reado
       className={period === id ? "active" : ""} aria-pressed={period === id} onClick={() => select(id)}>{t(label)}</button>)}
   </div>;
 
-  return <section className={`status-page${live ? " model-status-live" : ""}`} data-period={period}>
+  return <section className="status-page" data-period={period}>
     <header className="page-heading status-heading"><h1>{t("common.status")}</h1>
       {live ? <div className="model-status-controls">{tabs}<button type="button" className="icon-button report-refresh"
         aria-label={t("modelStatus.refresh")} title={t("modelStatus.refresh")} disabled={!data} onClick={refresh}><RefreshCw aria-hidden="true" /></button></div> : tabs}

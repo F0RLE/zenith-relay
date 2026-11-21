@@ -10,7 +10,8 @@ export function StatusValue({ metric, values, interval = false }: { metric: Stat
   let detail: string | undefined;
   if (values) {
     const { state, monitoredMs, operationalMs, spanMs, requestMs, requests, cacheBps, cacheSamples, latencyMs, latencySamples } = values;
-    const samples = (n: number) => t("modelStatus.samples", { known: n.toLocaleString(locale), total: (requests ?? 0).toLocaleString(locale) });
+    const samples = (n: number, label: "modelStatus.samples" | "modelStatus.completionSamples") =>
+      t(label, { known: n.toLocaleString(locale), total: (requests ?? 0).toLocaleString(locale) });
     switch (metric) {
       case "availability":
         if (monitoredMs > 0) {
@@ -27,13 +28,13 @@ export function StatusValue({ metric, values, interval = false }: { metric: Stat
       case "latency":
         if (latencyMs !== null) {
           value = latencyMs.toLocaleString(locale, { style: "unit", unit: "millisecond", unitDisplay: "short" });
-          detail = samples(latencySamples);
+          detail = samples(latencySamples, "modelStatus.completionSamples");
         }
         break;
       case "cache":
         if (cacheBps !== null) {
           value = percent(cacheBps / 10000);
-          detail = samples(cacheSamples);
+          detail = samples(cacheSamples, "modelStatus.samples");
         }
         break;
     }

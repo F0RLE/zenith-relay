@@ -1,4 +1,5 @@
 use super::*;
+use confirmation::{Approval, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -75,10 +76,77 @@ enum Action {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Change {
+struct RequestCommand {
     operation_id: Uuid,
     expected_revision: String,
     command: Action,
+}
+
+pub(super) struct Change {
+    operation_id: Uuid,
+    revision: i64,
+    action: Action,
+}
+
+impl Change {
+    async fn parse(req: Request, prepare: bool) -> Option<Self> {
+        let body = crate::setup::credential::<RequestCommand>(req).await?;
+        let revision = body.expected_revision.parse::<i64>().ok()?;
+        if !(1..i64::MAX).contains(&revision)
+            || revision.to_string() != body.expected_revision
+            || body.operation_id.is_nil()
+        {
+            return None;
+        }
+        match &body.command {
+            Action::Save { draft } if !prepare && draft.valid() => (),
+            Action::Check {} if !prepare => (),
+            Action::Publish {} => (),
+            Action::Disable { method_id } if !method_id.is_nil() => (),
+            _ => return None,
+        }
+        Some(Self {
+            operation_id: body.operation_id,
+            revision,
+            action: body.command,
+        })
+    }
+
+    async fn execute(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        proof: Option<(&Context, &Approval)>,
+    ) -> sqlx::Result<String> {
+        let (action, draft, target) = match &self.action {
+            Action::Save { draft } => ("save", Some(sqlx::types::Json(draft)), None),
+            Action::Check {} => ("check", None, None),
+            Action::Publish {} => ("publish", None, None),
+            Action::Disable { method_id } => ("disable", None, Some(*method_id)),
+        };
+        let query = sqlx::query_scalar(
+            "SELECT relay_hosted.change_checkout_builder($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(&s.origin)
+        .bind(tag.as_ref())
+        .bind(self.operation_id)
+        .bind(self.revision)
+        .bind(action)
+        .bind(draft)
+        .bind(target);
+        confirmation::bind_proof(query, proof)
+            .fetch_one(&s.pool)
+            .await
+    }
+
+    pub(super) async fn apply(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        proof: Option<(&Context, &Approval)>,
+    ) -> Response {
+        respond(self.execute(s, tag, proof).await, self.operation_id)
+    }
 }
 
 fn invalid() -> Response {
@@ -111,50 +179,38 @@ pub(super) async fn read(State(s): State<App>, headers: HeaderMap) -> Response {
 }
 
 pub(super) async fn change(State(s): State<App>, req: Request) -> Response {
+    submit(s, req, false).await
+}
+
+pub(super) async fn options(State(s): State<App>, req: Request) -> Response {
+    submit(s, req, true).await
+}
+
+async fn submit(s: App, req: Request, prepare: bool) -> Response {
     let tag = match owner_mutation(&s, req.headers()) {
         Ok(tag) => tag,
         Err(e) => return e.response(),
     };
-    let Some(cmd) = crate::setup::credential::<Change>(req).await else {
+    let Some(change) = Change::parse(req, prepare).await else {
         return invalid();
-    };
-    let Ok(revision) = cmd.expected_revision.parse::<i64>() else {
-        return invalid();
-    };
-    if revision < 1 || revision.to_string() != cmd.expected_revision || cmd.operation_id.is_nil() {
-        return invalid();
-    }
-    let (action, draft, target) = match &cmd.command {
-        Action::Save { draft } if draft.valid() => ("save", Some(sqlx::types::Json(draft)), None),
-        Action::Check {} => ("check", None, None),
-        Action::Publish {} => ("publish", None, None),
-        Action::Disable { method_id } if !method_id.is_nil() => ("disable", None, Some(*method_id)),
-        _ => return invalid(),
     };
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return unavailable();
     }
-    let result = sqlx::query_scalar::<_, String>(
-        "SELECT relay_hosted.change_checkout_builder($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(&s.origin)
-    .bind(tag.as_ref())
-    .bind(cmd.operation_id)
-    .bind(revision)
-    .bind(action)
-    .bind(draft)
-    .bind(target)
-    .fetch_one(&s.pool)
-    .await;
+    let result = change.execute(&s, &tag, None).await;
+    if prepare && matches!(result.as_deref(), Ok("fresh_required")) {
+        let admin = s.auth.as_ref().expect("authenticated");
+        let command = payment_confirmation::Command::Checkout(change);
+        return confirmation::start(&s, &admin.payment_changes, tag, command).await;
+    }
+    respond(result, change.operation_id)
+}
+
+fn respond(result: sqlx::Result<String>, operation_id: Uuid) -> Response {
     match result.as_deref() {
-        Ok("applied") => http::success(json!({"applied":true,"operation_id":cmd.operation_id})),
+        Ok("applied") => http::success(json!({"applied":true,"operation_id":operation_id})),
         Ok("denied") => denied(),
         Ok("invalid") => invalid(),
-        Ok("fresh_required") => http::error(
-            StatusCode::FORBIDDEN,
-            "fresh_passkey_required",
-            "Verify the owner passkey again.",
-        ),
         Ok("conflict") => http::error(
             StatusCode::CONFLICT,
             "revision_conflict",
@@ -170,6 +226,7 @@ pub(super) async fn change(State(s): State<App>, req: Request) -> Response {
             "checkout_closed",
             "Checkout configuration is limited to local qualification.",
         ),
-        _ => unavailable(),
+        Ok(code) => confirmation::error(code).unwrap_or_else(unavailable),
+        Err(_) => unavailable(),
     }
 }

@@ -32,6 +32,16 @@ describe("server model status", () => {
     expect(parsed.summary).toMatchObject({ requests: 0, latencyMs: null, cacheBps: null });
   });
 
+  test("preserves exact nonalphabetical catalog order while rejecting duplicates", () => {
+    const data = response();
+    const first = data.items[0]!;
+    data.items.push({ ...first, model: "another-model" });
+    data.summary = { ...data.summary, span_ms: step * 96, request_ms: data.summary.request_ms * 2 };
+    expect(parseModelStatus(data, 24).items.map(row => row.model)).toEqual(["vendor/new:model", "another-model"]);
+    data.items[1]!.model = first.model;
+    expect(() => parseModelStatus(data, 24)).toThrow();
+  });
+
   test("rejects malformed windows, unobserved health and incomplete sample claims", () => {
     const bad = response();
     bad.intervals[4]!.from_ms++;
@@ -42,6 +52,11 @@ describe("server model status", () => {
     expect(() => parseModelStatus(partial, 24)).toThrow();
     const inconsistent = response();
     Object.assign(inconsistent.items[0]!.history[4]!, { cache_samples: 1, cache_bps: 9000 });
+    expect(() => parseModelStatus(inconsistent, 24)).toThrow();
+    Object.assign(inconsistent.items[0]!.history[4]!, {
+      request_ms: 80000, requests: 1, latency_ms: 90001, latency_samples: 1,
+      cache_samples: 0, cache_bps: null,
+    });
     expect(() => parseModelStatus(inconsistent, 24)).toThrow();
   });
 });

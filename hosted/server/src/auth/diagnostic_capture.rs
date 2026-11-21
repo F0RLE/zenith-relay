@@ -1,8 +1,10 @@
 use super::*;
+use crate::config::CaptureLimits;
 use axum::{
     body::to_bytes,
     extract::{Path, RawQuery},
 };
+use confirmation::{Approval, Context};
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -16,6 +18,59 @@ struct Start {
     seconds: i32,
 }
 
+pub(super) struct Command {
+    start: Start,
+    limits: Option<CaptureLimits>,
+}
+
+impl Command {
+    async fn parse(req: Request, limits: Option<CaptureLimits>) -> Option<Self> {
+        if req.uri().query().is_some()
+            || browser::one(req.headers(), "content-type").and_then(|v| v.split(';').next())
+                != Some("application/json")
+        {
+            return None;
+        }
+        let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(req.into_body(), 512))
+            .await
+            .ok()?
+            .ok()?;
+        let start: Start = serde_json::from_slice(&bytes).ok()?;
+        if start.operation_id.is_nil()
+            || start.request_id.is_nil()
+            || !(1..=1800).contains(&start.seconds)
+        {
+            return None;
+        }
+        Some(Self { start, limits })
+    }
+
+    async fn apply(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        approval: Option<(&Context, &Approval)>,
+    ) -> sqlx::Result<Option<Value>> {
+        let query = sqlx::query_scalar(
+            "SELECT relay_hosted.start_diagnostic_capture($1,$2,$3,$4,$5::text::relay_hosted.capture_reason,
+                $6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+        )
+        .bind(&s.origin)
+        .bind(tag.as_ref())
+        .bind(self.start.operation_id)
+        .bind(self.start.request_id)
+        .bind(self.start.reason.code())
+        .bind(self.start.seconds)
+        .bind(self.limits.map(|c| c.max_seconds))
+        .bind(self.limits.map(|c| c.max_events))
+        .bind(self.limits.map(|c| c.max_bytes))
+        .bind(self.limits.map(|c| c.max_events_per_second));
+        confirmation::bind_proof(query, approval)
+            .fetch_one(&s.pool)
+            .await
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Reason {
@@ -25,7 +80,7 @@ enum Reason {
 }
 
 impl Reason {
-    fn code(self) -> &'static str {
+    fn code(&self) -> &'static str {
         match self {
             Self::RequestTiming => "request_timing",
             Self::StreamInterruption => "stream_interruption",
@@ -52,11 +107,6 @@ async fn response(data: Result<Option<Value>, sqlx::Error>) -> Response {
         None => return http::success(v),
         Some("invalid_capture") => return invalid(),
         Some("not_found") => return http::not_found().await,
-        Some("fresh_passkey_required") => (
-            StatusCode::FORBIDDEN,
-            "fresh_passkey_required",
-            "Verify the owner passkey again.",
-        ),
         Some("capture_disabled") => (
             StatusCode::CONFLICT,
             "capture_disabled",
@@ -87,7 +137,7 @@ async fn response(data: Result<Option<Value>, sqlx::Error>) -> Response {
             "capture_history_full",
             "The diagnostic capture retention limit was reached.",
         ),
-        _ => return unavailable(),
+        Some(code) => return confirmation::error(code).unwrap_or_else(unavailable),
     };
     http::error(status, code, message)
 }
@@ -139,52 +189,50 @@ async fn read(s: &App, headers: &HeaderMap, query: Option<String>, raw: Option<&
     response(data).await
 }
 
-pub(super) async fn start(State(s): State<App>, req: Request) -> Response {
-    let proof = match owner_mutation(&s, req.headers()) {
+pub(super) async fn receipt(State(s): State<App>, req: Request) -> Response {
+    prepare(&s, req, false).await
+}
+
+pub(super) async fn options(State(s): State<App>, req: Request) -> Response {
+    prepare(&s, req, true).await
+}
+
+async fn prepare(s: &App, req: Request, issue_options: bool) -> Response {
+    let tag = match owner_mutation(s, req.headers()) {
         Ok(tag) => tag,
         Err(e) => return e.response(),
     };
-    if req.uri().query().is_some()
-        || browser::one(req.headers(), "content-type").and_then(|v| v.split(';').next())
-            != Some("application/json")
-    {
-        return invalid();
-    }
-    let Ok(Ok(bytes)) =
-        tokio::time::timeout(Duration::from_secs(5), to_bytes(req.into_body(), 512)).await
-    else {
+    let Some(command) = Command::parse(req, s.capture).await else {
         return invalid();
     };
-    let Ok(start) = serde_json::from_slice::<Start>(&bytes) else {
-        return invalid();
-    };
-    if start.operation_id.is_nil()
-        || start.request_id.is_nil()
-        || !(1..=1800).contains(&start.seconds)
-    {
-        return invalid();
-    }
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return unavailable();
     }
-    response(
-        sqlx::query_scalar(
-            "SELECT relay_hosted.start_diagnostic_capture($1,$2,$3,$4,$5::text::relay_hosted.capture_reason,$6,$7,$8,$9,$10)",
-        )
-        .bind(&s.origin)
-        .bind(proof.as_ref())
-        .bind(start.operation_id)
-        .bind(start.request_id)
-        .bind(start.reason.code())
-        .bind(start.seconds)
-        .bind(s.capture.map(|c| c.max_seconds))
-        .bind(s.capture.map(|c| c.max_events))
-        .bind(s.capture.map(|c| c.max_bytes))
-        .bind(s.capture.map(|c| c.max_events_per_second))
-        .fetch_one(&s.pool)
-        .await,
-    )
-    .await
+    let result = command.apply(s, &tag, None).await;
+    if issue_options && matches!(&result, Ok(Some(data)) if data["error"] == "fresh_required") {
+        let admin = s.auth.as_ref().expect("authenticated");
+        return confirmation::start(s, &admin.capture_starts, tag, command).await;
+    }
+    response(result).await
+}
+
+pub(super) async fn verify(State(s): State<App>, Path(id): Path<String>, req: Request) -> Response {
+    let Some(admin) = &s.auth else {
+        return denied();
+    };
+    let (command, ctx, proof) =
+        match confirmation::verify(&s, &admin.capture_starts, &id, req).await {
+            Ok(verified) => verified,
+            Err(error) => return error.response(),
+        };
+    if command.limits != s.capture {
+        return http::error(
+            StatusCode::CONFLICT,
+            "capture_limits_changed",
+            "Review the current diagnostic capture limits.",
+        );
+    }
+    response(command.apply(&s, &ctx.tag, Some((&ctx, &proof))).await).await
 }
 
 pub(super) async fn stop(State(s): State<App>, Path(raw): Path<String>, req: Request) -> Response {

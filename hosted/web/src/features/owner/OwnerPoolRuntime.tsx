@@ -5,7 +5,13 @@ import type { PoolActivityPresentation } from "./poolActivity";
 import type { PoolRoutingPolicy } from "./poolRotation";
 import "./owner-pool-runtime.css";
 
-export function OwnerPoolRuntime({ activity, mode }: { activity: PoolActivityPresentation; mode: PoolRoutingPolicy["mode"] }) {
+type RuntimeSummary = Pick<PoolActivityPresentation, "observed" | "models" | "total"> & {
+  current: { name: string }[]; last?: { name: string } | undefined;
+};
+
+export function OwnerPoolRuntime({ activity, mode, strategy }: {
+  activity: RuntimeSummary; mode: PoolRoutingPolicy["mode"]; strategy?: string | undefined;
+}) {
   const { t } = useLocale();
   const current = activity.current.map(member => member.name).join(" · ");
   const summary = current ? t("pool.activity.current", { name: current })
@@ -15,6 +21,7 @@ export function OwnerPoolRuntime({ activity, mode }: { activity: PoolActivityPre
   const requests = activity.total ? t(models ? "pool.activity.requests" : "pool.activity.requestsUnknown", { count: activity.total, models }) : "";
   return <div className="owner-pool-runtime" aria-live="polite" aria-atomic="true">
     <h2>{t(mode === "automatic" ? "pool.activity.distribution" : mode === "failover" ? "pool.rotation.modes.failover" : "pool.activity.order")}</h2>
+    {strategy && <span className="live-pool-strategy">{strategy}</span>}
     <div className="owner-pool-route"><strong data-working={activity.total > 0 || undefined} data-relay-tooltip={summary}>{summary}</strong></div>
     <span className="owner-pool-active-models" data-active-request-count={activity.total} aria-hidden={!requests} data-relay-tooltip={requests || undefined}>{requests && <><Cpu aria-hidden="true" /><span>{requests}</span></>}</span>
   </div>;

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { readUsageOverview, usageLink } from "../../api/usageReport";
 import { ChevronDown, RefreshCw } from "../../components/Icons";
-import { HostedTooltips } from "../../components/HostedTooltips";
 import { useLocale } from "../../i18n/LocaleProvider";
 import { localInterval, reportView, ReportPeriods, ReportStatus, useReportRead, useReportSource } from "../usage/ReportTools";
 import { UsageCharts } from "./UsageCharts";
@@ -29,10 +28,9 @@ export function CustomerOverview({ csrf }: { csrf: string }) {
   }
   const retry = view ? () => refresh() : () => location.assign("/app/overview");
   return <section className="hosted-overview report-overview" aria-labelledby="customer-overview-title">
-    <HostedTooltips />
-    <header className="report-overview-heading">
+    <header className="page-heading overview-heading report-overview-heading">
       <h1 id="customer-overview-title" tabIndex={interval ? 0 : undefined} data-relay-tooltip={interval}>{t("nav.overview")}</h1>
-      <div className="report-overview-controls">
+      <div className="overview-controls report-overview-controls">
         {(model || (data?.models.length ?? 0) > 1) && <label className="catalog-select report-model">
           <span className="sr-only">{t("overview.statisticsModel")}</span>
           <select value={model} onChange={e => setModel(e.currentTarget.value)}>

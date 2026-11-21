@@ -1,5 +1,13 @@
-//! A short-lived, server-local first-owner ceremony. `serve` never mounts it.
-use crate::{config::Config, db, http};
+//! Short-lived server-local owner ceremonies. `serve` never mounts them.
+mod owner;
+pub use owner::OwnerOperation;
+use owner::Target;
+
+use crate::{
+    auth::{browser, enrollment},
+    config::Config,
+    db, http,
+};
 use axum::{
     Router,
     body::to_bytes,
@@ -21,7 +29,6 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::oneshot, time::Instant};
 use webauthn_rs::prelude::*;
-use webauthn_rs_proto::ResidentKeyRequirement;
 use zeroize::Zeroizing;
 
 const LIFETIME: Duration = Duration::from_secs(180);
@@ -55,11 +62,8 @@ impl Step {
 struct Ceremony {
     auth: Webauthn,
     db: PgPool,
-    installation: Uuid,
-    epoch: i64,
-    db_deadline_ms: i64,
+    target: Target,
     origin: String,
-    user: Uuid,
     until: Instant,
     step: Mutex<Step>,
     completed: Mutex<Option<oneshot::Sender<bool>>>,
@@ -73,13 +77,12 @@ impl Ceremony {
     }
 
     fn take(&self, headers: &HeaderMap, stage: u8) -> Option<Step> {
-        let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
-        let bearer = headers
-            .get(header::AUTHORIZATION)?
-            .to_str()
-            .ok()?
-            .strip_prefix("Bearer ")?;
-        if self.until <= Instant::now() || origin != self.origin || bearer.len() != 64 {
+        let bearer =
+            browser::one(headers, header::AUTHORIZATION.as_str())?.strip_prefix("Bearer ")?;
+        if self.until <= Instant::now()
+            || !browser::same_origin(headers, &self.origin)
+            || bearer.len() != 64
+        {
             return None;
         }
         let mut step = self.step.lock().ok()?;
@@ -144,17 +147,9 @@ async fn start(State(s): State<Arc<Ceremony>>, req: Request) -> Response {
     if s.take(req.headers(), 0).is_none() {
         return denied();
     }
-    let Ok((mut options, state)) = s
-        .auth
-        .start_passkey_registration(s.user, "owner", "Owner", None)
-    else {
+    let Some((options, state)) = enrollment::options(&s.auth, s.target.user, None) else {
         return unavailable();
     };
-    let Some(selection) = &mut options.public_key.authenticator_selection else {
-        return unavailable();
-    };
-    selection.resident_key = Some(ResidentKeyRequirement::Required);
-    selection.require_resident_key = true;
     let session = secret();
     let response = http::success(Registration {
         session: &session,
@@ -171,44 +166,23 @@ async fn register(State(s): State<Arc<Ceremony>>, req: Request) -> Response {
     let Some(reg) = credential::<RegisterPublicKeyCredential>(req).await else {
         return invalid();
     };
-    if reg.type_ != "public-key" {
-        return invalid();
-    }
-    let Ok(key) = s.auth.finish_passkey_registration(&reg, &state) else {
+    let Some((options, proof, key)) = enrollment::register(&s.auth, &state, &reg) else {
         return invalid();
     };
-    if key.cred_id() != &reg.raw_id {
-        return invalid();
-    }
-    let Ok((mut options, proof)) = s
-        .auth
-        .start_passkey_authentication(std::slice::from_ref(&key))
-    else {
-        return unavailable();
-    };
-    // Require an actual discoverable assertion before persisting this owner.
-    // The server retains the one registered verifier and checks the user handle.
-    options.public_key.allow_credentials.clear();
     *s.step.lock().unwrap() = Step::Prove(session, Box::new(key), proof);
     http::success(options)
 }
 
 async fn prove(State(s): State<Arc<Ceremony>>, req: Request) -> Response {
-    let Some(Step::Prove(_, mut key, state)) = s.take(req.headers(), 2) else {
+    let Some(Step::Prove(_, key, state)) = s.take(req.headers(), 2) else {
         return denied();
     };
     let Some(reg) = credential::<PublicKeyCredential>(req).await else {
         return invalid();
     };
-    if reg.type_ != "public-key" || reg.get_user_unique_id() != Some(s.user.as_bytes()) {
-        return invalid();
-    }
-    let Ok(proof) = s.auth.finish_passkey_authentication(&reg, &state) else {
+    let Some(key) = enrollment::prove(&s.auth, s.target.user, &state, *key, &reg) else {
         return invalid();
     };
-    if !proof.user_verified() || key.update_credential(&proof).is_none() {
-        return invalid();
-    }
     let mut tx = match s.db.begin().await {
         Ok(tx) => tx,
         Err(_) => return unavailable(),
@@ -216,19 +190,7 @@ async fn prove(State(s): State<Arc<Ceremony>>, req: Request) -> Response {
     if s.until <= Instant::now() {
         return denied();
     }
-    match sqlx::query_scalar::<_, bool>(
-        "SELECT relay_hosted.bind_first_owner($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(s.installation)
-    .bind(s.epoch)
-    .bind(&s.origin)
-    .bind(s.user)
-    .bind(key.cred_id().as_slice())
-    .bind(sqlx::types::Json(&key))
-    .bind(s.db_deadline_ms)
-    .fetch_one(&mut *tx)
-    .await
-    {
+    match s.target.store(&mut tx, &s.origin, &key).await {
         Ok(true) => {
             if tx.commit().await.is_err() {
                 return unavailable();
@@ -241,25 +203,27 @@ async fn prove(State(s): State<Arc<Ceremony>>, req: Request) -> Response {
             http::error(
                 StatusCode::CONFLICT,
                 "setup_closed",
-                "Owner setup is closed.",
+                "Owner ceremony is closed.",
             )
         }
         Err(_) => unavailable(),
     }
 }
 
-pub async fn run(c: &Config, pool: &PgPool, dist: &Path, code_dir: &Path) -> Result<()> {
+pub async fn run(
+    c: &Config,
+    pool: &PgPool,
+    dist: &Path,
+    code_dir: &Path,
+    operation: OwnerOperation,
+) -> Result<()> {
     let origin = &c.server.public_origin;
     db::closed_setup(pool, origin).await?;
-    let auth = crate::auth::webauthn(c)?.ok_or("configure auth.admin_rp_id for owner setup")?;
-    let (installation, epoch, db_deadline_ms) = sqlx::query_as::<_, (Uuid, i64, i64)>(
-        "SELECT id, authorization_epoch, floor(extract(epoch FROM clock_timestamp())*1000)::bigint + $2
-         FROM relay_hosted.pending_owner WHERE public_origin=$1
-         AND has_function_privilege('relay_hosted.bind_first_owner(uuid,bigint,text,uuid,bytea,jsonb,bigint)','EXECUTE')
-         AND NOT has_function_privilege('relay_hosted.post_verified_payment(uuid,text,text,text,bigint)','EXECUTE')
-         AND NOT has_schema_privilege('relay_hosted','CREATE')",
-    ).bind(origin).bind(LIFETIME.as_millis() as i64).fetch_optional(pool).await.map_err(|_| "local setup role required")?
-        .ok_or("owner already provisioned or setup role unavailable")?;
+    let auth = crate::auth::webauthn(c)?.ok_or("configure auth.admin_rp_id for owner passkeys")?;
+    let Some(target) = Target::load(pool, origin, operation).await? else {
+        println!("Owner recovery previously committed; no changes.");
+        return Ok(());
+    };
     let dir = fs::canonicalize(code_dir).map_err(|_| "private setup directory missing")?;
     if !dir.is_dir() || dir.starts_with(fs::canonicalize(dist).map_err(|_| "web build missing")?) {
         return Err("select a private setup directory outside the website");
@@ -291,11 +255,8 @@ pub async fn run(c: &Config, pool: &PgPool, dist: &Path, code_dir: &Path) -> Res
     let s = Arc::new(Ceremony {
         auth,
         db: pool.clone(),
-        installation,
-        epoch,
-        db_deadline_ms,
+        target,
         origin: origin.clone(),
-        user: Uuid::new_v4(),
         step: Mutex::new(Step::Start(token)),
         until: Instant::now() + LIFETIME,
         completed: Mutex::new(Some(result)),
@@ -304,13 +265,14 @@ pub async fn run(c: &Config, pool: &PgPool, dist: &Path, code_dir: &Path) -> Res
         .route("/api/hosted/v1/setup/start", post(start))
         .route("/api/hosted/v1/setup/register", post(register))
         .route("/api/hosted/v1/setup/prove", post(prove));
-    let app = http::website(app, dist, &["/setup/owner"])?
+    let page = operation.page();
+    let app = http::website(app, dist, &[page])?
         .fallback(http::not_found)
         .method_not_allowed_fallback(http::wrong_method)
         .with_state(s.clone())
         .layer(middleware::from_fn(http::response_headers));
     eprintln!(
-        "Open {origin}/setup/owner and enter the code from {}",
+        "Open {origin}{page} and enter the code from {}",
         file.path().display()
     );
     let (stop, signal) = oneshot::channel::<()>();
@@ -333,6 +295,6 @@ pub async fn run(c: &Config, pool: &PgPool, dist: &Path, code_dir: &Path) -> Res
     if bound {
         Ok(())
     } else {
-        Err("setup closed without binding an owner")
+        Err("owner ceremony closed without confirming a passkey")
     }
 }

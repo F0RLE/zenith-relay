@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { defaultOwnerUsage, ownerRequestPath, ownerUsageHref, parseOwnerUsageView, readOwnerRequest } from "../../api/ownerUsage";
+import { customerCasePath } from "../../api/customerAccess";
 import { diagnosticOrigins, diagnosticSeverities, diagnosticStages, type OwnerDiagnostic } from "../../api/requestDiagnostics";
 import { ArrowRight, Check, Copy, RefreshCw } from "../../components/Icons";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -64,7 +65,8 @@ export function OwnerRequest() {
             <h3 id="owner-context">{t("ownerUsage.context")}</h3>
             <dl className="owner-case-context">
               <dt>{t("ownerUsage.requestId")}</dt><dd><CopyReference id={data.receipt.id} /></dd>
-              <dt>{t("ownerUsage.workspaceId")}</dt><dd><a className="entry-account-link" href={ownerUsageHref({ ...view, workspace: data.workspace })}><code>{data.workspace}</code></a></dd>
+              <dt>{t("ownerUsage.workspaceId")}</dt><dd><a className="entry-account-link" href={customerCasePath(data.workspace)}
+                aria-label={t("access.openCase", { id: data.workspace })}><code>{data.workspace}</code></a></dd>
               <dt>{t("common.apiKey")}</dt><dd><a className="entry-account-link" href={ownerUsageHref({ ...view, key: data.receipt.keyId })}><code>{reportKeyPrefix(data.receipt.keyId)}</code></a></dd>
               <dt>{t("usage.protocolTransport")}</dt><dd>Responses · {data.streaming ? "SSE" : "JSON"}</dd>
               <dt>{t("receipt.tariffRevision")}</dt><dd>{data.receipt.tariff.toLocaleString(locale)}</dd>

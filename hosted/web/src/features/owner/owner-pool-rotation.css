@@ -109,6 +109,12 @@
     .owner-rotation-editor[data-manual-order="true"][data-request-shares="true"] .owner-rotation-member { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 }
+@container pool-rotation (max-width: 380px) {
+  .owner-rotation-editor:not([data-manual-order="true"]) .owner-rotation-member,
+  .owner-rotation-editor[data-manual-order="true"][data-request-shares="true"] .owner-rotation-member {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .owner-pool-rotation button, .owner-rotation-shares input::after { transition: none; }
 }

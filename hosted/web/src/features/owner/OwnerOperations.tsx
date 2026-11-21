@@ -21,7 +21,7 @@ const stateLabel = { succeeded: "operations.succeeded", failed: "operations.fail
 
 type Session = Awaited<ReturnType<typeof readOwnerOverview>>;
 
-export function OwnerOperations({ session, onSession }: { session: Session; onSession: (v: Session) => void }) {
+export function OwnerOperations({ session }: { session: Session }) {
   const { t, locale } = useLocale();
   const [revision, setRevision] = useState(0);
   const [pages, setPages] = useState<string[]>([]);
@@ -85,6 +85,6 @@ export function OwnerOperations({ session, onSession }: { session: Session; onSe
         </nav>}
       </section>
     </div>
-    <OwnerDiagnosticCapture session={session} onSession={onSession} revision={revision} />
+    <OwnerDiagnosticCapture session={session} revision={revision} />
   </div>;
 }

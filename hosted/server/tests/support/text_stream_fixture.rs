@@ -66,10 +66,20 @@ fn event(kind: &str, number: u64, fields: Value) -> Bytes {
 }
 
 pub(super) fn response_event(status: &str, sequence: u64, usage: Value) -> Bytes {
+    text_response_event(status, sequence, usage, DELTA)
+}
+
+pub(super) fn measured_terminal() -> Bytes {
+    let mut counts = usage(1000, 100, 20);
+    counts["output_tokens_details"] = json!({"reasoning_tokens":5});
+    text_response_event("completed", 3, counts, &DELTA.repeat(2))
+}
+
+fn text_response_event(status: &str, sequence: u64, usage: Value, text: &str) -> Bytes {
     let kind = if sequence == 0 { "created" } else { status };
     let output = if matches!(status, "completed" | "incomplete") {
         json!([{"id":"msg_fixture","type":"message","role":"assistant","status":status,
-            "content":[{"type":"output_text","text":DELTA,"annotations":[]}]}])
+            "content":[{"type":"output_text","text":text,"annotations":[]}]}])
     } else {
         json!([])
     };

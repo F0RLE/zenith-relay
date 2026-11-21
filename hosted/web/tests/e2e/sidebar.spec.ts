@@ -16,7 +16,9 @@ test("logo toggles the rail or closes the drawer without navigating", async ({ p
   await expect(sidebar.locator(".sidebar-footer").getByRole("button", { name: "Выйти", exact: true })).toBeVisible();
   if (mobile) {
     const logoBounds = await logo.boundingBox();
-    const closeBounds = await sidebar.getByRole("button", { name: "Закрыть меню", exact: true }).boundingBox();
+    const close = sidebar.locator(".drawer-close");
+    await expect(close).toHaveAccessibleName("Закрыть меню");
+    const closeBounds = await close.boundingBox();
     expect(logoBounds!.x + logoBounds!.width + 8).toBeLessThanOrEqual(closeBounds!.x);
     await logo.click();
     await expect(sidebar).not.toBeVisible();

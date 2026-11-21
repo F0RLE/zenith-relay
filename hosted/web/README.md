@@ -16,13 +16,21 @@ Errors shows the observed stage and explanation when retained, with filters for
 stage, origin, category, severity and code.
 With [customer OIDC configured](../server/README.md#restricted-customer-sign-in),
 the owner can confirm a set of testers or pause access. `/login` verifies their
-identities; `/app/overview` shows the customer's rolling usage and current wallet. `/app/keys`
-issues personal keys with one-time disclosure, replacement and revocation.
+identities. The signed-in cabinet uses the same sidebar and mobile drawer as
+the preview. Overview shows rolling usage; Balance opens the current wallet.
+Under API keys, customers can issue, replace and revoke personal keys. New keys
+are shown once. Account security stays in the cabinet header.
 `/admin/connections` lists stored API sources, proxy assignment and current verified models for the owner.
-Its **Paired devices** section lets the owner [grant or revoke read-only Desktop access](../server/README.md#pair-a-desktop).
-In `/admin/pools` the owner admits a verified model, saves its price draft and
-publishes or withdraws it for the approved testers. `/app/models` reads their
-effective catalog without probing a provider or exposing connection details.
+On local HTTPS with the qualifier running, the same model dialog offers an
+[explicit Responses check](../server/README.md#check-a-model-in-the-admin-panel).
+Its Desktop panel lets the owner [grant or revoke scoped access](../server/README.md#pair-a-desktop).
+Overview, request history and pool review are optional pairing permissions.
+With pool review enabled, the owner [confirms a single membership change](../server/README.md#change-pool-membership-from-desktop) with a passkey in the same panel.
+In `/admin/pools` the owner [manages admitted connections](../server/README.md#pool-members-and-activity)
+and sees which ones have a request in progress. **Model rules** saves price
+drafts and publishes or withdraws models for approved testers. `/app/models` renders their
+effective catalog in the shared model table, with exact rates and copyable IDs.
+The table does not infer publishers, context or comparisons from a model ID.
 In `/admin/notifications`, the owner saves and confirms
 [in-app notices](../server/README.md#in-app-service-notices) for qualified customers,
 who see them in the header bell.

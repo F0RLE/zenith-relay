@@ -28,8 +28,48 @@ async fn start(
     seconds: i32,
     caps: Option<CaptureLimits>,
 ) -> Option<Value> {
+    start_with_proof(db, tag, operation, request, seconds, caps, None).await
+}
+
+async fn arm(
+    admin: &PgPool,
+    db: &PgPool,
+    operation: Uuid,
+    request: Uuid,
+    seconds: i32,
+    caps: CaptureLimits,
+) -> Option<Value> {
+    let revision: i64 = sqlx::query_scalar(
+        "SELECT revision FROM relay_hosted.admin_credentials WHERE credential_id=decode('01','hex')",
+    )
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    start_with_proof(
+        db,
+        TAG,
+        operation,
+        request,
+        seconds,
+        Some(caps),
+        Some(revision),
+    )
+    .await
+}
+
+async fn start_with_proof(
+    db: &PgPool,
+    tag: &[u8],
+    operation: Uuid,
+    request: Uuid,
+    seconds: i32,
+    caps: Option<CaptureLimits>,
+    revision: Option<i64>,
+) -> Option<Value> {
     sqlx::query_scalar(
-        "SELECT relay_hosted.start_diagnostic_capture($1,$2,$3,$4,'request_timing',$5,$6,$7,$8,$9)",
+        "SELECT relay_hosted.start_diagnostic_capture($1,$2,$3,$4,'request_timing',$5,$6,$7,$8,$9,
+            CASE WHEN $10::bigint IS NOT NULL THEN decode('01','hex') END,$10,0,false,false,
+            floor(extract(epoch FROM clock_timestamp())*1000)::bigint+30000)",
     )
     .bind(ORIGIN)
     .bind(tag)
@@ -40,6 +80,7 @@ async fn start(
     .bind(caps.map(|c| c.max_events))
     .bind(caps.map(|c| c.max_bytes))
     .bind(caps.map(|c| c.max_events_per_second))
+    .bind(revision)
     .fetch_one(db)
     .await
     .unwrap()
@@ -121,17 +162,12 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
         "capture_disabled"
     );
 
-    const AGE_PROOF: &str =
-        "UPDATE relay_hosted.admin_sessions SET created_at=now()-interval '3 minutes'";
-    const FRESH_PROOF: &str = "UPDATE relay_hosted.admin_sessions SET created_at=now()";
-    sql(&f.admin, AGE_PROOF).await;
     assert_eq!(
         start(&management, TAG, op, r.id, 60, Some(CAPS))
             .await
             .unwrap()["error"],
-        "fresh_passkey_required"
+        "fresh_required"
     );
-    sql(&f.admin, FRESH_PROOF).await;
     assert_eq!(
         start(&management, TAG, op, Uuid::new_v4(), 60, Some(CAPS))
             .await
@@ -139,8 +175,8 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
         "capture_request_unavailable",
     );
     let (a, b) = tokio::join!(
-        start(&management, TAG, op, r.id, 60, Some(CAPS)),
-        start(&management, TAG, op, r.id, 60, Some(CAPS)),
+        arm(&f.admin, &management, op, r.id, 60, CAPS),
+        arm(&f.admin, &management, op, r.id, 60, CAPS),
     );
     let started = a.unwrap()["session"].clone();
     assert_eq!(started, b.unwrap()["session"]);
@@ -275,7 +311,11 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
          CREATE TRIGGER fixture_audit_failure BEFORE INSERT ON relay_hosted.diagnostic_capture_audit
              FOR EACH ROW WHEN (NEW.action='close') EXECUTE FUNCTION relay_hosted.fixture_audit_failure();",
     ).await;
-    sql(&f.admin, AGE_PROOF).await;
+    sql(
+        &f.admin,
+        "UPDATE relay_hosted.admin_sessions SET created_at=now()-interval '3 minutes'",
+    )
+    .await;
     let mut unavailable = f.admin.begin().await.unwrap();
     sqlx::query("LOCK TABLE relay_hosted.diagnostic_capture_audit IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *unavailable)
@@ -309,9 +349,8 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
         stopped
     );
 
-    sql(&f.admin, FRESH_PROOF).await;
     let expired = session(
-        &start(&management, TAG, Uuid::new_v4(), another.id, 1, Some(CAPS))
+        &arm(&f.admin, &management, Uuid::new_v4(), another.id, 1, CAPS)
             .await
             .unwrap(),
     );
@@ -338,7 +377,7 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
         json!([])
     );
     let revoked = session(
-        &start(&management, TAG, Uuid::new_v4(), another.id, 60, Some(CAPS))
+        &arm(&f.admin, &management, Uuid::new_v4(), another.id, 60, CAPS)
             .await
             .unwrap(),
     );
@@ -408,6 +447,14 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
     .unwrap();
     assert!(unlinked);
     assert_eq!(audited, 6);
+    let starts_with_passkey: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM relay_hosted.diagnostic_capture_audit
+         WHERE action='start' AND confirmed_by_passkey_id IS NOT NULL",
+    )
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(starts_with_passkey, 3);
     sql(&f.admin, "UPDATE relay_hosted.diagnostic_capture_events SET recorded_at=now()-interval '2 days',expires_at=now()-interval '1 day'").await;
     sql(&management, "SELECT relay_hosted.prune_capture_events()").await;
     let count: i64 =
@@ -423,6 +470,55 @@ async fn capture_fences_scope_retries_expiry_and_audit_recovery() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; set RELAY_TEST_PG_BIN"]
+async fn preparing_a_capture_cannot_close_one_or_arm_a_finished_request() {
+    let f = Fixture::new().await;
+    let management = owner(&f).await;
+    let old = Held::reserve(&f, f.key, &f.bearer).await;
+    let next = Held::reserve(&f, f.key, &f.bearer).await;
+    let id = session(
+        &arm(&f.admin, &management, Uuid::new_v4(), old.id, 60, CAPS)
+            .await
+            .unwrap(),
+    );
+    sqlx::query(
+        "UPDATE relay_hosted.diagnostic_sessions SET started_at=now()-interval '2 minutes',
+           expires_at=now()-interval '1 minute' WHERE id=$1",
+    )
+    .bind(id)
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    let unchanged = || {
+        sqlx::query_as::<_, (bool, i64, i64)>(
+            "SELECT ended_at IS NULL AND proof_tag IS NOT NULL,
+               (SELECT count(*) FROM relay_hosted.diagnostic_sessions),
+               (SELECT count(*) FROM relay_hosted.diagnostic_capture_audit)
+             FROM relay_hosted.diagnostic_sessions WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&f.admin)
+    };
+    let op = Uuid::new_v4();
+    assert_eq!(
+        start(&management, TAG, op, next.id, 60, Some(CAPS))
+            .await
+            .unwrap()["error"],
+        "fresh_required",
+    );
+    assert_eq!(unchanged().await.unwrap(), (true, 1, 1));
+    assert_eq!(next.finish(&f.worker, "not_sent").await, "released");
+    assert_eq!(
+        arm(&f.admin, &management, op, next.id, 60, CAPS)
+            .await
+            .unwrap()["error"],
+        "capture_request_unavailable",
+    );
+    assert_eq!(unchanged().await.unwrap(), (true, 1, 1));
+    assert_eq!(f.sends(), (0, 0));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; set RELAY_TEST_PG_BIN"]
 async fn capture_is_fenced_by_the_web_process_session_reset() {
     let f = Fixture::new().await;
     let management = owner(&f).await;
@@ -430,7 +526,7 @@ async fn capture_is_fenced_by_the_web_process_session_reset() {
     let r = Held::reserve(&f, f.key, &f.bearer).await;
     let receipt = reader.current_receipt(r.id).await;
     let id = session(
-        &start(&management, TAG, Uuid::new_v4(), r.id, 60, Some(CAPS))
+        &arm(&f.admin, &management, Uuid::new_v4(), r.id, 60, CAPS)
             .await
             .unwrap(),
     );
@@ -486,7 +582,7 @@ async fn capture_budgets_are_atomic_under_concurrent_writers() {
         };
         let op = Uuid::new_v4();
         let id = session(
-            &start(&management, TAG, op, r.id, 60, Some(caps))
+            &arm(&f.admin, &management, op, r.id, 60, caps)
                 .await
                 .unwrap(),
         );
@@ -550,7 +646,7 @@ async fn capture_sink_failure_does_not_change_a_stream_or_its_charge() {
     .await
     .expect("committed stream dispatch");
     let id = session(
-        &start(&management, TAG, Uuid::new_v4(), rid, 60, Some(CAPS))
+        &arm(&f.admin, &management, Uuid::new_v4(), rid, 60, CAPS)
             .await
             .unwrap(),
     );

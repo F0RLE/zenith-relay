@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { join } from "node:path";
+import { forkOwnerSession, ownerAssertion } from "./owner-session.mjs";
 
 export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead, login, issue, wait }) {
   const ownerHttp = owner.context().request;
@@ -28,6 +29,7 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
     return (await items(ownerHttp, endpoint)).find(n => n.title === title);
   };
   const privateTitle = "Initial service notice";
+  const previous = await forkOwnerSession(owner, origin);
   await owner.getByRole("link", { name: "Notifications", exact: true }).click();
   await expect(owner).toHaveURL(origin + "/admin/notifications");
   await expect(owner.getByRole("heading", { name: "Notifications", exact: true })).toBeVisible();
@@ -43,17 +45,44 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   expect(await items(customer)).toEqual([]);
 
   const path = endpoint + "/" + privateNotice.id;
-  const change = async (data, client = ownerHttp, token = null, site = origin) =>
-    mutation(client, path, token ?? (await ownerRead()).csrf_token, data, site);
+  const options = path + "/options";
+  const verification = endpoint + "/confirmations/";
+  const ownerCsrf = (await ownerRead()).csrf_token;
+  const post = (url, data, client = ownerHttp, token = ownerCsrf, site = origin) =>
+    mutation(client, url, token, data, site);
+  const change = (...args) => post(path, ...args);
   const rawPublish = command(1, { action: "publish" });
-  expect((await change(rawPublish, customer)).status()).toBe(401);
-  expect((await change(rawPublish, ownerHttp, "0".repeat(64))).status()).toBe(403);
-  expect((await change(rawPublish, ownerHttp, null, "https://foreign.invalid")).status()).toBe(403);
+  let proof, verify;
+  try {
+    for (const url of [path, options]) {
+      expect((await post(url, rawPublish, customer)).status()).toBe(401);
+      expect((await post(url, rawPublish, ownerHttp, "0".repeat(64))).status()).toBe(403);
+      expect((await post(url, rawPublish, ownerHttp, ownerCsrf, "https://foreign.invalid")).status()).toBe(403);
+    }
+    const withoutProof = await change(rawPublish);
+    expect(withoutProof.status()).toBe(403);
+    expect((await withoutProof.json()).error.code).toBe("fresh_passkey_required");
+    expect((await post(options, command(1, { action: "discard" }))).status()).toBe(400);
+    const prepared = await post(options, rawPublish);
+    expect(prepared.status()).toBe(200);
+    const challenge = (await prepared.json()).data;
+    verify = `${verification}${challenge.ceremony_id}/verify`;
+    proof = await ownerAssertion(owner, challenge.options);
+    const earlier = await previous.request.get(api + "admin/overview");
+    expect(earlier.status()).toBe(200);
+    const wrong = await post(verify, proof, previous.request, (await earlier.json()).data.csrf_token);
+    expect(wrong.status()).toBe(409);
+    expect((await wrong.json()).error.code).toBe("passkey_ceremony_expired");
+    expect(await items(customer)).toEqual([]);
+  } finally { await previous.close(); }
   await row.getByRole("button", { name: "Edit", exact: true }).click();
   await owner.getByLabel("Message", { exact: true }).fill("Only the first tester can see this notice.");
   await owner.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(row).toContainText("Only the first tester can see this notice.");
-  expect((await change(rawPublish)).status()).toBe(409);
+  const stale = await post(verify, proof);
+  expect(stale.status()).toBe(409);
+  expect((await stale.json()).error.code).toBe("notice_changed");
+  expect((await post(verify, proof)).status()).toBe(409);
   await row.getByRole("button", { name: "Send", exact: true }).click();
   await row.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(row.getByRole("button", { name: "Send", exact: true })).toBeFocused();
@@ -61,35 +90,31 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   issue("notice-draft", privateNotice.id);
   await wait("notice-confirm");
 
-  const stale = await change(command(2, { action: "publish" }));
-  expect(stale.status()).toBe(403);
-  expect((await stale.json()).error.code).toBe("fresh_passkey_required");
   const writes = [];
-  let dropped = false;
+  const record = async route => { writes.push(route.request().postDataJSON()); await route.continue(); };
   const cut = async route => {
-    writes.push(route.request().postDataJSON());
-    if (dropped) return route.continue();
     const result = await route.fetch();
-    if (result.status() === 200) {
-      dropped = true;
-      await result.dispose();
-      await route.abort("failed");
-    } else {
-      expect(result.status()).toBe(403);
-      await route.fulfill({ response: result });
-      await result.dispose();
-    }
+    expect(result.status()).toBe(200);
+    expect((await result.json()).data).toEqual({ operation_id: writes[0].operation_id, applied: true });
+    await result.dispose();
+    const replay = await post(route.request().url(), route.request().postDataJSON());
+    expect(replay.status()).toBe(409);
+    expect((await replay.json()).error.code).toBe("passkey_ceremony_expired");
+    await route.abort("failed");
   };
-  await owner.route(path, cut);
+  const verifyRoute = `${verification}*/verify`;
+  await owner.route(verifyRoute, cut, { times: 1 });
+  await owner.route(options, record);
   try {
     await row.getByRole("button", { name: "Send", exact: true }).click();
     await row.getByRole("button", { name: "Confirm sending", exact: true }).click();
     await expect(owner.getByRole("alert")).toHaveText(/No confirmation received/);
     await row.getByRole("button", { name: "Retry", exact: true }).click();
     await expect(row).toContainText("Recipients: 1");
-  } finally { await owner.unroute(path, cut); }
-  expect(writes).toHaveLength(3);
-  expect(writes.every(w => JSON.stringify(w) === JSON.stringify(writes[0]))).toBe(true);
+  } finally { await owner.unroute(options, record); await owner.unroute(verifyRoute, cut); }
+  expect(writes).toHaveLength(2);
+  expect(writes[1]).toEqual(writes[0]);
+  expect((await ownerRead()).csrf_token).toBe(ownerCsrf);
   const repeat = await Promise.all([change(writes[0]), change(writes[0])]);
   expect(repeat.map(r => r.status())).toEqual([200, 200]);
   expect((await change({ ...writes[0], command: { action: "discard" } })).status()).toBe(409);
@@ -97,7 +122,7 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   expect((await items(customer)).map(n => n.id)).toEqual([privateNotice.id]);
 
   await login(b);
-  await expect(b.locator(".entry-wallet dd")).toBeVisible();
+  await expect(b.locator(".hosted-tools .hosted-balance")).toBeVisible();
   expect(await items(later, inbox + "?workspace_id=" + (await (await customer.get(api + "account")).json()).data.workspace_id)).toEqual([]);
   const mark = (client, token, ids) => mutation(client, inbox + "/read", token, { ids });
   const bToken = await csrf(later);
@@ -110,6 +135,9 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   await expect(discarded).toContainText("Delete draft?");
   await discarded.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(discarded).toHaveCount(0);
+  expect((await post(endpoint + "/" + deleted.id, command(0, {
+    action: "save", title: "Replacement draft", message: "Same ID is no longer available.",
+  }))).status()).toBe(409);
 
   const shared = await create("Service update", "We have scheduled work.\n<b>Plain text, not markup.</b>");
   const broadcast = owner.getByRole("article", { name: shared.title });
@@ -119,7 +147,7 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   expect((await mark(later, bToken, [shared.id, privateNotice.id])).status()).toBe(404);
   expect((await items(later)).map(n => [n.id, n.read])).toEqual([[shared.id, false]]);
 
-  const bell = a.locator(".entry-notification-button");
+  const bell = a.locator(".hosted-tools .notification-button");
   const panel = a.getByRole("dialog", { name: "Notifications" });
   await a.setViewportSize({ width: 320, height: 740 });
   await a.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
@@ -129,6 +157,13 @@ export async function checkServiceNotices({ a, b, owner, origin, api, ownerRead,
   await expect(panel.getByRole("heading", { name: shared.title, exact: true })).toBeVisible();
   await expect(panel.getByText("<b>Plain text, not markup.</b>", { exact: false })).toBeVisible();
   await expect(panel.locator("b")).toHaveCount(0);
+  await a.getByRole("combobox", { name: /^Language:/ }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(bell).toHaveAttribute("inert", "");
+  await a.getByRole("listbox", { name: "Language" }).press("Escape");
+  await expect(bell).toHaveAttribute("data-unread", "true");
+  await bell.click();
+  await expect(panel.getByRole("heading", { name: shared.title, exact: true })).toBeVisible();
   const fits = await panel.evaluate(el => {
     const box = el.getBoundingClientRect();
     return box.left >= 11 && box.right <= innerWidth - 11 && box.bottom <= innerHeight - 11

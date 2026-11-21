@@ -47,20 +47,8 @@
 .hosted-app .model-status-tooltip dt { color: var(--secondary); overflow-wrap: anywhere; }
 .hosted-app .model-status-tooltip dd { text-align: end; font-variant-numeric: tabular-nums; font-weight: 550; }
 .hosted-app .model-status-coverage { display: block; margin-block-start: 2px; color: var(--secondary); font-size: 11px; line-height: 16px; font-weight: 400; }
-.hosted-app .model-status-live { width: 100%; container: relay-page / inline-size; --hosted-tools-space: 0px; }
-.hosted-app .model-status-live .status-heading { margin-block-end: 12px; padding-block: 0 12px; gap: 8px 24px; border: 0; }
-.hosted-app .model-status-live .status-heading h1 { color: var(--text); font-size: 28px; line-height: 36px; }
-.hosted-app .model-status-controls, .hosted-app .model-status-live .model-status-period { display: flex; align-items: center; gap: 4px; }
-.hosted-app .model-status-live .model-status-period button {
-  min-height: 44px; padding: 8px 12px; border: 1px solid transparent; border-radius: 8px;
-  color: var(--secondary); background: transparent; font-size: 13px;
-}
-.hosted-app .model-status-live .model-status-period button:hover { background: var(--subtle); }
-.hosted-app .model-status-live .model-status-period button.active { color: var(--accent); background: var(--accent-soft); font-weight: 550; }
-.hosted-app .model-status-live :is(.model-status-history, .model-status-search input):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.hosted-app .model-status-live .model-status-search input { color: var(--text); background: var(--surface); border-radius: 8px; }
-.hosted-app .model-status-live .model-status-search input::placeholder { color: var(--secondary); opacity: 1; }
-.hosted-app .model-status-live :is(.model-status-frame, .model-status-placeholder) { border-radius: 12px; }
+.hosted-app .model-status-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.hosted-app .model-status-placeholder { border-radius: 12px; }
 .hosted-app .model-status-placeholder { display: grid; justify-items: center; gap: 12px; padding: 40px 16px; color: var(--secondary); text-align: center; }
 .hosted-app .model-status-placeholder .button { min-height: 44px; }
 @container relay-page (max-width: 900px) {
@@ -94,7 +82,6 @@
 }
 @media (max-width: 639px) {
   .hosted-app .status-heading { padding-inline-end: 0; gap: 16px; }
-  .hosted-app .model-status-live .status-heading h1 { font-size: 24px; line-height: 32px; }
 }
 @media (max-width: 639px), (pointer: coarse) {
   .hosted-app .model-status-search input, .hosted-app .model-status-history { min-height: 44px; }

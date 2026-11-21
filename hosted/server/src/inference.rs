@@ -31,7 +31,11 @@ use routing::{Admission, Output, Selection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use store::Store;
 use uuid::Uuid;
 use zenith_relay_core::{
@@ -57,7 +61,8 @@ pub async fn check_worker(pool: &PgPool, origin: &str) -> Result<(), &'static st
         'relay_hosted.claim_text_candidate(text,uuid,uuid,uuid,uuid,uuid,text,bigint,bigint,bigint,bytea,integer,integer,uuid,bigint)'::regprocedure,
         'relay_hosted.record_text_cooldown(uuid,uuid,uuid,bigint)'::regprocedure,
         'relay_hosted.key_text_models(text,uuid,bytea)'::regprocedure,
-        'relay_hosted.capture_text_terminal(uuid,uuid,uuid,text,bigint,bigint,bigint)'::regprocedure,
+        'relay_hosted.capture_text_terminal(uuid,uuid,uuid,text,bigint,bigint,bigint,integer)'::regprocedure,
+        'relay_hosted.capture_text_terminal(uuid,uuid,uuid,text,bigint,bigint,bigint,integer,integer,bigint)'::regprocedure,
         'relay_hosted.capture_text_stream_usage(uuid,uuid,uuid,bigint,bigint,bigint)'::regprocedure,
         'relay_hosted.record_request_diagnostic(uuid,uuid,uuid,text,smallint,bigint)'::regprocedure,
         'relay_hosted.reconcile_text_attempt(uuid,uuid,uuid,text)'::regprocedure,
@@ -135,9 +140,9 @@ pub(crate) async fn source(
 ) -> Result<(ProviderSource, reqwest::Client), &'static str> {
     let endpoint = route.endpoint();
     vault
-        .check_imported_route(id, endpoint, route.uses_proxy())
+        .check_saved_route(id, endpoint, route.uses_proxy())
         .await
-        .map_err(|_| "source differs from the reviewed copy route")?;
+        .map_err(|_| "source differs from the saved route")?;
     let raw = vault
         .read(id, Purpose::Provider, revision)
         .await
@@ -329,6 +334,7 @@ async fn generate(State(s): State<Arc<Ingress>>, req: Request) -> Response {
         }
         Err(_) => return unavailable(),
     };
+    let started = Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         routing::dispatch(
@@ -356,7 +362,7 @@ async fn generate(State(s): State<Arc<Ingress>>, req: Request) -> Response {
         }
         Ok(Ok(Output::Stream(running))) => {
             s.store.milestone(rid, aid, Milestone::UpstreamResponse);
-            return stream::respond(s.store.clone(), ids, running, permit);
+            return stream::respond(s.store.clone(), ids, running, permit, started);
         }
         other => {
             s.store.milestone(rid, aid, Milestone::RequestInterrupted);
@@ -403,7 +409,11 @@ async fn generate(State(s): State<Arc<Ingress>>, req: Request) -> Response {
             return err(503, "relay_outcome_pending", Some(rid));
         }
     };
-    if !s.store.apply_terminal(ids, outcome, evidence(&value)).await {
+    if !s
+        .store
+        .apply_terminal(ids, outcome, evidence(&value), started, None)
+        .await
+    {
         return err(503, "relay_outcome_pending", Some(rid));
     }
     let mut response = Json(value).into_response();

@@ -46,7 +46,13 @@ impl Vault {
         let ok: bool = sqlx::query_scalar("SELECT
             has_function_privilege('relay_hosted.source_copy_access(text,uuid,uuid,uuid,bytea,boolean)','EXECUTE')
             AND has_function_privilege('relay_hosted.finish_source_copy(text,uuid,uuid,uuid,bytea)','EXECUTE')
-            AND NOT has_function_privilege('relay_hosted.review_source_copy(text,bytea,uuid,uuid,uuid,uuid,jsonb,bytea,bytea,boolean)','EXECUTE')
+            AND has_function_privilege('relay_hosted.web_source_access(text,uuid,uuid,bytea)','EXECUTE')
+            AND has_function_privilege('relay_hosted.finish_web_source(text,uuid,uuid,bytea)','EXECUTE')
+            AND NOT has_function_privilege('relay_hosted.approve_web_source(text,bytea,uuid,text,text,text[],boolean,bytea,bytea,bytea,bigint,bigint,boolean,boolean,bigint)','EXECUTE')
+            AND NOT has_function_privilege('relay_hosted.web_source_receipt(text,bytea,uuid)','EXECUTE')
+            AND NOT has_any_column_privilege('relay_hosted.web_source_intakes','SELECT,INSERT,UPDATE')
+            AND NOT has_table_privilege('relay_hosted.web_source_intakes','DELETE,TRUNCATE')
+            AND NOT has_function_privilege('relay_hosted.review_source_copy(text,bytea,uuid,uuid,uuid,uuid,jsonb,bytea,bytea,bigint,bytea,bigint,bigint,boolean,boolean,bigint)','EXECUTE')
             AND NOT has_any_column_privilege('relay_hosted.desktop_source_copies','SELECT,INSERT,UPDATE')
             AND NOT has_table_privilege('relay_hosted.desktop_source_copies','DELETE,TRUNCATE')")
             .fetch_one(&self.pool).await.map_err(|_| "cannot verify source copy role")?;
@@ -116,6 +122,14 @@ impl Vault {
         }
         // Like qualification, take the authority fence before the vault lock.
         lock_transaction(&mut tx, true).await?;
+        let current = grant(&mut tx, origin, proof, false)
+            .await?
+            .as_ref()
+            .map(state_of)
+            .transpose()?;
+        if current != Some(CopyState::Approved) {
+            return Ok(current);
+        }
         let result = self
             .stage_api(
                 &mut tx,
@@ -145,7 +159,7 @@ impl Vault {
         Ok(Some(CopyState::Committed))
     }
 
-    pub(crate) async fn check_imported_route(
+    pub(crate) async fn check_saved_route(
         &self,
         source: Uuid,
         endpoint: &str,

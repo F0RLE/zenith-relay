@@ -39,6 +39,8 @@
 .hosted-app .catalog-cell-label { display: none; }
 .hosted-app .catalog-empty td { padding: 48px 20px; text-align: center; }
 .hosted-app .catalog-empty p { color: var(--secondary); font-size: 13px; }
+.hosted-app .catalog-empty p[role="alert"] { color: var(--error); }
+.hosted-app .catalog-empty .button { margin-block-start: 12px; }
 .hosted-app .catalog-table .catalog-company > th { padding: 16px 20px; border-block: 1px solid var(--border); background: var(--subtle); color: var(--text); font-size: 13px; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
 @container relay-page (min-width: 1101px) {
   .hosted-app .catalog-table th, .hosted-app .catalog-table td { text-align: center; }
@@ -46,7 +48,7 @@
   .hosted-app .catalog-row > :is(th, td) { height: 104px; }
   .hosted-app .catalog-model-heading, .hosted-app .catalog-price-main, .hosted-app .catalog-official { justify-content: center; }
   .hosted-app .catalog-model-heading { column-gap: 4px; }
-  .hosted-app .catalog-table .catalog-rate-cell { vertical-align: top; }
+  .hosted-app .catalog-row:has(.catalog-official) .catalog-rate-cell { vertical-align: top; }
   .hosted-app .catalog-price-main { align-items: center; min-height: 22px; }
   .hosted-app .catalog-context-value { display: flex; justify-content: center; margin-inline: -8px; }
   .hosted-app .catalog-context .catalog-choice-buttons button { padding-inline: 5px; }

@@ -36,16 +36,18 @@ impl Reconciliation {
 }
 
 pub async fn prune_projections(pool: &PgPool) -> ! {
-    let mut failed = [false; 5];
+    let mut failed = [false; 7];
     let mut sink = Sink::default();
     loop {
         tokio::time::sleep(Duration::from_secs(15)).await;
-        let (reports, notices, quotes, resumes, diagnostics) = tokio::join!(
+        let (reports, notices, quotes, resumes, diagnostics, completions, observations) = tokio::join!(
             db::prune_usage_reports(pool),
             db::prune_service_notices(pool),
             db::prune_checkout_quotes(pool),
             db::prune_checkout_resume_checks(pool),
             prune_diagnostics(pool),
+            sqlx::query("SELECT relay_hosted.prune_model_status_completions()").execute(pool),
+            sqlx::query("SELECT relay_hosted.prune_model_status_observations()").execute(pool),
         );
         for ((name, result), was_failed) in [
             ("usage report", reports),
@@ -53,6 +55,8 @@ pub async fn prune_projections(pool: &PgPool) -> ! {
             ("checkout quote", quotes),
             ("checkout resume", resumes),
             ("request diagnostics", diagnostics),
+            ("model status timing", completions.map(|_| ())),
+            ("model availability", observations.map(|_| ())),
         ]
         .into_iter()
         .zip(&mut failed)

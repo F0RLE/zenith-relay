@@ -1,9 +1,10 @@
 use std::{
-    env, future::IntoFuture, net::SocketAddr, path::Path, process::ExitCode, time::Duration,
+    env, future::IntoFuture, io::Write, net::SocketAddr, path::Path, process::ExitCode,
+    time::Duration,
 };
 use tokio::net::TcpListener;
 use zenith_relay_hosted::{
-    config, db, http, inference, operations, qualification, setup, transfers,
+    config, db, http, inference, model_monitor, operations, qualification, setup, transfers,
     vault::{ImportRoute, ProvisionResult, Purpose, Vault},
 };
 
@@ -19,13 +20,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), &'static str> {
-    const USAGE: &str = "usage: migrate | upgrade-check | restore-fence --installation UUID --operation UUID | serve [--web-dist PATH] | setup-owner --web-dist PATH --code-dir PRIVATE_DIR | vault-check --vault-dir PRIVATE_DIR | vault-add --source UUID --purpose provider|proxy --secret-file PRIVATE_FILE --vault-dir PRIVATE_DIR | vault-provision --operation UUID --source UUID --provider-file PRIVATE_FILE (--direct | --proxy-file PRIVATE_FILE) --vault-dir PRIVATE_DIR | serve-transfers --bind LOOPBACK:PORT --vault-dir PRIVATE_DIR | qualify-text --print-scope | qualify-text --profile PATH --vault-dir PRIVATE_DIR | serve-text --bind LOOPBACK:PORT --vault-dir PRIVATE_DIR | reconcile-text";
+    const USAGE: &str = "usage: migrate | upgrade-check | import-catalog-publishers --file PATH | restore-fence --installation UUID --operation UUID | export-customer-access --installation UUID | restore-customer-access --installation UUID --operation UUID --receipts PRIVATE_FILE | serve [--web-dist PATH] | setup-owner --web-dist PATH --code-dir PRIVATE_DIR | recover-owner --installation UUID --operation UUID --web-dist PATH --code-dir PRIVATE_DIR | vault-check --vault-dir PRIVATE_DIR | vault-add --source UUID --purpose provider|proxy --secret-file PRIVATE_FILE --vault-dir PRIVATE_DIR | vault-provision --operation UUID --source UUID --provider-file PRIVATE_FILE (--direct | --proxy-file PRIVATE_FILE) --vault-dir PRIVATE_DIR | serve-transfers --bind LOOPBACK:PORT --vault-dir PRIVATE_DIR | qualify-text --print-scope | qualify-text --profile PATH --vault-dir PRIVATE_DIR | qualify-text --watch --vault-dir PRIVATE_DIR | serve-text --bind LOOPBACK:PORT --vault-dir PRIVATE_DIR | reconcile-text | collect-model-status --prometheus LOOPBACK:PORT";
     enum Action<'a> {
         Migrate,
         UpgradeCheck,
+        ImportPublishers(&'a Path),
         RestoreFence(uuid::Uuid, uuid::Uuid),
+        ExportCustomerAccess(uuid::Uuid),
+        RestoreCustomerAccess(uuid::Uuid, uuid::Uuid, &'a Path),
         Serve(Option<&'a Path>),
-        Setup(&'a Path, &'a Path),
+        Owner(setup::OwnerOperation, &'a Path, &'a Path),
         Vault(&'a Path),
         VaultAdd(uuid::Uuid, Purpose, &'a Path, &'a Path),
         Provision(
@@ -36,6 +40,7 @@ async fn run() -> Result<(), &'static str> {
             &'a Path,
         ),
         Qualify(&'a Path, &'a Path),
+        WatchChecks(&'a Path),
         Scope,
         Text(SocketAddr, &'a Path),
         Transfers(SocketAddr, &'a Path),
@@ -49,6 +54,56 @@ async fn run() -> Result<(), &'static str> {
         }
         [op] if op == "migrate" => Action::Migrate,
         [op] if op == "upgrade-check" => Action::UpgradeCheck,
+        [op, flag, addr] if op == "collect-model-status" && flag == "--prometheus" => {
+            let address = addr
+                .to_str()
+                .and_then(|v| v.parse().ok())
+                .ok_or("model monitor requires a numeric loopback address and port")?;
+            let summary = model_monitor::collect(&config::Config::load()?, address).await?;
+            println!(
+                "Model status slots: {} accepted, {} without evidence, {} no longer eligible, {} conflicts.",
+                summary.accepted, summary.unobserved, summary.ineligible, summary.conflicts
+            );
+            return Ok(());
+        }
+        [op, flag, file] if op == "import-catalog-publishers" && flag == "--file" => {
+            Action::ImportPublishers(Path::new(file))
+        }
+        [op, id_flag, installation]
+            if op == "export-customer-access" && id_flag == "--installation" =>
+        {
+            Action::ExportCustomerAccess(
+                installation
+                    .to_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or(USAGE)?,
+            )
+        }
+        [
+            op,
+            id_flag,
+            installation,
+            op_flag,
+            operation,
+            file_flag,
+            path,
+        ] if op == "restore-customer-access"
+            && id_flag == "--installation"
+            && op_flag == "--operation"
+            && file_flag == "--receipts" =>
+        {
+            Action::RestoreCustomerAccess(
+                installation
+                    .to_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or(USAGE)?,
+                operation
+                    .to_str()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or(USAGE)?,
+                Path::new(path),
+            )
+        }
         [op, id_flag, installation, op_flag, operation]
             if op == "restore-fence" && id_flag == "--installation" && op_flag == "--operation" =>
         {
@@ -99,6 +154,11 @@ async fn run() -> Result<(), &'static str> {
         }
         [op] if op == "reconcile-text" => Action::Reconcile,
         [op, flag] if op == "qualify-text" && flag == "--print-scope" => Action::Scope,
+        [op, watch, flag, dir]
+            if op == "qualify-text" && watch == "--watch" && flag == "--vault-dir" =>
+        {
+            Action::WatchChecks(Path::new(dir))
+        }
         [op, bind_flag, bind, vault_flag, dir]
             if (op == "serve-text" || op == "serve-transfers")
                 && bind_flag == "--bind"
@@ -153,7 +213,42 @@ async fn run() -> Result<(), &'static str> {
         [op, web, dist, code, dir]
             if op == "setup-owner" && web == "--web-dist" && code == "--code-dir" =>
         {
-            Action::Setup(Path::new(dist), Path::new(dir))
+            Action::Owner(
+                setup::OwnerOperation::Setup,
+                Path::new(dist),
+                Path::new(dir),
+            )
+        }
+        [
+            op,
+            install,
+            installation,
+            id,
+            operation,
+            web,
+            dist,
+            code,
+            dir,
+        ] if op == "recover-owner"
+            && install == "--installation"
+            && id == "--operation"
+            && web == "--web-dist"
+            && code == "--code-dir" =>
+        {
+            Action::Owner(
+                setup::OwnerOperation::Recover {
+                    installation: installation
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or(USAGE)?,
+                    operation: operation
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or(USAGE)?,
+                },
+                Path::new(dist),
+                Path::new(dir),
+            )
         }
         [op] if op == "serve" => Action::Serve(None),
         [op, flag, path] if op == "serve" && flag == "--web-dist" => {
@@ -165,6 +260,10 @@ async fn run() -> Result<(), &'static str> {
     let pool = db::connect(&c, &config::database_url()?).await?;
     match action {
         Action::Migrate => db::migrate(&pool, &c.server.public_origin).await?,
+        Action::ImportPublishers(file) => {
+            let count = db::import_catalog_publishers(&pool, &c.server.public_origin, file).await?;
+            println!("Loaded publisher references for {count} model IDs.");
+        }
         Action::UpgradeCheck => {
             let plan = db::upgrade_plan(&pool, &c.server.public_origin).await?;
             println!(
@@ -181,6 +280,25 @@ async fn run() -> Result<(), &'static str> {
         Action::RestoreFence(installation, operation) => {
             db::fence_restore(&pool, &c.server.public_origin, installation, operation).await?;
             println!("Restore fenced. Keep ingress closed for reconciliation.");
+        }
+        Action::ExportCustomerAccess(installation) => {
+            let bytes =
+                db::export_customer_access(&pool, &c.server.public_origin, installation).await?;
+            std::io::stdout()
+                .lock()
+                .write_all(&bytes)
+                .map_err(|_| "cannot write customer access evidence")?;
+        }
+        Action::RestoreCustomerAccess(installation, operation, path) => {
+            let applied = db::restore_customer_access(
+                &pool,
+                &c.server.public_origin,
+                installation,
+                operation,
+                path,
+            )
+            .await?;
+            println!("Applied {applied} customer access receipts. Restore remains fenced.");
         }
         Action::Serve(web) => serve(c, &pool, web).await?,
         Action::Reconcile => {
@@ -222,6 +340,16 @@ async fn run() -> Result<(), &'static str> {
             qualification::check(scope, &vault, profile, &c.network.outbound_policy).await?;
             println!("Verified model recorded.");
         }
+        Action::WatchChecks(dir) => {
+            if !c.server.web_model_checks {
+                return Err("web model checks are disabled");
+            }
+            let vault = separate_vault(&c, dir).await?;
+            tokio::select! {
+                result = qualification::watch(&pool, &c.server.public_origin, &vault, &c.network.outbound_policy) => result?,
+                () = shutdown() => (),
+            }
+        }
         Action::Scope => println!(
             "{}",
             qualification::scope(&pool, &c.server.public_origin)
@@ -249,7 +377,7 @@ async fn run() -> Result<(), &'static str> {
                 .map_err(|e| e.message())?;
             println!("New secret slot stored at revision 1.");
         }
-        Action::Setup(dist, dir) => setup::run(&c, &pool, dist, dir).await?,
+        Action::Owner(operation, dist, dir) => setup::run(&c, &pool, dist, dir, operation).await?,
         Action::Vault(dir) => {
             open_vault(&pool, &c, dir).await?;
             println!("Vault binding verified.");

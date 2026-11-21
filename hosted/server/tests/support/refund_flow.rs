@@ -178,8 +178,10 @@ pub(super) async fn run(
     fs::write(exchange.join("refund-failed"), []).unwrap();
     let declined = read_case(browser, exchange, "refund-declined").await;
     let audit: Vec<(String, String, bool)> = sqlx::query_as(
-        "SELECT r.state,a.action,a.actor_id=i.owner_user_id FROM relay_hosted.payment_refunds r
-         JOIN relay_hosted.payment_refund_reviews a ON a.refund_id=r.id CROSS JOIN relay_hosted.installations i
+        "SELECT r.state,a.action,a.actor_id=i.owner_user_id AND a.actor_id=k.user_id
+         FROM relay_hosted.payment_refunds r JOIN relay_hosted.payment_refund_reviews a ON a.refund_id=r.id
+         JOIN relay_hosted.admin_credentials k ON k.passkey_id=a.confirmed_by_passkey_id
+         CROSS JOIN relay_hosted.installations i
          WHERE r.payment_id=$1 ORDER BY r.requested_at",
     ).bind(payment).fetch_all(admin).await.unwrap();
     assert_eq!(

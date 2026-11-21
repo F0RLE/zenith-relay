@@ -31,7 +31,8 @@ pub(super) async fn owner_session(db: &PgPool) {
         "UPDATE relay_hosted.installations SET setup_state='claimed',
             owner_user_id=(SELECT user_id FROM relay_hosted.admin_assignments WHERE role='owner');
          INSERT INTO relay_hosted.admin_credentials(credential_id,user_id,passkey)
-            SELECT '\\x42'::bytea,owner_user_id,'{}' FROM relay_hosted.installations;",
+            SELECT '\\x42'::bytea,owner_user_id,jsonb_build_object('cred',jsonb_build_object('counter',0))
+            FROM relay_hosted.installations;",
     )
     .execute(db)
     .await
@@ -61,7 +62,11 @@ async fn refund_and_real_inference_admission_cannot_spend_the_same_wallet_funds(
     let mut tx = reader.pool.begin().await.unwrap();
     let rolled_back = Uuid::new_v4();
     assert_eq!(
-        review(&mut *tx, first, rolled_back, "approve").await,
+        review(&mut *tx, first, rolled_back, "approve", None).await,
+        "fresh_required"
+    );
+    assert_eq!(
+        review(&mut *tx, first, rolled_back, "approve", Some(1)).await,
         "applied"
     );
     tx.rollback().await.unwrap();
@@ -73,7 +78,10 @@ async fn refund_and_real_inference_admission_cannot_spend_the_same_wallet_funds(
     // the same wallet. It must see the new available balance after lock handoff.
     let mut tx = reader.pool.begin().await.unwrap();
     let op = Uuid::new_v4();
-    assert_eq!(review(&mut *tx, first, op, "approve").await, "applied");
+    assert_eq!(
+        review(&mut *tx, first, op, "approve", Some(1)).await,
+        "applied"
+    );
     let parallel = tokio::spawn(f.submit("refund-got-wallet-first", 1000, 100).send());
     wait_for_worker(
         &f.admin,
@@ -86,17 +94,24 @@ async fn refund_and_real_inference_admission_cannot_spend_the_same_wallet_funds(
     assert_eq!(parallel.await.unwrap().unwrap().status(), 402);
     assert_eq!(f.sends(), (0, 0));
     assert_eq!(balances(&f.admin, f.space).await, (0, CREDIT, CREDIT));
-    assert_eq!(review(&reader.pool, first, op, "approve").await, "applied");
+    assert_eq!(
+        review(&reader.pool, first, op, "approve", None).await,
+        "applied"
+    );
     merchant.refuse.store(true, SeqCst);
     assert_eq!(submit_next(&f.pay, &merchant).await, Ok(Some(first)));
     assert_eq!(balances(&f.admin, f.space).await, (CREDIT, 0, 0));
 
     let second = request(&reader, payment, CREDIT).await;
+    assert_eq!(
+        review(&reader.pool, second, Uuid::new_v4(), "decline", Some(1)).await,
+        "passkey_changed"
+    );
     let held = Held::reserve(&f, f.key, &f.bearer).await;
     assert_eq!(held.amount, 3500);
     let approve = Uuid::new_v4();
     assert_eq!(
-        review(&reader.pool, second, approve, "approve").await,
+        review(&reader.pool, second, approve, "approve", Some(2)).await,
         "balance"
     );
     assert_eq!(
@@ -112,14 +127,14 @@ async fn refund_and_real_inference_admission_cannot_spend_the_same_wallet_funds(
     .unwrap();
     assert!(!was_audited);
     assert_eq!(
-        review(&reader.pool, second, Uuid::new_v4(), "decline").await,
+        review(&reader.pool, second, Uuid::new_v4(), "decline", Some(2)).await,
         "applied"
     );
 
     let part = 980_000;
     let third = request(&reader, payment, part).await;
     assert_eq!(
-        review(&reader.pool, third, Uuid::new_v4(), "approve").await,
+        review(&reader.pool, third, Uuid::new_v4(), "approve", Some(3)).await,
         "applied"
     );
     let mixed = (CREDIT - held.amount - part, held.amount + part, part);
@@ -204,16 +219,23 @@ pub(super) async fn review<'e>(
     refund: Uuid,
     operation: Uuid,
     action: &str,
+    verified_revision: Option<i64>,
 ) -> String {
-    sqlx::query_scalar("SELECT relay_hosted.review_payment_refund($1,$2,$3,$4,'requested',$5)")
-        .bind(ORIGIN)
-        .bind(OWNER)
-        .bind(refund)
-        .bind(operation)
-        .bind(action)
-        .fetch_one(db)
-        .await
-        .unwrap()
+    // Synthetic verifier input tests the SQL boundary; the browser journey proves the actual assertion.
+    sqlx::query_scalar(
+        "SELECT relay_hosted.review_payment_refund($1,$2,$3,$4,'requested',$5,$6,$7,0,false,false,
+            floor(extract(epoch FROM clock_timestamp())*1000)::bigint+30000)",
+    )
+    .bind(ORIGIN)
+    .bind(OWNER)
+    .bind(refund)
+    .bind(operation)
+    .bind(action)
+    .bind(verified_revision.map(|_| b"B".as_slice()))
+    .bind(verified_revision)
+    .fetch_one(db)
+    .await
+    .unwrap()
 }
 
 async fn reject_wrong_postings(db: &PgPool, workspace: Uuid, refund: Uuid) {

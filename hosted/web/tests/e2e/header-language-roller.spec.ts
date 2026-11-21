@@ -185,6 +185,7 @@ test("rapid reversals and reopen settle on the committed flag without changing h
   await expect(list.locator('[data-active="true"]')).toHaveAttribute("aria-label", "Русский");
   await page.keyboard.press("ArrowLeft");
   await page.keyboard.press("Enter");
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   await picker.press("Space");
   await expect(list.locator('[data-active="true"]')).toHaveAttribute("aria-label", "简体中文");
   await expect(list.getByRole("option")).toHaveCount(1);

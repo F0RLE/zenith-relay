@@ -1,7 +1,8 @@
-//! Private connection storage. No browser route accepts or returns these values.
+//! Private connection storage. Only the transfer worker accepts browser source secrets.
 mod files;
 mod provision;
 mod source_copy;
+mod source_intake;
 pub(crate) use files::read_operator_key;
 pub use provision::{ImportRoute, ProvisionResult};
 

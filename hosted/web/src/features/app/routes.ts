@@ -1,11 +1,16 @@
-export const customerPages = [
+export const customerMainPages = [
   { id: "overview", name: "nav.overview" },
   { id: "usage", name: "nav.usage" },
   { id: "models", name: "nav.models" },
   { id: "status", name: "common.status" },
+] as const;
+
+export const customerAccountPages = [
   { id: "keys", name: "nav.keys" },
   { id: "billing", name: "nav.balance" },
 ] as const;
+
+export const customerPages = [...customerMainPages, ...customerAccountPages] as const;
 
 export const ownerPages = [
   { id: "overview", name: "nav.overview", group: "" },

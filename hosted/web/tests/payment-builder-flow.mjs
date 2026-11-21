@@ -1,9 +1,14 @@
 import { expect } from "@playwright/test";
 import { join } from "node:path";
+import { ownerAssertion, signInOwner } from "./owner-session.mjs";
+import { setWorkspaceLanguage } from "./customer-shell.mjs";
 
 export async function configureCheckout({ owner, ownerRead, customer, origin, api, issue, wait, getMethods, makeQuote, confirm }) {
   const http = owner.context().request;
   const endpoint = api + "admin/payment-methods";
+  const options = endpoint + "/options";
+  const verification = api + "admin/payments/confirmations/";
+  const verify = challenge => `${verification}${challenge.ceremony_id}/verify`;
   const buttons = name => owner.getByRole("button", { name, exact: true });
   const command = (revision, body) => ({ operation_id: crypto.randomUUID(), expected_revision: revision, command: body });
   const read = async () => {
@@ -12,12 +17,21 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
     expect(res.headers()["cache-control"]).toBe("no-store");
     return (await res.json()).data;
   };
-  const send = async (data, { client = http, csrf, src = origin } = {}) => client.post(endpoint,
+  const post = async (url, data, { client = http, csrf, src = origin } = {}) => client.post(url,
     { data, headers: { Origin: src, "X-Relay-CSRF": csrf ?? (await ownerRead()).csrf_token } });
+  const send = (data, params) => post(endpoint, data, params);
   const reject = async (response, status, code) => {
     const res = await response;
     expect(res.status()).toBe(status);
     if (code) expect((await res.json()).error.code).toBe(code);
+  };
+  const prepare = async data => {
+    const response = await post(options, data);
+    expect(response.status()).toBe(200);
+    expect(response.headers()["cache-control"]).toBe("no-store");
+    const challenge = (await response.json()).data;
+    expect(challenge.options.publicKey.userVerification).toBe("required");
+    return challenge;
   };
   const check = async () => {
     await buttons("Check draft").click();
@@ -64,6 +78,7 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
   await reject(send(probe, { client: customer }), 401);
   await reject(send(probe, { csrf: "0".repeat(64) }), 403);
   await reject(send(probe, { src: "https://foreign.invalid" }), 403);
+  await reject(post(options, probe), 400); // Options is not a way to check or save drafts.
 
   // The private worker installs a profile, not a draft or a published method.
   issue("checkout-empty"); await wait("checkout-ready");
@@ -104,26 +119,64 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
   await expect(owner.getByRole("list", { name: "Customer order" }).getByRole("listitem").filter({ hasText: "Voucher" }))
     .toContainText("No eligible amounts");
   expect(await getMethods()).toEqual([]);
+  const publishCurrent = () => command(current.revision, { action: "publish" });
+  const expiring = await prepare(publishCurrent());
+  const expiringProof = await ownerAssertion(owner, expiring.options);
   issue("checkout-check-aged"); await wait("checkout-check-expired");
-  await reject(send(command(current.revision, { action: "publish" })), 403, "fresh_passkey_required");
-  // Confirming in the UI reauthenticates, then the server rejects the expired check.
+  await reject(post(verify(expiring), expiringProof), 409, "checkout_check_required");
   await buttons("Publish").click();
   await buttons("Confirm publication").click();
   await expect(owner.getByRole("alert")).toHaveText("The check expired. Check the saved draft again.");
   expect(await getMethods()).toEqual([]);
   await check();
 
+  const foreign = await owner.context().browser().newContext();
+  try {
+    const oldCsrf = (await ownerRead()).csrf_token;
+    await foreign.addCookies(await owner.context().cookies(origin));
+    await owner.context().clearCookies({ name: "__Host-relay_admin" });
+    await owner.goto(origin + "/admin/login");
+    await signInOwner(owner, origin);
+    await owner.goto(origin + "/admin/payment-methods");
+    expect((await ownerRead()).csrf_token).not.toBe(oldCsrf);
+    const publication = publishCurrent();
+    await reject(send(publication), 403, "fresh_passkey_required");
+    await reject(post(options, publication, { client: customer }), 401);
+    await reject(post(options, publication, { csrf: "00".repeat(32) }), 403);
+    await reject(post(options, publication, { src: "https://foreign.invalid" }), 403);
+    const selected = await prepare(publication), other = await prepare(publishCurrent());
+    const proof = await ownerAssertion(owner, selected.options);
+    await reject(post(verify(selected), proof, { client: foreign.request, csrf: oldCsrf }), 409, "passkey_ceremony_expired");
+    await reject(post(verify(selected), proof, { src: "https://foreign.invalid" }), 403);
+    await reject(post(verify(other), proof), 400, "invalid_credential");
+    // A real assertion becomes obsolete if the owner edits the draft while its prompt is open.
+    await reject(send(command(current.revision, { action: "save", draft: current.draft })), 200);
+    await reject(post(verify(selected), proof), 409, "revision_conflict");
+    await reject(post(verify(selected), proof), 409, "passkey_ceremony_expired");
+  } finally { await foreign.close(); }
+  expect(await getMethods()).toEqual([]);
+  current = await read();
+  await owner.reload();
+  await check();
+
+  const csrf = (await ownerRead()).csrf_token;
   const attempts = [];
-  const cut = async route => {
-    if (route.request().method() !== "POST") return route.continue();
+  const observe = async route => {
     attempts.push(route.request().postDataJSON());
-    if (attempts.length > 1) return route.continue();
+    await route.continue();
+  };
+  const cut = async route => {
+    const proof = route.request().postDataJSON();
+    expect(proof).toMatchObject({ type: "public-key" });
+    expect(proof).not.toHaveProperty("command");
     const res = await route.fetch();
     expect(res.status()).toBe(200);
+    expect((await res.json()).data).toEqual({ applied: true, operation_id: attempts[0].operation_id });
     await res.dispose();
     await route.abort("failed");
   };
-  await owner.route(endpoint, cut);
+  await owner.route(options, observe);
+  await owner.route(verification + "*/verify", cut, { times: 1 });
   try {
     await buttons("Publish").click();
     await expect(buttons("Cancel")).toBeFocused();
@@ -133,11 +186,16 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
     await buttons("Publish").click();
     await buttons("Confirm publication").click();
     await expect(owner.getByRole("alert")).toHaveText("Could not confirm the result. Retry the same action.");
+    const receipt = owner.waitForResponse(r => r.url() === options && r.ok());
     await buttons("Retry").click();
+    expect((await (await receipt).json()).data).toEqual({ applied: true, operation_id: attempts[0].operation_id });
     await expect(owner.getByRole("status")).toHaveText("Checkout updated.");
-  } finally { await owner.unroute(endpoint, cut); }
+  } finally { await owner.unroute(options, observe); }
   expect(attempts).toHaveLength(2);
   expect(attempts[0]).toEqual(attempts[1]);
+  expect((await ownerRead()).csrf_token).toBe(csrf);
+  await reject(send(attempts[0]), 200);
+  await reject(send({ ...attempts[0], command: { action: "check" } }), 409, "revision_conflict");
 
   const first = await getMethods();
   expect(first.map(m => m.label)).toEqual(["Card", "Bank transfer"]);
@@ -169,15 +227,14 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
   await owner.reload();
   await expect(owner.locator(".hosted-entry")).toHaveAttribute("data-theme", "dark");
   await expect(published.getByText("Customer pays · Fee: $0.50")).toBeVisible();
-  const language = owner.locator("select.language-select");
-  await language.selectOption("ru");
+  await setWorkspaceLanguage(owner, "ru");
   await expect(owner.getByRole("heading", { name: "Способы оплаты", exact: true })).toBeVisible();
   await fits(320);
   if (dir) await owner.screenshot({ path: join(dir, "builder-published-320-ru-dark.png"), fullPage: true });
-  await language.selectOption("zh-CN");
+  await setWorkspaceLanguage(owner, "zh-CN");
   await expect(owner.getByRole("heading", { name: "付款方式", exact: true })).toBeVisible();
   await fits(320);
-  await language.selectOption("en");
+  await setWorkspaceLanguage(owner, "en");
   await expect(owner.getByRole("heading", { name: "Payment methods", exact: true })).toBeVisible();
 
   return { methods, lowerLimitAndDisable: async () => {
@@ -189,6 +246,7 @@ export async function configureCheckout({ owner, ownerRead, customer, origin, ap
     expect(await getMethods()).toEqual(methods);
     current = await read();
     await reject(send(command(current.revision, { action: "disable", method_id: first[0].id })), 409, "revision_conflict");
+    await reject(send(command(current.revision, { action: "disable", method_id: methods[0].id })), 403, "fresh_passkey_required");
     await buttons("Disable Card").click();
     await expect(buttons("Cancel")).toBeFocused();
     await fits(320);

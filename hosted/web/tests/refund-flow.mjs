@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { join } from "node:path";
+import { ownerAssertion } from "./owner-session.mjs";
 
 export async function checkRefunds({ a, b, owner, ownerRead, origin, api, acctA, acctB, issue, wait }, original) {
   const customer = a.context().request, peer = b.context().request, admin = owner.context().request;
@@ -99,39 +100,65 @@ export async function checkRefunds({ a, b, owner, ownerRead, origin, api, acctA,
   await wait("refund-passkey-aged");
   const old = (await ownerRead()).csrf_token;
   const command = { operation_id: crypto.randomUUID(), expected_state: "requested", action: "approve" };
+  const options = decision(requested.id) + "/options";
+  const verification = "admin/payments/confirmations/";
   expect((await post(customer, decision(requested.id), old, command)).status()).toBe(401);
+  expect((await post(customer, options, old, command)).status()).toBe(401);
   expect((await post(admin, decision(requested.id), "00".repeat(32), command)).status()).toBe(403);
   expect((await post(admin, decision(requested.id), old, { ...command, expected_state: "queued" })).status()).toBe(400);
   const stale = await post(admin, decision(requested.id), old, command);
   expect(stale.status()).toBe(403);
   expect((await stale.json()).error.code).toBe("fresh_passkey_required");
-  const routeUrl = api + decision(requested.id);
+
+  const prepare = async action => {
+    const started = await post(admin, options, old, { ...command, action });
+    expect(started.status()).toBe(200);
+    const challenge = (await started.json()).data;
+    expect(challenge.options.publicKey.userVerification).toBe("required");
+    return challenge;
+  };
+  const approve = await prepare("approve"), decline = await prepare("decline");
+  const proof = await ownerAssertion(owner, approve.options);
+  const wrong = await post(admin, `${verification}${decline.ceremony_id}/verify`, old, proof);
+  expect(wrong.status()).toBe(400);
+  expect((await wrong.json()).error.code).toBe("invalid_credential");
+  await expectWallet("10000000");
+  expect((await currentPayment()).refund.state).toBe("requested");
+
   let applied;
-  await owner.route(routeUrl, async route => {
-    const result = await route.fetch();
-    if (!result.ok()) {
-      await route.fulfill({ response: result });
-      return;
-    }
+  await owner.route(api + options, async route => {
     applied = route.request().postDataJSON();
+    await route.continue();
+  }, { times: 1 });
+  await owner.route(api + verification + "*/verify", async route => {
+    const assertion = route.request().postDataJSON();
+    expect(assertion).toMatchObject({ type: "public-key" });
+    expect(assertion).not.toHaveProperty("action");
+    const result = await route.fetch();
+    expect(result.status()).toBe(200);
+    expect((await result.json()).data).toEqual({ applied: true, operation_id: applied.operation_id });
+    await result.dispose();
+    const spent = await post(admin, route.request().url().slice(api.length), old, assertion);
+    expect(spent.status()).toBe(409);
+    expect((await spent.json()).error.code).toBe("passkey_ceremony_expired");
     await route.abort();
-  });
-  const proof = owner.waitForResponse(r => r.url() === api + "auth/admin/sign-in/verify" && r.ok());
+  }, { times: 1 });
   const confirm = () => row.getByRole("button", { name: "Confirm refund", exact: true }).click();
   await confirm();
-  await proof;
   await expect(owner.getByRole("alert")).toHaveText(/Couldn’t confirm the decision/);
   expect(applied).toMatchObject({ action: "approve", expected_state: "requested" });
   await expectWallet("8000000", "2000000");
-  await owner.unroute(routeUrl);
-  const acknowledgment = owner.waitForResponse(r => r.url() === routeUrl);
+  const acknowledgment = owner.waitForResponse(r => r.url() === api + options);
   await confirm();
   const replay = await acknowledgment;
   expect(replay.status()).toBe(200);
   expect(replay.request().postDataJSON()).toEqual(applied);
+  expect((await replay.json()).data).toEqual({ applied: true, operation_id: applied.operation_id });
   await expect(row).toHaveText(/Approved · awaiting payment provider/);
-  expect((await post(admin, decision(requested.id), (await ownerRead()).csrf_token, applied)).status()).toBe(200);
-  expect((await post(admin, decision(requested.id), (await ownerRead()).csrf_token, command)).status()).toBe(409);
+  expect((await ownerRead()).csrf_token).toBe(old);
+  expect((await post(admin, decision(requested.id), old, applied)).status()).toBe(200);
+  expect((await post(admin, decision(requested.id), old, { ...applied, action: "decline" })).status()).toBe(409);
+  expect((await post(admin, decision(requested.id), old, command)).status()).toBe(409);
   await refresh();
   await customerStatus("Approved · awaiting payment provider", "2.00");
   await expect(a.locator(".entry-wallet dd")).toHaveText(["8.00 USD", "2.000000 USD"]);

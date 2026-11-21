@@ -44,6 +44,14 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    pub(super) fn counts(&self) -> [usize; 3] {
+        [
+            self.traffic.model_reads.load(SeqCst),
+            self.traffic.responses.load(SeqCst),
+            self.traffic.direct.load(SeqCst),
+        ]
+    }
+
     pub(super) async fn start() -> Self {
         let traffic = Arc::new(Traffic::default());
         let direct = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -83,6 +91,8 @@ impl Fixture {
                         let bytes = axum::body::to_bytes(r.into_body(), 8192).await.unwrap();
                         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                         assert_eq!(body["input"], "Reply with OK.");
+                        assert_eq!(body["store"], false);
+                        assert_eq!(body["max_output_tokens"], 64);
                         Json(json!({"object":"response","id":"resp_copy_probe","model":"fixture-text","status":"completed",
                             "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],
                             "usage":{"input_tokens":4,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"total_tokens":5}})).into_response()
@@ -105,24 +115,11 @@ impl Fixture {
         &self,
         c: &Cluster,
         config: &Config,
-        admin: &PgPool,
-        owner: Uuid,
+        scope_id: Uuid,
         plan: &CopyPlan,
         vault_dir: &Path,
         vault_key: &Path,
     ) {
-        // This disposable scope is for the real qualification worker, not for public admission.
-        let provider = Uuid::new_v4();
-        let scope_id = Uuid::new_v4();
-        let mut tx = admin.begin().await.unwrap();
-        sqlx::query("INSERT INTO relay_hosted.identity_providers VALUES ($1,'https://identity.example','fixture',$2)")
-            .bind(provider).bind([21u8; 32].as_slice()).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO relay_hosted.configuration_revisions VALUES
-            ($1,2,1,'qualification','verify_customer_access',$2,$3,ARRAY[$4::uuid],now(),now()+interval '1 hour')")
-            .bind(scope_id).bind(owner).bind(provider).bind(Uuid::new_v4()).execute(&mut *tx).await.unwrap();
-        sqlx::query("UPDATE relay_hosted.service_control SET mode='qualification',revision=2,qualification_scope_ref=$1")
-            .bind(scope_id).execute(&mut *tx).await.unwrap();
-        tx.commit().await.unwrap();
         let origin = &plan.origin;
         let vp = db::connect(config, &c.dsn("fixture_vault")).await.unwrap();
         let vault = Vault::open(&vp, origin, vault_dir, vault_key)
@@ -166,7 +163,7 @@ impl Fixture {
                 &config.network.outbound_policy,
             )
             .await,
-            Err("source differs from the reviewed copy route")
+            Err("source differs from the saved route")
         );
 
         let mut refused = valid;
@@ -181,11 +178,26 @@ impl Fixture {
                 &config.network.outbound_policy,
             )
             .await,
-            Err("source catalog unavailable")
+            Err("model check not confirmed")
         );
         assert_eq!(self.traffic.rejected.load(SeqCst), 1);
         assert_eq!(self.traffic.model_reads.load(SeqCst), 1);
         assert_eq!(self.traffic.responses.load(SeqCst), 1);
         assert_eq!(self.traffic.direct.load(SeqCst), 0);
     }
+}
+
+pub(super) async fn activate_scope(admin: &PgPool, owner: Uuid) -> Uuid {
+    let provider = Uuid::new_v4();
+    let scope = Uuid::new_v4();
+    let mut tx = admin.begin().await.unwrap();
+    sqlx::query("INSERT INTO relay_hosted.identity_providers VALUES ($1,'https://identity.example','fixture',$2)")
+        .bind(provider).bind([21u8; 32].as_slice()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO relay_hosted.configuration_revisions VALUES
+        ($1,2,1,'qualification','verify_customer_access',$2,$3,ARRAY[$4::uuid],now(),now()+interval '1 hour')")
+        .bind(scope).bind(owner).bind(provider).bind(Uuid::new_v4()).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE relay_hosted.service_control SET mode='qualification',revision=2,qualification_scope_ref=$1")
+        .bind(scope).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    scope
 }

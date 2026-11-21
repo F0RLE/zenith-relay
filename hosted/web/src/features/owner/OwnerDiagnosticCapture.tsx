@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ControlError, uuidText } from "../../api/control";
 import { captureReasons, readCapture, readCaptures, startCapture, stopCapture,
   type CaptureDetail, type CapturePage, type CaptureReason, type CaptureStart } from "../../api/diagnosticCapture";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
+import { OwnerPasskeyError, type readOwnerOverview } from "../../api/ownerSession";
 import { useLocale } from "../../i18n/LocaleProvider";
 import type { MessageKey } from "../../i18n/types";
 import { ReportStatus } from "../usage/ReportTools";
@@ -22,7 +22,7 @@ const eventLabel = { dispatch_committed: "capture.dispatch", upstream_response: 
 const problems: Record<string, MessageKey> = {
   capture_disabled: "capture.disabled", capture_busy: "capture.busy", capture_request_unavailable: "capture.requestUnavailable",
   capture_conflict: "capture.conflict", capture_retired: "capture.retired", capture_history_full: "capture.full",
-  invalid_capture: "capture.invalid", fresh_passkey_required: "capture.verify",
+  invalid_capture: "capture.invalid", capture_limits_changed: "capture.limitsChanged",
 };
 
 function readTarget(page: CapturePage, selected: string) {
@@ -80,8 +80,8 @@ function useCaptures(revision: number, localRevision: number, selected: string) 
   return read;
 }
 
-export function OwnerDiagnosticCapture({ session, onSession, revision }: {
-  session: OwnerSession; onSession: (s: OwnerSession) => void; revision: number;
+export function OwnerDiagnosticCapture({ session, revision }: {
+  session: OwnerSession; revision: number;
 }) {
   const { t, locale } = useLocale();
   const [selected, setSelected] = useState("");
@@ -124,7 +124,8 @@ export function OwnerDiagnosticCapture({ session, onSession, revision }: {
       heading.current?.focus();
     } catch (e) {
       if (!unauthenticated(e)) {
-        const message = e instanceof ControlError && e.code ? problems[e.code] : undefined;
+        const message = e instanceof OwnerPasskeyError ? "capture.verify"
+          : e instanceof ControlError && e.code ? problems[e.code] : undefined;
         setProblem(message ? { message } : { message: fallback, recovery });
         heading.current?.focus();
       }
@@ -147,17 +148,7 @@ export function OwnerDiagnosticCapture({ session, onSession, revision }: {
     const command = prior?.request_id === id && prior.reason === reason && prior.seconds === seconds ? prior
       : { request_id: id, operation_id: crypto.randomUUID(), reason, seconds };
     pending.current = command;
-    void act(async () => {
-      try {
-        return await startCapture(session.csrf, command);
-      } catch (e) {
-        if (!(e instanceof ControlError) || e.code !== "fresh_passkey_required") throw e;
-        try { await signInOwner(); } catch { throw e; }
-        const newSession = await readOwnerOverview(AbortSignal.timeout(8000));
-        onSession(newSession);
-        return startCapture(newSession.csrf, command);
-      }
-    }, "capture.startUnconfirmed", { operation: command.operation_id });
+    void act(() => startCapture(session.csrf, command), "capture.startUnconfirmed", { operation: command.operation_id });
   }
 
   return <section className="capture-section" aria-labelledby="temporary-capture">

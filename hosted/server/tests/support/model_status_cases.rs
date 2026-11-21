@@ -4,7 +4,7 @@ use super::*;
 const SLOT: &str = "date_bin(interval '30 minutes',created_at,timestamptz '2000-01-01 00:00:00+00') + interval '30 minutes'";
 
 impl Reader {
-    async fn read_status(&self, hours: i32) -> Option<Value> {
+    pub(super) async fn read_status(&self, hours: i32) -> Option<Value> {
         sqlx::query_scalar("SELECT relay_hosted.customer_model_status($1,$2,$3,$4,$5)")
             .bind(ORIGIN)
             .bind(self.provider)
@@ -39,13 +39,38 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
     )
     .await;
     publish(&f.admin, second, 1, None).await;
-    assert_eq!(
-        f.submit("model-status-logical-request", 5, 3)
-            .send()
+    let gate = Arc::new(ReplyGate::default());
+    *f.a.provider.reply_gate.lock().unwrap() = Some(gate.clone());
+    let wait = tokio::spawn(f.submit("model-status-logical-request", 5, 3).send());
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let running = a.read_status(24).await.unwrap();
+    assert!(running["summary"]["latency_ms"].is_null());
+    assert_eq!(running["summary"]["latency_samples"], 0);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    gate.release.notify_one();
+    let result = wait.await.unwrap().unwrap();
+    assert_eq!(result.status(), 200);
+    let rid = request_id(&result);
+    let (aid, timing): (Uuid, i32) = sqlx::query_as(
+        "SELECT r.attempt_id,t.elapsed_ms FROM relay_hosted.text_requests r
+         JOIN relay_hosted.text_completion_timings t ON t.request_id=r.id WHERE r.id=$1",
+    )
+    .bind(rid)
+    .fetch_one(&f.admin)
+    .await
+    .unwrap();
+    assert!((60..=90_000).contains(&timing));
+    let attempt = partial_text::Attempt {
+        offer: f.offer,
+        request: rid,
+        id: aid,
+    };
+    assert!(
+        attempt
+            .capture_timed(&f.worker, "completed", [Some(5), Some(0), Some(3)], Some(0))
             .await
-            .unwrap()
-            .status(),
-        200
     );
     let sends = f.sends();
     assert_eq!(sends.0 + sends.1, 1);
@@ -86,10 +111,14 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
         assert_eq!(snapshot["summary"]["requests"], 1);
         assert_eq!(snapshot["summary"]["cache_samples"], 1);
         assert_eq!(snapshot["summary"]["cache_bps"], 0);
-        assert!(snapshot["summary"]["latency_ms"].is_null());
+        assert_eq!(snapshot["summary"]["latency_samples"], 1);
+        assert_eq!(snapshot["summary"]["latency_ms"], timing);
+        assert_eq!(rows[0]["history"][n - 1]["latency_ms"], timing);
         assert_eq!(foreign["summary"]["requests"], 0);
         assert_eq!(foreign["summary"]["cache_samples"], 0);
         assert!(foreign["summary"]["cache_bps"].is_null());
+        assert!(foreign["summary"]["latency_ms"].is_null());
+        assert_eq!(foreign["summary"]["latency_samples"], 0);
         assert_eq!(foreign["items"][0]["history"][n - 1]["requests"], 0);
         let safe = snapshot.to_string();
         for hidden in [
@@ -107,6 +136,10 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
     // A price revision during the same publication leaves request history intact.
     publish(&f.admin, f.a.item, 2, Some("2")).await;
     assert_eq!(a.read_status(24).await.unwrap()["summary"]["requests"], 1);
+    assert_eq!(
+        a.read_status(24).await.unwrap()["summary"]["latency_ms"],
+        timing
+    );
     sqlx::query("UPDATE relay_hosted.text_model_rules SET enabled=false WHERE id=$1")
         .bind(f.a.item)
         .execute(&f.admin)
@@ -125,6 +158,7 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
     .await
     .unwrap();
     assert_eq!(a.read_status(24).await.unwrap()["summary"]["requests"], 0);
+    assert!(a.read_status(24).await.unwrap()["summary"]["latency_ms"].is_null());
     sqlx::query("UPDATE relay_hosted.external_identities SET revoked_at=now() WHERE subject_digest=decode(repeat('22',32),'hex')")
         .execute(&f.admin).await.unwrap();
     assert!(a.read_status(24).await.is_none());
@@ -138,6 +172,8 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
     for sql in [
         "SELECT * FROM relay_hosted.model_status_observations",
         "DELETE FROM relay_hosted.model_status_observations",
+        "SELECT * FROM relay_hosted.text_completion_timings",
+        "SELECT relay_hosted.capture_text_terminal(gen_random_uuid(),gen_random_uuid(),gen_random_uuid(),'completed',1,0,1,100)",
         "SELECT relay_hosted.model_status_snapshot('http://localhost:1443',gen_random_uuid(),24,statement_timestamp())",
         "SELECT * FROM relay_hosted.customer_catalog_listings('http://localhost:1443',gen_random_uuid())",
     ] {
@@ -148,6 +184,75 @@ async fn model_status_follows_publications_without_counting_other_workspaces_or_
         );
     }
     assert_eq!(f.sends(), sends);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; set RELAY_TEST_PG_BIN"]
+async fn model_status_cleanup_removes_only_expired_timings_without_rewriting_receipts() {
+    let f = Fixture::new().await;
+    setup_reader(&f).await;
+    let a = Reader::new(&f, f.space, 1).await;
+    let mut saved = Vec::new();
+    for (kind, ms, measured) in [
+        ("completed", 100, Some(100)),
+        ("completed", 301, Some(301)),
+        ("completed", 90_001, None),
+        ("incomplete", 1, None),
+    ] {
+        let held = Held::reserve(&f, f.key, &f.bearer).await;
+        assert!(held.claim(&f, f.a.id, f.a.item, 1).await);
+        let attempt = held.attempt();
+        assert!(
+            attempt
+                .capture_timed(&f.worker, kind, [Some(1000), Some(0), Some(20)], Some(ms))
+                .await
+        );
+        assert_eq!(attempt.reconcile(&f.worker, "deadline").await, "settled");
+        assert_eq!(
+            sqlx::query_scalar::<_, i32>(
+                "SELECT elapsed_ms FROM relay_hosted.text_completion_timings WHERE request_id=$1",
+            )
+            .bind(held.id)
+            .fetch_optional(&f.admin)
+            .await
+            .unwrap(),
+            measured
+        );
+        saved.push(held.id);
+    }
+    let before = a.read_status(24).await.unwrap();
+    assert_eq!(before["summary"]["requests"], 4);
+    assert_eq!(before["summary"]["latency_samples"], 2);
+    assert_eq!(before["summary"]["latency_ms"], 201);
+    let expired = saved[0];
+    let receipt = text_late_cases::at_status(&f, expired).await;
+    sqlx::query(
+        "UPDATE relay_hosted.text_completion_timings
+         SET observed_at=statement_timestamp()-interval '168 hours' WHERE request_id=$1",
+    )
+    .bind(expired)
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    sqlx::query("SELECT relay_hosted.prune_model_status_completions()")
+        .execute(&a.pool)
+        .await
+        .unwrap();
+    let after = a.read_status(24).await.unwrap();
+    assert_eq!(after["summary"]["requests"], 4);
+    assert_eq!(after["summary"]["latency_samples"], 1);
+    assert_eq!(after["summary"]["latency_ms"], 301);
+    assert_eq!(text_late_cases::at_status(&f, expired).await, receipt);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT applied_at IS NOT NULL FROM relay_hosted.text_terminal_evidence WHERE request_id=$1",
+        )
+        .bind(expired)
+        .fetch_one(&f.admin)
+        .await
+        .unwrap()
+    );
+    assert_eq!(f.sends(), (0, 0));
 }
 
 #[tokio::test]
@@ -210,6 +315,8 @@ async fn model_status_colors_only_covered_bins_and_never_treats_a_capped_scan_as
     assert_eq!(capped["items"][0]["model"], MODEL);
     assert!(capped["summary"]["requests"].is_null());
     assert_eq!(capped["summary"]["request_ms"], 0);
+    assert!(capped["summary"]["latency_ms"].is_null());
+    assert_eq!(capped["summary"]["latency_samples"], 0);
     assert!(capped["summary"]["cache_bps"].is_null());
     assert_eq!(f.sends(), (0, 0));
 }

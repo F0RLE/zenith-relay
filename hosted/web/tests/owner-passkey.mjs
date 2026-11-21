@@ -2,6 +2,7 @@ import { chromium, expect } from "@playwright/test";
 import { createHash, X509Certificate } from "node:crypto";
 import { dirname } from "node:path";
 import { readFixture, writeFixture, fixtureOrigin, fixtureJourney } from "../../test-support/files.mjs";
+import { virtualOwnerKey } from "./owner-session.mjs";
 
 const [rawOrigin, file, mode, otherOrigin, otherFile, journey] = process.argv.slice(2);
 const sourceCopy = mode === "source-copy";
@@ -13,7 +14,12 @@ if (sourceCopy) {
   args.push("--ignore-certificate-errors-spki-list=" + createHash("sha256").update(key).digest("base64"));
 }
 const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, args });
-async function enroll(codePath, listener) {
+const authenticators = new WeakMap();
+const proofButton = (page, recovery) => page.getByRole("button", {
+  name: recovery ? "Replace owner passkeys" : "Verify passkey",
+});
+
+async function enroll(codePath, listener, recovery = false) {
   const page = await browser.newPage();
   if (listener) {
     listener = fixtureOrigin(listener, { numeric: true });
@@ -23,24 +29,21 @@ async function enroll(codePath, listener) {
       await route.fulfill({ response: res });
     });
   }
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
-    protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
-    isUserVerified: true, automaticPresenceSimulation: true,
-  } });
-  await page.goto(origin + "/setup/owner");
-  await page.getByLabel("Local setup code").fill(readFixture(codePath));
+  authenticators.set(page, await virtualOwnerKey(page));
+  await page.goto(origin + (recovery ? "/setup/recovery" : "/setup/owner"));
+  await page.getByLabel(recovery ? "Local recovery code" : "Local setup code").fill(readFixture(codePath));
   await page.getByRole("button", { name: "Create passkey" }).click();
-  await expect(page.getByRole("button", { name: "Verify passkey" })).toBeVisible();
+  await expect(proofButton(page, recovery)).toBeVisible();
   return page;
 }
 
-async function prove(page) {
+async function prove(page, recovery = false) {
   const ack = page.waitForResponse(r => r.url() === origin + "/api/hosted/v1/setup/prove");
-  await page.getByRole("button", { name: "Verify passkey" }).click({ timeout: 8000 });
+  await proofButton(page, recovery).click({ timeout: 8000 });
   const status = (await ack).status();
-  if (status === 200) await expect(page.getByRole("status")).toHaveText("Owner passkey verified. The service is still closed.");
+  if (status === 200) await expect(page.getByRole("status")).toHaveText(recovery
+    ? "Owner access recovered. Previous passkeys and sessions are no longer valid."
+    : "Owner passkey verified. The service is still closed.");
   else await expect(page.getByRole("alert")).toBeVisible();
   expect(await page.context().cookies()).toEqual([]);
   return status;
@@ -66,10 +69,21 @@ try {
     expect(await prove(page)).toBe(200);
     const { checkCustomerJourney } = await import("./customer-journey.mjs");
     await checkCustomerJourney({ browser, owner: page, origin, issuer: otherOrigin, exchange: otherFile, funded: fixtureJourney(journey) });
+  } else if (mode === "recover-owner") {
+    expect(await prove(page)).toBe(200);
+    const { checkOwnerRecovery } = await import("./owner-recovery-flow.mjs");
+    await checkOwnerRecovery({ origin, old: page, enroll, prove, waitForServer, exchange: otherOrigin });
+  } else if (mode === "manage-passkeys") {
+    expect(await prove(page)).toBe(200);
+    await waitForServer();
+    const { checkOwnerPasskeys } = await import("./owner-passkeys-flow.mjs");
+    await checkOwnerPasskeys(browser, origin, page, authenticators.get(page));
   } else if (sourceCopy) {
     expect(await prove(page)).toBe(200);
     const { checkSourceCopy } = await import("./source-copy.mjs");
     await checkSourceCopy(page, origin, otherOrigin);
+    const { checkWebSourceIntake } = await import("./web-source-intake.mjs");
+    await checkWebSourceIntake(page, origin, otherOrigin);
   } else {
     const second = await enroll(otherFile, otherOrigin);
     // Each browser already holds a verified registration and a fresh proof challenge.

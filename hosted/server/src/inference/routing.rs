@@ -103,37 +103,41 @@ pub(super) async fn dispatch(
         let mut wait = false;
         let mut routes = BTreeMap::new();
         let mut costs = BTreeMap::new();
-        {
-            let mut engine = engine.lock().map_err(|_| Unavailable)?;
-            for route in candidates.items {
-                if refused.contains(&route.item) {
-                    continue;
-                }
-                if route.busy {
-                    wait = true;
-                    continue;
-                }
-                let id = route.item.to_string();
-                if engine.candidate(&id).is_none() {
-                    engine
-                        .upsert(
-                            RotationCandidate::new(&id, &route.model, &route.model)
-                                .with_capacity(route.source.to_string(), 1),
-                        )
-                        .map_err(|_| Unavailable)?;
-                }
-                costs.insert(id.clone(), route.cost);
-                routes.insert(id, route);
+        for route in candidates.items {
+            if refused.contains(&route.item) {
+                continue;
             }
+            if route.busy {
+                wait = true;
+                continue;
+            }
+            let id = route.item.to_string();
+            costs.insert(id.clone(), route.cost);
+            routes.insert(id, route);
         }
         while !costs.is_empty() {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_millis() as u64);
-            let selected = engine
-                .lock()
-                .map_err(|_| Unavailable)?
-                .reserve_priced(&request, &costs, now);
+            let selected = {
+                // Other holds can carry a different policy. Install this hold's
+                // mode and ranks atomically with selection, preserving leases.
+                let mut engine = engine.lock().map_err(|_| Unavailable)?;
+                engine.set_mode(candidates.mode);
+                for id in costs.keys() {
+                    let route = &routes[id];
+                    if !engine
+                        .candidate(id)
+                        .is_some_and(|c| c.priority == route.priority)
+                    {
+                        let mut candidate = RotationCandidate::new(id, &route.model, &route.model)
+                            .with_capacity(route.source.to_string(), 1);
+                        candidate.priority = route.priority;
+                        engine.upsert(candidate).map_err(|_| Unavailable)?;
+                    }
+                }
+                engine.reserve_priced(&request, &costs, now)
+            };
             let selected = match selected {
                 Ok(selected) => selected,
                 Err(AdmissionError::NoEligibleCandidate) => {

@@ -9,11 +9,15 @@ export async function startIssuer(issuer, redirect, client) {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const otherKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
   const codes = new Map();
-  const counts = { exchanges: 0, accepted: 0 };
+  const counts = { exchanges: 0, accepted: 0, keyReads: 0 };
+  let tokenGate;
   const server = createServer(async (req, res) => {
     const request = new URL(req.url, issuer);
     const send = (status, v) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(v)); };
-    if (request.pathname === "/keys") return send(200, { keys: [{ ...publicKey.export({ format: "jwk" }), kid: "one", use: "sig", alg: "RS256" }] });
+    if (request.pathname === "/keys") {
+      counts.keyReads++;
+      return send(200, { keys: [{ ...publicKey.export({ format: "jwk" }), kid: "one", use: "sig", alg: "RS256" }] });
+    }
     if (req.method === "GET" && request.pathname === "/authorize") {
       const q = request.searchParams, identity = /(?:^|;\s*)test_subject=([a-z-]+)/.exec(req.headers.cookie ?? "")?.[1];
       if (!identity || q.get("client_id") !== client || q.get("redirect_uri") !== redirect
@@ -25,6 +29,7 @@ export async function startIssuer(issuer, redirect, client) {
       res.writeHead(303, { Location: cb.href, "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" }); return res.end();
     }
     if (req.method !== "POST" || request.pathname !== "/token") return send(404, {});
+    const gate = tokenGate;
     counts.exchanges++;
     let raw = ""; for await (const part of req) raw += part;
     const f = new URLSearchParams(raw), code = f.get("code"), auth = codes.get(code);
@@ -33,6 +38,7 @@ export async function startIssuer(issuer, redirect, client) {
       || f.get("redirect_uri") !== redirect || !f.get("code_verifier")
       || createHash("sha256").update(f.get("code_verifier")).digest("base64url") !== auth.challenge) return send(400, {});
     counts.accepted++;
+    await gate;
     const now = Math.floor(Date.now()/1000), kind = auth.identity;
     const claims = { iss: kind === "wrong-issuer" ? issuer + "/other" : issuer, aud: kind === "wrong-audience" ? "other" : client,
       sub: kind, email: "same@example.invalid", iat: now, exp: now + (kind === "expired" ? -30 : 60),
@@ -43,5 +49,11 @@ export async function startIssuer(issuer, redirect, client) {
     send(200, { token_type: "Bearer", access_token: randomUUID(), id_token: `${unsigned}.${sig}` });
   });
   await new Promise((resolve, reject) => server.once("error", reject).listen(Number(url.port), "127.0.0.1", resolve));
-  return { counts, close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
+  function holdTokenReplies() {
+    if (tokenGate) throw new Error("Token replies are already paused");
+    let resume;
+    tokenGate = new Promise(resolve => { resume = resolve; });
+    return () => { tokenGate = undefined; resume(); };
+  }
+  return { counts, holdTokenReplies, close: async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } };
 }

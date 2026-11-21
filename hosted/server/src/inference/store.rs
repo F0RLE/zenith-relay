@@ -7,9 +7,12 @@ use ring::hmac;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::{future::Future, net::Ipv4Addr, pin::Pin};
+use std::{future::Future, net::Ipv4Addr, pin::Pin, time::Instant};
 use uuid::Uuid;
-use zenith_relay_core::gateway::hosted::{ClaimError, HostedAttempt, HostedDispatchAuthority};
+use zenith_relay_core::{
+    gateway::hosted::{ClaimError, HostedAttempt, HostedDispatchAuthority, HostedGeneration},
+    scheduler::rotation::RotationMode,
+};
 
 #[derive(Deserialize)]
 pub(super) struct Route {
@@ -25,11 +28,13 @@ pub(super) struct Route {
     pub rate_revision: i64,
     pub cost: u64,
     pub busy: bool,
+    pub priority: i32,
 }
 
 #[derive(Deserialize)]
 pub(super) struct Candidates {
     pub scope: Uuid,
+    pub mode: RotationMode,
     pub items: Vec<Route>,
 }
 
@@ -133,22 +138,27 @@ impl Store {
 
     async fn capture(
         &self,
-        offer: Uuid,
-        rid: Uuid,
-        aid: Uuid,
+        (offer, rid, aid): RequestIds,
         state: &str,
         counts: [Option<i64>; 3],
+        elapsed_ms: Option<i32>,
+        generation: Option<HostedGeneration>,
     ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar("SELECT relay_hosted.capture_text_terminal($1,$2,$3,$4,$5,$6,$7)")
-            .bind(offer)
-            .bind(rid)
-            .bind(aid)
-            .bind(state)
-            .bind(counts[0])
-            .bind(counts[1])
-            .bind(counts[2])
-            .fetch_one(&self.pool)
-            .await
+        sqlx::query_scalar(
+            "SELECT relay_hosted.capture_text_terminal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(offer)
+        .bind(rid)
+        .bind(aid)
+        .bind(state)
+        .bind(counts[0])
+        .bind(counts[1])
+        .bind(counts[2])
+        .bind(elapsed_ms)
+        .bind(generation.map(|v| v.duration_ms))
+        .bind(generation.map(|v| v.output_tokens))
+        .fetch_one(&self.pool)
+        .await
     }
 
     pub async fn apply_terminal(
@@ -156,11 +166,22 @@ impl Store {
         ids: RequestIds,
         state: &str,
         counts: [Option<i64>; 3],
+        started: Instant,
+        generation: Option<HostedGeneration>,
     ) -> bool {
         let (offer, rid, aid) = ids;
+        let elapsed_ms = if state == "completed" {
+            i32::try_from(started.elapsed().as_millis()).ok()
+        } else {
+            None
+        };
         self.milestone(rid, aid, Milestone::TerminalObserved);
         // Mandatory recovery evidence commits before accounting, independently of optional diagnostics.
-        if !matches!(self.capture(offer, rid, aid, state, counts).await, Ok(true)) {
+        if !matches!(
+            self.capture(ids, state, counts, elapsed_ms, generation)
+                .await,
+            Ok(true)
+        ) {
             self.diagnostics
                 .record(ids, Observation::EvidenceUnavailable);
             return false;

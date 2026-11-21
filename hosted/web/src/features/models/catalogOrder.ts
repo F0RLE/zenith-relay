@@ -1,4 +1,4 @@
-import { groupModels, modelIdKey } from "../../../../../desktop/frontend/src/features/relay/modelGroups";
+import { groupModels, modelIdKey, type ModelGroup } from "../../../../../desktop/frontend/src/features/relay/modelGroups";
 import { reorderById } from "../../../../../desktop/frontend/src/features/relay/pages/pool/modelRulesModel";
 import type { CustomerModel } from "./model";
 
@@ -25,7 +25,10 @@ export type CatalogMove = { kind: "group" | "model"; source: string; target: str
 
 /** Persist complete provider blocks, including disabled models. A drag cannot change company. */
 export function moveCatalogItem(models: readonly CustomerModel[], displayOrder: readonly string[], move: CatalogMove): string[] | null {
-  const groups = catalogGroups(models, displayOrder);
+  return moveCatalogBlock(catalogGroups(models, displayOrder), move);
+}
+
+export function moveCatalogBlock<T extends { id: string }>(groups: readonly ModelGroup<T>[], move: CatalogMove): string[] | null {
   if (move.kind === "group") {
     return reorderById(groups, move.source, move.target)?.flatMap(group => group.models.map(model => model.id)) ?? null;
   }

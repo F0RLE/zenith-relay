@@ -13,7 +13,7 @@ pub(super) async fn owner(f: &Fixture) -> PgPool {
     sqlx::raw_sql(
         "UPDATE relay_hosted.installations SET owner_user_id=(SELECT user_id FROM relay_hosted.admin_assignments),setup_state='claimed';
          INSERT INTO relay_hosted.admin_credentials(credential_id,user_id,passkey)
-             SELECT '\\x01'::bytea,user_id,'{}' FROM relay_hosted.admin_assignments;",
+             SELECT '\\x01'::bytea,user_id,'{\"cred\":{\"counter\":0}}' FROM relay_hosted.admin_assignments;",
     )
     .execute(&f.admin)
     .await
@@ -80,6 +80,97 @@ pub(super) async fn diagnostic_filter(
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+async fn pool_activity(pool: &PgPool, origin: &str, tag: &[u8]) -> Option<Value> {
+    sqlx::query_scalar("SELECT relay_hosted.owner_pool_activity($1,$2)")
+        .bind(origin)
+        .bind(tag)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; set RELAY_TEST_PG_BIN"]
+async fn pool_activity_uses_the_serving_binding_and_ignores_unconfirmed_work() {
+    let f = Fixture::new().await;
+    let pool = owner(&f).await;
+    let customer = Reader::new(&f, f.space, 1).await;
+    let seen = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT last_seen_at::text FROM relay_hosted.admin_sessions WHERE verifier=$1",
+        )
+        .bind(TAG)
+    };
+    let before = seen().fetch_one(&f.admin).await.unwrap();
+    let idle = json!({"strategy":"automatic","member_order":[],"items":[]});
+    assert_eq!(pool_activity(&pool, ORIGIN, TAG).await, Some(idle.clone()));
+    assert!(pool_activity(&pool, ORIGIN, &customer.tag).await.is_none());
+    assert!(
+        pool_activity(&pool, "https://unbound.test", TAG)
+            .await
+            .is_none()
+    );
+    assert!(
+        sqlx::query("SELECT relay_hosted.owner_pool_activity($1,$2)")
+            .bind(ORIGIN)
+            .bind(TAG)
+            .execute(&f.worker)
+            .await
+            .is_err()
+    );
+
+    // Input-heavy work chooses B; the published tariff is anchored on A.
+    let gate = Arc::new(ReplyGate::default());
+    *f.b.provider.reply_gate.lock().unwrap() = Some(gate.clone());
+    let reply = tokio::spawn(f.submit("pool-activity", 200, 1).send());
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("selected supplier received the request");
+
+    // The observed scope also has a queue entry, an uncertain send and a
+    // claimed dispatch past its deadline. None of these is live activity.
+    sqlx::query(
+        "WITH stamp AS (SELECT statement_timestamp()-interval '3 minutes' AS at),
+         requested AS (
+            INSERT INTO relay_hosted.text_requests(workspace_id,key_id,offer_id,authority_epoch,input_tag,send_tag,
+                input_bound,output_bound,held,started_at,claim_by,close_by,claimed_at,execution,accounting)
+            SELECT k.workspace_id,k.id,$2,1,k.verifier,k.verifier,1,1,0,stamp.at,stamp.at+interval '30 seconds',
+                stamp.at+w.deadline,stamp.at+w.claimed,execution,accounting
+            FROM relay_hosted.customer_keys k CROSS JOIN stamp CROSS JOIN (VALUES
+                ('reserved','held',interval '5 minutes',NULL::interval),
+                ('uncertain','pending',interval '5 minutes',interval '1 second'),
+                ('dispatched','held',interval '65 seconds',interval '1 second')
+            ) w(execution,accounting,deadline,claimed) WHERE k.id=$1
+            RETURNING attempt_id,execution
+         )
+         INSERT INTO relay_hosted.text_purchase_attempts(attempt_id,item,rate_revision,month_utc,bound_micro_usd)
+         SELECT attempt_id,$3,1,date_trunc('month',now() AT TIME ZONE 'UTC')::date,0
+         FROM requested WHERE execution<>'reserved'",
+    )
+    .bind(f.key)
+    .bind(f.offer)
+    .bind(f.a.item)
+    .execute(&f.admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        pool_activity(&pool, ORIGIN, TAG).await,
+        Some(json!({"strategy":"automatic","member_order":[],"items":[
+            {"source_id":f.b.id,"source":"Fixture source","model":MODEL,"requests":1}
+        ]}))
+    );
+    assert_eq!(f.sends(), (0, 1));
+    gate.release.notify_one();
+    assert_eq!(reply.await.unwrap().unwrap().status(), 200);
+    assert_eq!(pool_activity(&pool, ORIGIN, TAG).await, Some(idle));
+    assert_eq!(seen().fetch_one(&f.admin).await.unwrap(), before);
+    sqlx::query("UPDATE relay_hosted.admin_sessions SET last_seen_at=now()-interval '21 minutes'")
+        .execute(&f.admin)
+        .await
+        .unwrap();
+    assert!(pool_activity(&pool, ORIGIN, TAG).await.is_none());
 }
 
 #[tokio::test]

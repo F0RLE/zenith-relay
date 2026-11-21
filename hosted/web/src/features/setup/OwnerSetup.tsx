@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { getAssertion } from "../../api/ownerSession";
+import { createPasskey, getAssertion } from "../../api/ownerSession";
 import { LanguageSwitcher } from "../../components/LanguageSwitcher";
 import { RelayMark } from "../../components/RelayMark";
 import { useTheme } from "../../components/useTheme";
@@ -19,7 +19,7 @@ async function send<T>(step: "start" | "register" | "prove", token: string, data
   return result.data;
 }
 
-export function OwnerSetup() {
+export function OwnerSetup({ recovery = false }: { recovery?: boolean }) {
   const { t } = useLocale();
   const { theme } = useTheme();
   const code = useRef<HTMLInputElement>(null);
@@ -36,9 +36,8 @@ export function OwnerSetup() {
         if (code.current) code.current.value = "";
         if (!token) throw new Error("Missing setup code");
         const begin = await send<{ session: string; options: { publicKey: PublicKeyCredentialCreationOptionsJSON } }>("start", token, {});
-        const key = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(begin.options.publicKey) });
-        if (!(key instanceof PublicKeyCredential)) throw new Error("No passkey");
-        const options = await send<{ publicKey: PublicKeyCredentialRequestOptionsJSON }>("register", begin.session, key.toJSON());
+        const key = await createPasskey(begin.options.publicKey);
+        const options = await send<{ publicKey: PublicKeyCredentialRequestOptionsJSON }>("register", begin.session, key);
         setProof({ token: begin.session, options: options.publicKey });
         setPhase("ready");
       } else {
@@ -58,11 +57,12 @@ export function OwnerSetup() {
   return <div className="relay-app landing hosted-entry" data-theme={theme} style={{ colorScheme: theme }}>
     <header className="hosted-entry-header"><span className="landing-brand"><RelayMark className="landing-mark" /><strong>Relay</strong></span><LanguageSwitcher /></header>
     <main className="integration-unavailable hosted-entry-content">
-      <h1>{t("setup.owner")}</h1>
-      {phase === "done" ? <p role="status">{t("setup.saved")}</p> : phase === "failed" ? <p role="alert">{t("setup.failed")}</p>
+      <h1>{t(recovery ? "setup.recovery" : "setup.owner")}</h1>
+      {phase === "done" ? <p role="status">{t(recovery ? "setup.recovered" : "setup.saved")}</p>
+        : phase === "failed" ? <p role="alert">{t(recovery ? "setup.recoveryFailed" : "setup.failed")}</p>
         : <form className="owner-setup-form" onSubmit={event => { event.preventDefault(); void proceed(); }} aria-busy={phase === "busy"}>
-          {!proof && <label>{t("setup.code")}<input ref={code} type="password" autoComplete="off" spellCheck={false} required maxLength={64} disabled={phase === "busy"} /></label>}
-          <button className="key-button key-primary" type="submit" disabled={phase === "busy"}>{t(proof ? "setup.confirm" : "setup.register")}</button>
+          {!proof && <label>{t(recovery ? "setup.recoveryCode" : "setup.code")}<input ref={code} type="password" autoComplete="off" spellCheck={false} required maxLength={64} disabled={phase === "busy"} /></label>}
+          <button className="key-button key-primary" type="submit" disabled={phase === "busy"}>{t(!proof ? "setup.register" : recovery ? "setup.replace" : "setup.confirm")}</button>
         </form>}
     </main>
   </div>;

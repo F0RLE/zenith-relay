@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ControlError, uuidText } from "../../api/control";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
+import { customerCasePath } from "../../api/customerAccess";
+import { OwnerPasskeyError, type readOwnerOverview } from "../../api/ownerSession";
 import { readRefundCases, refundLabels, reviewRefund, type RefundAction } from "../../api/refunds";
 import { RefreshCw } from "../../components/Icons";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -16,7 +17,7 @@ const problems: Record<string, MessageKey> = {
   refund_closed: "refund.closed",
 };
 
-export function PaymentRefunds({ session, onSession }: { session: Session; onSession: (v: Session) => void }) {
+export function PaymentRefunds({ session }: { session: Session }) {
   const { t, locale } = useLocale();
   const payment = new URLSearchParams(location.search).get("payment_id");
   const valid = payment === null || uuidText.test(payment);
@@ -47,7 +48,8 @@ export function PaymentRefunds({ session, onSession }: { session: Session; onSes
     try { await fn(); }
     catch (err) {
       if (denied(err)) return;
-      const message = err instanceof ControlError && err.code ? problems[err.code] : undefined;
+      const message = err instanceof OwnerPasskeyError ? "paymentBuilder.verifyFailed"
+        : err instanceof ControlError && err.code ? problems[err.code] : undefined;
       setProblem(message ?? (applying ? "refund.reviewUnconfirmed" : "unavailable.server"));
     } finally { running.current = false; setBusy(false); }
   }
@@ -58,19 +60,7 @@ export function PaymentRefunds({ session, onSession }: { session: Session; onSes
 
   function apply(command: Review) {
     void run(async () => {
-      const send = (csrf: string) => reviewRefund(csrf, command.id, command.operation, command.action);
-      try { await send(session.csrf); }
-      catch (error) {
-        if (!(error instanceof ControlError) || error.code !== "fresh_passkey_required") throw error;
-        try {
-          await signInOwner();
-        } catch {
-          setProblem("paymentBuilder.verifyFailed"); return;
-        }
-        const renewed = await readOwnerOverview(AbortSignal.timeout(10000));
-        onSession(renewed);
-        await send(renewed.csrf);
-      }
+      await reviewRefund(session.csrf, command.id, command.operation, command.action);
       await load(before);
       requestAnimationFrame(() => heading.current?.focus());
     }, true);
@@ -99,6 +89,8 @@ export function PaymentRefunds({ session, onSession }: { session: Session; onSes
           <strong>{r.label}</strong>
           <span>{date.format(r.at * 1000)} UTC</span>
           <a className="entry-account-link refund-id" href={"/admin/payments?payment_id=" + r.paymentId}>{r.paymentId}</a>
+          <a className="entry-account-link" href={customerCasePath(r.workspace)}
+            aria-label={t("access.openCase", { id: r.workspace })}>{t("access.case")}</a>
         </div>
         <div className="own-key-tools">
           <strong>{amount}</strong>

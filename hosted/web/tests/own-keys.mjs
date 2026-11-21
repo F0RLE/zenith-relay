@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { navigateCustomer } from "./customer-shell.mjs";
 
 export async function checkOwnKeys({ a, b, ownerHttp, origin, acctA, acctB, checkpoint, wait }) {
   const url = origin + "/api/hosted/v1/keys";
@@ -8,7 +9,7 @@ export async function checkOwnKeys({ a, b, ownerHttp, origin, acctA, acctB, chec
   const list = async (client, query = "") => (await (await client.get(url + query)).json()).data.keys;
   const reveal = a.getByRole("region",{name:"Key created"});
   const row = name => a.getByRole("listitem").filter({has:a.getByText(name,{exact:true})});
-  await a.getByRole("link",{name:"API keys"}).click();
+  await navigateCustomer(a, "API keys");
   await expect(a.getByText("No keys yet. Create the first one for your app.")).toBeVisible();
   await a.getByLabel("Key name").fill("Test client");
   await a.getByRole("button",{name:"Create key",exact:true}).click();
@@ -97,6 +98,6 @@ export async function checkOwnKeys({ a, b, ownerHttp, origin, acctA, acctB, chec
     const dir = process.env.RELAY_TEST_KEY_UI_CAPTURE;
     if (dir) await a.screenshot({path:`${dir}/keys-${width}.png`,fullPage:true});
   }
-  await a.getByRole("link",{name:"Overview",exact:true}).click();
+  await navigateCustomer(a, "Overview");
   return replies.find(v => typeof v.secret === "string").secret;
 }

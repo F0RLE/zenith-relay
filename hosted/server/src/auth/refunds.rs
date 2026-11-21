@@ -1,5 +1,6 @@
 use super::*;
 use axum::extract::{Path, RawQuery};
+use confirmation::{Approval, Context};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -58,6 +59,42 @@ struct Review {
     action: String,
 }
 
+pub(super) struct Decision {
+    id: Uuid,
+    body: Review,
+}
+
+impl Decision {
+    async fn execute(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        proof: Option<(&Context, &Approval)>,
+    ) -> sqlx::Result<String> {
+        let query = sqlx::query_scalar(
+            "SELECT relay_hosted.review_payment_refund($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        )
+        .bind(&s.origin)
+        .bind(tag.as_ref())
+        .bind(self.id)
+        .bind(self.body.operation_id)
+        .bind(&self.body.expected_state)
+        .bind(&self.body.action);
+        confirmation::bind_proof(query, proof)
+            .fetch_one(&s.pool)
+            .await
+    }
+
+    pub(super) async fn apply(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        proof: Option<(&Context, &Approval)>,
+    ) -> Response {
+        respond(self.execute(s, tag, proof).await, self.body.operation_id).await
+    }
+}
+
 fn invalid() -> Response {
     http::error(
         StatusCode::BAD_REQUEST,
@@ -67,6 +104,18 @@ fn invalid() -> Response {
 }
 
 pub(super) async fn review(State(s): State<App>, Path(id): Path<String>, req: Request) -> Response {
+    submit(s, &id, req, false).await
+}
+
+pub(super) async fn options(
+    State(s): State<App>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    submit(s, &id, req, true).await
+}
+
+async fn submit(s: App, id: &str, req: Request, prepare: bool) -> Response {
     let tag = match owner_mutation(&s, req.headers()) {
         Ok(tag) => tag,
         Err(e) => return e.response(),
@@ -86,27 +135,22 @@ pub(super) async fn review(State(s): State<App>, Path(id): Path<String>, req: Re
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return unavailable();
     }
-    let result = sqlx::query_scalar::<_, String>(
-        "SELECT relay_hosted.review_payment_refund($1,$2,$3,$4,$5,$6)",
-    )
-    .bind(&s.origin)
-    .bind(tag.as_ref())
-    .bind(id)
-    .bind(body.operation_id)
-    .bind(body.expected_state)
-    .bind(body.action)
-    .fetch_one(&s.pool)
-    .await;
+    let decision = Decision { id, body };
+    let result = decision.execute(&s, &tag, None).await;
+    if prepare && matches!(result.as_deref(), Ok("fresh_required")) {
+        let admin = s.auth.as_ref().expect("authenticated");
+        let command = payment_confirmation::Command::Refund(decision);
+        return confirmation::start(&s, &admin.payment_changes, tag, command).await;
+    }
+    respond(result, decision.body.operation_id).await
+}
+
+async fn respond(result: sqlx::Result<String>, operation_id: Uuid) -> Response {
     match result.as_deref() {
-        Ok("applied") => http::success(json!({"applied":true,"operation_id":body.operation_id})),
+        Ok("applied") => http::success(json!({"applied":true,"operation_id":operation_id})),
         Ok("denied") => denied(),
         Ok("invalid") => invalid(),
         Ok("missing") => http::not_found().await,
-        Ok("fresh_required") => http::error(
-            StatusCode::FORBIDDEN,
-            "fresh_passkey_required",
-            "Verify the owner passkey again.",
-        ),
         Ok("conflict") => http::error(
             StatusCode::CONFLICT,
             "refund_conflict",
@@ -127,6 +171,7 @@ pub(super) async fn review(State(s): State<App>, Path(id): Path<String>, req: Re
             "refund_closed",
             "Refunds are limited to local qualification.",
         ),
-        _ => unavailable(),
+        Ok(code) => confirmation::error(code).unwrap_or_else(unavailable),
+        Err(_) => unavailable(),
     }
 }

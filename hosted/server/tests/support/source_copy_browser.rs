@@ -6,7 +6,11 @@ use reqwest::{Certificate, Client};
 use sqlx::PgPool;
 use std::{fs, path::Path, process::Command, time::Duration};
 use uuid::Uuid;
-use zenith_relay_hosted::{config::Config, db};
+use zenith_relay_hosted::{
+    config::Config,
+    db,
+    vault::{Purpose, Vault},
+};
 use zenith_relay_hosted_device::{
     COPY_COMMIT_PATH, COPY_STATUS_PATH, CopyKey, CopyPlan, CopyProxy, Destination, DeviceKey,
 };
@@ -100,7 +104,11 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
     let transfer_bind = format!("127.0.0.1:{transfer_port}");
     let toml = include_str!("../../config.example.toml")
         .replace("http://localhost:1443", &origin)
-        .replace("127.0.0.1:1443", &format!("127.0.0.1:{web_port}"));
+        .replace("127.0.0.1:1443", &format!("127.0.0.1:{web_port}"))
+        .replace(
+            "[server]",
+            "[server]\nweb_api_intake = true\nweb_model_checks = true",
+        );
     let conf = root.join("copy.toml");
     fs::write(&conf, &toml).unwrap();
     let config = Config::parse(&toml).unwrap();
@@ -196,6 +204,7 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
         Command::new("bun")
             .current_dir(&web)
             .env("RELAY_TEST_EDGE_CERT", &cert)
+            .env("NODE_EXTRA_CA_CERTS", &cert)
             .arg("tests/owner-passkey.mjs")
             .arg(&origin)
             .arg(code)
@@ -243,9 +252,9 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
     let paired = DeviceKey::generate(target.clone()).unwrap();
     sqlx::query(
         "INSERT INTO relay_hosted.management_devices (id,installation_id,owner_id,installation_epoch,
-          owner_epoch,label,scope,revision,invited_at,approve_by,approved_at,expires_at,verifier)
+          owner_epoch,label,scope,revision,invited_at,approve_by,approved_at,expires_at,verifier,manage_pool,read_scopes)
          SELECT $1,i.id,u.id,i.authorization_epoch,u.authorization_epoch,'Copy fixture','connections.read',2,
-          now(),now()+interval '5 minutes',now(),now()+interval '24 hours',$2
+          now(),now()+interval '5 minutes',now(),now()+interval '24 hours',$2,true,'{overview.read}'
          FROM relay_hosted.installations i JOIN relay_hosted.users u ON u.id=i.owner_user_id",
     ).bind(device).bind(paired.verifier().as_slice()).execute(&admin).await.unwrap();
     let route = proxy::Fixture::start().await;
@@ -356,10 +365,181 @@ async fn owner_reviews_one_https_copy_and_the_worker_keeps_its_authenticated_pro
         .await,
         "committed"
     );
+    let scope = proxy::activate_scope(&admin, owner).await;
+    let web_route = proxy::Fixture::start().await;
+    fs::write(
+        exchange.join("web-model-route"),
+        serde_json::json!({ "endpoint": web_route.endpoint, "proxy": web_route.proxy, "key": PROVIDER }).to_string(),
+    )
+    .unwrap();
     fs::write(exchange.join("committed"), []).unwrap();
+
+    checkpoint(&mut browser, &exchange.join("simulate-check-interruption")).await;
+    let abandoned: Uuid = fs::read_to_string(exchange.join("simulate-check-interruption"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let qp = db::connect(&config, &c.dsn("fixture_qualifier"))
+        .await
+        .unwrap();
+    let take = || {
+        sqlx::query_scalar::<_, Option<serde_json::Value>>(
+            "SELECT relay_hosted.take_web_model_check($1)",
+        )
+        .bind(&origin)
+        .fetch_one(&qp)
+    };
+    let (left, right) = tokio::join!(take(), take());
+    let taken: Vec<_> = [left.unwrap(), right.unwrap()]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0]["id"], abandoned.to_string());
+    sqlx::query("UPDATE relay_hosted.web_model_checks SET started_at=clock_timestamp()-interval '2 minutes' WHERE operation_id=$1")
+        .bind(abandoned).execute(&admin).await.unwrap();
+    assert!(
+        take().await.unwrap().is_none(),
+        "claimed checks never run again"
+    );
+
+    checkpoint(&mut browser, &exchange.join("start-model-worker")).await;
+    assert_eq!(
+        web_route.counts(),
+        [0, 0, 0],
+        "save, options and status reads do not probe"
+    );
+    let _qualifier = Process(
+        c.cli("fixture_qualifier", &conf)
+            .args(["qualify-text", "--watch", "--vault-dir"])
+            .arg(&vault_dir)
+            .env("ZENITH_RELAY_HOSTED_VAULT_KEY_FILE", &vault_key)
+            .env(
+                "ZENITH_RELAY_HOSTED_VAULT_DATABASE_URL_FILE",
+                c.role_file("fixture_vault"),
+            )
+            .spawn()
+            .unwrap(),
+    );
+    checkpoint(&mut browser, &exchange.join("desktop-pool-ready")).await;
+    let reviewed_source = fs::read_to_string(exchange.join("desktop-pool-ready")).unwrap();
+    let device_record = paired.protected_record();
+    let device_secret = device_record.split_once('\n').unwrap().1;
+    let device_bearer = zeroize::Zeroizing::new(format!("rhd1.{iid}.{device}.{device_secret}"));
+    let endpoint = format!("{origin}/api/hosted/v1/device/pool");
+    for action in ["include", "exclude"] {
+        let read = || {
+            http.get(&endpoint)
+                .bearer_auth(device_bearer.as_str())
+                .send()
+        };
+        let state: serde_json::Value = read().await.unwrap().json().await.unwrap();
+        let row = state["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == reviewed_source)
+            .unwrap();
+        assert_eq!(state["data"]["pool_access"], true);
+        assert_eq!(row["pool"]["action"], action);
+        assert_eq!(row["proxy_bound"], true);
+        let body = serde_json::json!({"source_id":reviewed_source, "action":action, "expected_revision":row["pool"]["revision"]});
+        let request = || {
+            http.post(&endpoint)
+                .bearer_auth(device_bearer.as_str())
+                .json(&body)
+        };
+        if action == "include" {
+            assert_eq!(
+                request()
+                    .header("origin", &origin)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                401
+            );
+        }
+        let response = request().send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let review: serde_json::Value = response.json().await.unwrap();
+        let code = review["data"]["result"]["operation_id"].as_str().unwrap();
+        fs::write(exchange.join(format!("desktop-pool-{action}")), code).unwrap();
+        checkpoint(
+            &mut browser,
+            &exchange.join(format!("desktop-pool-{action}-done")),
+        )
+        .await;
+        let updated: serde_json::Value = read().await.unwrap().json().await.unwrap();
+        let row = updated["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == reviewed_source)
+            .unwrap();
+        assert_eq!(row["pool"]["in_pool"], action == "include");
+        assert_eq!(row["credential_state"], "stored");
+        assert_eq!(row["proxy_bound"], true);
+        assert!(updated["data"]["pool_review"].is_null());
+        let metrics = http
+            .get(format!(
+                "{origin}/api/hosted/v1/device/overview/metrics?hours=24"
+            ))
+            .bearer_auth(device_bearer.as_str())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            metrics["data"]["result"]["metrics"]["pool"],
+            serde_json::json!({"members":if action=="include" {"1"} else {"0"},"ready":"0","busy":"0"})
+        );
+    }
     wait_exit(&mut browser).await;
+    assert_eq!(
+        web_route.counts(),
+        [2, 1, 0],
+        "one short check; the unlisted model is never dispatched"
+    );
+
+    let source = fs::read_to_string(exchange.join("web-source"))
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let web_vault_pool = db::connect(&config, &c.dsn("fixture_vault")).await.unwrap();
+    let web_vault = Vault::open(&web_vault_pool, &origin, &vault_dir, &vault_key)
+        .await
+        .unwrap();
+    let stored_key = web_vault.read(source, Purpose::Provider, 1).await.unwrap();
+    let stored_proxy = web_vault.read(source, Purpose::Proxy, 1).await.unwrap();
+    assert!(stored_key.as_slice() == PROVIDER.as_bytes());
+    assert!(stored_proxy.as_slice() == web_route.proxy.as_bytes());
+    let routes: (bool, bool, bool) = sqlx::query_as(
+        "SELECT relay_hosted.source_copy_route($1,$2,$3,true),
+            relay_hosted.source_copy_route($1,$2,$3,false),
+            relay_hosted.source_copy_route($1,$2,$4,true)",
+    )
+    .bind(iid)
+    .bind(source)
+    .bind(&web_route.endpoint)
+    .bind(&route.endpoint)
+    .fetch_one(&web_vault_pool)
+    .await
+    .unwrap();
+    assert_eq!(routes, (true, false, false));
+    let created: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM relay_hosted.web_source_intakes WHERE committed_at IS NOT NULL",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(created, 1);
 
     route
-        .verify(&c, &config, &admin, owner, &plan, &vault_dir, &vault_key)
+        .verify(&c, &config, scope, &plan, &vault_dir, &vault_key)
         .await;
 }

@@ -128,7 +128,10 @@ export async function checkOwnerUsage({ owner, customer, origin, api, requestId 
     await expect(net).toBeVisible();
     await expect(diagnostics.getByText("upstream_transport_body", { exact: true })).toBeVisible();
     await expect(page.locator(".hosted-entry")).toHaveAttribute("data-theme", theme);
-    await expect(page.getByRole("link", { name: listLabel, exact: true })).toHaveAttribute("aria-current", "location");
+    const menu = page.locator(".hosted-tools .mobile-menu");
+    if (width === 320) await menu.click();
+    await expect(page.locator(".relay-sidebar").getByRole("link", { name: listLabel, exact: true })).toHaveAttribute("aria-current", "location");
+    if (width === 320) await page.keyboard.press("Escape");
     expect(await net.evaluate(el => el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).lineHeight) + 0.5)).toBe(true);
     expect(await checkContained()).toBe(true);
     if (process.env.RELAY_TEST_HISTORY_UI_CAPTURE)

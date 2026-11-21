@@ -14,8 +14,9 @@ createServer({ cert: readFixture(certPath), key: readFixture(keyPath) }, (req, r
   }
   const copy = req.method === "GET" && req.url === "/api/hosted/v1/transfer/status"
     || req.method === "POST" && req.url === "/api/hosted/v1/transfer/commit";
+  const intake = req.method === "POST" && /^\/api\/hosted\/v1\/transfer\/intake\/[0-9a-f-]{36}$/.test(req.url);
   const upstream = request({
-    hostname: "127.0.0.1", port: copy ? transfers : web, agent: false,
+    hostname: "127.0.0.1", port: copy || intake ? transfers : web, agent: false,
     method: req.method, path: req.url, headers: req.headers,
   }, reply => {
     res.writeHead(reply.statusCode, reply.headers);

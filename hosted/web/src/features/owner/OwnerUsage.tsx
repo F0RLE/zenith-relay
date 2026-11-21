@@ -1,5 +1,6 @@
 import { useCallback, useState, type FormEvent } from "react";
 import { uuidText } from "../../api/control";
+import { customerCasePath } from "../../api/customerAccess";
 import { accountings, defaultOwnerUsage, hasDiagnosticSelection, ownerUsageHref, parseOwnerUsageView, readOwnerUsagePage, type OwnerUsageView } from "../../api/ownerUsage";
 import { diagnosticChoices, diagnosticStages } from "../../api/requestDiagnostics";
 import { executions } from "../../api/usageReport";
@@ -46,6 +47,8 @@ function UsageFeed({ view }: { view: OwnerUsageView }) {
         title={t("usage.refreshUsage")} aria-disabled={loading} onClick={() => { if (!loading) refresh(); }}><RefreshCw aria-hidden="true" /></button>
     </div>
     <UsageFilters view={view} count={filterCount} choose={choose} />
+    {view.workspace && <a className="entry-account-link owner-customer-case-link" href={customerCasePath(view.workspace)}
+      aria-label={t("access.openCase", { id: view.workspace })}>{t("access.case")}</a>}
     <div className="owner-usage-snapshot" aria-live="polite">
       {data && <><span>{localInterval(data.from, data.to, locale, true)}</span>
         <time dateTime={new Date(data.asOf).toISOString()}>{t("report.asOf", { time: utcStamp(data.asOf, locale) })}</time></>}

@@ -1,11 +1,15 @@
 use super::*;
 use crate::accounting::Rate;
+use axum::extract::{Path, RawQuery};
+use confirmation::{Approval, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+pub(super) mod display_order;
+pub(super) mod member_models;
 mod review;
+pub(super) mod rotation;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,15 +40,80 @@ struct SourceMarkup {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Admit,
+    Save,
+    Review,
+    Publish,
+    Suspend,
+}
+
+impl Action {
+    fn requires_proof(&self) -> bool {
+        matches!(self, Self::Admit | Self::Publish | Self::Suspend)
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Save => "save",
+            Self::Review => "review",
+            Self::Publish => "publish",
+            Self::Suspend => "suspend",
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Change {
+struct RequestChange {
     operation_id: Uuid,
     expected_revision: String,
-    action: String,
+    action: Action,
     rates: Option<Prices>,
     purchase_rates: Option<Prices>,
     source_markup: Option<SourceMarkup>,
     sale_rule: Option<review::Rule>,
+}
+
+pub(super) struct Change {
+    item: Uuid,
+    operation_id: Uuid,
+    revision: i64,
+    action: Action,
+    payload: Value,
+}
+
+impl Change {
+    async fn execute(
+        &self,
+        s: &App,
+        tag: &hmac::Tag,
+        proof: Option<(&Context, &Approval)>,
+    ) -> sqlx::Result<String> {
+        let query = sqlx::query_scalar(
+            "SELECT relay_hosted.change_text_rule($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        )
+        .bind(&s.origin)
+        .bind(tag.as_ref())
+        .bind(self.item)
+        .bind(self.operation_id)
+        .bind(self.revision)
+        .bind(self.action.as_str())
+        .bind(&self.payload);
+        confirmation::bind_proof(query, proof)
+            .fetch_one(&s.pool)
+            .await
+    }
+
+    pub(super) async fn apply(&self, s: &App, ctx: &Context, proof: &Approval) -> Response {
+        respond(
+            self.execute(s, &ctx.tag, Some((ctx, proof))).await,
+            self.operation_id,
+        )
+        .await
+    }
 }
 
 fn revision(raw: &str) -> Option<i64> {
@@ -70,45 +139,76 @@ pub(super) async fn read(State(s): State<App>, h: HeaderMap) -> Response {
         Err(_) => unavailable(),
     }
 }
-pub(super) async fn change(
+
+pub(super) async fn activity(
     State(s): State<App>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    req: Request,
+    h: HeaderMap,
+    RawQuery(query): RawQuery,
 ) -> Response {
-    let invalid = || {
-        http::error(
-            StatusCode::BAD_REQUEST,
-            "invalid_model_rule",
-            "Invalid model rule.",
-        )
-    };
-    let (Some(admin), Some(token)) = (&s.auth, browser::cookie(req.headers(), SESSION)) else {
+    let (Some(admin), Some(token)) = (&s.auth, browser::cookie(&h, SESSION)) else {
         return denied();
     };
-    if !browser::same_origin(req.headers(), &s.origin)
-        || !browser::one(req.headers(), "x-relay-csrf")
-            .and_then(browser::decode)
-            .is_some_and(|v| bool::from(admin.tag(b"csrf-v1", &token).as_ref().ct_eq(v.as_ref())))
-    {
-        return forbidden();
+    if query.is_some() {
+        return http::error(
+            StatusCode::BAD_REQUEST,
+            "invalid_filter",
+            "Pool activity does not accept filters.",
+        );
     }
+    if db::closed_setup(&s.pool, &s.origin).await.is_err() {
+        return unavailable();
+    }
+    match sqlx::query_scalar::<_, Option<Value>>("SELECT relay_hosted.owner_pool_activity($1,$2)")
+        .bind(&s.origin)
+        .bind(admin.tag(b"session-v1", &token).as_ref())
+        .fetch_one(&s.pool)
+        .await
+    {
+        Ok(Some(view)) => http::success(view),
+        Ok(None) => denied(),
+        Err(_) => unavailable(),
+    }
+}
+
+pub(super) async fn change(State(s): State<App>, Path(id): Path<String>, req: Request) -> Response {
+    submit(s, id, req, false).await
+}
+
+pub(super) async fn options(
+    State(s): State<App>,
+    Path(id): Path<String>,
+    req: Request,
+) -> Response {
+    submit(s, id, req, true).await
+}
+
+fn invalid() -> Response {
+    http::error(
+        StatusCode::BAD_REQUEST,
+        "invalid_model_rule",
+        "Invalid model rule.",
+    )
+}
+
+async fn submit(s: App, id: String, req: Request, prepare: bool) -> Response {
+    let tag = match owner_mutation(&s, req.headers()) {
+        Ok(tag) => tag,
+        Err(e) => return e.response(),
+    };
     let Ok(item) = id.parse::<Uuid>() else {
         return invalid();
     };
-    let Some(cmd) = crate::setup::credential::<Change>(req).await else {
+    let Some(cmd) = crate::setup::credential::<RequestChange>(req).await else {
         return invalid();
     };
     let Some(rev) = revision(&cmd.expected_revision) else {
         return invalid();
     };
     if cmd.operation_id.is_nil()
-        || !matches!(
-            cmd.action.as_str(),
-            "admit" | "save" | "review" | "publish" | "suspend"
-        )
-        || (cmd.action == "save")
+        || (prepare && !cmd.action.requires_proof())
+        || matches!(cmd.action, Action::Save)
             != (cmd.rates.is_some() || cmd.purchase_rates.is_some() || cmd.source_markup.is_some())
-        || (cmd.action == "review") != cmd.sale_rule.is_some()
+        || matches!(cmd.action, Action::Review) != cmd.sale_rule.is_some()
         || [&cmd.rates, &cmd.purchase_rates]
             .into_iter()
             .flatten()
@@ -124,7 +224,6 @@ pub(super) async fn change(
     if db::closed_setup(&s.pool, &s.origin).await.is_err() {
         return unavailable();
     }
-    let tag = admin.tag(b"session-v1", &token);
     let payload = if let Some(rule) = cmd.sale_rule {
         let result = sqlx::query_scalar::<_, Option<Value>>(
             "SELECT relay_hosted.owner_text_price_inputs($1,$2,$3,$4)",
@@ -159,28 +258,28 @@ pub(super) async fn change(
         }
         Value::Object(payload)
     };
-    let result = sqlx::query_scalar::<_, String>(
-        "SELECT relay_hosted.change_text_rule($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(&s.origin)
-    .bind(tag.as_ref())
-    .bind(item)
-    .bind(cmd.operation_id)
-    .bind(rev)
-    .bind(cmd.action)
-    .bind(payload)
-    .fetch_one(&s.pool)
-    .await;
+    let change = Change {
+        item,
+        operation_id: cmd.operation_id,
+        revision: rev,
+        action: cmd.action,
+        payload,
+    };
+    let result = change.execute(&s, &tag, None).await;
+    if prepare && matches!(result.as_deref(), Ok("fresh_required")) {
+        let admin = s.auth.as_ref().expect("authenticated");
+        let command = supply_confirmation::Command::Rule(change);
+        return confirmation::start(&s, &admin.supply_changes, tag, command).await;
+    }
+    respond(result, change.operation_id).await
+}
+
+async fn respond(result: sqlx::Result<String>, operation_id: Uuid) -> Response {
     match result.as_deref() {
-        Ok("applied") => http::success(json!({"operation_id":cmd.operation_id,"applied":true})),
+        Ok("applied") => http::success(json!({"operation_id":operation_id,"applied":true})),
         Ok("missing") => http::not_found().await,
         Ok("invalid") => invalid(),
         Ok("denied") => denied(),
-        Ok("fresh_required") => http::error(
-            StatusCode::FORBIDDEN,
-            "fresh_passkey_required",
-            "Verify the owner passkey again.",
-        ),
         Ok("notice_required") => http::error(
             StatusCode::CONFLICT,
             "price_notice_required",
@@ -211,6 +310,7 @@ pub(super) async fn change(
             "rule_changed",
             "Review the current model rule.",
         ),
-        _ => unavailable(),
+        Ok(code) => confirmation::error(code).unwrap_or_else(unavailable),
+        Err(_) => unavailable(),
     }
 }

@@ -5,7 +5,7 @@ import { CatalogChoice } from "./CatalogChoice";
 import { ModelCacheWritePrice, ModelPrice } from "./ModelPrice";
 import { modelContextRanges, selectedModelVariant } from "./model";
 import type { CustomerModel, ModelPricingVariant } from "./model";
-import { catalogGroups } from "./catalogOrder";
+import { groupModels } from "../../../../../desktop/frontend/src/features/relay/modelGroups";
 import "./models.css";
 
 export type { CustomerModel } from "./model";
@@ -32,7 +32,8 @@ function ModelRow({ model }: { model: CustomerModel }) {
     return t(range.min == null ? "modelCatalog.shortContext" : "modelCatalog.longContext", { tokens: compact(range.min ?? range.max) });
   };
   return <tr className="catalog-row" data-model-id={model.id} data-variant-id={selected?.id}>
-    <th scope="row"><div className="catalog-model-heading"><strong className="catalog-model-name">{model.name}</strong></div><code className="catalog-model-id">{model.id}</code>
+    <th scope="row"><div className="catalog-model-heading"><strong className="catalog-model-name">{model.name}</strong></div>
+      {model.name !== model.id && <code className="catalog-model-id">{model.id}</code>}
     </th>
     <td className="catalog-protocol-cell"><span className="catalog-cell-label">{t("modelCatalog.protocol")}</span><span className="catalog-protocols">{model.protocols.length ? model.protocols.join(" · ") : "—"}</span></td>
     {components.map(([component, label]) => <td className="catalog-rate-cell" key={component}><span className="catalog-cell-label">{t(label)}</span>{component === "cacheWrite" ? <ModelCacheWritePrice model={selected ?? model} /> : <ModelPrice model={selected ?? model} component={component} />}</td>)}
@@ -45,12 +46,14 @@ function ModelRow({ model }: { model: CustomerModel }) {
   </tr>;
 }
 
-export function ModelsPage({ models = [] }: {
+export function ModelsPage({ models = [], state }: {
   models?: readonly CustomerModel[];
+  state?: { kind: "loading" } | { kind: "unavailable"; retry: () => void };
 }) {
   const { t } = useLocale();
   const heading = useId();
-  const groups = catalogGroups(models);
+  const groups = models.some(model => model.catalogProvider || model.publisher)
+    ? groupModels(models, { metadata: model => ({ catalogProvider: model.catalogProvider ?? model.publisher ?? null }) }) : [];
 
   return <section className="models-page">
     <header className="page-heading"><h1 id={heading}>{t("modelCatalog.title")}</h1></header>
@@ -63,7 +66,15 @@ export function ModelsPage({ models = [] }: {
           <tr className="catalog-company"><th scope="rowgroup" colSpan={8}>{group.provider === "other" ? t("modelCatalog.otherCompany") : group.label}</th></tr>
           {group.models.map(model => <ModelRow key={model.id} model={model} />)}
         </tbody>)}
-        {!models.length && <tbody><tr className="catalog-empty"><td colSpan={8}><p role="status">{t("modelCatalog.noModels")}</p></td></tr></tbody>}
+        {!groups.length && <tbody>
+          {models.map(model => <ModelRow key={model.id} model={model} />)}
+          {!models.length && <tr className="catalog-empty"><td colSpan={8}>
+            {state?.kind === "unavailable" ? <>
+              <p role="alert">{t("unavailable.server")}</p>
+              <button type="button" className="button" onClick={state.retry}>{t("common.retry")}</button>
+            </> : <p role="status">{t(state?.kind === "loading" ? "unavailable.connecting" : "modelCatalog.noModels")}</p>}
+          </td></tr>}
+        </tbody>}
       </table>
     </section>
   </section>;

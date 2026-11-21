@@ -8,6 +8,7 @@
 .hosted-app .owner-source-form input[aria-invalid] { border-color: var(--error); }
 .hosted-app .source-form-error { color: var(--error); margin: -8px 0 0; }
 .hosted-app .owner-source-protocol-field .option-trigger { width: 100%; }
+.hosted-app .owner-source-protocol-value { display: flex; align-items: center; min-height: 40px; padding-inline: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--subtle); color: var(--text); font-size: 13px; }
 .hosted-app .owner-source-model-input { display: flex; align-items: center; gap: 8px; }
 .hosted-app .owner-source-model-input .icon-button { flex-shrink: 0; }
 .hosted-app .owner-source-model-list { list-style: none; margin: 16px 0 0; padding: 0; max-height: 280px; overflow-y: auto; scrollbar-gutter: stable; }
@@ -19,5 +20,13 @@
 .hosted-app .owner-source-model-list .icon-button { flex-shrink: 0; }
 .hosted-app .owner-source-preview-note { margin: 0; font-size: 11px; line-height: 1.6; }
 .hosted-app .owner-source-form-actions { justify-content: flex-end; margin: 0; }
-@media (max-width: 639px), (pointer: coarse) { .hosted-app .owner-source-form input, .hosted-app .owner-source-form .option-trigger { min-height: 44px; } }
+.hosted-app .owner-model-check { display: grid; gap: 12px; border-block-start: 1px solid var(--border); padding-block-start: 12px; }
+.hosted-app .owner-model-check-action { justify-self: start; }
+.hosted-app .owner-model-check-receipt { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 12px; color: var(--secondary); }
+.hosted-app .owner-model-check-receipt code { overflow-wrap: anywhere; min-width: 0; }
+.hosted-app .owner-model-check :is(.owner-source-form, .owner-source-fields) { gap: 12px; }
+.hosted-app .owner-model-check-limits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.hosted-app .owner-model-check-limits > label { display: flex; flex-direction: column; justify-content: space-between; }
+.hosted-app .owner-model-check-limits legend { margin-block-end: 8px; font-size: 12px; font-weight: 600; color: var(--text); }
+@media (max-width: 639px), (pointer: coarse) { .hosted-app .owner-source-form :is(input, .option-trigger, .owner-source-protocol-value) { min-height: 44px; } }
 @media (max-width: 639px) { .hosted-app .request-dialog.owner-source-dialog { width: calc(100% - 16px); } }

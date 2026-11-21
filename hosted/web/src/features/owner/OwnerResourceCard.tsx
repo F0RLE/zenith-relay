@@ -1,5 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import type { ReactNode } from "react";
 import { Cloud, ListMinus, ListPlus, MoreHorizontal, Pause, Pencil, Play, RefreshCw, RotateCcw, UserRound } from "../../components/Icons";
 import type { CustomerModel } from "../models/ModelsPage";
 import type { ConnectionAction, OwnerConnection } from "./model";
@@ -15,8 +16,9 @@ export function ResourceMenu({ name, active, actions }: { name: string; active: 
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const id = useId();
+  const available = actions.some(action => !action.disabled);
   function close(restore = false) { setOpen(false); if (restore) trigger.current?.focus(); }
-  useEffect(() => { if (!active) setOpen(false); }, [active]);
+  useEffect(() => { if (!active || !available) setOpen(false); }, [active, available]);
   useLayoutEffect(() => {
     if (!open) return;
     function place() {
@@ -35,7 +37,7 @@ export function ResourceMenu({ name, active, actions }: { name: string; active: 
     return () => { document.removeEventListener("pointerdown", outside); window.removeEventListener("resize", place); document.removeEventListener("scroll", place, true); };
   }, [open]);
   return <>
-    <button ref={trigger} className="relay-icon-button owner-card-menu-trigger" type="button" aria-label={t("connections.actionsFor", { name })} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(current => !current)} onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); setOpen(true); } }}><MoreHorizontal aria-hidden="true" /></button>
+    <button ref={trigger} className="relay-icon-button owner-card-menu-trigger" type="button" aria-label={t("connections.actionsFor", { name })} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} aria-disabled={!available} onClick={() => { if (available) setOpen(current => !current); }} onKeyDown={event => { if (available && event.key === "ArrowDown") { event.preventDefault(); setOpen(true); } }}><MoreHorizontal aria-hidden="true" /></button>
     {open && createPortal(<div ref={panel} id={id} className="owner-card-menu" role="menu" aria-label={t("connections.actionsFor", { name })} onPointerDown={event => { if ((event.target as HTMLElement).closest("button:disabled")) event.preventDefault(); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node) && event.relatedTarget !== trigger.current) close(); }} onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(true); }
       const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
@@ -45,6 +47,18 @@ export function ResourceMenu({ name, active, actions }: { name: string; active: 
       }
     }}>{actions.map(action => <button type="button" role="menuitem" tabIndex={-1} key={action.label} disabled={action.disabled} data-danger={action.danger || undefined} onClick={() => { close(true); action.run(); }}>{action.label}</button>)}</div>, trigger.current?.closest(".hosted-app") ?? document.body)}
   </>;
+}
+
+export function ResourceCardHeading({ name, api, status, meta, actions }: {
+  name: string; api: boolean; status: string; meta: ReactNode; actions: ReactNode;
+}) {
+  return <header className="owner-resource-card-heading">
+    <span className="owner-resource-icon" data-relay-tooltip={status} role="img" aria-label={status} tabIndex={0}>{api ? <Cloud aria-hidden="true" /> : <UserRound aria-hidden="true" />}</span>
+    <div className="owner-resource-identity">
+      <h2 data-relay-tooltip={name} tabIndex={0}>{name}</h2><div className="owner-resource-meta">{meta}</div>
+    </div>
+    <div className="owner-resource-header-actions">{actions}</div>
+  </header>;
 }
 
 export function OwnerResourceCard({ connection, selected, onSelect, change, nowMs, active, onDetails, onEditSource, onSourceModels, onEditMember, currentRequests, position, totalMembers, allowReorder = true, valuesVisible = true }: {
@@ -74,13 +88,9 @@ export function OwnerResourceCard({ connection, selected, onSelect, change, nowM
   ];
   return <article className="owner-resource-card" aria-label={connection.name} aria-describedby={currentRequests ? activityId : undefined} data-kind={connection.kind} data-selected={selected || undefined} data-status={tone} data-current={currentRequests !== undefined ? currentRequests > 0 : undefined} data-active-requests={currentRequests}>
     {!!currentRequests && <span className="sr-only" id={activityId}>{t("pool.activity.requestsUnknown", { count: currentRequests })}</span>}
-    <header className="owner-resource-card-heading">
-      <span className="owner-resource-icon" data-relay-tooltip={status} role="img" aria-label={status} tabIndex={0}>{api ? <Cloud aria-hidden="true" /> : <UserRound aria-hidden="true" />}</span>
-      <div className="owner-resource-identity"><h2 data-relay-tooltip={connection.name} tabIndex={0}>{connection.name}</h2><div className="owner-resource-meta">
-        {connection.kind === "account" ? <><span className="owner-account-plan" data-relay-tooltip={t(connection.account?.plan ? "connections.subscription" : "connections.subscriptionUnknown")}>{connection.account?.plan ?? "—"}</span><span className="owner-account-route">{connection.account?.route ?? t("common.account")}</span></> : <span className="owner-source-endpoint" data-relay-tooltip={endpoint ?? t("source.endpointUnknown")} tabIndex={0}>{endpoint ?? "—"}</span>}
-      </div></div>
-      <div className="owner-resource-header-actions">{(position == null || api) && <ResourceMenu name={connection.name} active={active} actions={actions} />}<ResourceSelection label={t("connections.select", { name: connection.name })} checked={selected} onChange={onSelect} /></div>
-    </header>
+    <ResourceCardHeading name={connection.name} api={api} status={status}
+      meta={connection.kind === "account" ? <><span className="owner-account-plan" data-relay-tooltip={t(connection.account?.plan ? "connections.subscription" : "connections.subscriptionUnknown")}>{connection.account?.plan ?? "—"}</span><span className="owner-account-route">{connection.account?.route ?? t("common.account")}</span></> : <span className="owner-source-endpoint" data-relay-tooltip={endpoint ?? t("source.endpointUnknown")} tabIndex={0}>{endpoint ?? "—"}</span>}
+      actions={<>{(position == null || api) && <ResourceMenu name={connection.name} active={active} actions={actions} />}<ResourceSelection label={t("connections.select", { name: connection.name })} checked={selected} onChange={onSelect} /></>} />
     <span className="sr-only">{status}</span>
     {connection.kind === "account" ? <OwnerAccountBody account={connection.account} nowMs={nowMs} valuesVisible={valuesVisible} /> : <OwnerSourceBody source={connection.source} modelCount={connection.models.length} valuesVisible={valuesVisible} onModels={onSourceModels} />}
     <footer className="owner-resource-footer">

@@ -249,18 +249,22 @@ pub(super) async fn run(
     assert_eq!(count(a).await.unwrap(), 3);
     assert_eq!(count(b).await.unwrap(), 2);
     assert_wallets(admin, a, b, 0).await;
-    let changes: (i64, i64, i64, i64) = sqlx::query_as(
+    let changes: (i64, i64, i64, i64, bool) = sqlx::query_as(
         "SELECT (SELECT open_limit::bigint FROM relay_hosted.checkout_policy),
             (SELECT count(*) FROM relay_hosted.checkout_builder_operations WHERE action='publish'),
             (SELECT count(*) FROM relay_hosted.checkout_builder_operations WHERE action='disable'),
             (SELECT count(*) FROM relay_hosted.checkout_methods
-                WHERE disabled_at IS NULL AND merchant_binding_id=$1 AND method_code='card')",
+                WHERE disabled_at IS NULL AND merchant_binding_id=$1 AND method_code='card'),
+            NOT EXISTS (SELECT FROM relay_hosted.checkout_builder_operations op
+                WHERE op.confirmed_by_passkey_id IS DISTINCT FROM (
+                    SELECT k.passkey_id FROM relay_hosted.admin_credentials k
+                    WHERE k.user_id=op.actor_id AND op.action IN ('publish','disable')))",
     )
     .bind(signer.binding)
     .fetch_one(admin)
     .await
     .unwrap();
-    assert_eq!(changes, (2, 3, 1, 0));
+    assert_eq!(changes, (2, 3, 1, 0, true));
     worker.close().await;
     let worker = reconnect().await;
     merchant.wrong_total.store(true, Ordering::Relaxed);

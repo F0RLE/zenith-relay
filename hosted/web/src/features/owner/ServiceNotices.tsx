@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bell, Plus } from "../../components/Icons";
 import { ControlError } from "../../api/control";
 import { changeNotice, noticeFields, ownerNotices, type NoticeCommand, type OwnerNotice } from "../../api/notices";
-import { readOwnerOverview, signInOwner } from "../../api/ownerSession";
+import { OwnerPasskeyError, type readOwnerOverview } from "../../api/ownerSession";
 import { useLocale } from "../../i18n/LocaleProvider";
 import type { MessageKey } from "../../i18n/types";
 import { NoticeFields } from "./NoticeFields";
@@ -13,7 +13,7 @@ type Intent = { action: "save"; id: string; revision: number; title: string; mes
   | { action: "discard" | "publish"; id: string; revision: number };
 const controlId = (id: string, action: Intent["action"]) => `notice-${id}-${action}`;
 
-export function ServiceNotices({ session, onSession }: { session: Session; onSession: (s: Session) => void }) {
+export function ServiceNotices({ session }: { session: Session }) {
   const { t, locale } = useLocale();
   const [rows, setRows] = useState<OwnerNotice[]>();
   const [reload, setReload] = useState(0);
@@ -63,25 +63,12 @@ export function ServiceNotices({ session, onSession }: { session: Session; onSes
     };
     setBusy(true); setFault(undefined); flight.current = true;
     try {
-      try {
-        await changeNotice(intent.id, session.csrf, command);
-      } catch (error) {
-        if (!(error instanceof ControlError) || error.code !== "fresh_passkey_required") throw error;
-        let renewed: Session;
-        try {
-          await signInOwner();
-          renewed = await readOwnerOverview(AbortSignal.timeout(10000));
-        } catch {
-          setFault("ownerNotices.verifyFailed");
-          return;
-        }
-        onSession(renewed);
-        await changeNotice(intent.id, renewed.csrf, command);
-      }
+      await changeNotice(intent.id, session.csrf, command);
       close(true);
     } catch (error) {
       const code = error instanceof ControlError ? error.code : undefined;
       if (error instanceof ControlError && error.status === 401) location.replace("/admin/login");
+      else if (error instanceof OwnerPasskeyError) setFault("ownerNotices.verifyFailed");
       else if (code === "notice_changed") {
         close(true); setFault("ownerNotices.changed");
       } else if (code === "notice_no_audience" || code === "notice_capacity" || code === "invalid_notice") {

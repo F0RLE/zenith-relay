@@ -7,3 +7,5 @@ GRANT SELECT, INSERT ON relay_hosted.static_source_provisions TO :"vault_role";
 GRANT EXECUTE ON FUNCTION relay_hosted.source_copy_access(text,uuid,uuid,uuid,bytea,boolean),
     relay_hosted.finish_source_copy(text,uuid,uuid,uuid,bytea),
     relay_hosted.source_copy_route(uuid,uuid,text,boolean) TO :"vault_role";
+GRANT EXECUTE ON FUNCTION relay_hosted.web_source_access(text,uuid,uuid,bytea),
+    relay_hosted.finish_web_source(text,uuid,uuid,bytea) TO :"vault_role";

@@ -28,12 +28,13 @@ pub(super) fn respond(
     ids: RequestIds,
     running: Box<RunningStream>,
     permit: OwnedSemaphorePermit,
+    started: std::time::Instant,
 ) -> Response {
     // Backpressure is bounded even when the caller keeps the connection but stops reading.
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let _permit = permit;
-        pump(&store, ids, *running, tx).await;
+        pump(&store, ids, *running, tx, started).await;
     });
     let mut response = Response::new(Body::from_stream(ReceiverStream::new(rx)));
     response.headers_mut().insert(
@@ -49,7 +50,13 @@ pub(super) fn respond(
 
 type Sender = mpsc::Sender<Result<Bytes, Infallible>>;
 
-async fn pump(store: &Store, ids: RequestIds, mut stream: RunningStream, tx: Sender) {
+async fn pump(
+    store: &Store,
+    ids: RequestIds,
+    mut stream: RunningStream,
+    tx: Sender,
+    started: std::time::Instant,
+) {
     let deadline = Instant::now() + BODY_BUDGET;
     let (offer, rid, aid) = ids;
     let mut first = true;
@@ -77,15 +84,23 @@ async fn pump(store: &Store, ids: RequestIds, mut stream: RunningStream, tx: Sen
         match frame.observation {
             HostedStreamObservation::None => (),
             HostedStreamObservation::Usage(usage) => {
+                stream.upstream.mark_read_pause();
                 if store.stream_usage(offer, rid, aid, usage).await.is_err() {
                     break Observation::EvidenceUnavailable;
                 }
             }
-            HostedStreamObservation::Terminal { kind, usage, .. } => {
+            HostedStreamObservation::Terminal {
+                kind,
+                usage,
+                generation,
+                ..
+            } => {
                 if kind == HostedTerminalKind::Failed {
                     store.diagnostics.record(ids, Observation::UpstreamFailed);
                 }
-                let applied = store.apply_terminal(ids, kind.as_str(), usage).await;
+                let applied = store
+                    .apply_terminal(ids, kind.as_str(), usage, started, generation)
+                    .await;
                 let sequence = stream.upstream.next_sequence_number();
                 let bytes = match (applied, kind) {
                     (false, _) => error_frame("relay_outcome_pending", sequence),
@@ -99,6 +114,10 @@ async fn pump(store: &Store, ids: RequestIds, mut stream: RunningStream, tx: Sen
                 }
                 return;
             }
+        }
+        // Backpressure can delay reading the next upstream chunk.
+        if tx.capacity() == 0 {
+            stream.upstream.mark_read_pause();
         }
         if let Err(stop) = send(&tx, deadline, frame.bytes).await {
             break stop;

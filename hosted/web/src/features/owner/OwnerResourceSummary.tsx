@@ -7,15 +7,20 @@ import type { MessageKey } from "../../i18n/types";
 
 export type ResourceStat = { label: MessageKey; value: number; icon: ReactNode };
 
+export function ResourceCounts({ stats }: { stats: ResourceStat[] }) {
+  const { t, locale } = useLocale();
+  return <dl className="owner-resource-summary" aria-label={t("account.connectionInventory")}>{stats.map(stat => <div key={stat.label} tabIndex={0} data-relay-tooltip={t(stat.label)}>
+    <dt>{stat.icon}<span className="sr-only">{t(stat.label)}</span></dt><dd>{stat.value.toLocaleString(locale)}</dd>
+  </div>)}</dl>;
+}
+
 export function OwnerResourceSummary({ stats, accounts, nowMs, valuesVisible }: {
   stats: ResourceStat[]; accounts: OwnerConnection[]; nowMs: number; valuesVisible: boolean;
 }) {
   const { t, locale } = useLocale();
   const total = ownerAccountTotals(accounts.filter(item => item.kind === "account"), nowMs, locale);
   return <div className="owner-resource-summary-band" data-values={valuesVisible || undefined}>
-    <dl className="owner-resource-summary" aria-label={t("account.connectionInventory")}>{stats.map(stat => <div key={stat.label} tabIndex={0} data-relay-tooltip={t(stat.label)}>
-      <dt>{stat.icon}<span className="sr-only">{t(stat.label)}</span></dt><dd>{stat.value.toLocaleString(locale)}</dd>
-    </div>)}</dl>
+    <ResourceCounts stats={stats} />
     {valuesVisible && <dl className="owner-resource-economics" aria-label={t("account.accountApiEquivalents")}>
       <div tabIndex={0} data-relay-tooltip={t("account.summaryUsageHint", { known: total.usageCount, total: total.accountCount })}>
         <dt><span aria-hidden="true">$</span><span className="sr-only">{t("account.apiEquivalentUsage")}</span></dt><dd>{total.used}</dd>

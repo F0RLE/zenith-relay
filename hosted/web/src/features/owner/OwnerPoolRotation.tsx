@@ -18,18 +18,20 @@ const MODES = [
   { id: "failover", value: "failover", icon: ShieldCheck },
 ] as const;
 
-export function OwnerPoolRotation({ policy, connections, onChange, embedded = false }: {
+export function OwnerPoolRotation({ policy, connections, onChange, embedded = false, restricted = false }: {
   policy: PoolRoutingPolicy;
-  connections: readonly OwnerConnection[];
+  connections: readonly Pick<OwnerConnection, "id" | "kind" | "name" | "paused">[];
   onChange: (policy: PoolRoutingPolicy) => void;
   embedded?: boolean;
+  restricted?: boolean;
 }) {
   const { t } = useLocale();
   const [dragged, setDragged] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const manualOrder = policy.mode !== "automatic";
-  const shares = usesRequestShares(policy.mode);
+  const shares = !restricted && usesRequestShares(policy.mode);
+  const modes = restricted ? MODES.filter(mode => mode.id !== "roundRobin") : MODES;
   const mode = rotationModeName(policy.mode);
   const preset = currentRotationPreset(policy);
   const inventory = new Map(connections.map(connection => [poolRotationKey({ id: connection.id, kind: connection.kind === "api" ? "source" : "account" }), connection]));
@@ -45,8 +47,10 @@ export function OwnerPoolRotation({ policy, connections, onChange, embedded = fa
     const offset = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 }[event.key];
     if (offset === undefined && event.key !== "Home" && event.key !== "End") return;
     event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? MODES.length - 1 : (index + (offset ?? 0) + MODES.length) % MODES.length;
-    onChange({ ...policy, mode: MODES[next]!.value });
+    const next = event.key === "Home" ? 0 : event.key === "End" ? modes.length - 1 : (index + (offset ?? 0) + modes.length) % modes.length;
+    const choice = modes[next]!.value;
+    if (restricted && choice === "failover" && !rows.length) return;
+    onChange({ ...policy, mode: choice });
     clearDrag();
     event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
   };
@@ -55,27 +59,30 @@ export function OwnerPoolRotation({ policy, connections, onChange, embedded = fa
     if (event.key === "Escape" && dragged) { event.preventDefault(); clearDrag(); }
   }}>
     {!embedded && <header className="owner-rotation-header"><h2>{t("pool.rotation.title")}</h2></header>}
-    <div className="owner-rotation-editor" data-manual-order={manualOrder} data-request-shares={shares}>
-      <aside className="owner-rotation-presets">
+    <div className="owner-rotation-editor" data-manual-order={manualOrder} data-request-shares={shares} data-restricted={restricted || undefined}>
+      {!restricted && <aside className="owner-rotation-presets">
         <div className="owner-rotation-preset-heading"><span>{t("pool.rotation.preset")}</span>{preset === "custom" && <span className="owner-rotation-custom">{t("pool.rotation.presets.custom")}</span>}</div>
         <div className="owner-rotation-preset-options" role="group" aria-label={t("pool.rotation.preset")}>
           {PRESETS.map(({ id, label, icon: Icon }) => <button key={id} type="button" className="owner-rotation-preset" aria-pressed={preset === id} onClick={() => { clearDrag(); onChange(applyRotationPreset(policy, id)); }}><Icon /><span>{t(label)}</span></button>)}
         </div>
-      </aside>
+      </aside>}
       <div className="owner-rotation-content">
         <section className="owner-rotation-strategy" aria-label={t("pool.rotation.strategy")}>
           <h3>{t("pool.rotation.strategy")}</h3>
           <div className="owner-rotation-modes" role="radiogroup" aria-label={t("pool.rotation.strategy")}>
-            {MODES.map(({ id, value, icon: Icon }, index) => <button key={id} type="button" role="radio" data-mode={id} aria-label={t(`pool.rotation.modes.${id}`)} aria-checked={mode === id} tabIndex={mode === id ? 0 : -1} onKeyDown={event => chooseMode(event, index)} onClick={() => { clearDrag(); onChange({ ...policy, mode: value }); }}>
+            {modes.map(({ id, value, icon: Icon }, index) => <button key={id} type="button" role="radio" data-mode={id} aria-label={t(`pool.rotation.modes.${id}`)} aria-checked={mode === id} tabIndex={mode === id ? 0 : -1}
+              disabled={restricted && id === "failover" && rows.length === 0 && mode !== id}
+              onKeyDown={event => chooseMode(event, index)} onClick={() => { clearDrag(); onChange({ ...policy, mode: value }); }}>
               <Icon /><span className="owner-rotation-mode-full">{t(`pool.rotation.modes.${id}`)}</span>{id === "automatic" && <span className="owner-rotation-mode-compact" aria-hidden="true">{t("pool.rotation.auto")}</span>}
             </button>)}
           </div>
-          {mode === "roundRobin" && <label className="owner-rotation-shares"><span>{t("pool.rotation.weighted")}</span><input type="checkbox" role="switch" aria-label={t("pool.rotation.weighted")} checked={policy.mode === "weighted_round_robin"} onChange={event => onChange({ ...policy, mode: event.currentTarget.checked ? "weighted_round_robin" : "round_robin" })} /></label>}
+          {!restricted && mode === "roundRobin" && <label className="owner-rotation-shares"><span>{t("pool.rotation.weighted")}</span><input type="checkbox" role="switch" aria-label={t("pool.rotation.weighted")} checked={policy.mode === "weighted_round_robin"} onChange={event => onChange({ ...policy, mode: event.currentTarget.checked ? "weighted_round_robin" : "round_robin" })} /></label>}
+          {restricted && <p className="live-rotation-hint">{t(mode === "failover" ? "pool.rotation.failoverHelp" : "pool.rotation.automaticHelp")}</p>}
         </section>
-        <section className="owner-rotation-members">
+        {(!restricted || manualOrder) && <section className="owner-rotation-members">
           <div className="owner-rotation-columns" aria-hidden="true">
             <div className="owner-rotation-members-heading"><h3>{listLabel}</h3><span>{rows.length}</span></div>
-            {shares && <span>{t("pool.rotation.weight")}</span>}<span>{t("pool.rotation.concurrency")}</span>{manualOrder && <span />}
+            {shares && <span>{t("pool.rotation.weight")}</span>}{!restricted && <span>{t("pool.rotation.concurrency")}</span>}{manualOrder && <span />}
           </div>
           <div className="owner-rotation-order" ref={listRef} role="list" aria-label={listLabel}>
             {rows.map(({ rule, index, member }) => {
@@ -91,16 +98,16 @@ export function OwnerPoolRotation({ policy, connections, onChange, embedded = fa
                     if (dragged === key) { const target = targetAt(event); onChange(movePoolRotationMember(policy, index, policy.members.findIndex(item => poolRotationKey(item) === target))); }
                     clearDrag(); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                   }} onPointerCancel={clearDrag} onLostPointerCapture={clearDrag}><GripVertical /></button><span className="owner-rotation-rank">{index + 1}</span></>}
-                  <span className="owner-rotation-avatar"><Icon /></span><span className="owner-rotation-name"><strong>{name}</strong><span className="owner-rotation-meta"><small>{t(rule.kind === "account" ? "pool.rotation.account" : "pool.rotation.api")}</small><span className="owner-rotation-state" data-paused={member?.paused ?? true}>{t(member?.paused ? "connections.paused" : "pool.enabled")}</span></span></span>
+                  <span className="owner-rotation-avatar"><Icon /></span><span className="owner-rotation-name"><strong>{name}</strong><span className="owner-rotation-meta">{!restricted && <small>{t(rule.kind === "account" ? "pool.rotation.account" : "pool.rotation.api")}</small>}<span className="owner-rotation-state" data-paused={member?.paused ?? true}>{t(member?.paused ? "connections.paused" : "pool.enabled")}</span></span></span>
                 </div>
                 {shares && <label className="owner-rotation-number"><span>{t("pool.rotation.weight")}</span><input type="number" min={1} max={100} aria-label={t("pool.rotation.memberWeight", { name })} value={rule.weight} onChange={event => onChange(updatePoolRotationMember(policy, key, "weight", event.currentTarget.valueAsNumber))} /></label>}
-                <label className="owner-rotation-number"><span>{t("pool.rotation.concurrency")}</span><input type="number" min={1} max={1024} aria-label={t("pool.rotation.memberConcurrency", { name })} aria-valuetext={rule.maxConcurrency === 0 ? t("pool.rotation.unlimited") : undefined} placeholder={t("pool.rotation.unlimited")} value={rule.maxConcurrency || ""} onChange={event => onChange(updatePoolRotationMember(policy, key, "maxConcurrency", event.currentTarget.value === "" ? 0 : event.currentTarget.valueAsNumber))} /></label>
+                {!restricted && <label className="owner-rotation-number"><span>{t("pool.rotation.concurrency")}</span><input type="number" min={1} max={1024} aria-label={t("pool.rotation.memberConcurrency", { name })} aria-valuetext={rule.maxConcurrency === 0 ? t("pool.rotation.unlimited") : undefined} placeholder={t("pool.rotation.unlimited")} value={rule.maxConcurrency || ""} onChange={event => onChange(updatePoolRotationMember(policy, key, "maxConcurrency", event.currentTarget.value === "" ? 0 : event.currentTarget.valueAsNumber))} /></label>}
                 {manualOrder && <div className="owner-rotation-order-actions">{([{ direction: -1, icon: ArrowUp, label: "pool.rotation.moveUp" }, { direction: 1, icon: ArrowDown, label: "pool.rotation.moveDown" }] as const).map(({ direction, icon: MoveIcon, label }) => <button key={direction} type="button" aria-label={t(label, { name })} data-relay-tooltip={t(label, { name })} disabled={index + direction < 0 || index + direction >= policy.members.length} onClick={() => onChange(movePoolRotationMember(policy, index, index + direction))}><MoveIcon /></button>)}</div>}
               </div>;
             })}
           </div>
           {!rows.length && <p className="owner-rotation-empty" role="status">{t("pool.empty")}</p>}
-        </section>
+        </section>}
       </div>
     </div>
   </section>;

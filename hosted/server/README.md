@@ -69,8 +69,54 @@ checkout and public inference remain closed.
 after three minutes and are not resumable. A stale code file from a killed
 process cannot authorize a new one. Run the local command again: if an owner is
 already bound it refuses without issuing a code. Do not drop the database or
-delete a credential to retry. There is no public reset; keep the enrolled
-authenticator available. A second passkey and audited recovery remain delivery gates.
+delete a credential to retry. Keep the enrolled authenticator available.
+
+### Manage owner passkeys
+
+After migration `0045`, reapply [runtime-grants.sql](runtime-grants.sql).
+On the first signed-in Overview, open **Set up a backup passkey**. Confirm with
+an existing passkey, create the backup on another device or security key, then
+verify the new key. The confirmation flow expires after three minutes and
+allows up to eight active keys. Any active key can sign in as the same owner.
+
+Use **Passkeys** on Overview to revoke a key. Confirm with a different active
+passkey. The server will not remove the last one and ends only the sessions
+that used the revoked key, including the current session if applicable.
+The list shows labels, creation time and which key signed in; it does not
+return stored verifiers. The database records each committed add or revoke
+in `relay_hosted.owner_passkey_changes`.
+
+### Recover owner access
+
+If all owner passkeys are lost, recover against the same installation and RP.
+With the migrator credential, record the installation UUID (`SELECT id FROM
+relay_hosted.installations WHERE singleton`) and grant a dedicated `relay_recovery`
+login just the [recovery grants](owner-recovery-grants.sql):
+
+```sh
+psql -v ON_ERROR_STOP=1 -v recovery_role=relay_recovery -f hosted/server/owner-recovery-grants.sql
+```
+
+Keep this credential offline when not recovering. Stop the regular web listener
+and restrict access to the temporary listener to the operator at the configured
+origin. Select the recovery credential and a new operation UUID:
+
+```sh
+zenith-relay-hosted recover-owner --installation INSTALLATION_UUID --operation OPERATION_UUID --web-dist PATH_TO_DIST --code-dir PRIVATE_DIR
+```
+
+Open `/setup/recovery`, enter the one-use code from the local file and create and
+verify the replacement within three minutes. Only a verified replacement changes
+the database. The commit keeps the same owner, revokes previous passkeys and
+sessions, invalidates paired Desktop grants, and appends a recovery receipt.
+It does not change customer authority, wallet history or the service mode.
+
+If the confirmation was lost, repeat the command with the **same** operation UUID
+to check whether the recovery committed. A committed operation issues no new
+code. The migration owner can inspect `relay_hosted.owner_recoveries` by operation.
+After the recovery listener stops, restart `serve`, sign in with the replacement
+and pair Desktop again if needed. Normal `serve` has no recovery endpoint.
+A [fenced restore](#fence-an-isolated-restore) cannot use this procedure to reopen.
 
 ### Check an upgrade
 
@@ -117,15 +163,44 @@ is not evidence of a missing external effect. No command currently clears
 the fence; this is a containment step, not a production recovery or reopening
 procedure.
 
+#### Reapply customer access decisions
+
+After stopping access changes on the authoritative installation, run this with
+its migration credential and a new private file outside the database backup:
+
+```sh
+(umask 077; zenith-relay-hosted export-customer-access --installation INSTALLATION_UUID > PRIVATE_DIR/customer-access.json)
+```
+
+Keep the successful export with the off-host recovery evidence. On a compatible,
+isolated restore fenced with `RECOVERY_UUID`, use the replacement database's
+migration credential:
+
+```sh
+zenith-relay-hosted restore-customer-access --installation INSTALLATION_UUID --operation RECOVERY_UUID --receipts PRIVATE_DIR/customer-access.json
+```
+
+Replay applies the original revisions in order and skips exact receipts already
+present. A missing workspace, conflicting receipt or wrong fence aborts the
+replay. An older snapshot cannot prove that later suspensions or closures did
+not happen. Keep ingress closed if evidence is missing or incomplete; reconcile
+individual key revocations and financial obligations separately.
+
 ### Owner sessions
 
 `serve` never accepts a setup code, inference key or customer cookie as an owner.
 Each sign-in uses an origin-bound, single-use challenge (two minutes, at most 64
 starts per process per two minutes) and requires user verification. The server
 checks the installation, active assignment, credential and authorization epochs.
-`/admin/overview` reads the service mode. Confirming or pausing a customer test
-scope requires a passkey sign-in within the last two minutes, current session
-CSRF, the expected service revision and a unique operation ID.
+`/admin/overview` reads the service mode. **Approve 24-hour access** and
+**Pause customer access** each require their own passkey confirmation. The
+confirmation keeps the current session, covers the chosen transition and review
+IDs at the displayed revision, and cannot authorize another change. After a
+lost response, retry the same operation; a recorded receipt does not require a
+new confirmation. The same pattern applies to payment and supply writes in the
+[owner action matrix](../../docs/hosted/HOSTED_RELAY_ARCHITECTURE.md#owner-confirmation-by-action).
+After upgrading through `0046`–`0048`, reapply [runtime grants](runtime-grants.sql)
+before starting `serve`.
 
 After migrations `0037` and `0038`, reapply [runtime-grants.sql](runtime-grants.sql).
 Owner Overview reads `/api/hosted/v1/admin/overview/usage`: rolling 24h, 7d,
@@ -188,12 +263,13 @@ change the outcome of a cleanup or reconciliation pass.
 
 In **Overview → Operations → Temporary diagnostics**, enter one in-progress
 request ID from **Usage** or `X-Request-Id`, choose a reason and set the duration.
-Start requires same-origin CSRF and an owner passkey verified within two minutes.
-Stop does not require another passkey. Neither customer accounts nor paired
-Desktop can read or operate captures. Repeating the same start operation returns
-the existing capture without extending it.
+Start requires same-origin CSRF and a one-use owner passkey assertion for that
+request, reason, duration and current limits. Stop does not require another
+passkey. Neither customer accounts nor paired Desktop can read or operate
+captures. Repeating the same start operation returns the existing capture
+without extending it.
 
-Apply migration `0042` and reapply the runtime and inference grants above.
+Apply the [schema upgrade](#check-an-upgrade) with the runtime and inference grants.
 Set `[diagnostics.capture]` in the configuration for both `serve` and `serve-text`.
 All three caps are required to enable capture: `max_events` (1–128),
 `max_bytes` (128–32768, serialized event bytes), and `max_events_per_second`
@@ -238,11 +314,63 @@ of the audit sink; cleanup retries a missing closure audit. The list shows up to
    lasts at most 24 hours. It enables only these identities; the landing does
    not advertise open registration.
 4. Each approved tester signs in again to see their personal USD balance at
-   `/app/overview`. A returning identity retains its wallet. Logout revokes
-   that session. Sessions last up to eight hours, with a 30-minute idle limit
-   and up to eight per customer; restarting `serve` invalidates browser cookies,
-   not identities or wallets. Session reads enforce the current grant and expiry.
-   Pause access in `/admin` before approving a different set of testers.
+   `/app/overview`. A returning identity retains its wallet. Open **Account
+   security** in the header to review and end active browser sessions. Sessions
+   last up to eight hours, with a 30-minute idle limit and up to eight per
+   customer. Restarting `serve` invalidates browser cookies; API keys and wallet
+   history are independent. Pause access in `/admin` before changing testers.
+
+On upgrade, migrate through `0053` and reapply [runtime grants](runtime-grants.sql)
+before starting `serve`.
+
+#### Sign-in limits
+
+`serve` admits up to 64 starts per rolling three minutes and six per rolling
+20 seconds for the same short-lived browser cookie. At most four starts can
+prepare at once, independently of the four slots for token exchange and final
+sign-in. Excess starts return `429` with `Retry-After`; they do not replace a
+pending attempt. If the exchange slots are busy, the callback redirects to
+`/login#busy` without consuming the attempt. The page never retries automatically.
+
+An attempt lasts at most three minutes. Before contacting the issuer, the
+server checks the installation and service revision, plus the configured
+issuer binding and scope expiry in qualification. It then verifies the
+subject and rechecks admission in PostgreSQL before creating a session. Setup
+and maintenance only allow review IDs. The bounded counters and attempts are
+process-local, pruned on the next start, and discarded on restart. They use
+no email or subject input.
+
+For remote qualification, keep `serve` on loopback behind a trusted HTTPS
+ingress restricted to the intended testers. Bound request sizes, connection
+concurrency and start/callback rates at that ingress, with separate budgets
+so busy starts do not consume callback capacity. Apply per-source limits
+using the peer observed at the trusted edge, not caller-provided `Forwarded`
+or `X-Forwarded-For`; `serve` does not read those headers for login limits.
+Cookies can be cleared, so the browser budget does not replace edge limits.
+Exclude callback queries and cookies from logs. Qualify the ingress and real
+issuer before opening access. In-app notices work independently; external
+recipients stay disabled until HD-13 is qualified.
+
+### Customer access cases
+
+As owner, open one workspace from request detail, an exact workspace filter
+in **Usage**, or a refund case. There is no customer directory or paired
+Desktop access. **Suspend access**, **Reinstate access** and **Close account**
+each require a reason and a new passkey assertion for the exact workspace
+and revision. If the response is lost, **Check result** looks for the same
+operation's receipt without changing access.
+
+Suspension and closure end browser sessions, invalidate API keys, and block
+new payment intents and requests. Queued requests cannot be sent and their
+holds are released. Dispatched requests and already accepted payments still
+reconcile. Reinstatement permits a fresh sign-in and new keys; it does not
+restore old credentials. Closure is permanent and does not delete receipts,
+adjust the balance, or issue a refund.
+
+**Account security** links to closure support when `[policies].support` is
+configured. The customer should save their receipts and request any refund
+separately before losing access. Only close after verifying the customer's
+request. The support link does not perform an account change.
 
 ### Customer API keys
 
@@ -253,7 +381,8 @@ loses the issuance response, look up the same `operation_id` using `GET /keys`.
 Reissue creates a replacement without revoking the original; migrate the client,
 then confirm revocation of the old key. Signing out does not revoke a key.
 
-Each qualification allows 32 issuances per workspace, including replacements.
+Each qualification allows 32 issuances per workspace and authorization epoch,
+including replacements.
 Keys cannot outlive that specific approval or extend the key they replace.
 Suspension and revocation block subsequent credential checks. Neither owner
 sessions nor inference keys can manage a customer's keys.
@@ -261,8 +390,8 @@ sessions nor inference keys can manage a customer's keys.
 ### In-app service notices
 
 In `/admin/notifications`, create, edit or discard a draft. To send a saved
-revision, choose **Send**, then **Confirm sending**. Publication requires an owner
-passkey sign-in within two minutes. The server atomically records one inbox item
+revision, choose **Send**, then **Confirm sending**. Confirm that revision with
+an owner passkey in the same session. The server atomically records one inbox item
 per already enrolled, eligible customer in the current qualification scope
 (at most 16); if nobody is eligible, the draft remains unpublished.
 Later sign-ins cannot add recipients. Published content is immutable, and the
@@ -280,7 +409,6 @@ response, retry the same command without changing the ID; the server returns
 the original acknowledgement. Publication and acknowledgement commit together.
 The runtime prunes expired messages and read markers after 30 days and keeps
 up to 2,048 command acknowledgements for a 30-day replay window.
-On upgrade, apply migration `0032` and reapply [runtime grants](runtime-grants.sql).
 
 ### Private connection storage
 
@@ -326,10 +454,12 @@ the public web process.
    and protected. No automatic collection or live key rotation is enabled.
 
 In **Admin → Connections** (`/admin/connections`), the owner can see saved API sources
-before admitting them to a pool. Each row shows whether a proxy is assigned and
-which model checks still match the current tester scope and credentials. An unused
+before admitting them to a pool. The **API providers** and **Trash** tabs paginate
+separately; search and state filters apply to the current page. Each card shows
+the proxy binding and model checks that match the current tester scope and credentials. An unused
 source shows its ID until its first successful check, unless it was copied with
-a label from Desktop. Revoked provider keys stay marked as revoked. Opening the list makes no provider requests
+a label from Desktop. Revoked keys remain marked in API providers, not in Trash.
+Opening the list makes no provider requests
 and returns neither secrets nor upstream or proxy URLs.
 
 These storage operations are not routes for reading credentials. Backup-aware
@@ -338,24 +468,51 @@ credentials.
 
 ### Pair a Desktop
 
-1. In **Admin → Connections → Paired devices**, enter a device name and create an
-   invitation. Paste the whole invitation into **Relay Hosted → Review server**
-   on the intended computer within five minutes.
+1. In **Admin → Connections → Desktop → Paired devices**, enter a device name.
+   Connections are included; **View overview**, **View request history** and
+   **Change pool membership** are independent and off by default. Paste the invitation into
+   **Relay Hosted → Settings → Review server** on the intended computer within five minutes.
 2. Check the displayed origin and installation ID. Copy the approval code from
-   that computer into the same invitation in the admin panel and approve access.
-   Creating, approving and revoking require an owner passkey verified within
-   the last two minutes. Keep at most 16 pending or active devices.
-3. Select **View server connections** in Desktop. The grant lasts 24 hours.
-   Each explicit read returns the same safe source metadata as the web list.
-   It grants no customer, pool-management, billing, inference or import access.
+   that computer into the same invitation in the admin panel. Review the
+   permissions again and approve access.
+   Confirm each invitation, approval or revocation with an owner passkey
+   in the current session. Keep at most 16 pending or active devices.
+3. Select **Check access** in Desktop Settings. The grant lasts 24 hours;
+   sections without approval do not read server data. Overview shows rolling
+   24-hour, 7-day or 30-day
+   totals and speed from measured streams. Pool readiness and in-flight
+   activity are current snapshots, independent of the selected period.
+   Usage filters by period, exact model and
+   execution status; up to 32 rows per page, with a 15-minute pagination
+   window. Refresh to start a new window. No customer IDs, API keys, provider
+   prices, raw errors or billing are returned to Desktop.
 4. **Revoke access** on the server to reject subsequent reads immediately.
-   **Forget on this computer** removes only its saved pairing. Pair again with
-   a new invitation after expiry, revocation, or a change of destination.
+   **Forget on this computer** in Settings removes only its saved pairing. Pair again with
+   a new invitation after expiry, revocation, or a change of destination or
+   permissions. Existing connections-only grants do not gain additional access.
 
 Use the server's exact HTTPS origin (HTTP is accepted only for loopback).
 The invitation contains public IDs; the return code identifies the native
 device's verifier, not its credential. Neither can be used as a bearer. The
 web runtime stores no device secret and needs no vault permission for pairing.
+Migrate through `0069` and reapply [runtime](runtime-grants.sql) and
+[inference](inference-grants.sql) grants before starting the updated processes.
+Older servers can still return the legacy overview without the new metrics.
+See the [control API contract](openapi.yaml).
+
+### Change pool membership from Desktop
+
+1. In **Relay Hosted → Pool**, select **Add to pool** or **Remove from pool**.
+   Adding requires an enabled source outside the pool with at least one current
+   model check. Saving or copying a source does not admit it.
+2. Paste the five-minute code into **Admin → Connections → Desktop → Pool review**.
+   Review the device, source and exact models, then confirm with your passkey.
+   Changing those inputs or revoking the device invalidates an unconfirmed code.
+3. Refresh Pool in Desktop to see the acknowledged membership. Adding
+   admits the latest eligible check per model; it leaves prices, model blocks
+   and publication unchanged. Removing stops new work and lets dispatched work
+   finish. The key and proxy stay saved. To add the source again, resume it in
+   the owner panel and run fresh checks.
 
 ### Copy one Desktop API source
 
@@ -371,16 +528,17 @@ zenith-relay-hosted serve-transfers --bind 127.0.0.1:1445 --vault-dir ABSOLUTE_P
 At the TLS edge route only `GET /api/hosted/v1/transfer/status` and
 `POST /api/hosted/v1/transfer/commit` to that loopback port. Pass `Authorization`
 through unchanged; don't rewrite paths, retry the POST, or log bodies or
-authorization. Keep the listener and vault private. Leave
-`POST /api/hosted/v1/admin/source-copy` on `serve`, which reviews metadata only.
+authorization. Keep the listener and vault private. Leave the browser preview
+and confirmation routes on `serve`.
 
-1. In the paired Desktop, choose **Copy an API source to the server** and review
+1. In Desktop Connections, choose **Copy an API source to the server** and review
    its name, server, API endpoint and proxy. Copy the review code to
-   **Admin → Connections → Desktop source copy**. The code contains no key or
+   **Admin → Connections → Desktop → Desktop source copy**. The code contains no key or
    proxy credentials.
-2. Review the device and route, then select **Approve one copy**. A fresh owner
-   passkey is required. The grant is for that source and operation, expires
-   within ten minutes and stops accepting writes if the device is revoked.
+2. Review the device and route, then select **Approve one copy** and confirm it
+   with an owner passkey. The preview needs no separate confirmation. The grant
+   expires within ten minutes or when the pairing ends, whichever is earlier.
+   Retry the same review after a lost reply; it does not extend the grant.
 3. In Desktop, check the approval and select **Copy to server**. Desktop
    verifies its current source matches the review before sending it. If the
    result is unknown, use **Check server result** for the same operation;
@@ -392,6 +550,119 @@ explicit proxy (including credentials), or an explicit direct route. The local
 source is unchanged. The destination appears in Connections outside the pool;
 the copy does not discover models, publish prices or prove reachability.
 Qualification uses the exact reviewed route and never drops an imported proxy.
+Migration `0049` expires unapplied approvals issued under the previous sign-in
+window. It keeps existing pairings and committed copies. Create a new review
+code in Desktop for an expired copy.
+
+### Add an API source in the admin panel
+
+With the same HTTPS transfer worker and grants, route
+`POST /api/hosted/v1/transfer/intake/{operation_uuid}` to that worker. Pass
+`Origin` and `Authorization` unchanged, limit bodies to 3,073 bytes, and disable
+body/credential logs and POST retries. Keep `/api/hosted/v1/admin/*` on `serve`.
+Then set `web_api_intake = true` under `[server]` and restart `serve`.
+
+1. Open **Connections → API providers → Add API connection**. Enter the
+   label, native Responses `/v1` endpoint, provider key, and direct or proxy
+   route. If using a proxy, include any authentication in the write-only URL.
+   **Models** accepts optional IDs awaiting verification.
+2. Save with a fresh owner passkey. Approval covers this operation and its
+   exact upload for two minutes in the current session. The transfer worker
+   stores the key, any proxy and the receipt together. A lost reply can be
+   checked in the same browser tab without resending credentials.
+3. [Check a model](#check-a-model-in-the-admin-panel) in the local HTTPS panel
+   or use the [qualification CLI](#first-funded-text-request). Saving never
+   contacts the provider.
+
+### Check a model in the admin panel
+
+After migration `0060`, reapply the runtime and qualifier grants. On a local
+HTTPS qualification installation set `web_model_checks = true` under `[server]`.
+Run `zenith-relay-hosted qualify-text --watch --vault-dir PRIVATE_DIR` under the
+separate qualifier login with the vault settings below. The worker has no
+HTTP listener. Keep the installation's [outbound approval](#direct-https-outbound-approval).
+An external proxied destination is still unsupported.
+
+In **Connections → API providers**, open a web-saved connection's **Models →
+Check model**. Enter the exact upstream ID and reviewed input/output charge
+bounds, then confirm with a passkey. These bounds are not a context window.
+The worker reads the saved route's catalog and, if the exact model is present,
+sends one short non-streaming Responses request. Approval and status reads do
+not contact the provider. Scope, connection or credential changes can invalidate
+an approval before dispatch. An interrupted check is never sent again
+automatically; reopen **Models** to read the result. For this path the closure
+bound is 65 seconds and evidence lasts at most one hour within the active scope.
+
+A verified model stays outside the pool until separately admitted. To offer
+it to testers, set prices and publish from **Pool**.
+
+### API source lifecycle
+
+In **Admin → Connections**, confirm each change with an owner passkey:
+
+| Action | Result |
+| --- | --- |
+| **Pause** / **Resume** | Stop new permits and checks, or resume after draining. Membership and current evidence are retained. |
+| **Actions → Remove from pool** | Pause and remove all admitted bindings for this source. Keep the key and proxy; previous checks no longer authorize the source. |
+| **Actions → Move to trash** | Keep the key and proxy for recovery. Exclude the source from routing and checks. |
+| **Restore outside pool** | Return to Connections paused, without previous membership or check authority. To serve again, resume, qualify a new binding, admit it in **Pool → Members**, and set its purchase rates. |
+| **Delete permanently** | From trash, after all work drains, revoke this source's provider key and proxy slots together. The source cannot be restored or reused; receipts and historical accounting remain. |
+
+Use **Refresh status** to reread draining work. Accepted requests still settle
+at their original rates. A compatible admitted supplier can serve the same
+published offer; if none remains, the offer is unavailable until qualified,
+priced supply returns. Lifecycle changes do not create or reprice an offer.
+After a lost response, **Check result** reads the exact revisioned receipt
+without repeating the action.
+
+Removal revokes live vault references, not the credential at its issuer.
+Unreferenced ciphertext remains subject to private vault cleanup and backup
+retention. Reapply later removals on an isolated restore before any cutover.
+
+### Pool members and activity
+
+In **Pool → Members**, choose **Add member**, select the verified connection
+and model, and confirm with a passkey. Open the card's pencil, turn individual
+admitted models on or off, then confirm **Save** with one passkey. **Settings**
+holds pause, resume and removal for the whole connection. Price and publication
+changes stay in **Model rules**.
+
+A disabled model cannot get a new dispatch permit on this source. Already
+dispatched requests keep their original accounting. If another eligible supplier
+remains, the existing offer stays available at the same price; otherwise it is
+unavailable until qualified supply returns. Settings apply to the exact model ID
+and survive a new check or readmission of the same source. Re-enabling a model
+does not admit, qualify or publish it. If the settings changed elsewhere, review
+the refreshed list; if a reply was lost, **Retry** checks the same command.
+
+In **Pool → Members**, open **Pool rotation settings**. **Automatic** uses the
+lowest-cost eligible connection. **Primary & reserve** uses the first ready
+connection in the saved order, even if another costs less. Reorder by dragging
+or using the arrows; confirm **Save** with a passkey. New holds pin the committed
+rotation revision. A policy change does not reprice or restart work.
+
+The board shows outstanding dispatches on the actual serving connection. It can
+briefly show work draining on a removed member, and never predicts the next one.
+Apply the current [runtime-grants.sql](runtime-grants.sql) after migration `0065`.
+
+### Model display order
+
+In **Pool → Model rules**, use the group and model handles to move a whole
+publisher group or move a model within its group. A focused handle accepts
+arrow keys, Home and End. Collapsing a group is local. The saved order also
+applies to the customer's **Models** and **Status** after access filtering.
+Hidden models retain their positions. Order does not change tariffs, grants
+or execution.
+
+Migration `0062` adds the layout. Apply the current
+[runtime-grants.sql](runtime-grants.sql) after migrating.
+With the migration credential, run
+`zenith-relay-hosted import-catalog-publishers --file REFERENCE.json` to
+replace the publisher projection from a trusted local Relay reference catalog.
+It accepts the same JSON as Relay's metadata parser; a minimal example is
+`{"openai/example-model":{"name":"Example model"}}`. The file must be at most
+64 MiB. Only model IDs and publisher IDs are saved. Unmatched models appear
+in **Other**; a reference import does not discover or publish models.
 
 ### Wallet credits
 
@@ -413,10 +684,11 @@ methods, and choose who pays the fee from the adapter's supported options.
 Set the USD minimum, quick amounts, custom entry and open-invoice limit.
 **Save draft → Check draft → Publish** is explicit; the check applies to the
 saved revision for ten minutes. Methods with no eligible amounts stay in the
-draft but are omitted from checkout. Publication and disabling require a recent owner
-passkey verification. Changing an accepted term retires the old method ID for
-new confirmations; accepted invoices retain their amounts and binding. Reordering
-unchanged methods or changing the open-invoice limit keeps their existing quotes.
+draft but are omitted from checkout. Confirm publication or disabling with the
+passkey for that action; no new sign-in is needed. Changing an accepted term
+retires the old method ID for new confirmations; accepted invoices retain their
+amounts and binding. Reordering unchanged methods or changing the open-invoice
+limit keeps their existing quotes.
 
 A personal workspace starts with an empty USD wallet. The private payment
 worker accepts a paid invoice only through its configured verifier. The
@@ -446,7 +718,7 @@ In **Balance → Payment history**, a tester can request part or all of a
 credited sandbox top-up in whole USD cents, excluding the processing fee.
 Each payment has at most one open request. The request does not affect the wallet.
 In **Admin → Overview → Refunds** (`/admin/payments`), approve or decline the
-case after a recent passkey verification. Approval reserves the amount only
+case with a passkey confirmation for that decision. Approval reserves the amount only
 if both the payment's remaining refundable credit and the wallet cover it.
 Balances separate inference and refund reserves.
 
@@ -465,7 +737,7 @@ The [text worker](inference.openapi.yaml) serves the models the owner publishes
 to the current named testers. Nothing is seeded. The web process cannot read a
 provider credential, run a model check or send inference.
 
-1. Provision synthetic source material as above and approve a tester scope in
+1. Save a synthetic source as above and approve a tester scope in
    `/admin`. Create separate `CONNECT`-only qualifier and inference logins.
    As the migrator, apply [qualification-grants.sql](qualification-grants.sql)
    with `psql -v ON_ERROR_STOP=1 -v qualification_role=relay_qualifier -f hosted/server/qualification-grants.sql`
@@ -501,8 +773,10 @@ provider credential, run a model check or send inference.
    operator work, never a customer request or charge.
 4. Open **Pool → Members** at `/admin/pools`. Add the verified model to the pool,
    then open **Model rules**. Select a source and save its **Purchase prices**
-   for input, cache reads and output (USD per million tokens). Its optional
-   **API default markup (%)** applies across that connection's models. A blank
+   for input, cache reads and output (USD per million tokens). You can also click
+   the model count on the source card under **Connections → API providers** to
+   edit the same prices for its admitted models. The **API default markup (%)**
+   shown once in that dialog applies across the connection's models. A blank
    default makes no proposal; explicit zero proposes the purchase price.
    - **Fixed prices:** complete all three selling rates and save them.
    - **Use API defaults** or **Model markup:** choose **Review prices**. The
@@ -615,12 +889,61 @@ not these short-lived copies, in backups. Report reads never send inference.
 
 #### Model status
 
-Apply migration `0031` and reapply [runtime-grants.sql](runtime-grants.sql).
-`/app/status` uses the same authorized catalog as `/app/models` and shows own
-recorded requests and cache reads for rolling 24h/7d. Withdrawal removes the row
-on refresh. There are no live latency samples or continuous monitor in this
-qualification installation, so unsampled values and intervals stay neutral.
-Status reads never contact providers.
+`/app/status` follows `/app/models` order and shows the customer's recorded
+requests, cache reads and measured completion time for rolling 24h/7d.
+The worker measures from the start of dispatch preparation after reservation
+to a validated completion, before settlement, for JSON and streaming.
+The displayed average covers measured completions only and is not time to first
+token. No samples are backfilled from receipts. Missing values stay neutral.
+Withdrawal removes the row on refresh. Status reads never contact providers.
+
+After migration `0063`, reapply [runtime-grants.sql](runtime-grants.sql) and
+[inference-grants.sql](inference-grants.sql) before restarting their processes.
+Migration `0066` also requires the current runtime grants. The web maintenance
+loop removes timings after 168 hours and availability slots after their full
+interval leaves the 7-day window, without changing usage or balances.
+
+To collect availability, give a dedicated PostgreSQL login (no group
+memberships) the [model monitor grants](model-monitor-grants.sql):
+`psql -v ON_ERROR_STOP=1 -v model_monitor_role=relay_monitor -f hosted/server/model-monitor-grants.sql`.
+Set `ZENITH_RELAY_HOSTED_MODEL_MONITOR_DATABASE_URL_FILE` to its private DSN
+file and run `zenith-relay-hosted collect-model-status --prometheus 127.0.0.1:9090`
+with the installation's `ZENITH_RELAY_HOSTED_CONFIG`. Use a private Prometheus
+listener on numeric loopback. Schedule this one-shot command externally (for
+example, every five minutes), after qualifying the independent probe feed.
+`serve` does not run it.
+
+The feed is `relay_hosted_model_probe_success{publication_id="<UUID>"}`.
+Publish one `1` (healthy) or `0` (failed) per UTC five-minute bin, timestamped
+at the actual completion of a separately qualified check for that publication.
+Omit unknown outcomes. Preserve the event timestamp; do not re-stamp a cached
+gauge at each scrape. Scrape success, catalog checks and customer requests
+are not probe results. One unambiguous series must cover all six bins:
+all healthy → operational, all failed → unavailable, mixed → degraded.
+Missing bins, duplicate observations, invalid values and duplicate series leave
+the publication's slot unknown.
+
+The collector uses the database clock and queries raw samples for at most
+the last two completed half-hours, via
+[Prometheus instant range-vector queries](https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries).
+It sends only currently eligible publication IDs, without credentials, request
+retries, redirects or proxies; each response is limited to 128 KiB and each run
+to 30 seconds. Malformed or annotated query results fail closed. Output
+contains counts only. An accepted slot can be an identical retry; a conflict
+keeps the first observation. Previously accepted slots survive a later query
+failure.
+
+- `model_monitor_targets(origin)` returns up to 64 configured `items`
+  (`model`, `publication_id`, `published_at_ms`), or `{"error":"status_capacity"}`
+  without partial results. A target is not evidence of availability. Price edits
+  preserve the publication ID; withdrawal and republication replace it.
+- `attest_model_status(origin, publication_id, slot_at, state)` accepts
+  `operational`, `degraded` or `unavailable` for a complete UTC half-hour.
+  `recorded` also acknowledges an identical retained result for the current
+  publication. `conflict` means the slot already has a different result;
+  `inactive` means the installation/scope/publication is no longer current;
+  `invalid` includes pre-publication, incomplete, expired or unobserved slots
+  submitted an hour or more after their end. Skip slots without evidence.
 
 #### Native text streaming
 
@@ -715,41 +1038,76 @@ Install the web package's Playwright Chromium or set `PLAYWRIGHT_CHROMIUM_EXECUT
 The test uses a fresh browser profile and a virtual authenticator, not a real passkey.
 With the same web build and browser, run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test customer_identity -- --ignored`
 for owner approval, customer login and checkout against the built site. It checks
-draft isolation, passkey and check expiry, ordered methods, both fee choices,
+origin, CSRF, session and intent binding, one-use assertions and receipt recovery
+after a lost response across qualification and payment actions. The loopback
+issuer counts actual calls: busy starts preserve pending attempts; stale and
+expired callbacks never exchange a code; expiry during exchange creates no
+session. Checkout checks draft isolation, changed revisions, check expiry,
+ordered methods, both fee choices,
 fixed and custom amounts, cap reduction, and retirement without cancelling
 accepted invoices. It also checks quote expiry, lost browser and merchant replies,
 cross-wallet reads, the concurrent open-invoice cap and a verified $10.00 credit
 for one $10.50 payment, including history after a restart. It reopens the same
 invoice twice after quote expiry and rejects cross-wallet, mismatched, expired
-and paid handoffs. The same journey checks
-notice publication, rollback, audience cutoff, private read markers and expiry.
-It requests a $2 refund from that $10 credit, verifies fresh owner proof and
+and paid handoffs. The same journey checks notice revision and session binding,
+rollback, receipt recovery, audience cutoff, private read markers and expiry.
+It requests a $2 refund from that $10 credit, verifies the exact decision and
 replays a lost approval response with the same operation ID. Retiring the
 original method does not stop the refund. A lost merchant reply keeps $2
 reserved until lookup posts the refund once. It also checks failure releases
 the reserve, declining creates no posting, and payment history stays isolated
 across wallets after restart.
+The journey also checks suspension, reinstatement and closure through the
+owner browser, exact receipt lookup after a lost response, access isolation,
+and denial of case reads and writes by a valid paired Desktop.
+Run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test owner_recovery -- --ignored`
+for concurrent replacement attempts, old-key and session denial, one audit
+receipt and an unchanged funded wallet. The normal listener exposes no recovery
+route, and the fenced restore refuses the local command.
+Run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test owner_passkeys -- --ignored`
+for backup enrollment, sign-in with both keys, rejection of foreign-session and
+replayed challenges, and competing revocations of the last two keys.
 Run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test first_funded_request -- --ignored`
 for atomic source/proxy provisioning, idempotent replay, qualification through a counting proxy, owner
 publication in the browser, a verified USD 10 credit, a USD 2 hold, a USD 1.20
 charge for 50,000 tokens across price changes, a separate USD 0.31 purchase
 expense pinned at dispatch, linked customer receipts, monthly cap enforcement,
-withdrawal, duplicate delivery and recovery across worker restarts. Two-source
-pricing checks exact values, stale inputs, replay and customer visibility. The cap
-scenario checks a one-microUSD shortfall, exact fit and outstanding cost after
-the customer hold has closed.
+withdrawal, duplicate delivery and recovery across worker restarts. Model and
+limit writes check one-use passkey confirmation, audit attribution and receipt
+recovery without re-signing in. Two-source pricing checks exact values, stale
+inputs at confirmation and customer visibility. The cap scenario checks a
+one-microUSD shortfall, exact fit and outstanding cost after the customer hold
+has closed. The browser pauses and resumes an API source, checks a lost response
+without a second change, and verifies that a revoked source offers no controls.
 Both tests pair a native device, check inventory before/after restart, and revoke
 the grant. They use synthetic identities and credentials; neither contacts a real provider or merchant.
+Run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test request_selection -- --ignored model_monitor`
+for scoped grants, rolling retention, and collector runs against a counting
+loopback Prometheus fixture. It covers recovery and outage readings, neutral
+gaps, conflicts, republication and status reads with no provider calls.
+Run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test desktop_source_copy -- --ignored`
+for one-use approval in the owner browser, exact-plan and device fences, a
+lost-approval reply, atomic native commit, and qualification through the copied proxy.
 
 With PostgreSQL, run `cargo test --locked --manifest-path hosted/server/Cargo.toml --test request_selection -- --ignored`.
 Two counting providers exercise whole-request purchase ranking, cap and capacity
 changes between quote and permit, long cooldowns without replay, fixed customer
 tariffs, stale and incompatible supply, key revocation and actual-supplier fencing.
+The `supply_confirmation_race` filter checks selling edits against permit
+acquisition, cap changes against in-flight purchase accounting, and both
+orderings of a pause and a physical permit. It verifies the original tariff
+through fallback and settlement, unchanged pricing inputs, blocked checks and
+receipt replay.
+The `customer_access_cases` filter checks closure against waiting admission
+and dispatch, release of a queued hold, and exactly-once settlement of a sent
+request and an accepted payment without affecting another workspace.
 The `refund_and_real_inference` filter checks concurrent admission, the shared
 wallet limit, journal rollback and restart recovery of a refund during maintenance
 without consuming a simultaneous inference hold.
 The SSE cases exercise independent qualification, unbuffered text, terminal
 identity, replay, idle timeout, disconnect and recovery after a wallet lock.
+The `device_observation_cases::metrics` scenario exercises the Desktop pool
+snapshot and speed from paced SSE, including scope, retention and unchanged receipts.
 The partial/waiver case waits for the original deadlines (about 65 seconds).
 The `usage_report_cases` filter isolates UTC boundaries, tenant scoping, report
 limits and a late credit between pages. The funded browser journey checks
@@ -770,18 +1128,20 @@ for operation writer isolation, missing and stale observations, sink failure,
 grouping and expiry. The funded browser journey also checks worker failure and
 recovery in Operations without another send or wallet change.
 Use the `diagnostic_capture_cases` filter on `--test request_selection` for
-capture authority/fences, duplicate and concurrent limits, expiry, audit
-recovery, web-session reset and a stream completing with the collector denied.
-The funded browser starts with fresh passkey verification, recovers a lost
-acknowledgement, shows actual milestones and stops without another send or charge.
+capture authority/fences, mutation-free preparation, completed-request rejection,
+duplicate and concurrent limits, expiry, audit recovery, web-session reset and
+a stream completing with the collector denied. The funded browser confirms one
+exact capture, recovers a lost acknowledgement without another sign-in, shows
+actual milestones and stops without another send or charge.
 The `restore_cases` filter on `--test request_selection` also requires
 `pg_basebackup` and `pg_verifybackup` from the PostgreSQL bin directory. It
 starts a verified physical backup on a second loopback port after stopping the
 original, and checks the restored vault against the separately held key. The
-source commits a dispatch, credit, refund and key revocation after the backup.
-The drill checks revocation replay, denied resubmission, preserved holds and
-receipts, and the fence across restart. It uses synthetic effects only; it does
-not measure off-host WAL delivery, recovery time or recoverable data loss.
+source commits a dispatch, credit, refund, key revocation and customer closure
+after the backup. The drill replays the closure from external evidence, checks
+idempotency, denied resubmission, preserved holds and receipts, and the fence
+across restart. It uses synthetic effects only; it does not measure off-host
+WAL delivery, recovery time or recoverable data loss.
 
 With the web build and Chromium, run
 `cargo test --locked --manifest-path hosted/server/Cargo.toml --test desktop_source_copy -- --ignored`.

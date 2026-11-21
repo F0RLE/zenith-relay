@@ -1,6 +1,51 @@
 import { expect } from "@playwright/test";
 import { join } from "node:path";
 
+export async function virtualOwnerKey(page, existingSession) {
+  const cdp = existingSession ?? await page.context().newCDPSession(page);
+  if (!existingSession) await cdp.send("WebAuthn.enable");
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+    protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true,
+    isUserVerified: true, automaticPresenceSimulation: true,
+  } });
+  return { cdp, authenticatorId };
+}
+
+export async function signInOwner(page, origin, status = 200) {
+  const reply = page.waitForResponse(r => r.url() === origin + "/api/hosted/v1/auth/admin/sign-in/verify");
+  await page.getByRole("button", { name: "Sign in with a passkey" }).click();
+  expect((await reply).status()).toBe(status);
+  if (status === 200) await expect(page).toHaveURL(origin + "/admin/overview");
+}
+
+export function ownerAssertion(page, options) {
+  return page.evaluate(async publicKey => {
+    const key = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(publicKey) });
+    return key.toJSON();
+  }, options.publicKey);
+}
+
+export async function renewOwnerSession(page, origin) {
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(origin + "/admin/login");
+  await signInOwner(page, origin);
+  await expect(page).toHaveURL(origin + "/admin/overview");
+}
+
+export async function forkOwnerSession(page, origin) {
+  const context = await page.context().browser().newContext();
+  try {
+    await context.addCookies(await page.context().cookies(origin));
+    await page.context().clearCookies({ name: "__Host-relay_admin" });
+    await page.goto(origin + "/admin/login");
+    await signInOwner(page, origin);
+    return context;
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
+}
+
 export async function checkOwnerSession(origin, owner, foreign) {
   const api = origin + "/api/hosted/v1/";
   const verify = api + "auth/admin/sign-in/verify";
@@ -9,11 +54,7 @@ export async function checkOwnerSession(origin, owner, foreign) {
   const logout = api + "auth/admin/logout";
   const opts = { headers: { Origin: origin } };
   const ctx = owner.context(), request = ctx.request;
-  const login = async (page, status) => {
-    const reply = page.waitForResponse(r => r.url() === verify);
-    await page.getByRole("button", { name: "Sign in with a passkey" }).click();
-    expect((await reply).status()).toBe(status);
-  };
+  const login = (page, status) => signInOwner(page, origin, status);
   await foreign.goto(origin + "/admin/overview");
   await login(foreign, 401);
   await expect(foreign.getByRole("alert")).toBeVisible();
@@ -57,7 +98,7 @@ export async function checkOwnerSession(origin, owner, foreign) {
   await expect(owner.getByText("The service is in setup.", { exact: false })).toBeVisible();
   await expect(owner.getByText("No requests found", { exact: true })).toBeVisible();
   await expect(owner.locator(".report-chart-stack")).toHaveCount(0);
-  await expect(owner.locator(".relay-shell")).toHaveCount(0);
+  await expect(owner.locator(".relay-sidebar a[href='/admin/overview']")).toHaveAttribute("aria-current", "page");
   expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await owner.setViewportSize({ width: 1080, height: 720 });
   if (shots) await owner.screenshot({ path: join(shots, "owner-overview.png") });

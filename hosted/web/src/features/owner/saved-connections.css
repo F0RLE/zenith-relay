@@ -1,0 +1,29 @@
+.hosted-app .saved-connections .owner-resource-toolbar { grid-template-columns: minmax(0, 1fr); }
+.hosted-app .saved-connections .owner-resource-filters { grid-template-columns: minmax(0, 1fr) 160px 40px; }
+.hosted-app .saved-connections .owner-resource-filters:not(:has(.option-menu)) { grid-template-columns: minmax(0, 1fr) 40px; }
+.hosted-app .saved-connections .owner-resource-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.saved-source-state { display: grid; place-content: center; min-height: 44px; padding: 8px 12px; text-align: center; font-size: 13px; color: var(--secondary); }
+.saved-source-card[data-status="error"] .saved-source-state { color: var(--error); }
+.hosted-app .saved-source-card .owner-source-models { border-block-start: 1px solid var(--border); }
+.hosted-app .saved-source-card .owner-source-models:focus-visible,
+.hosted-app .saved-source-card .owner-resource-footer .relay-icon-button:focus-visible { background: var(--accent-soft); color: var(--accent); }
+.hosted-app .saved-connections .relay-icon-button[aria-disabled="true"] { opacity: .55; cursor: default; }
+.hosted-app .saved-connections .source-serving { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.saved-source-name, .source-serving > strong { overflow-wrap: anywhere; }
+.saved-connections-pager { margin-block-start: 16px; }
+.hosted-app .saved-connections .owner-resource-empty { max-width: none; font-size: 14px; }
+.hosted-app .saved-connections .owner-source-dialog .dialog-body { gap: 16px; }
+.hosted-app .saved-connections .owner-source-dialog p { font-size: 14px; max-width: none; }
+.hosted-app .source-markup-editor .catalog-actions { align-items: end; }
+.hosted-app .owner-price-dialog .catalog-edit-prices input { width: 100%; min-width: 0; }
+.hosted-app .saved-connections .device-panel > summary { min-height: 44px; display: list-item; align-content: center; padding-block: 8px; }
+.hosted-app .saved-connections .device-panel + .device-panel { border-block-start: 1px solid var(--border); }
+
+@media (min-width: 640px) {
+  .hosted-app .request-dialog.owner-price-dialog { width: min(760px, calc(100% - 32px)); }
+}
+@container relay-page (max-width: 480px) {
+  .hosted-app .saved-connections .owner-resource-filters { grid-template-columns: minmax(0, 1fr) 44px; }
+  .hosted-app .saved-connections .owner-resource-filters:not(:has(.option-menu)) .owner-resource-search { grid-column: 1; }
+  .hosted-app .saved-connections .owner-resource-filters:not(:has(.option-menu)) { grid-template-columns: minmax(0, 1fr) 44px; }
+}

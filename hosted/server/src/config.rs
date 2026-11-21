@@ -94,6 +94,10 @@ pub struct Auth {
 pub struct Server {
     pub bind: SocketAddr,
     pub public_origin: String,
+    #[serde(default)]
+    pub web_api_intake: bool,
+    #[serde(default)]
+    pub web_model_checks: bool,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +192,12 @@ impl Config {
             && origin.domain() != Some(&auth.admin_rp_id)
         {
             return Err("admin RP ID must be the exact public origin domain");
+        }
+        if c.server.web_api_intake && (origin.scheme() != "https" || c.auth.is_none()) {
+            return Err("web API intake requires HTTPS and owner passkeys");
+        }
+        if c.server.web_model_checks && (!local || origin.scheme() != "https" || c.auth.is_none()) {
+            return Err("web model checks require a local HTTPS qualification installation");
         }
         c.server.public_origin = canonical;
         if let Some(oidc) = &c.customer_oidc {

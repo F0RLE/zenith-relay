@@ -6,6 +6,7 @@ import { OptionMenu } from "../../components/OptionMenu";
 import type { CustomerModel } from "../models/ModelsPage";
 import type { ConnectionAction, OwnerConnection } from "./model";
 import { OwnerResourceCard } from "./OwnerResourceCard";
+import { OwnerSectionHeader } from "./OwnerSectionHeader";
 import { ResourceSelection } from "./ResourceSelection";
 import { OwnerResourceSummary } from "./OwnerResourceSummary";
 import { OwnerSourceDialog } from "./OwnerSourceDialog";
@@ -133,10 +134,10 @@ export function ConnectionsPage({ connections, models, change, active = true, as
     selection.clear();
   }
   return <>
-    <header className="relay-page-header relay-workspace-header"><h1>{t("nav.connections")}</h1>
-      <div className="relay-page-navigation"><div className="relay-tabs" role="group" aria-label={t("connections.connectionType")}>{([["account", "connections.accounts"], ["api", "connections.apiProviders"], ["proxy", "ownerProxies.title"], ["trash", "connections.trash"]] as const).map(([id, label]) => <button key={id} className={tab === id ? "active" : ""} type="button" aria-pressed={tab === id} onClick={() => { setTab(id); setFilter("all"); setDialog(null); setSourceEditor(null); setProxyImportOpen(false); selection.clear(); }}>{t(label)}</button>)}</div></div>
-      <div className="relay-page-actions"><button className="relay-button primary" type="button" onClick={() => { if (tab === "proxy") { setProxyImportOpen(true); return; } if (tab !== "account") { setSourceEditor({}); return; } setName(""); setModelIds(models.map(model => model.id)); setDialog("add"); }}><Plus aria-hidden="true" />{t(tab === "proxy" ? "ownerProxies.import" : "connections.addConnection")}</button></div>
-    </header>
+    <OwnerSectionHeader title="nav.connections" group="connections.connectionType"
+      tabs={[["account", "connections.accounts"], ["api", "connections.apiProviders"], ["proxy", "ownerProxies.title"], ["trash", "connections.trash"]]}
+      tab={tab} select={id => { setTab(id); setFilter("all"); setDialog(null); setSourceEditor(null); setProxyImportOpen(false); selection.clear(); }}
+      action={<button className="relay-button primary" type="button" onClick={() => { if (tab === "proxy") { setProxyImportOpen(true); return; } if (tab !== "account") { setSourceEditor({}); return; } setName(""); setModelIds(models.map(model => model.id)); setDialog("add"); }}><Plus aria-hidden="true" />{t(tab === "proxy" ? "ownerProxies.import" : "connections.addConnection")}</button>} />
     {tab === "proxy" ? <OwnerProxies entries={proxies} accounts={connections.filter(item => item.kind === "account" && !item.trashed)} onChange={onProxiesChange} active={active} importOpen={proxyImportOpen} onImportClose={() => setProxyImportOpen(false)} onImport={() => setProxyImportOpen(true)} /> : <>
     <ResourceControls stats={[{ label: "connections.total", value: inventory.length, icon: <Users aria-hidden="true" /> }, { label: "connections.inPool", value: inventory.filter(item => item.inPool).length, icon: <Layers2 aria-hidden="true" /> }, { label: "connections.paused", value: inventory.filter(item => item.paused).length, icon: <Pause aria-hidden="true" /> }, { label: "connections.inTrash", value: connections.length - inventory.length, icon: <Trash aria-hidden="true" /> }]}
       accounts={inventory} nowMs={Date.parse(asOf)} valuesVisible={valuesVisible} onToggleValues={() => setValuesVisible(value => !value)}

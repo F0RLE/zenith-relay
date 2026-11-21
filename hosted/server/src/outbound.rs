@@ -193,6 +193,10 @@ fn local_endpoint(raw: &str) -> bool {
     })
 }
 
+pub(crate) fn valid_text_endpoint(raw: &str) -> bool {
+    https_endpoint(raw) || local_endpoint(raw)
+}
+
 fn https_endpoint(raw: &str) -> bool {
     canonical_endpoint(raw).is_some_and(|u| {
         u.scheme() == "https"

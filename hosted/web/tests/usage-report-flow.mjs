@@ -4,6 +4,7 @@ import { readFixture } from "../../test-support/files.mjs";
 import { join } from "node:path";
 import { checkOwnerOverview } from "./owner-overview-flow.mjs";
 import { checkOwnerUsage } from "./owner-usage-flow.mjs";
+import { balanceLink, navigateCustomer } from "./customer-shell.mjs";
 
 export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, exchange }) {
   const client = a.context().request, foreign = b.context().request;
@@ -33,7 +34,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
     return (await r.json()).data.report_id;
   };
   const endpoint = "usage/requests", overview = "usage/reports/";
-  const wallet = a.locator(".entry-wallet dd");
+  const wallet = balanceLink(a);
   const requestChart = a.getByRole("link", { name: "Requests: time chart", exact: true });
   const spend = a.getByRole("article", { name: "Posted charges", exact: true }).locator(".overview-chart-summary");
   const chartData = a.getByRole("table", { name: "Chart data" });
@@ -46,7 +47,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
   await a.goto(origin + "/app/overview");
   const old = await reportId(requested);
   await expect(spend).toHaveText("1.204000 USD");
-  await expect(wallet).toHaveText("8.796000 USD");
+  await expect(wallet).toHaveAccessibleName("Balance: 8.796000 USD");
   await expect(chartData.getByRole("row")).toHaveCount(25);
   const snapshot = await read(overview + old);
   expect(snapshot.from_ms + 86400000).toBe(snapshot.as_of_ms);
@@ -127,7 +128,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
     if (process.env.RELAY_TEST_HISTORY_UI_CAPTURE)
       await a.screenshot({ path: join(process.env.RELAY_TEST_HISTORY_UI_CAPTURE, `usage-${width}-${colorScheme}.png`), fullPage: true });
   }
-  await a.getByRole("link", { name: "Overview", exact: true }).click();
+  await navigateCustomer(a, "Overview");
   await expect(spend).toHaveText("1.204000 USD");
   await a.goBack();
   await expect(a).toHaveURL(selectedUrl);
@@ -152,7 +153,7 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
     await a.setViewportSize({ width, height: 780 });
     await a.evaluate(theme => localStorage.setItem("relay-hosted-theme", theme), theme);
     await a.reload();
-    await expect(a.locator(".hosted-entry")).toHaveAttribute("data-theme", theme);
+    await expect(a.locator('.hosted-app[data-workspace="customer"]')).toHaveAttribute("data-theme", theme);
     await expect(explanation).toBeVisible();
     expect(await explanation.evaluate(el =>
       document.documentElement.scrollWidth <= innerWidth && [...el.querySelectorAll("a,button,code")].every(node =>
@@ -179,9 +180,9 @@ export async function checkUsageReport({ a, b, owner, origin, api, wait, issue, 
   expect(await csv(version)).toBe(pinnedFile);
   await a.reload();
   await expect(a.locator(".report-totals").getByText("1.204000 USD")).toBeVisible();
-  await a.getByRole("link", { name: "Overview", exact: true }).click();
+  await navigateCustomer(a, "Overview");
   await expect(spend).toHaveText("1.204000 USD");
-  await expect(wallet).toHaveText("8.799400 USD");
+  await expect(wallet).toHaveAccessibleName("Balance: 8.799400 USD");
   const refresh = captured();
   await a.getByRole("button", { name: "Refresh usage", exact: true }).click();
   const current = await reportId(refresh);

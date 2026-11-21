@@ -39,7 +39,7 @@ function metrics(v: unknown, expectedSpan: number): StatusMetrics {
     || (state === "unavailable" && operationalMs !== 0)
     || (requests === null) !== (requestMs === 0) || (requests ?? 0) > 8192
     || cacheSamples > (requests ?? 0) || (cacheBps === null) !== (cacheSamples === 0) || (cacheBps ?? 0) > 10000
-    || latencySamples > (requests ?? 0) || (latencyMs === null) !== (latencySamples === 0))
+    || latencySamples > (requests ?? 0) || (latencyMs === null) !== (latencySamples === 0) || (latencyMs ?? 0) > 90_000)
     throw new Error("Invalid model status coverage");
   return { state, spanMs, monitoredMs, operationalMs, requestMs, requests, latencyMs, latencySamples, cacheBps, cacheSamples };
 }
@@ -55,12 +55,12 @@ export function parseModelStatus(data: unknown, hours: StatusHours) {
     if (!record(row) || row.from_ms !== startMs || row.to_ms !== endMs) throw new Error("Invalid model status interval");
     return { startMs, endMs };
   });
-  let previous = "";
+  const seen = new Set<string>();
   const items = data.items.map((row: unknown) => {
     if (!record(row) || typeof row.model !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(row.model) ||
-      row.model <= previous || !Array.isArray(row.history) || row.history.length !== windows.length)
+      row.model.trim() !== row.model || seen.has(row.model) || !Array.isArray(row.history) || row.history.length !== windows.length)
       throw new Error("Invalid model status row");
-    previous = row.model;
+    seen.add(row.model);
     const history = row.history;
     return { model: row.model, metrics: metrics(row.metrics, span),
       intervals: windows.map((w, i) => ({ ...w, metrics: metrics(history[i], step) })) };

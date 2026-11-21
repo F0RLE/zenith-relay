@@ -1,4 +1,5 @@
 use super::*;
+use customer_access_cases::{access_state, close_account};
 use customer_reader::{Reader, setup_reader};
 use refund_race::fixture::Merchant;
 use zenith_relay_hosted::payments::{
@@ -65,7 +66,7 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
     .unwrap();
     let refund = refund_race::request(&customer, early_payment, REFUND).await;
     assert_eq!(
-        refund_race::review(&customer.pool, refund, Uuid::new_v4(), "approve").await,
+        refund_race::review(&customer.pool, refund, Uuid::new_v4(), "approve", Some(1)).await,
         "applied"
     );
     let queued_invoice: Uuid = sqlx::query_scalar(
@@ -151,6 +152,30 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
     assert_eq!(revoked, "revoked");
     let revoked_at = key_revocation(&f.admin, f.key).await.unwrap();
     assert_eq!(key_workspace(&f.worker, f.key, &f.bearer).await, None);
+    let closure = Uuid::new_v4();
+    assert_eq!(
+        close_account(&customer.pool, f.space, closure, Some(2)).await,
+        "applied"
+    );
+    let closed = access_state(&f.admin, f.space).await;
+    assert_eq!((&*closed.0, closed.1), ("closed", 2));
+    let exported = f
+        ._cluster
+        .cli("fixture_boot", &fixture_config_file(&f._cluster))
+        .args([
+            "export-customer-access",
+            "--installation",
+            &installation.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let evidence = snapshot.temp.path().join("customer-access.json");
+    fs::write(&evidence, exported.stdout).unwrap();
 
     // Never run a second active authority. The replacement is a direct
     // PostgreSQL restore on a new loopback port, with no Relay listeners.
@@ -199,6 +224,10 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
     assert_eq!(owner_mode(&runtime).await.as_deref(), Some("qualification"));
     assert_eq!(key_revocation(&restore, f.key).await, None);
     assert_eq!(
+        access_state(&restore, f.space).await,
+        ("active".into(), 1, None)
+    );
+    assert_eq!(
         key_workspace(&worker, f.key, &f.bearer).await,
         Some(f.space)
     );
@@ -221,6 +250,22 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
     )
     .unwrap();
     let operation = Uuid::new_v4();
+    let replay_access = |op: Uuid| {
+        snapshot
+            .cli("fixture_boot", &cfg)
+            .args([
+                "restore-customer-access",
+                "--installation",
+                &installation.to_string(),
+                "--operation",
+                &op.to_string(),
+                "--receipts",
+            ])
+            .arg(&evidence)
+            .output()
+            .unwrap()
+    };
+    assert!(!replay_access(operation).status.success());
     let fence = |role, installation: Uuid, operation: Uuid| {
         snapshot
             .cli(role, &cfg)
@@ -264,6 +309,20 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
         Some(operation),
     );
     assert_eq!(fence_state(&restore).await, fenced);
+    assert!(!replay_access(Uuid::new_v4()).status.success());
+    for count in [1, 0] {
+        let out = replay_access(operation);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout)
+                .contains(&format!("Applied {count} customer access receipts"))
+        );
+        assert_eq!(access_state(&restore, f.space).await, closed);
+    }
     for ready in [
         db::check_runtime(&runtime, ORIGIN).await,
         inference::check_worker(&worker, ORIGIN).await,
@@ -396,5 +455,12 @@ async fn physical_restore_fences_missing_claims_and_keeps_obligations() {
         Err("installation restore is fenced")
     );
     assert_eq!(key_revocation(&restore, f.key).await, Some(revoked_at));
+    assert_eq!(access_state(&restore, f.space).await, closed);
     payment::assert_wallet_with_holds(&restore, f.space, CREDIT - reserved, reserved, 3).await;
+}
+
+fn fixture_config_file(cluster: &Cluster) -> std::path::PathBuf {
+    let path = cluster.temp.path().join("export.toml");
+    fs::write(&path, include_str!("../../config.example.toml")).unwrap();
+    path
 }

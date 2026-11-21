@@ -28,9 +28,13 @@ isolation, idempotency and restart recovery.
 [Customer reports](../../hosted/server/README.md#customer-reports) share a saved
 selection across Overview, filtered request pages and direct CSV. A posted credit
 appears on refresh without changing an open report.
-[Model status](HOSTED_RELAY_ARCHITECTURE.md#model-status-history) reads the current
-customer catalog and evidence without provider sends. Continuous collection
-and measured latency still need qualification. [In-app service notices](../../hosted/server/README.md#in-app-service-notices)
+[Model status](HOSTED_RELAY_ARCHITECTURE.md#model-status-history) follows the
+customer catalog order and reads recorded request metrics, including measured
+completion latency, without provider sends. The opt-in [monitor collector](../../hosted/server/README.md#model-status)
+attests complete availability slots from private Prometheus evidence for the
+current publication. Loopback tests cover gaps, outage and recovery, replay and
+republication. Live probe and alert deployment remain open.
+[In-app service notices](../../hosted/server/README.md#in-app-service-notices)
 support owner drafts, passkey-confirmed publication and private customer read
 markers in the restricted installation. Public fanout and external delivery remain open.
 The text worker saves validated terminal status and counts before wallet
@@ -47,13 +51,16 @@ in one commit with a replayable receipt; a separate qualifier verifies a
 named model through the pinned direct or proxy route. **Connections** shows the owner
 stored API sources, their proxy bindings and current model checks without probing them.
 From the same page the owner can [pair a Desktop](../../hosted/server/README.md#pair-a-desktop)
-for explicit read-only inventory access. The customer journey exercises approval
-and revocation against the native device client; pairing does not copy a source.
+for read-only inventory and optional Overview and Usage access. The customer
+journey exercises scoped approval and revocation against the native device client;
+pairing does not copy a source.
 The owner's **Pool** page admits verified inventory, saves source purchase rates
 and defaults, and reviews fixed or marked-up selling rates before publishing to
 the named testers. Customer Models and the key catalog read that publication.
-The restricted worker uses shared Automatic rotation to choose the lowest
+The restricted worker defaults to shared Automatic rotation to choose the lowest
 whole-request cost among ready, compatible suppliers at one published tariff.
+The owner can save **Primary & reserve** and member order from Pool → Members.
+That strategy ranks eligible connections in the saved order for new holds.
 PostgreSQL pins the eligible inventory and rechecks the selected supplier before
 dispatch. [Two counting suppliers](../../hosted/server/tests/request_selection.rs)
 cover cost selection, cap and capacity races, cooldown, stale approvals and supplier fencing.
@@ -62,8 +69,17 @@ retained supplier bound after a lost acknowledgement and restart.
 Losing one credential does not remove the listing while compatible supply remains;
 withdrawal and expired customer approval still deny new execution.
 Identity approval alone cannot enable inference or public registration.
-Account import, backup-aware collection/restore, passkey recovery and sensitive-action
-step-up for other privileged actions, public identity methods and checkout, public sale
+[Local owner recovery](../../hosted/server/README.md#recover-owner-access)
+replaces lost passkeys without changing the service or customer authority.
+[Owner passkey management](../../hosted/server/README.md#manage-owner-passkeys)
+adds verified backups and revokes individual keys and their sessions.
+[The owner action matrix](HOSTED_RELAY_ARCHITECTURE.md#owner-confirmation-by-action)
+lists the actions that require single-use, session- and intent-bound passkey confirmation.
+[Customer access cases](../../hosted/server/README.md#customer-access-cases)
+support per-workspace suspension, reinstatement and closure. Reinstatement does
+not reactivate old sessions or keys. An isolated restore can replay access
+decisions from independently preserved receipts.
+Account import, automated off-host recovery, public identity methods and checkout, public sale
 and scheduled tariff increases, retained aggregate reports/exports and deployment
 qualification remain open.
 [Desktop qualification](../project/ROADMAP.md#current-confirmation-scope) continues separately.
@@ -79,7 +95,7 @@ identifies what stays closed without evidence. Development and release commands 
 | Starting point in this checkout | What the server must supply |
 | --- | --- |
 | [Core ingress](../../crates/relay-core/src/gateway.rs), [runtime](../../crates/relay-core/src/runtime.rs) and [usage callback](../../crates/relay-core/src/usage.rs) | Reuse selection, codecs and observations. The loopback router, single-key LAN wrapper and callback are not tenant admission, a durable dispatch permit or an accounting journal. |
-| [Native device client](../../crates/relay-hosted-device/src/lib.rs), [Desktop pairing](../../desktop/src-tauri/src/launcher/hosted_device.rs) and [core host-management fixture](../../crates/relay-core/tests/host_management.rs) | Approved devices can read server inventory. Add separately approved source/proxy transfer and aggregate reads; the development preview is not authority for either. |
+| [Native device client](../../crates/relay-hosted-device/src/lib.rs) and [Desktop pairing](../../desktop/src-tauri/src/launcher/hosted_device.rs) | Approved devices read server inventory and can separately be granted overview and safe usage history. Static source/proxy copy uses a separate approval. Explicit pool membership changes remain open. |
 | [Public config](../../hosted/server/openapi.yaml), [web entry](../../hosted/web/src/main.tsx) and [preview snapshot type](../../hosted/web/src/features/app/data.ts) | Preserve the closed production entry. Customer and owner reads and acknowledged writes need their own authority; never serialize the combined development snapshot. |
 
 ## Hosted multi-user Relay
@@ -421,8 +437,27 @@ owner/device schema and `tests/admin_auth.rs`.
 - **H05.01 — First owner:** server-local, installation-bound, single-use enrollment; atomic credential/owner assignment.
 - **H05.02 — WebAuthn:** verified library-backed RP/origin, discoverable-credential and user-verification contracts.
 - **H05.03 — Sessions:** protected cookies, CSRF, expiry/authorization epoch and fresh-proof action matrix.
+  The [customer journey](../../hosted/server/tests/customer_identity.rs) proves
+  one-use confirmation of tester admission, pause, payment-method publication
+  and retirement, refund approval and decline, and exact-revision notice
+  publication without a new session. It checks foreign sessions, wrong
+  intents, changed targets and receipt-only replay.
+  The [funded journey](../../hosted/server/tests/first_funded_request.rs) does the
+  same for model admission, publication, withdrawal and purchase-limit changes,
+  including a price review invalidated by changed purchase inputs. Its diagnostic
+  capture case checks the exact scope, receipt-only replay and the original
+  timeout. The [action matrix](HOSTED_RELAY_ARCHITECTURE.md#owner-confirmation-by-action)
+  separates confirmation from draft edits and capture stop.
 - **H05.04 — Recovery:** second/last-key guards and audited server-local recovery; no weaker public reset.
+  The [lost-passkey journey](../../hosted/server/tests/owner_recovery.rs) verifies
+  same-owner replacement, racing ceremonies, revoked web and Desktop access,
+  and unchanged customer money. The [backup-passkey journey](../../hosted/server/tests/owner_passkeys.rs)
+  verifies enrollment, sign-in with both keys, one-use confirmation and the
+  last-key guard under concurrent revocation.
 - **H05.05 — Desktop:** bounded owner-approved pairing/scopes/revocation and browser step-up for the [limited Desktop scope](HOSTED_RELAY_ARCHITECTURE.md#desktop-hosted-scope); enforce operation-level grants on the server, not full owner authority or an admin bypass.
+  The customer and [native copy journeys](../../hosted/server/tests/desktop_source_copy.rs)
+  verify one-use confirmation of pairing changes and copy approval, receipt-only
+  retries, and a copy fenced by the reviewed device revision and grant expiry.
 
 **Acceptance:** `tests/admin_auth.rs` rejects wrong origin/RP, replay, foreign/stale
 authority, CSRF/fixation and setup races. Paired-device credentials cannot invoke
@@ -438,9 +473,22 @@ auth handlers and `tests/customer_identity.rs`; use H04 wallet initialization.
 - **H06.02 — Registration:** atomically create one person/workspace/wallet per verified subject.
 - **H06.03 — Linking:** prove both identities; prevent reassignment and removal of the last login method.
 - **H06.04 — Sessions:** revocable cookies, CSRF and outage/recovery flows; no owner/device authority.
+  The [qualification journey](../../hosted/server/tests/customer_identity.rs) exercises
+  own browser-session reads and revocation, competing revocations, expiry and
+  restart, including recovery when a revocation reply is lost.
 - **H06.05 — Suspension/closure:** fence new access in the affected workspace, including its keys and queued dispatches. A confirmed closure retains required receipts, lets accepted obligations reconcile and reapplies revocation on restore. A support request alone is not proof of closure or refund.
+  The [owner and customer journey](../../hosted/server/tests/customer_identity.rs)
+  covers suspension, reinstatement, closure, stale revision and a lost response.
+  [PostgreSQL cases](../../hosted/server/tests/request_selection.rs) exercise
+  waiting admission and settlement, and replay a post-backup closure on an
+  isolated restore.
 - **H06.06 — Abuse/recipients:** bounded attempts without enumeration/lockout; enforce service mode and qualification scope.
-  External recipients need separate consent, proof and revocation under HD-13.
+  The [restricted sign-in profile](../../hosted/server/README.md#sign-in-limits)
+  bounds starts and exchanges separately and checks a callback's scope before
+  contacting the issuer. The local journey verifies throttling, one-use state,
+  stale revisions and expiry during exchange. Public ingress and live issuer
+  acceptance remain open; external recipients need consent, proof and revocation
+  under HD-13.
 
 **Acceptance:** `tests/customer_identity.rs` covers all adapters, callback/link races,
 last-login protection, redirects/CSRF, suspension, recipient changes and scope spoofing.
@@ -454,19 +502,37 @@ No second wallet, email-based merge or customer leakage. Authorize live login se
 
 - **H07.01 — Inventory:** scoped account/API sources, secret generations, refresh and health; saving is not pool admission.
 - **H07.02 — Lifecycle:** separate add/reauthenticate/park/enable/disable/drain/trash/restore/remove; fence dispatch and ownership.
+  [Static API pause, resume, park, trash, restore and removal](../../hosted/server/README.md#api-source-lifecycle)
+  are implemented. The funded browser journey and `supply_confirmation_race`
+  cover confirmation, lost receipts, draining, retired bindings and unchanged
+  settlement. Removing drained trash revokes both live secret slots; storage
+  retention and recovery qualification remain separate. The OAuth lifecycle remains open.
 - **H07.03 — Parity:** reuse local validators for controls, proxies, automations and request/publication policies.
+  [Pool Members](../../hosted/server/README.md#pool-members-and-activity) uses the
+  existing source lifecycle and shows observed dispatches. The restricted worker
+  supports Automatic and Primary & reserve with revisioned, passkey-confirmed
+  member order. Counting suppliers cover the policy/hold race, restart, busy
+  primary and unchanged customer tariff. Round robin, request shares and
+  quota-aware modes still need Hosted qualification.
 - **H07.04 — Catalog:** separate granted customer routes from bounded public descriptors/tariffs at `GET /public/models`.
   Preserve freshness/privacy; prices do not belong in `/public/config`, and aliases add no capacity.
-  Implement the canonical publisher grouping, `modelDisplayOrder` and role-filtered
-  projections from [pool model controls](HOSTED_RELAY_ARCHITECTURE.md#pool-model-controls-and-catalog-order).
+  [Restricted model display order](../../hosted/server/README.md#model-display-order)
+  is server-owned and shared by the owner editor, customer Models and Status.
+  Anonymous publication and automatic reference refresh remain open.
 - **H07.05 — Qualification:** require HD-01 and finite billable bounds for paid routes; reuse core discovery/validation.
+  The [local HTTPS model check](../../hosted/server/README.md#check-a-model-in-the-admin-panel)
+  queues a confirmed Responses check for a web-saved source. The separate
+  qualifier uses its saved route; the result does not admit or publish it.
 - **H07.06 — Races:** revision-check refresh/removal, activation, tariffs and draining; reads cannot activate or probe providers.
-  Revision-check display-order mutations too: reject stale writes without losing new discoveries,
-  prices or enablement; reordering is presentation only and never changes routing priority,
-  eligibility, grants or billing. Return the canonical accepted order to all projections.
+  The display-order checks cover a changed inventory, concurrent saves and unchanged
+  price/enablement and key catalog. Stale writes return a conflict and the browser rereads order.
 - **H07.07 — Publication:** implement [SC-06](HOSTED_RELAY_ARCHITECTURE.md#price-and-model-change-walkthrough), preserving holds and fencing failed/superseded activation.
 - **H07.08 — Provider onboarding:** implement [direct server sign-in/import](HOSTED_RELAY_ARCHITECTURE.md#server-side-provider-connection-onboarding), supported-method discovery and protected attempt state. Keep provider credentials separate from customer/admin identity and pool admission; qualify cancellation, duplicate callbacks, wrong-principal reauthentication, expiry and restart.
 - **H07.09 — Model controls:** combine per-member and pool-wide rules with grants and route evidence. Edit inline in Pool rules; Models reads effective publication. Apply the approved standard audience to eligible existing/new customers without manual pool membership; private grants stay separate. Effective disablement preserves historical prices, inventory and already dispatched outcomes.
+  In the restricted API pool, [Members → Edit](../../hosted/server/README.md#pool-members-and-activity)
+  saves per-source model flags with a passkey. The final permit rechecks the flags
+  under the source lock. Already dispatched work settles, and the same offer can
+  continue through another eligible source. The standard audience remains open.
 - **H07.10 — Discovery to projections:** a new core model appears in owner inventory without a frontend edit. Match or withhold grants, publication and tariffs independently. Emit a revision for affected readers; a catalog refresh cannot publish a selling price, invent availability history or trigger generation.
 - **H07.11 — API supply:** version each source's purchase rates and default markup separately from the public offer's selling rule. Adding, removing or repricing a supplier changes the next markup preview, never a saved or published tariff. Reject publication of a stale markup review. Source IDs, purchase rates and markups stay out of public/customer responses.
 - **H07.12 — Supplier controls:** save the owner's optional monthly USD purchase limit per API connection, with revision checks. Provider credit/quota is connector evidence, not a Relay-editable balance.
@@ -662,6 +728,9 @@ their schema/routes and `tests/notifications.rs`, reusing H03 outbox/jobs.
 - **H12.07 — Diagnostics:** implement the [canonical DTO/projections](HOSTED_RELAY_ARCHITECTURE.md#errors-and-production-diagnostics), deduplication, caps and sink-failure handling.
 - **H12.08 — Notices:** implement [SC-05](HOSTED_RELAY_ARCHITECTURE.md#customer-notifications-and-delivery) with consent/recipient rechecks and qualified HD-13 external delivery.
 - **H12.09 — Model status:** project [model monitoring history](HOSTED_RELAY_ARCHITECTURE.md#model-status-history) for currently authorized models on the server; cover a new model mid-window, a telemetry gap, a revoked grant and a status refresh with zero provider sends.
+  Restricted installation tests cover JSON/SSE completion timings, customer
+  isolation, collector coverage, immutable retry and slot expiry. Qualify the
+  live probe feed and ongoing operation under H16.03.
 
 **Acceptance:** `tests/{usage_reports,diagnostics,notifications}.rs` proves snapshot
 reconciliation, late credits, retention, authorization and event/recipient races.
@@ -746,9 +815,16 @@ treating web sign-in as synchronization.
   is covered by [`desktop_source_copy.rs`](../../hosted/server/tests/desktop_source_copy.rs).
   Shared-proxy mapping, batch preview and OAuth ownership handoff remain open.
 - **H15.06 — Desktop console:** implement Overview, Usage, and Connections and pool with explicit active-server identity and operation-scoped pairing. Reuse revision/fresh-proof policy for allowed actions without inheriting full owner authority or overwriting local profiles.
+  Implemented scoped rolling totals and in-flight counts, filtered request
+  history with safe details, the connections inventory and passkey-confirmed
+  pool inclusion/exclusion. Overview reads current pool readiness and measured
+  generation speed without treating missing samples as zero.
+  Installed-app acceptance remains open.
 - **H15.07 — Web investigation:** canonical error/detail routes, nested attempts and bounded capture; no raw-payload or replay console. Desktop reads only granted safe request/error detail, not capture administration.
 - **H15.08 — Web lifecycle:** implement SC-01/06/07/08 setup, readiness, guarded transitions and change/closure confirmations; do not duplicate service administration in Desktop.
 - **H15.09 — Model workspace:** bind publisher-group and within-group ordering, per-model enablement and variant selection to H07/H04. Connections and Pool open the same purchase/sale editor. Test setting an API default, overriding one model, reverting to inheritance and opening the saved draft from the other entry point. The storefront changes only after publication takes effect.
+  The restricted owner editor now saves group/model order with drag and keyboard
+  controls; order changes need no price publication.
 - **H15.10 — Owner notices:** the restricted `/admin/notifications` editor saves without sending and confirms a revision once. The customer journey proves atomic publication and recipient-only reads. Public rollout requires checkpointed fanout; Desktop pairing cannot publish.
 
 **Acceptance:** `tests/{management_parity,transfer_recovery}.rs` and
@@ -791,7 +867,8 @@ web distribution guide and operations acceptance fixtures.
   Unknown telemetry is not zero; keep source maps private and browser/server evidence distinct.
   The [owner operations view](../../hosted/server/README.md#owner-operations)
   reads saved cleanup and reconciliation passes with grouped failure/recovery history.
-  Independent probes and outage alerts remain open.
+  The optional collector ingests bounded availability observations; independent
+  live probes, scheduling and off-host outage alerts remain open.
 - **H16.04 — Backup:** verified off-host pgBackRest/WAL, compatible vault/config and independently recoverable keys.
 - **H16.05 — Restore:** isolated closed ingress; reconcile money, revocations, deletions and uncertainty before reopening.
   [Restore fencing](../../hosted/server/README.md#fence-an-isolated-restore) and

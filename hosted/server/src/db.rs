@@ -1,4 +1,9 @@
+mod customer_access;
+mod reference_publishers;
+
 use crate::config::Config;
+pub use customer_access::{export_customer_access, restore_customer_access};
+pub use reference_publishers::import_catalog_publishers;
 use sqlx::{
     ConnectOptions, PgExecutor, PgPool,
     migrate::Migrator,
@@ -87,6 +92,8 @@ pub async fn connect(c: &Config, dsn: &str) -> Result<PgPool, &'static str> {
         .disable_statement_logging()
         .options([
             ("search_path", "pg_catalog".to_owned()),
+            // A dispatch recheck must see policy changes committed while it waited for a lock.
+            ("default_transaction_isolation", "read committed".to_owned()),
             ("lock_timeout", db.lock_timeout_ms.to_string()),
             ("statement_timeout", db.statement_timeout_ms.to_string()),
         ]);
@@ -188,16 +195,23 @@ pub async fn check_runtime(pool: &PgPool, origin: &str) -> Result<(), &'static s
             has_function_privilege('relay_hosted.key_authority(text,uuid,bytea,bytea,boolean)', 'EXECUTE') OR
             has_function_privilege('relay_hosted.qualified_key_workspace(text,uuid,bytea)', 'EXECUTE') OR
             EXISTS (SELECT FROM pg_proc WHERE pronamespace='relay_hosted'::regnamespace
-                AND proname IN ('connection_page','text_offer_config','reserve_text','claim_text','reserve_published_text','claim_published_text','key_text_models','record_text_check','text_check_step','text_check_scope','finish_text','due_text','key_text_status','close_text','lock_text_authority','record_request_journal',
-                    'source_copy_access','finish_source_copy','source_copy_route','project_text_purchase','text_price_inputs',
+                AND proname IN ('owner_recovery_context','replace_owner_passkey','desktop_pool_capacity',
+                    'connection_page','device_read_context','text_offer_config','reserve_text','claim_text','reserve_published_text','claim_published_text','key_text_models','record_text_check','text_check_step','text_check_scope','finish_text','due_text','key_text_status','close_text','lock_text_authority','record_request_journal',
+                    'source_copy_access','finish_source_copy','source_copy_route','web_source_access','finish_web_source',
+                    'take_web_model_check','step_web_model_check','finish_web_model_check',
+                    'project_text_purchase','text_price_inputs',
                     'request_text_candidates','claim_text_candidate','record_text_cooldown','text_inventory_fenced','text_offer_supply',
                     'text_source_state','text_source_in_flight','text_cost_bound','fence_text_route','text_compatible_supply','text_basis_supply',
                     'text_final_value','value_text_purchase','record_late_text_usage','post_text_credit',
                     'capture_text_terminal','reconcile_text_attempt','capture_text_stream_usage','text_stream_check',
                     'usage_receipt','save_usage_report','usage_report_rows','usage_report_metrics','usage_report_keys',
-                    'usage_report_utc','usage_report_payload','customer_catalog_listings','model_status_snapshot',
+                    'usage_report_utc','usage_report_payload','customer_catalog_listings','model_status_snapshot','own_active_customer_sessions',
+                    'model_monitor_targets','attest_model_status',
+                    'model_display_rows','model_display_view','current_text_pool_rotation','text_pool_rotation_view','pin_text_pool_rotation',
+                    'customer_access_state','apply_customer_access_change','lock_text_customer','replay_customer_access',
                     'claim_checkout_invoice','checkout_invoice_for_lookup','record_checkout_invoice','checkout_summary','local_checkout',
                     'register_checkout_profile','checkout_draft_methods','valid_checkout_draft','publish_checkout',
+                    'lock_owner_payment_session','confirm_owner_payment','lock_supply_signer','source_in_pool','source_serving_view',
                     'claim_payment_refund','pending_refund_lookups','refund_for_lookup','observe_payment_refund',
                     'refund_lines','record_refund_journal','refund_summary','refundable_credit','platform_usage_overview',
                     'owner_usage_session','owner_request_issues','record_request_diagnostic',
@@ -209,13 +223,18 @@ pub async fn check_runtime(pool: &PgPool, origin: &str) -> Result<(), &'static s
             EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = 'relay_hosted'::regnamespace
                 AND proname IN ('owner_login_context','owner_verifier','issue_admin_session','read_admin_overview','owner_usage_overview','end_admin_session',
                     'owner_request_page','owner_request_detail','prune_request_diagnostics',
+                    'owner_pool_activity','owner_pool_rotation','change_pool_rotation','owner_model_display_order','change_model_display_order',
                     'owner_operations_status','owner_operations_events',
                     'owner_diagnostic_captures','start_diagnostic_capture','stop_diagnostic_capture',
                     'sweep_diagnostic_capture','prune_diagnostic_captures','prune_capture_events','reset_owner_browser_sessions',
                     'customer_binding_matches','customer_login_context','finish_customer_login','customer_account','end_customer_session','owner_service_view','transition_customer_scope',
-                    'read_customer_keys','issue_customer_key','revoke_customer_key','customer_history','owner_text_rules','change_text_rule','owner_text_price_inputs','customer_text_models','owner_connections',
-                    'owner_devices','change_device','device_connections','review_source_copy','owner_purchase_limit','change_purchase_limit',
+                    'read_customer_sessions','revoke_customer_session','owner_customer_case','change_customer_access',
+                    'read_customer_keys','issue_customer_key','revoke_customer_key','customer_history','owner_text_rules','change_text_rule','owner_text_price_inputs','customer_text_models','owner_connections','change_source_serving',
+                    'owner_devices','change_device','device_connections','device_access','device_overview','device_overview_metrics','device_usage','review_source_copy','approve_web_source','web_source_receipt',
+                    'approve_web_model_check','owner_web_model_check',
+                    'owner_purchase_limit','change_purchase_limit',
                     'start_usage_report','read_usage_report','prune_usage_reports','customer_model_status',
+                    'prune_model_status_completions','prune_model_status_observations',
                     'owner_service_notices','change_service_notice','customer_service_notices','read_service_notices','prune_service_notices',
                     'customer_checkout_methods','quote_checkout','confirm_checkout','customer_checkout_history','prune_checkout_quotes',
                     'owner_checkout_builder','change_checkout_builder',

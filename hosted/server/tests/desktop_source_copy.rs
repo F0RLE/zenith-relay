@@ -3,10 +3,10 @@ mod browser;
 #[allow(dead_code)]
 mod support;
 
-use reqwest::{Client, Response};
+use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::fs;
+use std::{fs, time::Duration};
 use support::Cluster;
 use uuid::Uuid;
 use zenith_relay_hosted::{
@@ -15,7 +15,8 @@ use zenith_relay_hosted::{
     vault::{Purpose, Vault},
 };
 use zenith_relay_hosted_device::{
-    COPY_COMMIT_PATH, COPY_STATUS_PATH, CopyKey, CopyPlan, CopyProxy, Destination, DeviceKey,
+    COPY_COMMIT_PATH, COPY_STATUS_PATH, CopyKey, CopyPlan, CopyProxy, CopyReview, Destination,
+    DeviceKey,
 };
 
 const ORIGIN: &str = "https://relay.example";
@@ -24,23 +25,36 @@ const PROXY: &str = "http://fixture-proxy:fixture-password@127.0.0.1:9080/";
 const ENDPOINT: &str = "http://127.0.0.1:9081/v1";
 const SESSION: [u8; 32] = [24; 32];
 
-async fn review(runtime: &PgPool, key: &CopyKey, approver: &[u8], approve: bool) -> Value {
-    let r = key.review();
+async fn review(
+    runtime: &PgPool,
+    r: CopyReview,
+    approver: &[u8],
+    device_revision: Option<i64>,
+    passkey_revision: Option<i64>,
+) -> Value {
     let p = &r.plan;
-    sqlx::query_scalar("SELECT relay_hosted.review_source_copy($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-        .bind(ORIGIN)
-        .bind(approver)
-        .bind(p.installation_id)
-        .bind(p.device_id)
-        .bind(p.operation_id)
-        .bind(p.source_id)
-        .bind(sqlx::types::Json(p))
-        .bind(r.verifier_bytes().unwrap().as_slice())
-        .bind(r.commitment_bytes().unwrap().as_slice())
-        .bind(approve)
-        .fetch_one(runtime)
-        .await
-        .unwrap()
+    // Browser tests verify the real assertion. These values exercise the
+    // guarded database transaction with a synthetic zero-counter passkey.
+    const CREDENTIAL: [u8; 32] = [18; 32];
+    sqlx::query_scalar(
+        "SELECT relay_hosted.review_source_copy($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+        0,false,false,floor(extract(epoch FROM clock_timestamp())*1000)::bigint+30000)",
+    )
+    .bind(ORIGIN)
+    .bind(approver)
+    .bind(p.installation_id)
+    .bind(p.device_id)
+    .bind(p.operation_id)
+    .bind(p.source_id)
+    .bind(sqlx::types::Json(p))
+    .bind(r.verifier_bytes().unwrap().as_slice())
+    .bind(r.commitment_bytes().unwrap().as_slice())
+    .bind(device_revision)
+    .bind(passkey_revision.map(|_| CREDENTIAL.as_slice()))
+    .bind(passkey_revision)
+    .fetch_one(runtime)
+    .await
+    .unwrap()
 }
 
 async fn worker(vault: &Vault) -> (String, tokio::task::JoinHandle<()>) {
@@ -65,6 +79,54 @@ async fn state(response: Response) -> Value {
     reply["data"]["state"].clone()
 }
 
+async fn expire_waiting_copy(db: &PgPool, op: Uuid, submit: RequestBuilder) -> Response {
+    let mut vault_lock = db.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar(
+        "SELECT pg_backend_pid() FROM (SELECT pg_advisory_xact_lock(98653249,1)) locked",
+    )
+    .fetch_one(&mut *vault_lock)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE relay_hosted.desktop_source_copies SET
+        approved_at=statement_timestamp()-interval '594 seconds',
+        expires_at=statement_timestamp()+interval '6 seconds' WHERE operation_id=$1",
+    )
+    .bind(op)
+    .execute(db)
+    .await
+    .unwrap();
+    let (response, ()) = tokio::join!(submit.send(), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(blocker)
+                .fetch_one(db)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        })
+        .await
+        .expect("transfer reached the vault lock before expiry");
+        sqlx::query(
+            "SELECT pg_sleep(greatest(extract(epoch FROM expires_at-clock_timestamp()),0)::float8)
+            FROM relay_hosted.desktop_source_copies WHERE operation_id=$1",
+        )
+        .bind(op)
+        .execute(db)
+        .await
+        .unwrap();
+        vault_lock.rollback().await.unwrap();
+    });
+    response.unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires an isolated PostgreSQL cluster; set RELAY_TEST_PG_BIN"]
 async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
@@ -75,7 +137,10 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     let conf = include_str!("../config.example.toml")
         .replace("http://localhost:1443", ORIGIN)
         .replace("\"localhost\"", "\"relay.example\"");
-    let config = Config::parse(&conf).unwrap();
+    let mut config = Config::parse(&conf).unwrap();
+    // The expiry case holds the vault lock across the shortened grant deadline.
+    config.database.lock_timeout_ms = 8_000;
+    config.database.statement_timeout_ms = 10_000;
     db::migrate(&bootstrap, ORIGIN).await.unwrap();
     sqlx::raw_sql("GRANT USAGE ON SCHEMA relay_hosted TO fixture_runtime;
         GRANT SELECT ON relay_hosted.closed_installation, relay_hosted._sqlx_migrations TO fixture_runtime;")
@@ -135,7 +200,7 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     let credential = [18u8; 32];
     assert!(
         sqlx::query_scalar::<_, bool>(
-            "SELECT relay_hosted.bind_first_owner($1,1,$2,$3,$4,'{}',9223372036854775807)"
+            "SELECT relay_hosted.bind_first_owner($1,1,$2,$3,$4,'{\"cred\":{\"counter\":0}}',9223372036854775807)"
         )
         .bind(iid)
         .bind(ORIGIN)
@@ -181,6 +246,17 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     };
     let source = Uuid::new_v4();
     let key = new_key(Some(PROXY), source);
+    let preview = |key: &CopyKey| review(&runtime, key.review().clone(), &SESSION, None, None);
+    let receipt = |key: &CopyKey| review(&runtime, key.review().clone(), &SESSION, Some(2), None);
+    let confirm = |key: &CopyKey, revision| {
+        review(
+            &runtime,
+            key.review().clone(),
+            &SESSION,
+            Some(2),
+            Some(revision),
+        )
+    };
     let auth = proof(&key);
     let persisted = key.protected_record();
     let (local, task) = worker(&vault).await;
@@ -209,32 +285,60 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     );
     assert_eq!(submit(body.clone()).send().await.unwrap().status(), 401);
     assert_eq!(
-        review(&runtime, &key, &paired.verifier(), true).await["state"],
+        review(
+            &runtime,
+            key.review().clone(),
+            &paired.verifier(),
+            Some(2),
+            Some(1)
+        )
+        .await["state"],
         "denied"
     );
-    assert_eq!(
-        review(&runtime, &key, &SESSION, false).await["state"],
-        "awaiting_approval"
-    );
-    assert_eq!(
-        review(&runtime, &key, &SESSION, true).await["state"],
-        "fresh_required"
-    );
+    assert_eq!(preview(&key).await["state"], "awaiting_approval");
+    assert_eq!(receipt(&key).await["state"], "fresh_required");
     assert_eq!(count().await.unwrap(), 0);
     sqlx::query("UPDATE relay_hosted.admin_sessions SET created_at=now()")
         .execute(&bootstrap)
         .await
         .unwrap();
+    assert_eq!(receipt(&key).await["state"], "fresh_required");
+    assert_eq!(confirm(&key, 1).await["state"], "applied");
+    let deadline = || {
+        sqlx::query_scalar::<_, i64>("SELECT floor(extract(epoch from expires_at)*1000)::bigint
+            FROM relay_hosted.desktop_source_copies c JOIN relay_hosted.admin_credentials k
+            ON k.passkey_id=c.confirmed_by_passkey_id WHERE c.operation_id=$1 AND c.device_revision=2 AND k.credential_id=$2")
+            .bind(key.review().plan.operation_id)
+            .bind(credential.as_slice())
+            .fetch_one(&bootstrap)
+    };
+    let approved_until = deadline().await.unwrap();
+    assert_eq!(receipt(&key).await["state"], "applied");
+    assert_eq!(deadline().await.unwrap(), approved_until);
+    for changed in [
+        CopyReview {
+            commitment: "00".repeat(32),
+            ..key.review().clone()
+        },
+        CopyReview {
+            verifier: "00".repeat(32),
+            ..key.review().clone()
+        },
+        CopyReview {
+            plan: CopyPlan {
+                label: "Changed plan".into(),
+                ..key.review().plan.clone()
+            },
+            ..key.review().clone()
+        },
+    ] {
+        assert_eq!(
+            review(&runtime, changed, &SESSION, Some(2), None).await["state"],
+            "conflict"
+        );
+    }
     assert_eq!(
-        review(&runtime, &key, &SESSION, true).await["state"],
-        "approved"
-    );
-    assert_eq!(
-        review(&runtime, &key, &SESSION, true).await["state"],
-        "approved"
-    );
-    assert_eq!(
-        review(&runtime, &new_key(Some(PROXY), source), &SESSION, true).await["state"],
+        receipt(&new_key(Some(PROXY), source)).await["state"],
         "conflict"
     );
     assert_eq!(state(status().send().await.unwrap()).await, "approved");
@@ -367,15 +471,12 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     assert!(!matches(ENDPOINT, false).await.unwrap());
     assert!(!matches("http://127.0.0.1:9082/v1", true).await.unwrap());
     assert_eq!(
-        review(&runtime, &new_key(Some(PROXY), source), &SESSION, true).await["state"],
+        receipt(&new_key(Some(PROXY), source)).await["state"],
         "conflict"
     );
 
     let direct = new_key(None, Uuid::new_v4());
-    assert_eq!(
-        review(&runtime, &direct, &SESSION, true).await["state"],
-        "approved"
-    );
+    assert_eq!(confirm(&direct, 2).await["state"], "applied");
     let apply = |k: &CopyKey| {
         http.post(format!("{local}{COPY_COMMIT_PATH}"))
             .bearer_auth(proof(k).as_str())
@@ -394,22 +495,40 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     );
 
     let expired = new_key(None, Uuid::new_v4());
+    assert_eq!(confirm(&expired, 3).await["state"], "applied");
     assert_eq!(
-        review(&runtime, &expired, &SESSION, true).await["state"],
-        "approved"
-    );
-    sqlx::query("UPDATE relay_hosted.desktop_source_copies SET
-        approved_at=approved_at-interval '11 minutes',expires_at=expires_at-interval '11 minutes' WHERE operation_id=$1")
-        .bind(expired.review().plan.operation_id).execute(&bootstrap).await.unwrap();
-    assert_eq!(
-        state(apply(&expired).send().await.unwrap()).await,
+        state(
+            expire_waiting_copy(
+                &bootstrap,
+                expired.review().plan.operation_id,
+                apply(&expired)
+            )
+            .await
+        )
+        .await,
         "expired"
     );
-    let revoked = new_key(None, Uuid::new_v4());
-    assert_eq!(
-        review(&runtime, &revoked, &SESSION, true).await["state"],
-        "approved"
+    assert!(
+        vault
+            .read(expired.review().plan.source_id, Purpose::Provider, 1)
+            .await
+            .is_err()
     );
+    assert_eq!(vault.collect_unreferenced().await.unwrap(), 0);
+
+    let legacy = new_key(None, Uuid::new_v4());
+    let info = legacy.review();
+    sqlx::query("INSERT INTO relay_hosted.desktop_source_copies
+        (installation_id,device_id,operation_id,source_id,plan,verifier,commitment,approved_at,expires_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,now(),now()+interval '10 minutes')")
+        .bind(iid).bind(device).bind(info.plan.operation_id).bind(info.plan.source_id)
+        .bind(sqlx::types::Json(&info.plan))
+        .bind(info.verifier_bytes().unwrap().as_slice()).bind(info.commitment_bytes().unwrap().as_slice())
+        .execute(&bootstrap).await.unwrap();
+    assert_eq!(preview(&legacy).await["state"], "expired");
+    assert_eq!(state(apply(&legacy).send().await.unwrap()).await, "expired");
+    let revoked = new_key(None, Uuid::new_v4());
+    assert_eq!(confirm(&revoked, 4).await["state"], "applied");
     sqlx::query(
         "UPDATE relay_hosted.management_devices SET revoked_at=now(),revision=3 WHERE id=$1",
     )
@@ -420,6 +539,12 @@ async fn copy_is_fenced_atomic_and_never_uses_the_read_grant_to_write() {
     assert_eq!(
         state(apply(&revoked).send().await.unwrap()).await,
         "expired"
+    );
+    assert_eq!(receipt(&revoked).await["state"], "applied");
+    assert_eq!(preview(&revoked).await["state"], "expired");
+    assert_eq!(
+        confirm(&new_key(None, Uuid::new_v4()), 5).await["state"],
+        "conflict"
     );
     assert_eq!(
         state(

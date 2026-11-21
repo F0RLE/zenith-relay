@@ -2,7 +2,14 @@ use super::{HostedExecutionError, HostedUnknown, Reply, ResponseCompletion, resp
 use crate::protocol::sse;
 use axum::{body::Bytes, http::header::CONTENT_TYPE};
 use serde_json::Value;
-use std::{mem, time::Duration};
+use std::{
+    mem,
+    time::{Duration, Instant},
+};
+
+mod generation;
+use generation::Generation;
+pub use generation::HostedGeneration;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +44,7 @@ pub enum HostedStreamObservation {
         kind: HostedTerminalKind,
         usage: [Option<i64>; 3],
         text_delta: bool,
+        generation: Option<HostedGeneration>,
     },
 }
 
@@ -72,6 +80,7 @@ impl HostedTextStream {
                 id: None,
                 text_delta: false,
                 sequence: 0,
+                generation: Generation::default(),
             },
             previous_usage: [None; 3],
         })
@@ -81,14 +90,21 @@ impl HostedTextStream {
         self.event.sequence
     }
 
+    /// Do not measure upstream speed across a relay-imposed pause between text chunks.
+    pub fn mark_read_pause(&mut self) {
+        if let Some(at) = self.framing.chunk_at {
+            self.event.generation.mark_read_pause(at);
+        }
+    }
+
     /// A missing terminal is an error, including EOF after complete text deltas.
     pub async fn next_frame(&mut self) -> Result<Option<HostedStreamFrame>, HostedExecutionError> {
         let Some(reply) = &mut self.reply else {
             return Ok(None);
         };
         let parsed = async {
-            let bytes = self.framing.read(&mut reply.response).await?;
-            let mut observation = self.event.observe(&bytes)?;
+            let (bytes, received_at) = self.framing.read(&mut reply.response).await?;
+            let mut observation = self.event.observe(&bytes, received_at)?;
             if let HostedStreamObservation::Usage(usage) = observation {
                 if usage == self.previous_usage {
                     observation = HostedStreamObservation::None;
@@ -122,6 +138,7 @@ impl HostedTextStream {
 struct Frames {
     pending: Vec<u8>,
     chunk: Bytes,
+    chunk_at: Option<Instant>,
     used: usize,
 }
 
@@ -129,7 +146,7 @@ impl Frames {
     async fn read(
         &mut self,
         response: &mut reqwest::Response,
-    ) -> Result<Bytes, HostedExecutionError> {
+    ) -> Result<(Bytes, Instant), HostedExecutionError> {
         use HostedExecutionError::OutcomeUnknown;
         loop {
             if self.chunk.is_empty() {
@@ -138,9 +155,15 @@ impl Frames {
                     .map_err(|_| OutcomeUnknown(HostedUnknown::ReadTimeout))?
                     .map_err(|error| OutcomeUnknown(HostedUnknown::read_error(error)))?
                     .ok_or(OutcomeUnknown(HostedUnknown::MissingTerminal))?;
+                self.chunk_at = Some(Instant::now());
             }
             if let Some(frame) = self.take()? {
-                return Ok(frame);
+                // Coalesced events share one timestamp, even if delivery pauses between them.
+                return Ok((
+                    frame,
+                    self.chunk_at
+                        .expect("a complete frame read needs a body chunk"),
+                ));
             }
         }
     }
@@ -179,10 +202,15 @@ struct Events {
     id: Option<String>,
     text_delta: bool,
     sequence: u64,
+    generation: Generation,
 }
 
 impl Events {
-    fn observe(&mut self, frame: &[u8]) -> Result<HostedStreamObservation, HostedExecutionError> {
+    fn observe(
+        &mut self,
+        frame: &[u8],
+        at: Instant,
+    ) -> Result<HostedStreamObservation, HostedExecutionError> {
         use HostedStreamObservation::None as NoObservation;
         std::str::from_utf8(frame).map_err(|_| INVALID_RESPONSE)?;
         let data = sse::event_data(frame);
@@ -204,7 +232,7 @@ impl Events {
         {
             return Err(INVALID_RESPONSE);
         }
-        let observation = self.observe_value(kind, &value)?;
+        let observation = self.observe_value(kind, &value, at)?;
         self.sequence = self
             .sequence
             .max(value["sequence_number"].as_u64().unwrap_or(self.sequence))
@@ -216,6 +244,7 @@ impl Events {
         &mut self,
         kind: &str,
         value: &Value,
+        at: Instant,
     ) -> Result<HostedStreamObservation, HostedExecutionError> {
         use HostedStreamObservation::{None as NoObservation, Terminal};
         let response = &value["response"];
@@ -281,15 +310,22 @@ impl Events {
             "response.output_text.delta" => {
                 let delta = value["delta"].as_str().ok_or(INVALID_RESPONSE)?;
                 self.text_delta |= !delta.trim().is_empty();
+                self.generation.delta(value, delta, at);
                 return Ok(NoObservation);
             }
             "response.done" | "error" => return Err(INVALID_RESPONSE),
             _ => return Ok(NoObservation),
         };
+        let usage = response_usage(response);
         Ok(Terminal {
             kind: terminal,
-            usage: response_usage(response),
+            usage,
             text_delta: self.text_delta,
+            generation: if terminal == HostedTerminalKind::Completed && self.text_delta {
+                self.generation.complete(response, usage[2])
+            } else {
+                None
+            },
         })
     }
 }

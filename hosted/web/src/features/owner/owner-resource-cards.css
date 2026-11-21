@@ -58,10 +58,11 @@
 .hosted-app .owner-source-values dt, .hosted-app .owner-source-models > span { color: var(--secondary); font-size: 11px; line-height: 16px; }
 .hosted-app .owner-source-values dd { display: grid; gap: 2px; margin: 0; font-size: 14px; line-height: 19px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .hosted-app .owner-source-values[data-stale] dd { color: var(--secondary); }
-.hosted-app .owner-source-models { display: grid; place-content: center; gap: 2px; flex: 1; width: 100%; min-height: 52px; padding: 8px 12px; border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.hosted-app .owner-source-models { display: grid; place-content: center; gap: 2px; flex: 1; width: 100%; min-height: 52px; padding: 8px 12px; border: 0; background: transparent; color: var(--text); font: inherit; }
+.hosted-app button.owner-source-models:not(:disabled) { cursor: pointer; }
 .hosted-app .owner-source-values + .owner-source-models { border-top: 1px solid var(--border); }
 .hosted-app .owner-source-models strong { font-size: 14px; line-height: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.hosted-app .owner-source-models:not(:disabled):hover, .hosted-app .owner-resource-footer button:not(:disabled):hover { background: var(--accent-soft); color: var(--accent); }
+.hosted-app button.owner-source-models:not(:disabled):hover, .hosted-app .owner-resource-footer button:not(:disabled):hover { background: var(--accent-soft); color: var(--accent); }
 .hosted-app .owner-source-models:disabled { cursor: default; }
 .hosted-app .owner-resource-card[data-kind="api"] .owner-resource-footer > .relay-icon-button { border-radius: 0; }
 .hosted-app .owner-resource-card[data-kind="api"] .owner-resource-footer > .relay-icon-button:first-child { border-end-start-radius: 11px; }

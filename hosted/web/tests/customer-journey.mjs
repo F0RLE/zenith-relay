@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { join } from "node:path";
 import { fixtureExists, writeFixture, fixtureOrigin } from "../../test-support/files.mjs";
 import { startIssuer } from "./oidc-issuer.mjs";
 import { checkOwnKeys } from "./own-keys.mjs";
@@ -8,6 +9,11 @@ import { checkUsageReport } from "./usage-report-flow.mjs";
 import { checkServiceNotices } from "./service-notices.mjs";
 import { checkCheckout } from "./checkout-flow.mjs";
 import { checkRefunds } from "./refund-flow.mjs";
+import { checkQualificationConfirmation } from "./qualification-confirmation.mjs";
+import { checkCustomerSessions } from "./account-sessions-flow.mjs";
+import { checkCustomerAccess } from "./customer-access-flow.mjs";
+import { loginFixture, checkLoginBudgets, checkLoginScopeExpiry } from "./customer-login-guard.mjs";
+import { balanceLink, checkCustomerShell, navigateCustomer, openCustomerMenu } from "./customer-shell.mjs";
 
 export async function checkCustomerJourney({ browser, owner, origin, issuer, exchange, funded }) {
   origin = fixtureOrigin(origin);
@@ -21,6 +27,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
   expect(cfg.registration_open).toBe(false);
   const base = api + "auth/customer/" + cfg.login_methods[0], callback = base + "/callback";
   const idp = await startIssuer(issuer, callback, "relay-fixture");
+  const signIn = loginFixture(base, origin);
   const loginLabel = "Sign in with your identity provider";
   const pageFor = async (subject, width = 1024) => {
     const ctx = await browser.newContext({ viewport: { width, height: 760 } });
@@ -34,6 +41,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
   const candidate = async page => {
     await login(page);
     await expect(page.getByRole("heading", { name: "Your review ID" })).toBeVisible();
+    await expect(page.locator(".relay-sidebar")).toHaveCount(0);
     return page.locator(".entry-review-id").innerText();
   };
   const signOwner = async () => {
@@ -43,7 +51,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     return owner.context().request;
   };
   const account = async page => (await (await page.context().request.get(api + "account")).json()).data;
-  const balance = (page, dollars) => expect(page.locator(".entry-wallet dd")).toHaveText(dollars + " USD");
+  const balance = (page, dollars) => expect(balanceLink(page)).toHaveAccessibleName("Balance: " + dollars + " USD");
   const fundedBalance = "8.799400"; // $10 minus $1.20 and the $0.000600 net corrected charge.
   const finalBalance = funded ? fundedBalance : "8.00";
   const mobileFits = async page => {
@@ -62,47 +70,28 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     expect(idA).not.toBe(idB); await mobileFits(a);
     expect(await candidate(a)).toBe(idA);
     for (const subject of ["wrong-issuer","wrong-audience","wrong-nonce","expired","not-yet-valid","wrong-signature","wrong-party"]) {
-      await other.context().addCookies([{ url: issuer, name: "test_subject", value: subject }]);
-      await login(other);
-      await expect(other.getByRole("alert")).toHaveText(/Access was not granted/);
+      const invalid = await pageFor(subject);
+      try {
+        await login(invalid);
+        await expect(invalid.getByRole("alert")).toHaveText(/Access was not granted/);
+      } finally { await invalid.context().close(); }
     }
-    await other.context().addCookies([{ url: issuer, name: "test_subject", value: "outsider" }]);
     expect((await a.context().request.get(api + "account")).status()).toBe(401);
-    const request = { operation_id: crypto.randomUUID(), expected_revision: "1", target: "qualification",
-      reason_code: "verify_customer_access", candidate_ids: [idA, idB] };
-    const change = (client, csrf, body, src = origin) => client.post(api + "admin/operations/service/transitions",
-      { headers: { Origin: src, "X-Relay-CSRF": csrf }, data: body });
-    let csrf = (await ownerRead()).csrf_token;
-    expect((await change(a.context().request, csrf, request)).status()).toBe(401);
-    expect((await change(ownerHttp, "00".repeat(32), request)).status()).toBe(403);
-    expect((await change(ownerHttp, csrf, request, issuer)).status()).toBe(403);
-    expect((await change(ownerHttp, csrf, { ...request, candidate_ids: [crypto.randomUUID()] })).status()).toBe(400);
-    expect((await change(ownerHttp, csrf, { ...request, target: "live" })).status()).toBe(400);
-    const stale = await a.context().request.post(base + "/begin", { headers: { Origin: origin } });
-    const staleLocation = (await a.context().request.get((await stale.json()).data.authorization_url, { maxRedirects: 0 })).headers().location;
-    issue("review"); await wait("approve");
-    const oldProof = await change(ownerHttp, csrf, request);
-    expect(oldProof.status()).toBe(403);
-    expect((await oldProof.json()).error.code).toBe("fresh_passkey_required");
-    const transition = api + "admin/operations/service/transitions";
-    const post = owner.waitForRequest(r => r.url() === transition);
-    await owner.getByLabel("Review IDs (one per tester)").fill(`${idA}, ${idB}`);
-    await owner.getByRole("button", { name: "Approve 24-hour access" }).click();
-    await expect(owner.getByRole("button", { name: "Pause customer access" })).toBeVisible();
-    const applied = (await post).postDataJSON();
-    csrf = (await ownerRead()).csrf_token;
-    expect((await change(ownerHttp, csrf, applied)).status()).toBe(200);
-    expect((await change(ownerHttp, csrf, { ...applied, candidate_ids: [idA] })).status()).toBe(409);
-    expect((await change(ownerHttp, csrf, request)).status()).toBe(409);
-    expect((await a.context().request.get(staleLocation,{ maxRedirects: 0 })).headers().location).toBe("/login#denied");
+    const staleLocation = await signIn.prepare(a.request);
+    await checkQualificationConfirmation({
+      browser, owner, customer: a.request, origin, issuer, candidates: [idA, idB], thorough: !funded,
+      beforeApproval: async () => { issue("review"); await wait("approve"); },
+    });
+    const staleCounts = { ...idp.counts };
+    expect((await signIn.complete(a.request, staleLocation)).headers().location).toBe("/login#denied");
+    expect(idp.counts).toEqual(staleCounts);
 
     // A foreign cookie or wrong state must not use up the legitimate browser attempt.
     const probe = a.context().request;
     expect((await probe.post(base + "/begin")).status()).toBe(403);
-    const options = await probe.post(base + "/begin", { headers: { Origin: origin } });
-    const authUrl = (await options.json()).data.authorization_url;
-    const redirect = (await probe.get(authUrl, { maxRedirects: 0 })).headers().location;
+    const redirect = await signIn.prepare(probe);
     const before = idp.counts.exchanges;
+    expect((await probe.head(redirect, { maxRedirects: 0 })).status()).toBe(405);
     const wrong = new URL(redirect); wrong.searchParams.set("state", "00".repeat(32));
     await probe.get(wrong.href,{ maxRedirects: 0 });
     await other.context().request.get(redirect,{ maxRedirects: 0 });
@@ -110,6 +99,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     const secondA = await pageFor("alice");
     await Promise.all([a.goto(redirect), login(secondA), ...(funded ? [login(b)] : [])]);
     await Promise.all([balance(a,"0.00"), balance(secondA,"0.00"), ...(funded ? [balance(b,"0.00")] : [])]);
+    await checkCustomerShell({ mobile: a, desktop: secondA, origin });
     const count = idp.counts.exchanges;
     await probe.get(redirect,{ maxRedirects: 0 });
     expect(idp.counts.exchanges).toBe(count);
@@ -128,6 +118,7 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     ]));
     await login(other); await expect(other.getByRole("alert")).toHaveText(/Access was not granted/);
     expect((await other.context().request.get(api + "account")).status()).toBe(401);
+    if (!funded) await checkLoginBudgets({ flow: signIn, idp, pageFor, login });
     issue("customers",JSON.stringify([acctA.workspace_id,acctB.workspace_id]));
     const checkout = { a,b,secondA,owner,ownerRead,origin,api,acctA,acctB,exchange,issue,wait };
     const payment = funded ? null : await checkRefunds(checkout, await checkCheckout(checkout));
@@ -136,7 +127,13 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
     const bKey = await checkOwnKeys({ a,b,ownerHttp,origin,acctA,acctB,checkpoint:issue,wait });
     if (funded) {
       process.stdout.write(bKey); issue("funding-keys");
-      await checkPublishedCatalog({ a,b,owner,origin,api,ownerRead,issue,wait,exchange });
+      const reopenSessions = async () => {
+        expect((await ownerHttp.get(api + "admin/connections")).status()).toBe(401);
+        await Promise.all([signOwner(), login(a), login(b)]);
+        for (const page of [a, b])
+          await expect.poll(async () => (await page.request.get(api + "account")).status()).toBe(200);
+      };
+      await checkPublishedCatalog({ a,b,owner,origin,api,ownerRead,issue,wait,exchange,reopenSessions });
       const { current, corrected } = await checkUsageReport({ a,b,owner,origin,api,wait: file => expect.poll(
         () => fixtureExists(exchange,file), {timeout:155000},
       ).toBe(true),issue,exchange });
@@ -152,8 +149,8 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
       expect(entries.length===1 && entries[0].amount_micro_usd==="1200000" && entries[0].request_id===charged.request_id).toBe(true);
       expect(await history(b,"usage/requests?id="+charged.request_id)).toHaveLength(0);
       expect(await history(b,"wallet/entries?id="+charged.wallet_receipt_id)).toHaveLength(0);
-      await a.getByRole("link",{name:"Usage",exact:true}).click();
-      await expect(a).toHaveURL(origin+"/app/usage");
+      await navigateCustomer(a, "Usage");
+      await expect(a).toHaveURL(url => url.origin === origin && url.pathname === "/app/usage");
       await expect(a.getByRole("heading",{name:"Usage",exact:true})).toBeVisible();
       for (const [hours,label] of [[168,"7 days"],[720,"30 days"],[24,"24 hours"]]) {
         const refreshed=a.waitForResponse(r=>r.url()===api+"usage/reports" && r.request().postDataJSON().hours===hours && r.status()===200);
@@ -196,20 +193,31 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
       await expect(correction.getByText("+0.003400 USD",{exact:true})).toBeVisible();
       await correction.getByRole("link",{name:"Request identifier"}).click();
       await expect(a).toHaveURL(origin+"/app/usage?id="+corrected.request_id);
-      await b.getByRole("link",{name:"Usage",exact:true}).click();
+      await navigateCustomer(b, "Usage");
       await expect(b.getByText("No requests found")).toBeVisible();
-      await a.getByRole("link",{name:"Overview",exact:true}).click();
+      await navigateCustomer(a, "Overview");
     }
-    await a.getByRole("button",{ name:"Sign out" }).click();
+    if (!funded) await checkCustomerSessions({ a,b,secondA,ownerHttp,origin,api,login,pageFor,issue,wait });
+    await openCustomerMenu(a);
+    await a.getByRole("button",{ name:"Sign out", exact:true }).click();
     await expect(a).toHaveURL(origin + "/login");
     expect((await probe.get(api + "account")).status()).toBe(401);
     await login(a); await balance(a,finalBalance);
+    const sessionList = async client => (await (await client.get(api + "account/sessions")).json()).data.sessions;
+    const previousSessions = await sessionList(probe);
     issue("restart"); await wait("restarted");
     expect((await probe.get(api + "account")).status()).toBe(401);
+    expect((await probe.get(api + "account/sessions")).status()).toBe(401);
     expect((await ownerHttp.get(api + "admin/connections")).status()).toBe(401);
     await login(a); await balance(a,finalBalance);
     const restored = await account(a);
     expect(restored.workspace_id).toBe(acctA.workspace_id);
+    const afterRestart = await sessionList(probe);
+    expect(afterRestart).toHaveLength(1);
+    expect(previousSessions.map(session => session.id)).not.toContain(afterRestart[0].id);
+    expect((await probe.delete(api + "account/sessions/" + previousSessions[0].id, {
+      headers: { Origin: origin, "X-Relay-CSRF": restored.csrf_token },
+    })).status()).toBe(404);
     if (payment) expect((await (await probe.get(api + "payments/" + payment.id)).json()).data.payment).toEqual(payment);
     expect((await (await probe.get(api + "keys")).json()).data.keys).toHaveLength(3);
     await login(b); await balance(b,"0.00");
@@ -227,19 +235,16 @@ export async function checkCustomerJourney({ browser, owner, origin, issuer, exc
       })).status()).toBe(404);
       issue("notice-expiry-seen");
     }
-    await wait("suspended");
-    expect((await probe.get(api + "account")).status()).toBe(401);
-    expect((await probe.get(api + "notifications")).status()).toBe(401);
-    expect((await probe.post(api + "keys",{headers:{Origin:origin,"X-Relay-CSRF":restored.csrf_token},
-      data:{name:"Blocked",operation_id:crypto.randomUUID()}})).status()).toBe(401);
-    expect((await b.context().request.get(api + "keys")).status()).toBe(200);
-    issue("suspension-checked"); await wait("scope-expired");
+    await checkCustomerAccess({ owner, a, b, api, origin, login, signOwner, account, funded });
+    await checkLoginScopeExpiry({ flow: signIn, idp, pageFor, customer: b.request,
+      expire: async () => { issue("suspension-checked"); await wait("scope-expired"); } });
     expect((await b.context().request.get(api + "keys")).status()).toBe(401);
     expect((await b.context().request.get(api + "account")).status()).toBe(401);
+    expect((await b.context().request.get(api + "account/sessions")).status()).toBe(401);
     expect((await b.context().request.get(api + "models")).status()).toBe(401);
     expect((await b.context().request.get(api + "models/status")).status()).toBe(401);
     expect((await b.context().request.get(api + "notifications")).status()).toBe(401);
-    await signOwner();
+    await owner.goto(origin + "/admin/overview");
     await owner.getByRole("button",{ name: "Pause customer access" }).click();
     await expect(owner.getByText("Customer access is paused.")).toBeVisible();
     expect((await probe.get(api + "account")).status()).toBe(401);

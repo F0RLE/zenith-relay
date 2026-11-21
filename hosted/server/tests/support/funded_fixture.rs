@@ -133,6 +133,7 @@ pub async fn run(
     bk: &str,
     device: &zenith_relay_hosted_device::DeviceKey,
     browser: &mut Process,
+    mut restart_web: impl AsyncFnMut(),
 ) {
     let dir = c.temp.path().join("vault");
     let key = c.temp.path().join("vault-secret");
@@ -327,6 +328,16 @@ pub async fn run(
     let exchange = c.temp.path().join("checkpoints");
     fs::write(exchange.join("inventory-ready"), []).unwrap();
     super::checkpoint(browser, &exchange.join("rule-published")).await;
+    let serving: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT c.revision,c.paused FROM relay_hosted.source_serving_changes c
+         JOIN relay_hosted.admin_credentials k ON (k.passkey_id,k.user_id)=(c.confirmed_by_passkey_id,c.actor)
+         WHERE c.source_id=$1 ORDER BY c.revision",
+    )
+    .bind(source)
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert_eq!(serving, [(1, true), (2, false)]);
     let offer: Uuid =
         sqlx::query_scalar("SELECT id FROM relay_hosted.active_text_listings WHERE item=$1")
             .bind(item)
@@ -394,7 +405,11 @@ pub async fn run(
             .status
             .success()
     );
-    assert_eq!(up.probes.load(SeqCst), 1);
+    assert_eq!(
+        (up.reads.load(SeqCst), up.probes.load(SeqCst)),
+        (2, 1),
+        "a blocked check cannot reach either upstream endpoint"
+    );
     fs::write(exchange.join("first-hold"), []).unwrap();
     super::checkpoint(browser, &exchange.join("lower-price")).await;
     assert_eq!(purchases().await.unwrap(), [first_bound]);
@@ -412,9 +427,16 @@ pub async fn run(
     assert_eq!(conflict.status(), 409);
     assert!(!conflict.headers().contains_key("x-request-id"));
     assert_eq!(up.sends.load(SeqCst), 1);
-    super::age_current_passkey(admin).await;
     fs::write(exchange.join("capture-request"), &logical).unwrap();
     super::checkpoint(browser, &exchange.join("capture-started")).await;
+    let captures: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),count(confirmed_by_passkey_id) FROM relay_hosted.diagnostic_capture_audit
+         WHERE action='start'",
+    )
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    assert_eq!(captures, (1, 1));
     assert_eq!(wallet().await.unwrap(), (8_000_000, 2_000_000));
     capture_poll::subscribed(admin, "fixture_inference").await;
     up.release.add_permits(1);
@@ -668,6 +690,25 @@ pub async fn run(
             String::from_utf8_lossy(&result.stderr)
         );
     }
+    let reference_file = c.temp.path().join("catalog-publishers.json");
+    fs::write(
+        &reference_file,
+        r#"{"openai/review-text":{"name":"Fixture review"}}"#,
+    )
+    .unwrap();
+    let imported = c
+        .cli("fixture_boot", cfg)
+        .args(["import-catalog-publishers", "--file"])
+        .arg(reference_file)
+        .output()
+        .unwrap();
+    assert!(
+        imported.status.success(),
+        "publisher import: {}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    // Start the two-source policy phase from durable state with its own ceremony window.
+    restart_web().await;
     fs::write(exchange.join("selling-review-ready"), []).unwrap();
     super::checkpoint(browser, &exchange.join("review-awaits-supplier-removal")).await;
     vault
@@ -676,6 +717,44 @@ pub async fn run(
         .unwrap();
     fs::write(exchange.join("review-supplier-removed"), []).unwrap();
     super::checkpoint(browser, &exchange.join("selling-review-checked")).await;
+    let old_write_paths_removed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('relay_hosted.change_text_rule(text,bytea,uuid,uuid,bigint,text,jsonb)') IS NULL
+             AND to_regprocedure('relay_hosted.change_purchase_limit(text,bytea,uuid,uuid,bigint,bigint)') IS NULL",
+    )
+    .fetch_one(admin)
+    .await
+    .unwrap();
+    assert!(old_write_paths_removed);
+    let confirmations: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT c.action,count(*),count(k.passkey_id)
+         FROM relay_hosted.text_rule_changes c LEFT JOIN relay_hosted.admin_credentials k
+         ON (k.passkey_id,k.user_id)=(c.confirmed_by_passkey_id,c.actor)
+         WHERE c.action IN ('admit','publish','suspend') GROUP BY c.action ORDER BY c.action",
+    )
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        confirmations,
+        [
+            ("admit".into(), 3, 3),
+            ("publish".into(), 5, 5),
+            ("suspend".into(), 2, 2)
+        ]
+    );
+    let caps: Vec<(Option<i64>, bool)> = sqlx::query_as(
+        "SELECT c.limit_micro_usd,k.passkey_id IS NOT NULL FROM relay_hosted.text_purchase_limit_changes c
+         LEFT JOIN relay_hosted.admin_credentials k ON (k.passkey_id,k.user_id)=(c.confirmed_by_passkey_id,c.actor)
+         WHERE c.source_id=$1 ORDER BY c.revision",
+    )
+    .bind(source)
+    .fetch_all(admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        caps,
+        [(Some(929_999), true), (None, true), (Some(930_000), true)]
+    );
     let tariffs: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT r.mode,o.input_rate::text,o.output_rate::text,o.cached_rate::text
          FROM relay_hosted.text_offers o JOIN relay_hosted.text_sale_reviews r
@@ -704,6 +783,25 @@ pub async fn run(
     );
     assert_eq!(models(&list().await.unwrap().json().await.unwrap()), 1);
     assert_eq!(up.sends.load(SeqCst), 2, "price edits do not send requests");
+    // Start the next phase from durable state, with a fresh confirmation window.
+    restart_web().await;
+    fs::write(exchange.join("source-lifecycle-ready"), []).unwrap();
+    super::checkpoint(browser, &exchange.join("source-lifecycle-checked")).await;
+    let lifecycle: Vec<(String, bool, i64)> = sqlx::query_as(
+        "SELECT c.action,c.paused,c.inventory_epoch FROM relay_hosted.source_serving_changes c
+         JOIN relay_hosted.admin_credentials k ON (k.passkey_id,k.user_id)=(c.confirmed_by_passkey_id,c.actor)
+         WHERE c.source_id=$1 AND c.revision>2 ORDER BY c.revision",
+    ).bind(source).fetch_all(admin).await.unwrap();
+    assert_eq!(
+        lifecycle,
+        [
+            ("park".into(), true, 3),
+            ("trash".into(), true, 4),
+            ("restore".into(), true, 5),
+            ("resume".into(), false, 5),
+        ]
+    );
+    assert_eq!(models(&list().await.unwrap().json().await.unwrap()), 0);
     up.omit_usage.store(true, SeqCst);
     let mut uncertain = profile.clone();
     uncertain["id"] = json!(Uuid::new_v4());
@@ -717,8 +815,8 @@ pub async fn run(
         );
     }
     assert_eq!(
-        up.probes.load(SeqCst),
-        4,
+        (up.reads.load(SeqCst), up.probes.load(SeqCst)),
+        (5, 4),
         "an uncertain check must not be repeated"
     );
     let mismatched: bool = sqlx::query_scalar(
@@ -762,7 +860,7 @@ pub async fn run(
     assert_eq!(replay.status(), 409);
     assert_eq!(replay.headers()["x-request-id"], logical);
     assert_eq!(up.sends.load(SeqCst), 2);
-    for id in 1..=32 {
+    for id in 1..=33 {
         if Uuid::from_u128(id) == second_source {
             continue;
         }
@@ -795,7 +893,13 @@ pub async fn run(
     );
     fs::write(exchange.join("connections-changed"), []).unwrap();
     super::checkpoint(browser, &exchange.join("connections-checked")).await;
-    assert_eq!((up.reads.load(SeqCst), up.probes.load(SeqCst)), (6, 4));
+    assert!(
+        vault
+            .read(second_source, Purpose::Provider, 1)
+            .await
+            .is_err()
+    );
+    assert_eq!((up.reads.load(SeqCst), up.probes.load(SeqCst)), (5, 4));
 
     let claimed_at: String =
         sqlx::query_scalar("SELECT (clock_timestamp()-interval '2 minutes')::text")

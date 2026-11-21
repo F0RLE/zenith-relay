@@ -235,7 +235,9 @@ async fn empty_install_restart_and_fail_closed() {
     );
     assert!(
         !sqlx::query_scalar::<_, bool>(
-            "SELECT has_function_privilege('fixture_setup','relay_hosted.owner_connections(text,bytea,uuid)','EXECUTE')",
+            "SELECT has_function_privilege('fixture_setup','relay_hosted.owner_connections(text,bytea,uuid)','EXECUTE')
+                 OR has_function_privilege('fixture_setup','relay_hosted.owner_connections(text,bytea,uuid,text)','EXECUTE')
+                 OR has_function_privilege('fixture_runtime','relay_hosted.connection_page(uuid,uuid,text)','EXECUTE')",
         )
         .fetch_one(&bootstrap)
         .await

@@ -216,10 +216,13 @@ and returns focus to its trigger.
 
 ### Owner shell
 
-Reuse the geometry/primitives, with a persistent textual `Owner` context
-and service mode in the header. Primary navigation is Overview, Connections, Pool,
-Models, Usage and Notifications. Link guarded setup, security, refund and audit
-tasks from their owning context; their passports do not add sidebar entries.
+Authenticated owner pages use the same sidebar and content geometry as the
+preview, with `Owner` in the header and service access mode in Overview.
+Production links to Overview, Connections, Pool, Payment methods, Usage and
+Notifications. The preview's Models screen has no production sidebar entry;
+published model configuration remains in Pool. Sign-in stays outside the
+workspace. Link guarded setup, security, refund and audit tasks from their
+owning context without adding sidebar entries.
 No CSS class or selected role grants permissions.
 The customer cabinet is a separate authenticated destination, not an admin preview
 that can display another customer's session. Do not show an impersonation button.
@@ -386,6 +389,9 @@ provider controls remain usable with the software keyboard, zoom and back gestur
 Each customer page uses the customer API only. The displayed customer is the
 authenticated personal workspace, never a chosen owner-panel filter. Each passport
 inherits WS-24's loading, denied, unavailable and session-expiry behavior.
+After session verification, use the shared sidebar and mobile drawer. Keep keys
+and balance above sign-out. The header links to Balance and Account security,
+then shows the bell, language and theme controls.
 
 ### WS-03 — Overview
 
@@ -469,6 +475,11 @@ only where the server deliberately exposes that public descriptor; no hidden-cat
 discovery via client guesses. Scheduled revisions show effective time and scope;
 historical request prices stay in Usage.
 
+The restricted catalog supplies the exact model ID, Responses protocol, published
+input/output/cache-read rates and nullable publisher in the saved display order.
+Group unknown publishers under **Other** when there are known groups. Missing
+context and cache-write rates use a dash; omit savings without a reference price.
+
 **States:** no authorized models points to support/account policy; temporary
 capacity is different from absent grant, disabled route or missing tariff. A model
 without a complete qualified price cannot look ready for paid use. Do not present
@@ -478,7 +489,8 @@ roadmap connectors as available options.
 the model table, and one legend beside search. Read only the
 [authorized history](HOSTED_RELAY_ARCHITECTURE.md#model-status-history).
 Missing samples stay neutral with accessible text; fewer observations are not
-an outage, 100% uptime or a measured zero latency.
+an outage, 100% uptime or a measured zero latency. Latency uses measured
+time to completion, with sample coverage in the detail.
 
 ### WS-06 — API keys
 
@@ -586,16 +598,18 @@ and account closure; keep appearance controls in the shell.
   begins a server-bound authenticated linking flow; unlink explains the remaining
   access method and fresh-proof requirements. The last usable method is protected.
   Same email is not automatic account merge; failures preserve existing access.
-- Sessions show bounded safe device/client description, last activity and current
-  session marker. Revoke other/current session has clear consequences; revoking
-  customer sessions leaves inference keys and owner sessions active.
+- **Browser sessions** is available from the signed-in header at
+  `/app/overview?panel=account`. Show the current session first, then other active
+  sessions by last activity, with sign-in and activity times. No device names are
+  inferred. End a session with inline confirmation; ending the current session
+  returns to sign-in. If the result is unknown, refresh the list before retrying.
 - Notifications show supported event preferences and threshold semantics. External
   delivery appears only for a qualified channel with verified recipient/consent;
   in-app read status is not acceptance of a tariff or resolution of an incident.
 - Only non-sensitive presentation preferences may persist in the browser.
-- Closure uses the verified request/support process in the [customer lifecycle](HOSTED_RELAY_ARCHITECTURE.md#first-customer-request-walkthrough).
-  Show how to obtain receipts and resolve pending funds before access ends.
-  Do not describe a closure request as a completed deletion or refund.
+- With a configured support link, **Close account** shows the workspace
+  reference and how to save receipts and request a refund before closure.
+  Contacting support does not change account state.
 
 Each editable section has its own Save/Cancel state, revision conflict and result.
 Navigating away warns about ordinary unsaved edits; credentials/proof are not saved
@@ -741,9 +755,22 @@ observed models. **Edit → Models** shows the API-wide default markup once abov
 the model list. On a model row the seller edits **Purchase** and **Sale**
 together using the [shared price editor](#ws-16--models-and-tariffs). Saving
 the connection does not publish the prices.
+In the static API inventory, open this editor from the connection card's model
+count. It edits rates for admitted models; declared IDs and verified models
+outside the pool remain read-only.
 For a Desktop transfer, the browser opens pairing/status only;
 Desktop selects the local data. The result's next action is **Review in Pool**,
 not an automatic admission. An interrupted operation can be reopened by reference.
+
+On HTTPS installations with web intake enabled, **API providers → Add API
+connection** uses the Connection/Models editor with the supported Responses
+protocol, masked key and proxy fields, and optional declared IDs. Save confirms
+with a passkey. A lost reply offers **Check connection save**, without resending
+the key. The card separates declared models from current verified observations.
+In local HTTPS qualification, the same **Models** dialog offers **Check model**
+with explicit billing bounds and passkey confirmation. The short check may
+incur upstream charges. Reopening the dialog reads the last receipt and does
+not start a check. A passed check updates verified observations only.
 
 **Proxies:** preview valid/error rows without echoing authentication. Choose the
 connection's effective binding (specific, inherit, explicitly direct) and save
@@ -763,6 +790,12 @@ speed tests or promise that a proxy reachable from Desktop works on the server.
 | Move to trash / restore | Explain retention and membership consequences; restore cannot silently reactivate or resurrect obsolete credentials. |
 | Permanently remove | Explicit target and irreversibility; fresh proof/fencing per policy; never promise removal erases financial/audit obligations. |
 | Export credentials | Separate deliberate secret-export action with fresh proof, scope and protected delivery; no generic export from a filtered table. |
+
+In the static API inventory, keep pause/resume and a compact **Actions**
+disclosure on the source row. Park and trash confirm inline; a trashed row
+offers restore in place. Show membership separately from pause and draining.
+Pool Participants reads those states without treating a retained publishing
+anchor as a member.
 
 Bulk operations begin with current-page selection. All-matching selection, if
 supported, names the bounded snapshot/count and allowed action; never assume every
@@ -793,8 +826,18 @@ work from the server. No animation from a click or preview speed, and no “next
 Advanced route/quota/tool options appear only on a member/policy that supports
 them, not as a permanent control strip.
 
+The restricted API pool's pencil opens the Desktop-style member editor.
+**Models** shows only admitted exact model IDs and their switches. One
+**Save** confirms the whole draft with a passkey. A conflict reloads the current
+flags for review. **Settings** holds whole-connection pause, resume and removal.
+Neither tab becomes a second price or publication editor.
+
 Keep participant rotation separate from model display order. The rotation editor
-shows only backend-qualified strategies and connector-supported controls. Quota
+shows only backend-qualified strategies and connector-supported controls. The
+restricted API pool supports **Automatic** and **Primary & reserve**. Show member
+order controls only in the latter; **Save** confirms the change with one passkey.
+After a conflict show the current policy and discard the stale draft. Show the
+saved mode beside observed dispatches without marking a predicted member. Quota
 uses shared terminology with provider-specific units and windows; unknown data
 is not unlimited capacity. Additional reset controls appear only when supported,
 independently of quota display. Authentication methods vary by provider. A
@@ -914,8 +957,8 @@ or silently retain two dispatch owners. No transfer is implied by opening Access
 
 ### WS-18 — Customers
 
-**Entry:** from a permitted request, payment or exact support reference in owner
-Usage. Open one authorized workspace, not a customer directory, Add user form
+**Entry:** from request detail, a refund case or an exact workspace filter in
+owner Usage. Open one authorized workspace, not a customer directory, Add user form
 or empty global dashboard. Standard shared access follows the approved offer
 policy; no one adds each new customer as a participant in the physical pool.
 
@@ -923,9 +966,10 @@ policy; no one adds each new customer as a participant in the physical pool.
 the keys/limits, payment, request or audit evidence needed for the case. Link to
 its authoritative record. No impersonation, raw session view or provider secrets.
 
-Suspend/reinstate explains reason, new admission/funding/access effects and existing
-settlement obligations; use a guarded action with expected revision. Limit/grant
-changes show affected keys, not a silent policy overwrite. Money adjustments link
+Show the current access state and latest receipt. Suspend, reinstate and close
+use inline review and passkey confirmation. **Check result** recovers the same
+receipt after a lost acknowledgement. Limit/grant changes show affected keys,
+not a silent policy overwrite. Money adjustments link
 to WS-19's audited journal flow; no editable Balance input on the customer profile.
 Deletion/closure follows reviewed retained-record policy, not hard-delete shortcuts.
 On mobile keep customer context visible above case actions so an action cannot appear

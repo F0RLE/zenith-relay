@@ -35,7 +35,7 @@ export async function controlResponse(path: string, init: RequestInit = {}) {
     || !/^[a-z][a-z0-9_-]*(?:\/[a-z0-9_-]+)*(?:\?[a-zA-Z0-9_~.*%=&+:-]*)?$/.test(path)) throw new Error("Invalid control path");
   const r = await fetch("/api/hosted/v1/" + path, {
     ...init,
-    mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
+    mode: "same-origin", credentials: init.credentials === "omit" ? "omit" : "same-origin", redirect: "error", cache: "no-store",
     signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000),
   });
   if (!r.ok) {

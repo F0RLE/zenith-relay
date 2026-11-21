@@ -1,4 +1,5 @@
 import { control, record, uuidText } from "./control";
+import { confirmPaymentAction } from "./ownerSession";
 
 const uuid = (v: unknown): v is string => typeof v === "string" && uuidText.test(v);
 
@@ -48,9 +49,9 @@ export async function readRefundCases(paymentId: string | null, before?: string,
   if (!Array.isArray(v.items) || v.items.length > 32 || (v.next_before !== null && !uuid(v.next_before)))
     throw new Error("Invalid refund page");
   const items = v.items.map(item => {
-    if (!record(item) || typeof item.label !== "string" || !item.label || [...item.label].length > 64)
-      throw new Error("Invalid payment label");
-    return { ...readRefund(item), label: item.label };
+    if (!record(item) || typeof item.label !== "string" || !item.label || [...item.label].length > 64 || !uuid(item.workspace_id))
+      throw new Error("Invalid payment case");
+    return { ...readRefund(item), label: item.label, workspace: item.workspace_id };
   });
   if (new Set(items.map(item => item.id)).size !== items.length ||
     (paymentId && items.some(item => item.paymentId !== paymentId)) ||
@@ -59,9 +60,8 @@ export async function readRefundCases(paymentId: string | null, before?: string,
 }
 
 export type RefundAction = "approve" | "decline";
-export async function reviewRefund(csrf: string, id: string, operation: string, action: RefundAction) {
-  const v = await post("admin/payments/refunds/" + id, csrf, {
+export function reviewRefund(csrf: string, id: string, operation: string, action: RefundAction) {
+  return confirmPaymentAction("admin/payments/refunds/" + id, csrf, {
     operation_id: operation, action, expected_state: "requested",
   });
-  if (v.applied !== true || v.operation_id !== operation) throw new Error("Refund decision not acknowledged");
 }

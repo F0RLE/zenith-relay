@@ -3,7 +3,8 @@
 
 mod stream;
 pub use stream::{
-    HostedStreamFrame, HostedStreamObservation, HostedTerminalKind, HostedTextStream,
+    HostedGeneration, HostedStreamFrame, HostedStreamObservation, HostedTerminalKind,
+    HostedTextStream,
 };
 
 use crate::protocol::completion::ResponseCompletion;

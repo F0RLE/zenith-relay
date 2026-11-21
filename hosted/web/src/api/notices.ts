@@ -1,4 +1,5 @@
 import { control, record, uuidText } from "./control";
+import { confirmOwnerAction } from "./ownerSession";
 
 export type Notice = { id: string; title: string; message: string };
 type PublishedNotice = Notice & { publishedAt: number; read: boolean };
@@ -49,7 +50,11 @@ export async function ownerNotices(signal: AbortSignal) {
 }
 
 export async function changeNotice(id: string, csrf: string, command: NoticeCommand) {
-  const data = await control("admin/notifications/" + id, {
+  const path = "admin/notifications/" + id;
+  if (command.command.action === "publish") {
+    return confirmOwnerAction(path, csrf, command, "admin/notifications/confirmations");
+  }
+  const data = await control(path, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Relay-CSRF": csrf },
     body: JSON.stringify(command),
   });

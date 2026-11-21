@@ -1,3 +1,4 @@
+.hosted-app .owner-section-header h1 { color: var(--text); overflow-wrap: anywhere; }
 .hosted-app .owner-resource-controls { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 .hosted-app .owner-resource-summary-band { display: grid; grid-template-columns: minmax(0, 1fr); border-bottom: 1px solid var(--border); }
 .hosted-app .owner-resource-summary-band[data-values] { grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); }

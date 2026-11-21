@@ -15,6 +15,7 @@
 .hosted-entry .owner-usage [aria-invalid="true"] { border-color:var(--error); }
 .owner-usage ::selection { background:var(--accent); color:var(--accent-ink); }
 .owner-request-lookup small { flex-basis:100%; color:var(--error); }
+.owner-customer-case-link { display: inline-flex; align-items: center; min-height: 44px; max-width: 100%; overflow-wrap: anywhere; }
 .owner-usage-filters { border-block:1px solid var(--border); }
 .owner-usage-filters > summary { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:44px; width:fit-content; max-width:100%; list-style:none; cursor:pointer; color:var(--accent); font-size:13px; font-weight:550; }
 .owner-usage-filters > summary::-webkit-details-marker { display:none; }

@@ -16,7 +16,7 @@ pub struct CaptureSettings {
     max_events_per_second: Option<i32>,
 }
 
-#[derive(Clone, Copy, serde::Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CaptureLimits {
     pub default_seconds: i32,
     pub max_seconds: i32,

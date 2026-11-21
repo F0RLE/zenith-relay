@@ -1,4 +1,5 @@
 import { control, record, uuidText } from "./control";
+import { confirmWithPasskey } from "./ownerSession";
 
 export const captureReasons = ["request_timing", "stream_interruption", "pending_outcome"] as const;
 const states = ["active", "stopped", "expired", "exhausted", "revoked"] as const;
@@ -71,13 +72,14 @@ export async function readCapture(id: string, signal: AbortSignal) {
   return parseCaptureDetail(await control(`${path}/${uuid(id)}`, { signal }), id);
 }
 
-export async function startCapture(csrf: string, command: CaptureStart) {
-  const v = await control(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Relay-CSRF": csrf },
-    body: JSON.stringify(command) });
-  const s = parseSummary(v.session);
-  if (v.version !== 1 || s.operation !== command.operation_id || s.request !== command.request_id || s.reason !== command.reason
-    || s.expires - s.started !== command.seconds * 1000) return invalid();
-  return s;
+export function startCapture(csrf: string, command: CaptureStart) {
+  return confirmWithPasskey(path, csrf, command, path, v => {
+    if (!("session" in v)) return undefined;
+    const s = parseSummary(v.session);
+    if (v.version !== 1 || s.operation !== command.operation_id || s.request !== command.request_id || s.reason !== command.reason
+      || s.expires - s.started !== command.seconds * 1000) return invalid();
+    return s;
+  });
 }
 
 export async function stopCapture(csrf: string, id: string) {

@@ -10,6 +10,7 @@ mod history;
 pub mod http;
 pub mod identity;
 pub mod inference;
+pub mod model_monitor;
 mod notifications;
 pub mod operations;
 pub mod outbound;

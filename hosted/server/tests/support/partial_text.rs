@@ -79,7 +79,17 @@ impl PartialText {
 
 impl Attempt {
     pub async fn capture(&self, db: &PgPool, outcome: &str, counts: [Option<i64>; 3]) -> bool {
-        sqlx::query_scalar("SELECT relay_hosted.capture_text_terminal($1,$2,$3,$4,$5,$6,$7)")
+        self.capture_timed(db, outcome, counts, None).await
+    }
+
+    pub async fn capture_timed(
+        &self,
+        db: &PgPool,
+        outcome: &str,
+        counts: [Option<i64>; 3],
+        elapsed_ms: Option<i32>,
+    ) -> bool {
+        sqlx::query_scalar("SELECT relay_hosted.capture_text_terminal($1,$2,$3,$4,$5,$6,$7,$8)")
             .bind(self.offer)
             .bind(self.request)
             .bind(self.id)
@@ -87,6 +97,7 @@ impl Attempt {
             .bind(counts[0])
             .bind(counts[1])
             .bind(counts[2])
+            .bind(elapsed_ms)
             .fetch_one(db)
             .await
             .unwrap()

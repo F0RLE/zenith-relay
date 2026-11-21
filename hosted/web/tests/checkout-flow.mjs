@@ -231,7 +231,7 @@ export async function checkCheckout({ a, b, secondA, owner, ownerRead, origin, a
   if (process.env.RELAY_CHECKOUT_SCREENSHOTS) {
     await b.emulateMedia({ colorScheme: "dark" });
     await b.goto(origin + path);
-    await expect(b.locator(".hosted-entry")).toHaveAttribute("data-theme", "dark");
+    await expect(b.locator('.hosted-app[data-workspace="customer"]')).toHaveAttribute("data-theme", "dark");
     await expect(b.locator("#top-up-history").getByText("Checking invoice").first()).toBeVisible();
     await b.screenshot({ path: join(process.env.RELAY_CHECKOUT_SCREENSHOTS, "checkout-history-dark.png"), fullPage: true });
     await b.emulateMedia({ colorScheme: "light" });

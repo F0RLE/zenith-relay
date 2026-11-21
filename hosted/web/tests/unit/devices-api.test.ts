@@ -28,3 +28,13 @@ test("approval accepts only the exact device's review digest, and labels are bou
   expect(validDeviceLabel("я".repeat(32))).toBe(true);
   for (const label of ["я".repeat(33)," x","", "a\u0000b"]) expect(validDeviceLabel(label)).toBe(false);
 });
+
+test("Desktop does not infer additional read grants or accept unknown permissions", () => {
+  const parse = (read_scopes: unknown) => parseDevices({...list,items:[{...row,read_scopes}]},origin).items[0]?.read_scopes;
+  expect(parse(undefined)).toEqual([]);
+  expect(parse(["usage.read"])).toEqual(["usage.read"]);
+  expect(parse(["overview.read", "usage.read"])).toEqual(["overview.read", "usage.read"]);
+  for (const invalid of [null, "overview.read", ["admin"], ["usage.read", "usage.read"], ["usage.read", "overview.read"]]) {
+    expect(() => parse(invalid)).toThrow();
+  }
+});

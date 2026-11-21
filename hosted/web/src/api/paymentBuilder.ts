@@ -1,4 +1,5 @@
 import { parseCreditInput } from "./checkout";
+import { confirmPaymentAction } from "./ownerSession";
 import { control, record, uuidText } from "./control";
 
 const path = "admin/payment-methods";
@@ -95,6 +96,8 @@ export type BuilderAction = { action: "save"; draft: CheckoutDraft } | { action:
 export type BuilderCommand = { operation_id: string; expected_revision: string; command: BuilderAction };
 
 export async function changePaymentBuilder(csrf: string, command: BuilderCommand) {
+  if (command.command.action === "publish" || command.command.action === "disable")
+    return confirmPaymentAction(path, csrf, command);
   const result = await control(path, { method: "POST",
     headers: { "Content-Type": "application/json", "X-Relay-CSRF": csrf }, body: JSON.stringify(command) });
   if (result.applied !== true || result.operation_id !== command.operation_id) throw new Error("Invalid checkout acknowledgement");

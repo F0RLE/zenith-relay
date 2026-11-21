@@ -1,7 +1,15 @@
+#[path = "support/catalog_order_cases.rs"]
+mod catalog_order_cases;
+#[path = "support/customer_access_cases.rs"]
+mod customer_access_cases;
 #[path = "support/customer_reader.rs"]
 mod customer_reader;
+#[path = "support/device_observation_cases.rs"]
+mod device_observation_cases;
 #[path = "support/diagnostic_capture_cases.rs"]
 mod diagnostic_capture_cases;
+#[path = "support/model_monitor_cases.rs"]
+mod model_monitor_cases;
 #[path = "support/model_status_cases.rs"]
 mod model_status_cases;
 #[path = "support/owner_overview_cases.rs"]
@@ -21,6 +29,8 @@ mod refund_race;
 mod request_diagnostic_cases;
 #[path = "support/restore_cases.rs"]
 mod restore_cases;
+#[path = "support/supply_confirmation_race.rs"]
+mod supply_confirmation_race;
 #[allow(dead_code)]
 mod support;
 #[path = "support/text_late_cases.rs"]
@@ -451,16 +461,36 @@ async fn stock(
 }
 
 async fn publish(db: &PgPool, item: Uuid, revision: i64, input: Option<&str>) -> Uuid {
+    publish_at(db, item, revision, input, 1, None).await
+}
+
+async fn publish_at(
+    db: &PgPool,
+    item: Uuid,
+    revision: i64,
+    input: Option<&str>,
+    first_live_revision: i64,
+    published_at: Option<i64>,
+) -> Uuid {
     sqlx::query_scalar(
         "WITH sale AS (
             INSERT INTO relay_hosted.text_offers(id,inventory_id,scope_id,source_id,provider_revision,base_url,model,revision,
-                max_input_bytes,max_output_tokens,tokens_per_byte,overhead_tokens,input_rate,cached_rate,output_rate,close_after_s)
+                max_input_bytes,max_output_tokens,tokens_per_byte,overhead_tokens,input_rate,cached_rate,output_rate,close_after_s,created_at)
             SELECT gen_random_uuid(),id,scope_id,source_id,provider_revision,base_url,model,$2,max_input_bytes,max_output_tokens,
-                tokens_per_byte,overhead_tokens,coalesce($3::text::numeric,3),.40,5,close_after_s
+                tokens_per_byte,overhead_tokens,coalesce($3::text::numeric,3),.40,5,close_after_s,
+                coalesce(to_timestamp($5::bigint::double precision),now())
             FROM relay_hosted.text_inventory WHERE id=$1 RETURNING id
-         ) UPDATE relay_hosted.text_model_rules SET enabled=true,last_offer=(SELECT id FROM sale),first_live_revision=1
+         ) UPDATE relay_hosted.text_model_rules SET enabled=true,last_offer=(SELECT id FROM sale),first_live_revision=$4
          WHERE id=$1 RETURNING last_offer",
-    ).bind(item).bind(revision).bind(input).fetch_one(db).await.unwrap()
+    )
+    .bind(item)
+    .bind(revision)
+    .bind(input)
+    .bind(first_live_revision)
+    .bind(published_at)
+    .fetch_one(db)
+    .await
+    .unwrap()
 }
 
 async fn limit<'e>(db: impl PgExecutor<'e>, source: Uuid, limit: Option<i64>) {
