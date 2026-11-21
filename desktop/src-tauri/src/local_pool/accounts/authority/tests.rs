@@ -26,6 +26,7 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 use zenith_relay_core::unix_time_ms as now_ms;
 
+mod lock_recovery;
 mod rotation_persistence;
 mod siwc_recovery;
 

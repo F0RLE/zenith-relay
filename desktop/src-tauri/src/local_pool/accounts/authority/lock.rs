@@ -210,16 +210,31 @@ fn recover_stale_lock(path: &Path, stale_after_ms: u64) -> Result<bool, ProcessL
     }
     let first = crate::files::read_regular_file_bounded(path, MAX_LOCK_BYTES)
         .map_err(|_| ProcessLockError::UnsafePath)?;
-    let owner: LockOwner = zenith_relay_core::bounded_json::from_slice(&first)
-        .map_err(|_| ProcessLockError::UnsafePath)?;
-    if Uuid::parse_str(&owner.owner_token).is_err()
-        || now_ms().saturating_sub(owner.created_at_ms) <= stale_after_ms
-    {
+    let modified = metadata.modified().map_err(|_| ProcessLockError::Io)?;
+    let owner = zenith_relay_core::bounded_json::from_slice::<LockOwner>(&first)
+        .ok()
+        .filter(|owner| Uuid::parse_str(&owner.owner_token).is_ok());
+    let stale = match owner {
+        Some(owner) => now_ms().saturating_sub(owner.created_at_ms) > stale_after_ms,
+        // An interrupted creation can leave empty, truncated or zero-filled
+        // JSON. Its file age bounds recovery; a fresh writer must keep its lock.
+        None => modified
+            .elapsed()
+            .is_ok_and(|age| age > Duration::from_millis(stale_after_ms)),
+    };
+    if !stale {
         return Ok(false);
     }
     let second = crate::files::read_regular_file_bounded(path, MAX_LOCK_BYTES)
         .map_err(|_| ProcessLockError::UnsafePath)?;
-    if first != second {
+    let current = fs::symlink_metadata(path).map_err(|_| ProcessLockError::Io)?;
+    if !current.file_type().is_file() || current.file_type().is_symlink() {
+        return Err(ProcessLockError::UnsafePath);
+    }
+    if first != second
+        || metadata.len() != current.len()
+        || modified != current.modified().map_err(|_| ProcessLockError::Io)?
+    {
         return Ok(false);
     }
     fs::remove_file(path).map_err(|_| ProcessLockError::Io)?;

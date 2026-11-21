@@ -162,12 +162,12 @@ where
     }
 }
 
-fn persistence_lock_failure(_: CredentialLockError) -> TokenPersistenceFailure {
-    TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
+fn persistence_lock_failure(error: CredentialLockError) -> TokenPersistenceFailure {
+    TokenPersistenceFailure::new(&super::lock_refresh_failure(error).code)
 }
 
 fn superseded_persistence() -> TokenPersistenceFailure {
-    TokenPersistenceFailure::new(error_codes::PERSISTENCE_FAILED)
+    TokenPersistenceFailure::new("credential_superseded")
 }
 
 impl<B, M> TokenPersistenceAdapter for CredentialPersistence<B, M>
@@ -230,5 +230,39 @@ where
             Some(expected),
             task_id,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistence_failures_preserve_safe_lock_and_revision_causes() {
+        for (failure, expected) in [
+            (
+                CredentialLockError::Timeout,
+                error_codes::REFRESH_LOCK_TIMEOUT,
+            ),
+            (
+                CredentialLockError::InvalidIdentity,
+                error_codes::INVALID_ACCOUNT_ID,
+            ),
+            (
+                CredentialLockError::InvalidConfiguration,
+                error_codes::REFRESH_LOCK_CONFIGURATION,
+            ),
+            (
+                CredentialLockError::Io,
+                error_codes::REFRESH_LOCK_UNAVAILABLE,
+            ),
+            (
+                CredentialLockError::UnsafePath,
+                error_codes::REFRESH_LOCK_UNAVAILABLE,
+            ),
+        ] {
+            assert_eq!(persistence_lock_failure(failure).code, expected);
+        }
+        assert_eq!(superseded_persistence().code, "credential_superseded");
     }
 }
