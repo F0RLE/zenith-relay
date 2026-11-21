@@ -12,10 +12,17 @@ pub enum RequestPayloadMode {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FullRequestReason {
+    #[serde(rename = "bps_transport", alias = "basis_points_transport")]
     BasisPointsTransport,
     ProtocolConversion,
+    StatelessImageRequest,
     /// A fact about this payload, not an inferred client decision or cache miss.
     NoPreviousResponseId,
+    SocketCheckpointUnavailable,
+    SocketSettingsChanged,
+    SocketHistoryChanged,
+    SocketOutputChanged,
+    SocketNoNewInput,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -23,6 +30,120 @@ pub enum FullRequestReason {
 pub enum RequestContentEncoding {
     Identity,
     Zstd,
+    #[serde(rename = "permessage-deflate")]
+    PerMessageDeflate,
+}
+
+/// Fixed labels only: never serialize client-defined keys or item values.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayField {
+    Type,
+    Id,
+    Status,
+    Role,
+    Content,
+    Summary,
+    EncryptedContent,
+    Phase,
+    Name,
+    Namespace,
+    Arguments,
+    EncryptedArguments,
+    EncryptedFunctionArgs,
+    Async,
+    CallId,
+    Caller,
+    Input,
+    Output,
+    Metadata,
+    ItemMetadata,
+    Execution,
+    Tools,
+    Action,
+    Author,
+    Recipient,
+    Result,
+    RevisedPrompt,
+    CreatedBy,
+    Agent,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayValueKind {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+impl From<&serde_json::Value> for SocketReplayValueKind {
+    fn from(value: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        match value {
+            Value::Null => Self::Null,
+            Value::Bool(_) => Self::Boolean,
+            Value::Number(_) => Self::Number,
+            Value::String(_) => Self::String,
+            Value::Array(_) => Self::Array,
+            Value::Object(_) => Self::Object,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketUnknownFieldChanges {
+    pub added: u32,
+    pub removed: u32,
+    pub changed: u32,
+    pub null_only: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_removed_type: Option<SocketReplayValueKind>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocketOutputMismatch {
+    /// Relative to the completed response output, not the entire conversation.
+    pub output_index: u32,
+    pub fields: Vec<SocketReplayField>,
+    /// Only fixed item-kind labels and aggregate changes; never item values or keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_kind: Option<SocketReplayItemKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_fields: Option<SocketUnknownFieldChanges>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayItemKind {
+    Message,
+    Reasoning,
+    FunctionCall,
+    CustomToolCall,
+    WebSearchCall,
+    ToolSearchCall,
+    ToolSearchOutput,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketOutputReconciliation {
+    OmittedCompletedMessageStatus,
+    OmittedCompletedFunctionStatus,
+    OmittedParsedFunctionArguments,
+    OmittedOptionalFunctionFields,
+    OmittedReasoningCreatedBy,
+    OmittedRootAgentAttribution,
+    OmittedDuplicateTurnMetadata,
+    OmittedAllowlistedOutputFields,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +152,13 @@ pub struct RequestPayloadDiagnostics {
     pub mode: RequestPayloadMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_request_reason: Option<FullRequestReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_output_mismatch: Option<SocketOutputMismatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_output_reconciled: Option<SocketOutputReconciliation>,
+    /// Declaration in the written SIWC frame, not provider acceptance or execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_declared: Option<bool>,
     pub json_bytes: u64,
     pub body_bytes: u64,
     pub content_encoding: RequestContentEncoding,
@@ -40,6 +168,12 @@ pub struct RequestPayloadDiagnostics {
     /// Microseconds preserve sub-millisecond observations; not codec CPU time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_us: Option<u64>,
+    /// Credential preparation and BPS access checks before this physical send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_ms: Option<u64>,
+    /// Post-authorization setup before HTTP execute, including encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_dispatch_preparation_ms: Option<u64>,
     /// HTTP execute to response headers, excluding compression/authorization.
     /// Includes connection setup and upstream waiting; not isolated upload time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,11 +204,16 @@ impl RequestPayloadDiagnostics {
                 TransportMode::ProtocolConversion => FullRequestReason::ProtocolConversion,
                 TransportMode::Native => FullRequestReason::NoPreviousResponseId,
             }),
+            socket_output_mismatch: None,
+            socket_output_reconciled: None,
+            web_search_declared: None,
             json_bytes: bytes.len() as u64,
             body_bytes: bytes.len() as u64,
             content_encoding: RequestContentEncoding::Identity,
             compression_ms: None,
             compression_us: None,
+            authorization_ms: None,
+            http_dispatch_preparation_ms: None,
             http_send_to_headers_ms: None,
         }
     }
@@ -98,7 +237,26 @@ impl ExecutorRoute {
             .as_mut()
             .and_then(|routing| routing.transport.as_mut())
         {
-            transport.http_version = Some(format!("{:?}", response.version()));
+            if let Some(socket) = response
+                .extensions()
+                .get::<crate::runtime::siwc_socket::SocketDiagnostics>()
+            {
+                socket.observe(transport);
+            } else {
+                if transport.upstream == crate::UsageTransport::Websocket {
+                    transport.upstream = crate::UsageTransport::Http;
+                    transport.handshake_ms = None;
+                    transport.connection_reused = None;
+                    transport.session_wait_ms = None;
+                    transport.connection_reset_reason = None;
+                    transport.response_format = None;
+                    transport.fallback_reason = (self.client_transport
+                        == crate::UsageTransport::Websocket)
+                        .then_some(super::TransportFallbackReason::ExistingHttpBridge);
+                }
+                transport.http_version = Some(format!("{:?}", response.version()));
+                transport.upstream_http_status = Some(response.status().as_u16());
+            }
             transport.request_payload = response
                 .extensions()
                 .get::<RequestPayloadDiagnostics>()
@@ -124,20 +282,68 @@ impl ExecutorRoute {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_socket_mismatch_defaults_optional_diagnostics() {
+        let restored: SocketOutputMismatch =
+            serde_json::from_value(serde_json::json!({"outputIndex":0,"fields":["other"]}))
+                .unwrap();
+        assert_eq!(restored.item_kind, None);
+        assert_eq!(restored.unknown_fields, None);
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::json!({"outputIndex":0,"fields":["other"]})
+        );
+        let legacy = serde_json::json!({"added":0,"removed":1,"changed":0,"nullOnly":false,"truncated":false});
+        let restored: SocketUnknownFieldChanges = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.single_removed_type.is_none());
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
+    }
+
+    #[test]
     fn payload_timings_preserve_missing_legacy_fields_and_measured_zero() {
         let mut observed = RequestPayloadDiagnostics::identity(b"{}", TransportMode::Native);
         let legacy = serde_json::to_value(&observed).unwrap();
         assert!(legacy.get("compressionUs").is_none());
+        assert!(legacy.get("authorizationMs").is_none());
+        assert!(legacy.get("httpDispatchPreparationMs").is_none());
         assert!(legacy.get("httpSendToHeadersMs").is_none());
+        assert!(legacy.get("socketOutputMismatch").is_none());
         let restored: RequestPayloadDiagnostics = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.compression_us, None);
+        assert_eq!(restored.authorization_ms, None);
+        assert_eq!(restored.http_dispatch_preparation_ms, None);
         assert_eq!(restored.http_send_to_headers_ms, None);
+        assert_eq!(restored.socket_output_mismatch, None);
         observed.compression_ms = Some(0);
         observed.compression_us = Some(420);
+        observed.authorization_ms = Some(0);
+        observed.http_dispatch_preparation_ms = Some(0);
         observed.http_send_to_headers_ms = Some(0);
         let encoded = serde_json::to_value(observed).unwrap();
         assert_eq!(encoded["compressionUs"], 420);
+        assert_eq!(encoded["authorizationMs"], 0);
+        assert_eq!(encoded["httpDispatchPreparationMs"], 0);
         assert_eq!(encoded["httpSendToHeadersMs"], 0);
+    }
+
+    #[test]
+    fn websocket_payload_diagnostics_preserve_encoding_and_reconciliation() {
+        let mut observed = RequestPayloadDiagnostics::identity(
+            br#"{"previous_response_id":"resp_synthetic","input":[]}"#,
+            TransportMode::Native,
+        );
+        observed.socket_output_reconciled =
+            Some(SocketOutputReconciliation::OmittedReasoningCreatedBy);
+        observed.content_encoding = RequestContentEncoding::PerMessageDeflate;
+        let encoded = serde_json::to_value(&observed).unwrap();
+        assert_eq!(
+            encoded["socketOutputReconciled"],
+            "omitted_reasoning_created_by"
+        );
+        assert_eq!(encoded["contentEncoding"], "permessage-deflate");
+        assert_eq!(
+            serde_json::from_value::<RequestPayloadDiagnostics>(encoded).unwrap(),
+            observed
+        );
     }
 
     #[test]
@@ -175,6 +381,16 @@ mod tests {
             );
             assert_eq!(full.mode, RequestPayloadMode::Full);
             assert_eq!(full.full_request_reason, Some(reason));
+        }
+        assert_eq!(
+            serde_json::to_value(FullRequestReason::BasisPointsTransport).unwrap(),
+            "bps_transport"
+        );
+        for name in ["bps_transport", "basis_points_transport"] {
+            assert_eq!(
+                serde_json::from_value::<FullRequestReason>(serde_json::json!(name)).unwrap(),
+                FullRequestReason::BasisPointsTransport
+            );
         }
     }
 }

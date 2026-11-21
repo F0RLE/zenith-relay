@@ -155,7 +155,6 @@ async fn codex_account_model_manifests(
     for (_, candidate_id, manifest) in completed {
         if let Some(manifest) = manifest {
             runtime.clear_candidate_capability_blocks(&candidate_id);
-            runtime.remember_codex_model_manifest(&candidate_id, manifest.clone(), now_ms);
             live_candidate_ids.insert(candidate_id.clone());
             live_manifests.push((candidate_id, manifest));
         }
@@ -188,6 +187,7 @@ async fn fetch_codex_account_manifest(
             .map(|access| access.manifest());
     }
     for client_version in client_versions {
+        let context = runtime.codex_model_manifest_context(candidate_id)?;
         url.query_pairs_mut()
             .clear()
             .append_pair("client_version", client_version);
@@ -215,6 +215,7 @@ async fn fetch_codex_account_manifest(
         if !response.response.status().is_success() {
             continue;
         }
+        let authorization = response.authorization_incarnation;
         let Ok(manifest_body) =
             crate::transport::collect_limited(response.response, MAX_CODEX_MODELS_BODY_BYTES).await
         else {
@@ -223,7 +224,14 @@ async fn fetch_codex_account_manifest(
         let Ok(manifest_document) = serde_json::from_slice::<Value>(&manifest_body) else {
             continue;
         };
-        if upstream_codex_models(&manifest_document).is_some() {
+        if upstream_codex_models(&manifest_document).is_some()
+            && runtime.remember_authorized_codex_model_manifest(
+                candidate_id,
+                manifest_document.clone(),
+                authorization,
+                context,
+            )
+        {
             return Some(manifest_document);
         }
     }

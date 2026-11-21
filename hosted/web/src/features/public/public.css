@@ -1,0 +1,18 @@
+.public-reading .public-reader { width: min(64ch, calc(100% - 2 * var(--landing-frame-gutter))); margin: clamp(32px, 7vh, 80px) auto 80px; }
+.public-nav, .landing-footer-links { display: flex; flex-wrap: wrap; align-items: center; gap: 0 24px; }
+.public-nav a, .landing-footer-links a { display: inline-flex; align-items: center; min-height: 44px; font-size: 14px; }
+.public-nav a[aria-current] { color: var(--accent); text-decoration: underline; text-underline-offset: 5px; }
+.public-reader h1 { margin: 24px 0 12px; font-size: clamp(40px, 4.4vw, 64px); line-height: 1.1; letter-spacing: -.035em; }
+.public-reader p { color: var(--secondary); line-height: 1.65; }
+.public-steps { margin-top: 32px; padding-left: 1.75rem; }
+.public-steps li { padding: 18px 0 18px 6px; border-top: 1px solid var(--border); }
+.public-steps li::marker { color: var(--accent); font-variant-numeric: tabular-nums; }
+.public-steps h2 { margin: 0 0 4px; font-size: 19px; }
+.public-policy-links { list-style: none; padding: 0; margin: 28px 0; }
+.public-policy-links a { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); }
+.public-policy-links span { color: var(--accent); }
+.public-nav a:hover, .public-policy-links a:hover, .landing-footer-links a:hover { text-decoration: underline; text-underline-offset: 4px; }
+.landing-home .footer-bottom { flex-wrap: wrap; row-gap: 4px; }
+@media (max-width: 560px) {
+  .landing-footer-links { order: 1; flex-basis: 100%; }
+}

@@ -19,6 +19,38 @@ pub struct PricingContext {
 }
 
 impl PricingContext {
+    pub fn candidate_image_price(
+        &self,
+        catalog: &PricingCatalog,
+        kind: &str,
+        id: &str,
+        model: &str,
+    ) -> (Option<super::ImageModelPrice>, super::PriceSource) {
+        if kind.eq_ignore_ascii_case("account") {
+            return catalog.resolve_image(
+                model,
+                true,
+                None,
+                self.account_provider_families
+                    .get(id)
+                    .or_else(|| self.account_provider_families.get(&super::normalize(id)))
+                    .map(String::as_str)
+                    .or(Some("openai")),
+            );
+        }
+        let id = source_context_id(id);
+        let metadata = self
+            .source_metadata
+            .get(&id)
+            .or_else(|| self.source_metadata.get(&super::normalize(&id)));
+        catalog.resolve_image(
+            model,
+            false,
+            metadata.and_then(|value| value.pricing_provider.as_deref()),
+            metadata.and_then(|value| value.official_provider_family.as_deref()),
+        )
+    }
+
     pub fn candidate_price(
         &self,
         catalog: &PricingCatalog,
@@ -31,7 +63,7 @@ impl PricingContext {
         };
         // Token-only aggregates do not carry the text/image/cache modality
         // split. Applying a text input rate would invent an image valuation.
-        if crate::runtime::is_image_model_id(model) {
+        if crate::runtime::is_image_model_id(model) || catalog.is_image_generation(model) {
             return ResolvedPrice::unpriced(catalog.metadata());
         }
         let context_id = if candidate_kind.eq_ignore_ascii_case("source") {

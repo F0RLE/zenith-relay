@@ -29,7 +29,8 @@ impl GatewayRuntime {
         binding_key: crate::SourceProtocolBindingKey,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let binding = self
-            .source_candidate_bindings
+            .source_state
+            .candidate_bindings
             .get(candidate_id)
             .filter(|binding| {
                 binding
@@ -39,7 +40,8 @@ impl GatewayRuntime {
             })
             .ok_or(ExecutorPrepareError::Authentication)?;
         let provider_source = self
-            .sources
+            .source_state
+            .connectors
             .get(&binding.source_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
         let source_binding = provider_source
@@ -64,7 +66,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
-        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+        if let Some(binding) = self.source_state.candidate_bindings.get(candidate_id) {
             // A route can be omitted only when all client projections use
             // one upstream contract and therefore identical authorization.
             let first = binding
@@ -82,7 +84,8 @@ impl GatewayRuntime {
             return self.prepare_source_authorization(candidate_id, first.binding_key);
         }
         let account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
         if !account.active.load(Ordering::Acquire) {
@@ -132,35 +135,16 @@ impl GatewayRuntime {
         account: &ChatGptAccountExecutor,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
-        let prepared = match account
-            .token_authority
-            .prepare_and_persist(
-                &account.id,
-                now_ms,
-                account.refresh_skew_ms,
-                account.refresh_adapter.as_ref(),
-                account.persistence_adapter.as_ref(),
-            )
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let health = match &error {
-                    TokenAuthorityError::RequiresReauth(_) => Some(CandidateHealth::ReauthRequired),
-                    TokenAuthorityError::AccessTokenExpired
-                    | TokenAuthorityError::AccountNotFound
-                    | TokenAuthorityError::InvalidAccountId => Some(CandidateHealth::Unhealthy),
-                    _ => None,
-                };
-                if let Some(health) = health {
-                    self.set_candidate_health(candidate_id, health);
-                }
-                return Err(classify_token_authority_error(error));
-            }
-        };
+        let prepared = self
+            .prepare_current_oauth_token(candidate_id, account, now_ms)
+            .await?;
         let Ok(mut authorization) =
             HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token()))
         else {
+            let _guard = prepared
+                .dispatch_revision
+                .guard()
+                .ok_or(ExecutorPrepareError::Transient)?;
             self.set_candidate_health(candidate_id, CandidateHealth::Unhealthy);
             return Err(ExecutorPrepareError::InvalidCredential);
         };
@@ -188,6 +172,58 @@ impl GatewayRuntime {
         })
     }
 
+    async fn prepare_current_oauth_token(
+        &self,
+        candidate_id: &str,
+        account: &ChatGptAccountExecutor,
+        now_ms: u64,
+    ) -> std::result::Result<crate::accounts::PreparedToken, ExecutorPrepareError> {
+        // Re-read one replacement registration before dispatch. Never refresh
+        // the retired grant again or turn repeated login churn into an unbounded wait.
+        // A replacement's expiry must include time spent waiting for the old refresh.
+        let started = std::time::Instant::now();
+        for _ in 0..2 {
+            if !account.active.load(Ordering::Acquire) {
+                return Err(ExecutorPrepareError::Authentication);
+            }
+            match account
+                .token_authority
+                .prepare_and_persist_with_revision(
+                    &account.id,
+                    now_ms.saturating_add(started.elapsed().as_millis() as u64),
+                    account.refresh_skew_ms,
+                    account.refresh_adapter.as_ref(),
+                    account.persistence_adapter.as_ref(),
+                )
+                .await
+            {
+                Ok(prepared) => return Ok(prepared),
+                Err(failure) => {
+                    let Some(revision) = failure.revision else {
+                        return Err(classify_token_authority_error(failure.error));
+                    };
+                    let Some(_guard) = revision.guard() else {
+                        continue;
+                    };
+                    let health = match &failure.error {
+                        TokenAuthorityError::RequiresReauth(_) => {
+                            Some(CandidateHealth::ReauthRequired)
+                        }
+                        TokenAuthorityError::AccessTokenExpired
+                        | TokenAuthorityError::AccountNotFound
+                        | TokenAuthorityError::InvalidAccountId => Some(CandidateHealth::Unhealthy),
+                        _ => None,
+                    };
+                    if let Some(health) = health {
+                        self.set_candidate_health(candidate_id, health);
+                    }
+                    return Err(classify_token_authority_error(failure.error));
+                }
+            }
+        }
+        Err(ExecutorPrepareError::Transient)
+    }
+
     pub(crate) async fn refresh_authorization_after_unauthorized(
         &self,
         candidate_id: &str,
@@ -195,7 +231,8 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
         if !account.active.load(Ordering::Acquire) {
@@ -225,7 +262,8 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let account = self
-            .chatgpt_accounts
+            .account_state
+            .executors
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
         if !account.active.load(Ordering::Acquire) {
@@ -366,6 +404,7 @@ fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepare
             ExecutorPrepareError::Persistence
         }
         TokenAuthorityError::RefreshFailed(_)
+        | TokenAuthorityError::RefreshDeferred { .. }
         | TokenAuthorityError::InvalidCapacity
         | TokenAuthorityError::CapacityReached => ExecutorPrepareError::Transient,
     }

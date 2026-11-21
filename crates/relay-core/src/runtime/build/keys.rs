@@ -1,4 +1,5 @@
 use super::*;
+use crate::UpstreamProtocolPolicy;
 
 pub(super) fn build_keys(keys: Vec<RuntimeMixedLocalKey>) -> Result<KeyRuntimeParts> {
     let mut runtime_keys = Vec::new();
@@ -41,6 +42,7 @@ pub(super) fn build_keys(keys: Vec<RuntimeMixedLocalKey>) -> Result<KeyRuntimePa
         });
         runtime_keys.push(RuntimeKey {
             id: key.key.id,
+            upstream_protocol: RwLock::new(UpstreamProtocolPolicy::Auto),
             enabled: key.enabled,
             secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
             scope: Arc::new(RwLock::new(scope)),

@@ -31,7 +31,7 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     assert_eq!(requests[0].body["store"], false);
     assert_eq!(requests[0].body["stream"], true);
     assert!(requests[0].body["input"].is_array());
-    assert!(requests[0].body.get("max_output_tokens").is_none());
+    assert_eq!(requests[0].body["max_output_tokens"], 16);
     drop(requests);
 
     let events = events.lock().unwrap();

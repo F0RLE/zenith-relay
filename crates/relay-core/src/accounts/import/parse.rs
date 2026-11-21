@@ -45,6 +45,7 @@ pub fn parse_import(
     let mut parsed_items = Vec::with_capacity(input_entries.len());
 
     for input_entry in input_entries {
+        let format = input_entry.format.unwrap_or(format);
         match input_entry.import_value {
             Some(import_value) => {
                 match parse_item(
@@ -52,6 +53,7 @@ pub fn parse_import(
                     input_entry.ordinal,
                     format,
                     source_file.as_deref(),
+                    input_entry.proxy,
                 ) {
                     Ok(mut parsed) => {
                         let identity_key = parsed.parsed_item.identity_key.to_ascii_lowercase();
@@ -67,9 +69,7 @@ pub fn parse_import(
                             continue;
                         }
                         if existing.contains(&identity_key) {
-                            parsed.preview.status = ImportPreviewStatus::Existing;
-                            parsed.preview.default_selected = false;
-                            parsed.preview.existing = true;
+                            parsed.preview.mark_existing();
                         }
                         rows.push(parsed.preview);
                         parsed_items.push(parsed.parsed_item);
@@ -114,6 +114,7 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
 
     let mut total_bytes = 0usize;
     let mut import_values = Vec::new();
+    let mut total_items = 0;
     for document in documents {
         total_bytes = total_bytes.checked_add(document.len()).ok_or_else(|| {
             ImportError::new(
@@ -129,7 +130,8 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
         }
         if document.trim().is_empty() {
             import_values.push(malformed_import_value());
-            check_item_count(import_values.len())?;
+            total_items += 1;
+            check_item_count(total_items)?;
             continue;
         }
 
@@ -142,11 +144,22 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
                 ) =>
             {
                 import_values.push(malformed_import_value());
-                check_item_count(import_values.len())?;
+                total_items += 1;
+                check_item_count(total_items)?;
                 continue;
             }
             Err(error) => return Err(error),
         };
+        total_items += document_entries.len();
+        check_item_count(total_items)?;
+        // Keep bundle-scoped credentials, proxy indices and platform checks attached to their file.
+        if let Ok(value) = serde_json::from_str::<Value>(document) {
+            match value {
+                Value::Array(items) => import_values.extend(items),
+                value => import_values.push(value),
+            }
+            continue;
+        }
         for input_entry in document_entries {
             import_values.push(
                 input_entry
@@ -191,6 +204,7 @@ fn invalid_row(
         label: format!("Item {}", ordinal + 1),
         identity: "unknown".to_string(),
         auth_mode: ImportAuthMode::Unknown,
+        bundle_proxy_endpoint: None,
         oauth_client_kind: None,
         source_name: format_name(format).to_string(),
         quota_status: ImportQuotaStatus::Skipped,
@@ -269,6 +283,6 @@ fn format_name(import_format: ImportFormat) -> &'static str {
         ImportFormat::JsonArray => "json_array",
         ImportFormat::JsonLines => "json_lines",
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
-        ImportFormat::ZenithV1 => "zenith",
+        ImportFormat::ZenithV1 | ImportFormat::ZenithV2 => "zenith",
     }
 }

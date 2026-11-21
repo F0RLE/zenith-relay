@@ -5,6 +5,7 @@ use super::presentation::{
 };
 use super::response::{invalid_tool_output, parse_transport_envelope, validate_tool_completion};
 use crate::protocol::AdapterError;
+use crate::runtime::siwc_socket::CatalogReplay;
 use crate::usage::ToolUseDiagnostics;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -190,7 +191,7 @@ impl DiscoverySession {
         if self.is_native() {
             return;
         }
-        runtime.basis_points_catalog_store.remember(
+        runtime.basis_points_catalog().remember(
             local_key_id,
             &self.model,
             response,
@@ -400,12 +401,32 @@ impl DiscoverySession {
     }
 
     pub(in crate::gateway) fn finish(&self, response: &mut Value) {
+        self.finish_preserving_native_call(response, None);
+    }
+
+    pub(in crate::gateway) fn finish_preserving_native_call(
+        &self,
+        response: &mut Value,
+        released_index: Option<usize>,
+    ) {
         let completed = response["status"] == "completed";
+        if completed
+            && let Some(replay) = self.siwc_catalog()
+            && response["output"]
+                .as_array()
+                .is_some_and(|items| !items.iter().any(native::is_lookup))
+        {
+            replay.confirm(response, &self.prior_messages);
+        }
         if let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) {
+            let mut index = 0;
             items.retain(|item| {
+                let released = released_index == Some(index);
+                index += 1;
                 if self.is_native() {
                     return !native::is_lookup(item)
                         && (completed
+                            || released
                             || !matches!(
                                 item["type"].as_str(),
                                 Some("function_call" | "custom_tool_call")
@@ -419,6 +440,14 @@ impl DiscoverySession {
 
     pub(in crate::gateway) fn is_native(&self) -> bool {
         self.native.is_some()
+    }
+
+    pub(in crate::gateway) fn siwc_catalog(&self) -> Option<&CatalogReplay> {
+        self.native.as_ref().map(|native| &native.replay)
+    }
+
+    pub(in crate::gateway) fn retained_native_prefix_len(&self) -> usize {
+        self.prior_messages.len()
     }
 
     pub(in crate::gateway) fn record(&self, tool_use: &mut ToolUseDiagnostics) {

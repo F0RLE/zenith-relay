@@ -25,6 +25,14 @@ impl GatewayRuntime {
             if !request.budget.can_dispatch() {
                 return None;
             }
+            let retry_deadline = request.budget.retry_candidate_deadline();
+            let deadline = earliest(deadline, retry_deadline);
+            if retry_deadline.is_some() && !self.route_recovery_enabled() {
+                return None;
+            }
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                return None;
+            }
             if !self.model_enabled(&request.model) {
                 return None;
             }

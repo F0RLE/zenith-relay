@@ -303,6 +303,7 @@ pub(super) fn encode(
     response: &Response,
     model: &str,
     client_tools: &BTreeMap<String, ClientToolTarget>,
+    reasoning_display: Option<ReasoningDisplay>,
 ) -> AdapterResult<Value> {
     if !response.citations.is_empty()
         && !matches!(protocol, WireApi::ChatCompletions | WireApi::Responses)
@@ -323,6 +324,13 @@ pub(super) fn encode(
     let mut refusal = String::new();
     let mut calls = Vec::new();
     for (index, block) in response.blocks.iter().enumerate() {
+        // Display changes the public projection, never the retained conversation.
+        // Chat reasoning also needs replay even though it has no opaque native item.
+        if reasoning_display == Some(ReasoningDisplay::Omitted)
+            && matches!(block, Block::Reasoning(_))
+        {
+            continue;
+        }
         match (protocol, block) {
             (WireApi::Responses, Block::WebSearch(search)) => content.push(search.item(true)?),
             (WireApi::Responses, Block::Text(text)) => content.push(json!({"type":"message","id":format!("msg_{}_{index}",response.id),"role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":response.citations.get(&index).map(|items| items.iter().map(citations::UrlCitation::responses_value).collect::<Vec<_>>()).unwrap_or_default()}]})),

@@ -31,6 +31,21 @@ pub(in crate::gateway) struct PreparedClientRequest {
 }
 
 impl PreparedClientRequest {
+    pub(in crate::gateway::execution) fn relay_prefix(&self) -> std::ops::Range<usize> {
+        let start = usize::from(
+            self.body["instructions"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty()),
+        );
+        let structured = matches!(
+            self.body
+                .pointer("/text/format/type")
+                .and_then(Value::as_str),
+            Some("json_object" | "json_schema")
+        );
+        start..start + 1 + usize::from(structured)
+    }
+
     pub(in crate::gateway) fn into_response_context(mut self) -> Result<Self, AdapterError> {
         // Resolve incremental declarations before releasing their history. The
         // immutable catalog remains authoritative for selection and validation.

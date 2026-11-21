@@ -1,6 +1,15 @@
 use super::*;
 use crate::runtime::AuthorizationIdentityPolicy;
 
+impl AuthorizationIncarnation {
+    pub(crate) fn token_revision(&self) -> Option<&crate::accounts::TokenDispatchRevision> {
+        match self {
+            Self::OAuth(revision) => Some(revision),
+            Self::Source | Self::Agent(_) => None,
+        }
+    }
+}
+
 impl PreparedAuthorization {
     pub(crate) fn incarnation(&self) -> AuthorizationIncarnation {
         if let Some(revision) = &self.token_revision {
@@ -21,7 +30,7 @@ impl PreparedAuthorization {
         candidate_id: &str,
     ) -> Option<PreparedAuthorizationDispatchGuard<'a>> {
         if let Some(revision) = &self.token_revision {
-            let account = runtime.chatgpt_accounts.get(candidate_id)?;
+            let account = runtime.account_state.executors.get(candidate_id)?;
             let plan = crate::poison::read(&account.subscription_plan_type);
             if !account.active.load(Ordering::Acquire) {
                 return None;
@@ -33,7 +42,7 @@ impl PreparedAuthorization {
             });
         }
         if let Some(expected) = self.agent_identity_revision {
-            let account = runtime.chatgpt_accounts.get(candidate_id)?;
+            let account = runtime.account_state.executors.get(candidate_id)?;
             let identity = account.agent_identity.read().ok()?;
             if !account.active.load(Ordering::Acquire)
                 || account.agent_identity_revision.load(Ordering::Acquire) != expected
@@ -48,7 +57,7 @@ impl PreparedAuthorization {
                 _plan: None,
             });
         }
-        runtime.source_candidate_bindings.get(candidate_id)?;
+        runtime.source_state.candidate_bindings.get(candidate_id)?;
         Some(PreparedAuthorizationDispatchGuard {
             _token: None,
             _agent: None,

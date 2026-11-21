@@ -222,7 +222,11 @@ fn native_tool_outputs_are_materialized(input_items: &[Value]) -> bool {
             None
         };
         if let Some(call_kind) = output_call_kind {
-            if !call_id.is_some_and(|call_id_value| calls.remove(&(call_kind, call_id_value))) {
+            let linked =
+                call_id.is_some_and(|call_id_value| calls.remove(&(call_kind, call_id_value)));
+            if !(linked
+                || (kind == "function_call_output" && is_standalone_function_output(input_item)))
+            {
                 return false;
             }
         } else if kind.ends_with("_call")
@@ -232,6 +236,31 @@ fn native_tool_outputs_are_materialized(input_items: &[Value]) -> bool {
         }
     }
     true
+}
+
+fn is_standalone_function_output(item: &Value) -> bool {
+    let nonblank = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
+    // Codex can supply named context as a native item, not as a result of a
+    // model call. Its item id does not provide a call link.
+    item.get("call_id").is_none_or(Value::is_null)
+        && item.get("name").is_some_and(nonblank)
+        && item
+            .get("namespace")
+            .is_none_or(|value| value.is_null() || nonblank(value))
+        && item.get("caller").is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_object()
+                    .is_some_and(|caller| caller.len() == 1 && caller["type"] == "direct")
+        })
+        && item.get("output").is_some_and(|output| {
+            output.is_string()
+                || output.as_array().is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .all(|part| part.get("type").is_some_and(nonblank))
+                })
+        })
 }
 
 fn native_replay_has_provider_state(request_body: &Value) -> bool {

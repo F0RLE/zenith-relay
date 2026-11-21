@@ -1,7 +1,115 @@
 use super::*;
 
+#[path = "policy/source_updates.rs"]
+mod source_updates;
+
+#[test]
+fn hidden_models_do_not_expand_a_keys_closed_model_allow_list() {
+    let mut runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("hidden", "synthetic-a", &["model-a"])),
+            RuntimeSource::unrestricted(source("allowed", "synthetic-b", &["model-b"])),
+            RuntimeSource::unrestricted(source("denied", "synthetic-c", &["model-c"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    runtime.keys[0].model_rules.allowed = BTreeSet::from(["model-b".into()]);
+    runtime.set_hidden_models(vec!["model-a".into()]);
+    let order = runtime.candidate_runtime_order_for_key("key-1");
+    for candidate in &order {
+        assert_eq!(candidate.available, candidate.candidate_id == "allowed");
+        assert_eq!(
+            candidate.next_for_new_request,
+            candidate.candidate_id == "allowed"
+        );
+    }
+    assert_eq!(
+        runtime.visible_models_for_secret(
+            "synthetic-local",
+            &[WireApi::Responses],
+            current_time_ms()
+        ),
+        vec!["model-b"]
+    );
+    runtime.set_hidden_models(vec!["model-b".into()]);
+    assert!(
+        runtime
+            .candidate_runtime_order_for_key("key-1")
+            .iter()
+            .all(|candidate| !candidate.available)
+    );
+}
+
+#[tokio::test]
+async fn runtime_preview_excludes_hidden_routes_without_hiding_active_work() {
+    let runtime = GatewayRuntime::from_pool(
+        vec![
+            RuntimeSource::unrestricted(source("visible", "synthetic-a", &["model-a"])),
+            RuntimeSource::unrestricted(source("hidden", "synthetic-b", &["model-b"])),
+        ],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let key = runtime.authenticated_key(&runtime.keys[0]);
+    let (_, lease) = runtime
+        .select_and_reserve(
+            &key,
+            "model-b",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, None),
+            current_time_ms(),
+        )
+        .await
+        .unwrap();
+    runtime.set_hidden_models(vec!["MODEL-B".into()]);
+    for order in [
+        runtime.candidate_runtime_order(),
+        runtime.candidate_runtime_order_for_key("key-1"),
+    ] {
+        let hidden = order
+            .iter()
+            .find(|candidate| candidate.candidate_id == "hidden")
+            .unwrap();
+        let visible = order
+            .iter()
+            .find(|candidate| candidate.candidate_id == "visible")
+            .unwrap();
+        assert!(!hidden.available);
+        assert_eq!(hidden.active_request_count, 1);
+        assert!(!hidden.next_for_new_request);
+        assert_eq!(hidden.selection_rank, None);
+        assert!(visible.available);
+        assert!(visible.next_for_new_request);
+        assert_eq!(visible.selection_rank, Some(0));
+    }
+    drop(lease);
+    runtime.set_hidden_models(Vec::new());
+    assert!(
+        runtime
+            .candidate_runtime_order_for_key("key-1")
+            .iter()
+            .all(|candidate| candidate.available)
+    );
+}
+
 #[test]
 fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
+    use crate::model_metadata::{ModelMetadataCatalog, ModelMetadataCatalogHandle};
+
+    let reference = ModelMetadataCatalogHandle::new(ModelMetadataCatalog::empty());
+    let reference_snapshot = reference.snapshot();
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source-1",
@@ -12,14 +120,22 @@ fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
             "key-1",
             "synthetic-local-key",
         ))],
-        GatewayRuntimeOptions::default(),
+        GatewayRuntimeOptions {
+            model_metadata_catalog: Some(reference),
+            ..GatewayRuntimeOptions::default()
+        },
         Arc::new(|_| {}),
     )
     .unwrap();
     let scheduler = runtime.scheduler.clone();
     let visibility = runtime.model_state.hidden_models.clone();
-    let adapters = runtime.adapter_continuation_store.clone();
-    let replay = runtime.native_responses_replay_store.clone();
+    let continuations = runtime.continuation_state.clone();
+    let catalog_callback =
+        crate::poison::mutex(&runtime.provider_metadata.catalog_hint_callback).clone();
+    let team_callback = runtime.account_state.team_breaker_callback.clone();
+    let native_card = serde_json::json!({"slug":"model-a","context_window":8192});
+    runtime
+        .set_official_codex_ultra_models(BTreeMap::from([("model-a".into(), native_card.clone())]));
 
     runtime.set_model_display_order(vec!["model-b".into(), "model-a".into()]);
     runtime.set_hidden_models(vec!["MODEL-B".into()]);
@@ -43,8 +159,43 @@ fn model_policy_updates_keep_scheduler_and_continuation_owners_in_place() {
     );
     assert!(Arc::ptr_eq(&scheduler, &runtime.scheduler));
     assert!(Arc::ptr_eq(&visibility, &runtime.model_state.hidden_models));
-    assert!(Arc::ptr_eq(&adapters, &runtime.adapter_continuation_store));
-    assert!(Arc::ptr_eq(&replay, &runtime.native_responses_replay_store));
+    assert!(Arc::ptr_eq(
+        &reference_snapshot,
+        &runtime
+            .provider_metadata
+            .reference_catalog
+            .as_ref()
+            .unwrap()
+            .snapshot()
+    ));
+    assert!(Arc::ptr_eq(
+        &catalog_callback,
+        &crate::poison::mutex(&runtime.provider_metadata.catalog_hint_callback)
+    ));
+    assert!(Arc::ptr_eq(
+        &team_callback,
+        &runtime.account_state.team_breaker_callback
+    ));
+    assert_eq!(
+        runtime.official_codex_ultra_model("model-a"),
+        Some(native_card)
+    );
+    assert!(Arc::ptr_eq(
+        &continuations.adapters,
+        &runtime.continuation_state.adapters
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.native_responses,
+        &runtime.continuation_state.native_responses
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.routes,
+        &runtime.continuation_state.routes
+    ));
+    assert!(Arc::ptr_eq(
+        &continuations.agent_messages,
+        &runtime.continuation_state.agent_messages
+    ));
 }
 
 #[test]
@@ -67,6 +218,62 @@ fn runtime_updates_service_tier_and_removes_candidates_in_place() {
     assert!(runtime.remove_candidate("source-1"));
     assert!(runtime.candidate_runtime_order().is_empty());
 }
+
+#[tokio::test]
+async fn late_settings_or_model_refresh_cannot_reenroll_a_removed_member() {
+    let source_runtime = GatewayRuntime::from_pool(
+        vec![RuntimeSource::unrestricted(source(
+            "source-1",
+            "synthetic-upstream",
+            &["gpt-test"],
+        ))],
+        vec![RuntimeLocalKey::unrestricted(key(
+            "key-1",
+            "synthetic-local",
+        ))],
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    for (runtime, id) in [
+        (source_runtime, "source-1"),
+        (quota_runtime(QuotaSnapshot::default()), "account-1"),
+    ] {
+        let (_, lease) = runtime
+            .select_and_reserve(
+                &runtime.authenticated_key(&runtime.keys[0]),
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                current_time_ms(),
+            )
+            .await
+            .unwrap();
+        lease.begin_rotation_http_dispatch().unwrap();
+        assert!(runtime.remove_candidate(id));
+        let policy = RuntimeCandidatePolicy {
+            enabled: true,
+            draining: false,
+            priority: 0,
+            weight: 1,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        };
+        if id == "source-1" {
+            assert!(!runtime.update_source_policy(id, policy, 0));
+        } else {
+            assert!(!runtime.update_account_models(id, &["late-model".into()]));
+            assert!(!runtime.update_account_policy(id, policy));
+        }
+        let pending = runtime.lock_scheduler().candidate(id).cloned().unwrap();
+        assert!(pending.draining && !pending.enabled);
+        assert!(!pending.models.contains("late-model"));
+        lease.settle_rotation_success(current_time_ms());
+        assert!(runtime.lock_scheduler().candidate(id).is_none());
+    }
+}
+
 #[test]
 fn service_tier_storage_values_keep_fast_aliases_compatible() {
     assert_eq!(DefaultServiceTier::Standard.as_str(), "standard");
@@ -204,7 +411,7 @@ fn runtime_updates_key_scope_without_rebuild() {
     );
 }
 #[test]
-fn active_responses_scope_uses_live_candidate_policy() {
+fn active_pool_scope_uses_live_candidate_policy() {
     let runtime = GatewayRuntime::from_pool(
         vec![RuntimeSource::unrestricted(source(
             "source-a",
@@ -230,7 +437,7 @@ fn active_responses_scope_uses_live_candidate_policy() {
     let source_ids = BTreeSet::from(["source-a".to_string()]);
     let account_ids = BTreeSet::from(["account-a".to_string()]);
     assert_eq!(
-        runtime.active_responses_scope(&source_ids, &account_ids),
+        runtime.active_pool_scope(&source_ids, &account_ids),
         CandidateScope {
             source_ids: Some(source_ids.clone()),
             account_ids: Some(account_ids.clone()),
@@ -261,7 +468,7 @@ fn active_responses_scope_uses_live_candidate_policy() {
             excluded_models: Vec::new(),
         },
     ));
-    let scope = runtime.active_responses_scope(&source_ids, &account_ids);
+    let scope = runtime.active_pool_scope(&source_ids, &account_ids);
     assert_eq!(scope.source_ids, Some(BTreeSet::new()));
     assert_eq!(scope.account_ids, Some(BTreeSet::new()));
 }

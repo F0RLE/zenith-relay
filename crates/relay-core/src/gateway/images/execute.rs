@@ -25,11 +25,34 @@ pub(super) async fn execute_prepared(
     key: AuthenticatedKey,
     prepared: PreparedImageRequest,
     endpoint: ImageEndpoint,
+    started: tokio::time::Instant,
+    ingress: crate::runtime::RequestIngressTiming,
 ) -> Response<Body> {
     let request_id = request_id();
     let budget = crate::scheduler::rotation::SharedRequestBudget::for_incoming_request(
         runtime.request_dispatch_budget(),
     );
+    let scope = runtime.track_request_usage_from(&request_id, &budget, started, ingress);
+    let response =
+        execute_attempts(&runtime, &key, &prepared, endpoint, &request_id, &budget).await;
+    let streaming = response.status().is_success()
+        && response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+    scope.finish(response.status().as_u16(), streaming);
+    response
+}
+
+async fn execute_attempts(
+    runtime: &Arc<GatewayRuntime>,
+    key: &AuthenticatedKey,
+    prepared: &PreparedImageRequest,
+    endpoint: ImageEndpoint,
+    request_id: &str,
+    budget: &crate::scheduler::rotation::SharedRequestBudget,
+) -> Response<Body> {
     budget.retain_input_bytes(
         prepared
             .input_images
@@ -54,14 +77,15 @@ pub(super) async fn execute_prepared(
         if !budget.can_dispatch() {
             break;
         }
+        let selection_started = runtime.diagnostics_enabled().then(std::time::Instant::now);
         let Some((selected, lease)) = runtime
             .select_and_reserve_image_with_budget(
-                &key,
+                key,
                 &prepared.resolved_model,
                 IMAGE_PROTOCOLS,
                 &tried,
                 now_ms(),
-                &budget,
+                budget,
             )
             .await
         else {
@@ -79,15 +103,18 @@ pub(super) async fn execute_prepared(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.client_context_id = prepared.client_context_id.clone();
+        if let Some(started) = selection_started {
+            runtime.record_request_selection(request_id, started);
+        }
         let lease = Arc::new(lease);
         let route_origin = super::super::response::route_error_origin(&route);
         match run_selected_attempt(SelectedImageRoute {
-            runtime: &runtime,
-            key: &key,
-            prepared: &prepared,
+            runtime,
+            key,
+            prepared,
             endpoint,
-            request_id: &request_id,
-            budget: &budget,
+            request_id,
+            budget,
             lease: &lease,
             route,
         })
@@ -101,13 +128,13 @@ pub(super) async fn execute_prepared(
         }
     }
 
-    if let Some(error) = super::super::errors::admission_error(&budget) {
+    if let Some(error) = super::super::errors::admission_error(budget) {
         return error;
     }
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS
         && let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
-            &key,
+            key,
             &prepared.resolved_model,
             IMAGE_PROTOCOLS,
             &HashSet::new(),
@@ -119,7 +146,7 @@ pub(super) async fn execute_prepared(
         return cooldown_error(
             retry_at,
             Some(&failure),
-            reason == crate::scheduler::CooldownReason::RateLimit,
+            reason.is_rate_limit(),
             last_failure_origin,
         );
     }
@@ -130,6 +157,6 @@ pub(super) async fn execute_prepared(
         failure.category,
         failure.category,
         origin,
-        Some(&request_id),
+        Some(request_id),
     )
 }

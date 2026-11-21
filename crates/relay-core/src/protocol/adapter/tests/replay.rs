@@ -286,6 +286,66 @@ fn native_responses_replay_materializes_tool_turn_without_protocol_conversion() 
     assert_eq!(input[1], upstream["output"][0]);
     assert_eq!(input[2], continuation["input"][0]);
 }
+
+#[test]
+fn native_responses_replay_preserves_standalone_named_function_results() {
+    let standalone = json!({"type":"function_call_output","id":"fco_context",
+        "name":"snapshot","namespace":"workspace","output":"Synthetic external context",
+        "internal_chat_message_metadata_passthrough":{"turn_id":"synthetic"}});
+    let initial = json!({"input":[{"role":"user","content":"Synthetic first turn"}, standalone]});
+    let call = json!({"type":"function_call","id":"fc_lookup","call_id":"call_lookup",
+        "name":"lookup","arguments":"{}"});
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &initial,
+        "gpt-test",
+        &json!({"id":"resp_first","output":[call]}),
+    )
+    .unwrap();
+    let result =
+        json!({"type":"function_call_output","call_id":"call_lookup","output":"Synthetic result"});
+    let appended = json!({"type":"function_call_output","name":"snapshot","call_id":null,
+        "caller":{"type":"direct"},"namespace":null,
+        "output":[{"type":"input_text","text":"Synthetic additional context"}]});
+    let request = json!({"input":[result, appended],"previous_response_id":"resp_first"});
+    let replayed = replay.replay_request(&request, "gpt-test", true).unwrap();
+    assert_eq!(
+        replayed["input"],
+        json!([initial["input"][0], standalone, call, result, appended])
+    );
+    assert!(replayed.get("previous_response_id").is_none());
+}
+
+#[test]
+fn native_responses_replay_keeps_linked_and_malformed_results_strict() {
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &json!({"input":"Synthetic first turn"}),
+        "gpt-test",
+        &json!({"id":"resp_first","output":[]}),
+    )
+    .unwrap();
+    for item in [
+        json!({"type":"function_call_output","name":"lookup","call_id":"orphan","output":"synthetic"}),
+        json!({"type":"function_call_output","name":"lookup","call_id":"","output":"synthetic"}),
+        json!({"type":"function_call_output","name":"lookup","call_id":7,"output":"synthetic"}),
+        json!({"type":"function_call_output","id":"fco_context","output":"synthetic"}),
+        json!({"type":"function_call_output","name":" ","output":"synthetic"}),
+        json!({"type":"function_call_output","name":"lookup","namespace":7,"output":"synthetic"}),
+        json!({"type":"function_call_output","name":"lookup","output":null}),
+        json!({"type":"function_call_output","name":"lookup","output":[7]}),
+        json!({"type":"function_call_output","name":"lookup","output":"synthetic",
+            "caller":{"type":"program","caller_id":"synthetic"}}),
+        json!({"type":"custom_tool_call_output","name":"lookup","output":"synthetic"}),
+        json!({"type":"tool_search_output","name":"lookup","tools":[]}),
+    ] {
+        let request = json!({"input":[item],"previous_response_id":"resp_first"});
+        assert_eq!(
+            replay.replay_request(&request, "gpt-test", true),
+            Err(AdapterError::continuation_mismatch()),
+            "{item}"
+        );
+    }
+}
+
 #[test]
 fn native_responses_replay_preserves_current_turn_options() {
     let initial = json!({

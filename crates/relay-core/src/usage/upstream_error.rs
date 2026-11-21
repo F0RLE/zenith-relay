@@ -278,7 +278,43 @@ fn safe_parameter(value: &str) -> Option<String> {
             | "response.json"
             | "response.serialization"
             | "response.status"
+            | "response.terminal"
             | "response.output"
+            | "response.output_item.changed"
+            | "response.output_item.index"
+            | "response.output_item.shape"
+            | "response.output_item.id"
+            | "response.output_item.type"
+            | "response.output_item.name"
+            | "response.output_item.call_id"
+            | "response.output_item.content"
+            | "response.output_item.summary"
+            | "response.output_item.encrypted_content"
+            | "response.output_item.phase"
+            | "response.output_item.status"
+            | "response.output_item.role"
+            | "response.output_item.arguments"
+            | "response.output_item.input"
+            | "response.output_item.caller"
+            | "response.output_item.async"
+            | "response.output_item.namespace"
+            | "response.output_item.action"
+            | "response.output_item.action.type"
+            | "response.output_item.action.query"
+            | "response.output_item.action.queries"
+            | "response.output_item.action.sources"
+            | "response.output_item.action.url"
+            | "response.output_item.action.pattern"
+            | "response.output_item.action.changed"
+            | "response.output_item.results"
+            | "response.output_item.output"
+            | "response.output_item.error"
+            | "response.output_item.server_label"
+            | "response.output_item.tools"
+            | "response.output_item.approval_request_id"
+            | "response.output_item.container_id"
+            | "response.output_item.code"
+            | "response.output_item.result"
             | "stream.response_size"
             | "stream.event.json"
             | "stream.terminal"
@@ -376,6 +412,17 @@ mod tests {
             "text.verbosity",
             "tools.parameters.encrypted",
             "previous_response_id",
+            "response.output_item.namespace",
+            "response.output_item.action",
+            "response.output_item.results",
+            "response.output_item.output",
+            "response.output_item.error",
+            "response.output_item.server_label",
+            "response.output_item.tools",
+            "response.output_item.approval_request_id",
+            "response.output_item.container_id",
+            "response.output_item.code",
+            "response.output_item.result",
         ] {
             let details = super::UpstreamErrorDetails::from_value(
                 Some(502),

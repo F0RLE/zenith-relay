@@ -1,9 +1,21 @@
+use super::rotation::RotationOperation;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum InFlightLane {
     Text,
     Image,
+}
+
+impl From<RotationOperation> for InFlightLane {
+    fn from(operation: RotationOperation) -> Self {
+        match operation {
+            RotationOperation::Image => Self::Image,
+            RotationOperation::Text
+            | RotationOperation::Compaction
+            | RotationOperation::Metadata => Self::Text,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

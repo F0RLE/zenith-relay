@@ -2,14 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { artifactPathsToClean, assertSafeCleanupPaths } from "./artifact-paths.mjs";
+import { artifactPathsToClean, assertSafeCleanupPaths, incrementalArtifactPaths } from "./artifact-paths.mjs";
 
 describe("build artifact cleanup scope", () => {
   const root = resolve("synthetic-workspace", "zenith-relay");
 
   test("default cleanup targets Desktop and web builds regardless of invocation directory", () => {
     expect(artifactPathsToClean(root)).toEqual([
-      join(root, "src", ".build"), join(root, "src", "dist"), join(root, "web", "dist"),
+      join(root, "desktop/frontend", ".build"), join(root, "desktop/frontend", "dist"), join(root, "hosted/web", "dist"),
     ]);
   });
 
@@ -25,9 +25,10 @@ describe("build artifact cleanup scope", () => {
       expect(withinRepository).not.toBe("");
     }
     expect(paths).toContain(join(root, "crates", "relay-core", "target"));
-    expect(paths).toContain(join(root, "src-tauri", "target"));
-    expect(paths).toContain(join(root, "web", "test-results"));
-    expect(paths).toContain(join(root, "web", "playwright-report"));
+    expect(paths).toContain(join(root, "desktop/src-tauri", "target"));
+    expect(paths).toContain(join(root, "hosted/web", "test-results"));
+    expect(paths).toContain(join(root, "hosted/web", "playwright-report"));
+    expect(paths).toContain(join(root, ".build", "desktop"));
   });
 
   test("help and unknown options exit before cleanup", () => {
@@ -38,18 +39,51 @@ describe("build artifact cleanup scope", () => {
     }
   });
 
+  test("incremental cleanup keeps dependencies, executables, frontend builds and user data", () => {
+    const paths = incrementalArtifactPaths(root);
+    expect(paths).toEqual([
+      join(root, "desktop/src-tauri", "target", "debug", "incremental"),
+      join(root, "crates", "relay-core", "target", "debug", "incremental"),
+    ]);
+    expect(() => assertSafeCleanupPaths(root, paths, () => ({
+      isSymbolicLink: () => false, isDirectory: () => true,
+    }))).not.toThrow();
+  });
+
+  test("conflicting cleanup modes exit before touching artifacts", () => {
+    const script = fileURLToPath(new URL("./clean.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "--all", "--incremental"], {
+      encoding: "utf8", windowsHide: true,
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Choose either --all or --incremental");
+  });
+
   test("full cleanup includes browser captures without removing all output or documentation images", () => {
     const paths = artifactPathsToClean(root, true);
-    expect(paths).toContain(join(root, "src", "output", "playwright"));
-    expect(paths).not.toContain(join(root, "src", "output"));
+    expect(paths).toContain(join(root, "desktop/frontend", "output", "playwright"));
+    expect(paths).not.toContain(join(root, "desktop/frontend", "output"));
     expect(paths).not.toContain(join(root, "docs", "screenshots"));
   });
 
   test("full cleanup removes permission schemas without deleting other gen contents", () => {
     const paths = artifactPathsToClean(root, true);
-    expect(paths).toContain(join(root, "src-tauri", "gen", "schemas"));
-    expect(paths).not.toContain(join(root, "src-tauri", "gen"));
+    expect(paths).toContain(join(root, "desktop/src-tauri", "gen", "schemas"));
+    expect(paths).not.toContain(join(root, "desktop/src-tauri", "gen"));
     expect(paths).not.toContain(join(root, "gen"));
+  });
+
+  test("full cleanup preserves exports, tool caches and build worktrees", () => {
+    const paths = artifactPathsToClean(root, true);
+    for (const protectedPath of [
+      join(root, ".build", "output"), join(root, ".build", "ci-tool-cache"),
+      join(root, ".build", "release-check"),
+    ]) {
+      for (const path of paths) {
+        const withinTarget = relative(path, protectedPath);
+        expect(withinTarget === "" || (!isAbsolute(withinTarget) && !withinTarget.startsWith(".."))).toBe(false);
+      }
+    }
   });
 });
 
@@ -66,22 +100,22 @@ describe("cleanup path safety", () => {
     });
     for (const path of artifactPaths) expect(inspectedPaths).toContain(path);
     expect(inspectedPaths).toContain(repositoryRoot);
-    expect(inspectedPaths).toContain(join(repositoryRoot, "src", "output"));
+    expect(inspectedPaths).toContain(join(repositoryRoot, "desktop/frontend", "output"));
   });
 
-  test.each(["", "web", join("web", "dist")])("rejects a linked root, parent or target: %s", (linkedRelativePath) => {
+  test.each(["", "hosted", "hosted/web", join("hosted/web", "dist")])("rejects a linked root, parent or target: %s", (linkedRelativePath) => {
     const linkedPath = join(repositoryRoot, linkedRelativePath);
-    expect(() => assertSafeCleanupPaths(repositoryRoot, [join(repositoryRoot, "web", "dist")], (path) => ({
+    expect(() => assertSafeCleanupPaths(repositoryRoot, [join(repositoryRoot, "hosted/web", "dist")], (path) => ({
       ...directoryMetadata,
       isSymbolicLink: () => path === linkedPath,
     }))).toThrow("Refusing cleanup through a link or non-directory");
   });
 
   test("a missing target does not hide a linked parent", () => {
-    const artifactPath = join(repositoryRoot, "web", "dist");
+    const artifactPath = join(repositoryRoot, "hosted/web", "dist");
     expect(() => assertSafeCleanupPaths(repositoryRoot, [artifactPath], (path) => {
       if (path === artifactPath) throw Object.assign(new Error("missing"), { code: "ENOENT" });
-      return { ...directoryMetadata, isSymbolicLink: () => path === join(repositoryRoot, "web") };
+      return { ...directoryMetadata, isSymbolicLink: () => path === join(repositoryRoot, "hosted/web") };
     })).toThrow("Refusing cleanup through a link or non-directory");
   });
 
@@ -98,7 +132,7 @@ describe("cleanup path safety", () => {
   });
 
   test("a file at an artifact path is not deleted as a directory", () => {
-    const artifactPath = join(repositoryRoot, "src", "dist");
+    const artifactPath = join(repositoryRoot, "desktop/frontend", "dist");
     expect(() => assertSafeCleanupPaths(repositoryRoot, [artifactPath], (path) => ({
       ...directoryMetadata,
       isDirectory: () => path !== artifactPath,

@@ -26,8 +26,15 @@ const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
 const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+fn parse_fixture_request(body: &[u8]) -> serde_json::Result<Value> {
+    zenith_relay_core::bounded_json::from_slice_with_limit::<_, MAX_CLIENT_REQUEST_BODY_BYTES>(body)
+}
+
 #[path = "support/usage_observations.rs"]
 mod usage_observations;
+#[path = "support/websocket_frames.rs"]
+mod websocket_frames;
+use websocket_frames::receive_websocket_data_with_timeout;
 
 #[path = "support/protocol_matrix.rs"]
 mod protocol_matrix;
@@ -63,6 +70,10 @@ mod protocol_bridges;
 #[path = "support/local_server.rs"]
 mod local_server;
 use local_server::{TestServer, spawn};
+#[path = "support/application_protocol.rs"]
+mod application_protocol;
+#[path = "support/catalog_endpoints.rs"]
+mod catalog_endpoints;
 #[path = "support/source_discovery.rs"]
 mod source_discovery;
 #[path = "support/stream_limits.rs"]
@@ -548,7 +559,7 @@ async fn upstream_image_generation(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = parse_fixture_request(&body).unwrap();
     state.bodies.lock().unwrap().push(request);
     Json(json!({
         "created": 7,
@@ -602,7 +613,7 @@ async fn upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = parse_fixture_request(&body).unwrap();
     if request.get("stream").and_then(Value::as_bool) != Some(true) {
         return Json(json!({
             "id": "resp_test",
@@ -783,7 +794,7 @@ async fn recording_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = serde_json::from_slice(&body).unwrap();
+    let request: Value = parse_fixture_request(&body).unwrap();
     state.bodies.lock().unwrap().push(request.clone());
     Json(json!({
         "id": "resp_test",
@@ -802,7 +813,7 @@ async fn native_replay_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -946,7 +957,7 @@ async fn strict_function_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -990,7 +1001,7 @@ async fn strict_custom_tool_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1034,7 +1045,7 @@ async fn strict_message_item_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1078,7 +1089,7 @@ async fn strict_missing_call_id_upstream_responses(
     if !has_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1222,7 +1233,7 @@ async fn upstream_messages(
     if !has_messages_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1403,7 +1414,7 @@ async fn upstream_gemini_generate_content(
     if !has_gemini_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
@@ -1432,7 +1443,7 @@ async fn upstream_gemini_stream_generate_content(
     if !has_gemini_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match parse_fixture_request(&body) {
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };

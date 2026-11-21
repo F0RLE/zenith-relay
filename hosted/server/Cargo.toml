@@ -1,0 +1,45 @@
+[package]
+name = "zenith-relay-hosted"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "AGPL-3.0-only"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+atomicwrites = "0.4.4"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+oauth2 = { version = "5.0.0", default-features = false }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["raw_value"] }
+serde_urlencoded = "0.7.1"
+hex = "0.4.3"
+ring = "0.17.14"
+subtle = "2.6.1"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring", "migrate", "macros", "uuid", "json"] }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1.19"
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
+tower-http = { version = "0.6.11", default-features = false, features = ["fs"] }
+url = "2.5.8"
+uuid = { version = "1.29.2", features = ["v4", "serde"] }
+webauthn-rs = { version = "0.5.5", default-features = false, features = ["conditional-ui"] }
+webauthn-rs-proto = "0.5.5"
+zeroize = "1.9.1"
+zenith-relay-vault-envelope = { path = "../../crates/relay-vault-envelope" }
+zenith-relay-core = { path = "../../crates/relay-core" }
+zenith-relay-hosted-device = { path = "../../crates/relay-hosted-device" }
+
+[target.'cfg(windows)'.dependencies]
+# Build the passkey verifier without a system-wide OpenSSL installation.
+openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+base64 = "0.22.1"
+openssl = "0.10"

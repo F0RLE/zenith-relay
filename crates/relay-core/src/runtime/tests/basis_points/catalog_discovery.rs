@@ -554,7 +554,7 @@ async fn catalog_continuation_rejects_replaced_incarnation_before_dispatch() {
         .into_iter()
         .find(|route| route.candidate_id == "account-1")
         .unwrap();
-    runtime.chatgpt_accounts["account-1"]
+    runtime.account_state.executors["account-1"]
         .token_authority
         .register(
             "account-1",

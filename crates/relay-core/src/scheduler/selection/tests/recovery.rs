@@ -32,7 +32,7 @@ fn start(
             None,
         )
         .unwrap();
-    budget.with_budget(|b| scheduler.begin_rotation_dispatch(slot, b).unwrap());
+    budget.with_budget(|b| scheduler.begin_rotation_dispatch(slot, b, now).unwrap());
     (slot, budget)
 }
 
@@ -258,7 +258,7 @@ fn compaction_waits_only_on_its_own_route_not_a_ready_text_api() {
             None,
         )
         .unwrap();
-    budget.with_budget(|b| scheduler.begin_rotation_dispatch(slot, b).unwrap());
+    budget.with_budget(|b| scheduler.begin_rotation_dispatch(slot, b, 0).unwrap());
     finish(
         &mut scheduler,
         (slot, budget),

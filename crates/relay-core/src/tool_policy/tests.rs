@@ -1,5 +1,5 @@
-use super::{ToolPolicy, apply_tool_policy, catalog::catalog_stats};
-use crate::{ToolPolicyMode, ToolPolicyOutcome};
+use super::{ToolPolicy, capture_tool_catalog, catalog::catalog_stats};
+use crate::ToolPolicyMode;
 use serde_json::{Value, json};
 
 fn named_catalog(count: usize) -> Value {
@@ -16,36 +16,32 @@ fn disabled_diagnostics_skip_sizes_without_changing_the_catalog() {
     let request = named_catalog(73);
     for enabled in [false, true] {
         let forwarded = request.clone();
-        let result = apply_tool_policy(&forwarded, &ToolPolicy::default(), enabled).unwrap();
+        let result = capture_tool_catalog(&forwarded, enabled);
         assert_eq!(forwarded, request);
-        assert_eq!(result.after.count, 73);
+        assert_eq!(result.stats.count, 73);
         assert_eq!(result.context.is_some(), enabled);
-        assert_eq!(result.after.bytes > 0, enabled);
+        assert_eq!(result.stats.bytes > 0, enabled);
     }
 }
 
 #[test]
-fn standard_mode_is_transparent() {
+fn catalog_capture_is_transparent() {
     let request = named_catalog(73);
     let original = request.clone();
-    let result = apply_tool_policy(&request, &ToolPolicy::default(), true).unwrap();
+    let result = capture_tool_catalog(&request, true);
 
     assert_eq!(request, original);
-    assert_eq!(result.before.count, 73);
-    assert_eq!(result.after, result.before);
-    assert_eq!(result.outcome, ToolPolicyOutcome::PassThrough);
+    assert_eq!(result.stats, catalog_stats(&original));
+    assert_eq!(result.stats.count, 73);
 }
 
 #[test]
-fn automatic_mode_forwards_even_a_small_catalog_unchanged() {
+fn capture_preserves_even_a_small_catalog() {
     let request = named_catalog(1);
     let original = request.clone();
-    let policy = ToolPolicy {
-        mode: ToolPolicyMode::Automatic,
-    };
-    let result = apply_tool_policy(&request, &policy, true).unwrap();
+    let result = capture_tool_catalog(&request, true);
     assert_eq!(request, original);
-    assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
+    assert_eq!(result.stats.count, 1);
 }
 
 #[test]
@@ -57,13 +53,9 @@ fn existing_client_or_provider_deferred_catalog_is_left_untouched() {
         ]
     });
     let original = request.clone();
-    let policy = ToolPolicy {
-        mode: ToolPolicyMode::Automatic,
-    };
-
-    let result = apply_tool_policy(&request, &policy, true).unwrap();
+    let result = capture_tool_catalog(&request, true);
     assert_eq!(request, original);
-    assert_eq!(result.outcome, ToolPolicyOutcome::Unchanged);
+    assert_eq!(result.stats.count, 2);
 }
 
 #[test]
@@ -80,12 +72,39 @@ fn tool_search_control_entry_is_not_counted_as_a_client_tool() {
 }
 
 #[test]
+fn web_search_evidence_only_recognizes_native_responses_declarations() {
+    use super::responses_web_search_declared as declared;
+    for kind in [
+        "web_search",
+        "web_search_2025_08_26",
+        "web_search_preview",
+        "web_search_preview_2025_03_11",
+    ] {
+        assert!(declared(&json!({"tools":[{"type":kind}]})));
+    }
+    for kind in ["additional_tools", "tool_search_output"] {
+        assert!(declared(&json!({"tools":[], "input":[
+            {"type":kind,"tools":[{"type":"web_search"}]}
+        ]})));
+    }
+    let not_declarations = json!({
+        "tools":[{"type":"function","name":"web_search"},{"type":"tool_search"},
+            {"type":"web_search_preview_custom"},{"type":"custom","name":"web_search"}],
+        "tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"}]},
+        "input":[{"type":"web_search_call","action":{"type":"search"}},
+            {"type":"function_call","name":"web_search","arguments":"{}"},
+            {"role":"user","content":"web_search","tools":[{"type":"web_search"}]}]
+    });
+    assert!(!declared(&not_declarations));
+}
+
+#[test]
 fn deferred_search_evidence_requires_both_control_and_deferred_definitions() {
     let function = json!({"type":"function","name":"fixture","defer_loading":true,"parameters":{"type":"object"}});
     let request = json!({"tools":[{"type":"tool_search"}, function]});
     let forwarded = request.clone();
-    let result = apply_tool_policy(&forwarded, &ToolPolicy::default(), true).unwrap();
-    assert!(result.after.deferred_search);
+    let result = capture_tool_catalog(&forwarded, true);
+    assert!(result.stats.deferred_search);
     assert_eq!(forwarded, request);
     assert!(!catalog_stats(&json!({"tools":[function]})).deferred_search);
     assert!(!catalog_stats(&json!({"tools":[{"type":"tool_search"}]})).deferred_search);

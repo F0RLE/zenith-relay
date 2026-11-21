@@ -3,6 +3,48 @@ use std::time::Duration;
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+pub(super) const MAX_OUTBOUND_FRAME_BYTES: usize = 1024 * 1024;
+
+pub(super) async fn send_request_message<S>(socket: &mut S, payload: String) -> Result<(), ()>
+where
+    S: Sink<tungstenite::Message> + Unpin,
+{
+    use tungstenite::protocol::frame::{
+        Frame,
+        coding::{Data, OpCode},
+    };
+    let write = async {
+        if payload.len() <= MAX_OUTBOUND_FRAME_BYTES {
+            return socket
+                .send(tungstenite::Message::Text(payload.into()))
+                .await
+                .map_err(|_| ());
+        }
+        let bytes = reqwest_websocket::Bytes::from(payload.into_bytes());
+        for start in (0..bytes.len()).step_by(MAX_OUTBOUND_FRAME_BYTES) {
+            let end = start
+                .saturating_add(MAX_OUTBOUND_FRAME_BYTES)
+                .min(bytes.len());
+            let opcode = OpCode::Data(if start == 0 {
+                Data::Text
+            } else {
+                Data::Continue
+            });
+            socket
+                .send(tungstenite::Message::Frame(Frame::message(
+                    bytes.slice(start..end),
+                    opcode,
+                    end == bytes.len(),
+                )))
+                .await
+                .map_err(|_| ())?;
+        }
+        Ok(())
+    };
+    tokio::time::timeout(WRITE_TIMEOUT, write)
+        .await
+        .map_err(|_| ())?
+}
 
 pub(super) async fn send_close_message<S, M>(socket: &mut S, message: M) -> Result<(), ()>
 where
@@ -12,6 +54,22 @@ where
         Ok(Ok(())) => Ok(()),
         _ => Err(()),
     }
+}
+
+pub(super) async fn close_downstream(socket: &mut super::WebSocket, message: super::Message) {
+    if send_close_message(socket, message).await.is_err() || socket.is_http_lane() {
+        return;
+    }
+    // Drain the close handshake before dropping TCP: unread control frames
+    // can otherwise turn an already-sent terminal error into a reset.
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+        while let Some(Ok(message)) = socket.recv_live().await {
+            if matches!(message, super::Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 pub(super) async fn send_message<S, M>(socket: &mut S, message: M) -> Result<(), ()>
@@ -24,6 +82,9 @@ where
         _ => Err(()),
     }
 }
+
+#[cfg(test)]
+mod frame_tests;
 
 #[cfg(test)]
 mod tests {

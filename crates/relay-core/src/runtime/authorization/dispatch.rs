@@ -79,10 +79,13 @@ impl GatewayRuntime {
         let first_request = request
             .try_clone()
             .ok_or(AuthorizedRequestError::NotReplayable)?;
+        let authorization_started = self.diagnostics_enabled().then(std::time::Instant::now);
         let prepared = if let Some(binding) = binding {
             self.prepare_source_authorization(candidate_id, binding)
                 .map_err(AuthorizedRequestError::Prepare)?
-        } else if budget.is_some() && self.is_basis_points_account(candidate_id) {
+        } else if budget.is_some_and(|budget| !budget.is_image_generation())
+            && self.is_basis_points_account(candidate_id)
+        {
             self.prepare_basis_points_authorization(candidate_id)
                 .await?
         } else {
@@ -93,9 +96,32 @@ impl GatewayRuntime {
         if expected.is_some_and(|expected| *expected != prepared.incarnation()) {
             return Err(AuthorizedRequestError::NotReplayable);
         }
+        let authorization_ms =
+            authorization_started.map(|start| start.elapsed().as_millis() as u64);
         let upstream_response = self
-            .send_prepared_authorization(candidate_id, first_request, &prepared, dispatch)
+            .send_prepared_authorization(
+                candidate_id,
+                first_request,
+                &prepared,
+                dispatch,
+                None,
+                authorization_ms,
+            )
             .await?;
+        let upstream_response = if upstream_response.status() == StatusCode::UNAUTHORIZED
+            && !endpoint_observes_codex_quota(upstream_response.url().path())
+            && (prepared.token_generation.is_some() || prepared.agent_task_id.is_some())
+            && let Some(budget) = budget
+        {
+            let (response, replay_safe) =
+                super::image_rejection::inspect(upstream_response, budget).await;
+            if !replay_safe {
+                return Ok(self.accept_authorized_response(candidate_id, response, &prepared));
+            }
+            response
+        } else {
+            upstream_response
+        };
         if upstream_response.status() == StatusCode::UNAUTHORIZED
             && let Some(task_id) = prepared.agent_task_id.as_deref()
         {
@@ -127,6 +153,7 @@ impl GatewayRuntime {
             if let Some(budget) = budget {
                 budget.observe_rejection();
             }
+            let authorization_started = self.diagnostics_enabled().then(std::time::Instant::now);
             let refreshed = self
                 .refresh_agent_identity_task_after_unauthorized(
                     candidate_id,
@@ -135,8 +162,17 @@ impl GatewayRuntime {
                 )
                 .await
                 .map_err(AuthorizedRequestError::Prepare)?;
+            let authorization_ms =
+                authorization_started.map(|start| start.elapsed().as_millis() as u64);
             let refreshed_response = self
-                .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
+                .send_prepared_authorization(
+                    candidate_id,
+                    request,
+                    &refreshed,
+                    dispatch,
+                    None,
+                    authorization_ms,
+                )
                 .await?;
             return Ok(self.accept_authorized_response(
                 candidate_id,
@@ -155,12 +191,9 @@ impl GatewayRuntime {
             return Ok(self.accept_authorized_response(candidate_id, upstream_response, &prepared));
         }
         if self.is_basis_points_account(candidate_id) {
-            let account =
-                self.chatgpt_accounts
-                    .get(candidate_id)
-                    .ok_or(AuthorizedRequestError::Prepare(
-                        ExecutorPrepareError::Authentication,
-                    ))?;
+            let account = self.account_state.executors.get(candidate_id).ok_or(
+                AuthorizedRequestError::Prepare(ExecutorPrepareError::Authentication),
+            )?;
             let revision =
                 prepared
                     .token_revision
@@ -196,6 +229,7 @@ impl GatewayRuntime {
             budget.observe_rejection();
         }
         let fence = self.fence_execution(candidate_id);
+        let authorization_started = self.diagnostics_enabled().then(std::time::Instant::now);
         let refreshed = self
             .refresh_authorization_after_unauthorized(candidate_id, &prepared, runtime_now_ms())
             .await
@@ -204,8 +238,17 @@ impl GatewayRuntime {
         // token authority has produced the replacement, release the Auth
         // admission fence before that same lease passes final dispatch.
         drop(fence);
+        let authorization_ms =
+            authorization_started.map(|start| start.elapsed().as_millis() as u64);
         let refreshed_response = self
-            .send_prepared_authorization(candidate_id, request, &refreshed, dispatch)
+            .send_prepared_authorization(
+                candidate_id,
+                request,
+                &refreshed,
+                dispatch,
+                None,
+                authorization_ms,
+            )
             .await?;
         Ok(self.accept_authorized_response(candidate_id, refreshed_response, &refreshed))
     }
@@ -216,13 +259,16 @@ impl GatewayRuntime {
         response: reqwest::Response,
         prepared: &PreparedAuthorization,
     ) -> AuthorizedResponse {
-        self.observe_codex_quota_headers(
-            candidate_id,
-            prepared.token_generation,
-            response.status(),
-            response.headers(),
-            runtime_now_ms(),
-        );
+        if endpoint_observes_codex_quota(response.url().path()) {
+            self.observe_codex_quota_headers(
+                candidate_id,
+                prepared.token_generation,
+                prepared.token_revision.as_ref(),
+                response.status(),
+                response.headers(),
+                runtime_now_ms(),
+            );
+        }
         AuthorizedResponse {
             response,
             account_token_generation: prepared.token_generation,
@@ -236,7 +282,7 @@ impl GatewayRuntime {
         generation: Option<u64>,
         response: &reqwest::Response,
     ) {
-        let Some((template, started)) = dispatch.usage_event else {
+        let Some((template, started)) = dispatch.tracked_usage() else {
             return;
         };
         if template
@@ -273,11 +319,14 @@ impl GatewayRuntime {
         candidate_id: &str,
         prepared: &PreparedAuthorization,
     ) -> Option<std::sync::Arc<super::super::routing_cookies::RoutingCookieJar>> {
-        self.chatgpt_accounts.get(candidate_id).map(|account| {
-            account
-                .routing_cookies
-                .for_credential(prepared.turn_state_credential())
-        })
+        self.account_state
+            .executors
+            .get(candidate_id)
+            .map(|account| {
+                account
+                    .routing_cookies
+                    .for_credential(prepared.turn_state_credential())
+            })
     }
 
     pub(crate) fn guard_turn_state(
@@ -345,13 +394,51 @@ impl GatewayRuntime {
         }
     }
 
+    /// Only a static native source can enter this path. Account repair, socket
+    /// transports and automatic resend are not part of this host contract.
+    pub(crate) async fn send_hosted_text(
+        &self,
+        route: &crate::runtime::ExecutorRoute,
+        request: reqwest::RequestBuilder,
+        dispatch: AuthorizationDispatch<'_>,
+        fence: crate::gateway::hosted::SendFence<'_>,
+    ) -> Result<reqwest::Response, AuthorizedRequestError> {
+        if route.account_id.is_some()
+            || route.adapter != crate::SourceAdapter::Native
+            || route.client_wire_api != crate::WireApi::Responses
+            || route.source_id != fence.attempt.source_id
+            || route.candidate_id != route.source_id
+            || route.source_model != fence.attempt.model_id
+        {
+            return Err(AuthorizedRequestError::NotReplayable);
+        }
+        let authorization_started = self.diagnostics_enabled().then(std::time::Instant::now);
+        let prepared = self
+            .prepare_source_authorization(&route.candidate_id, route.binding_key())
+            .map_err(AuthorizedRequestError::Prepare)?;
+        let authorization_ms =
+            authorization_started.map(|start| start.elapsed().as_millis() as u64);
+        self.send_prepared_authorization(
+            &route.candidate_id,
+            request,
+            &prepared,
+            dispatch,
+            Some(fence),
+            authorization_ms,
+        )
+        .await
+    }
+
     async fn send_prepared_authorization(
         &self,
         candidate_id: &str,
         request: reqwest::RequestBuilder,
         prepared: &PreparedAuthorization,
         dispatch: AuthorizationDispatch<'_>,
+        hosted: Option<crate::gateway::hosted::SendFence<'_>>,
+        authorization_ms: Option<u64>,
     ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+        let preparation_started = self.diagnostics_enabled().then(std::time::Instant::now);
         let AuthorizationDispatch {
             client_version,
             identity_policy,
@@ -394,21 +481,21 @@ impl GatewayRuntime {
                 }
             }
         }
-        let native_codex_account = self.chatgpt_accounts.contains_key(candidate_id)
+        let native_codex_account = self.account_state.executors.contains_key(candidate_id)
             && !self.is_siwc_account(candidate_id)
             && !self.is_basis_points_account(candidate_id)
             && identity_policy == AuthorizationIdentityPolicy::RelayCodex
             && prepared.identity.is_some();
         let diagnostics_mode = dispatch
             .usage_event
-            .and_then(|(event, _)| event.routing.as_ref())
+            .and_then(|usage| usage.event.routing.as_ref())
             .and_then(|routing| routing.transport.as_ref())
             .map(|transport| transport.mode);
-        let (mut authorized_request, payload_diagnostics) =
+        let (mut authorized_request, mut payload_diagnostics) =
             super::payload::encode(authorized_request, native_codex_account, diagnostics_mode)
                 .await;
         let url = authorized_request.url().clone();
-        let cookies = if self.is_siwc_account(candidate_id) {
+        let cookies = if hosted.is_some() || self.is_siwc_account(candidate_id) {
             None
         } else {
             self.routing_cookies(candidate_id, prepared)
@@ -421,11 +508,63 @@ impl GatewayRuntime {
         let headers_deadline = budget
             .filter(|_| !self.is_basis_points_account(candidate_id))
             .and_then(|budget| {
-                crate::transport::http_headers_timeout()
+                crate::transport::http_headers_timeout(budget.is_image_generation())
                     .map(|timeout| budget.http_headers_deadline(timeout))
             });
         if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
             return Err(AuthorizedRequestError::HeadersTimeout);
+        }
+        let hosted_text = hosted.is_some();
+        let socket = if let Some(fence) = hosted {
+            // No scheduler, scope or credential lock spans a host transaction.
+            // The existing local lease/budget checks run again after the ack.
+            fence
+                .claim()
+                .await
+                .map_err(AuthorizedRequestError::HostedClaim)?;
+            crate::runtime::siwc_socket::PreparedSocket::NotApplicable
+        } else {
+            self.prepare_siwc_socket(
+                candidate_id,
+                &authorized_request,
+                prepared,
+                dispatch,
+                diagnostics_mode,
+            )
+            .await?
+        };
+        match socket {
+            crate::runtime::siwc_socket::PreparedSocket::NotApplicable => (),
+            crate::runtime::siwc_socket::PreparedSocket::Rejected(response) => return Ok(response),
+            crate::runtime::siwc_socket::PreparedSocket::Ready(socket) => {
+                if headers_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+                {
+                    return Err(AuthorizedRequestError::HeadersTimeout);
+                }
+                // The handshake spent a wire attempt, not a generation. Recheck
+                // principal, model, grant and response ownership before the frame.
+                dispatch
+                    .lease
+                    .expect("SIWC socket requires a lease")
+                    .begin_rotation_dispatch_for(prepared, self)
+                    .map_err(|error| {
+                        if error == crate::scheduler::rotation::DispatchStartError::BudgetExhausted
+                        {
+                            AuthorizedRequestError::DispatchBudgetExhausted
+                        } else {
+                            stale_authorization()
+                        }
+                    })?;
+                if let Some((template, started)) = dispatch.tracked_usage() {
+                    let mut event = template.clone();
+                    event.attempt =
+                        budget.map_or(event.attempt, |budget| u16::from(budget.dispatches()));
+                    event.account_token_generation = prepared.token_generation;
+                    socket.observe_pending(&mut event);
+                    self.track_dispatch_usage(event, started);
+                }
+                return socket.send().await;
+            }
         }
         if let Some(budget) = budget {
             if let Some(lease) = lease {
@@ -463,7 +602,8 @@ impl GatewayRuntime {
         }
         // This boundary deliberately excludes authorization and body encoding.
         // reqwest does not expose upload completion: do not label this upload time.
-        let http_pool = budget.and_then(|_| {
+        // Desktop pool recovery can replace the client and discard the Hosted pin.
+        let http_pool = budget.filter(|_| !hosted_text).and_then(|_| {
             self.http_recovery.select(
                 candidate_id,
                 &url,
@@ -478,18 +618,23 @@ impl GatewayRuntime {
         }
         let http3_client = self.http3.select_client(
             &mut authorized_request,
-            budget.is_some() && !http1_only && self.direct_http_route(candidate_id),
+            !hosted_text && budget.is_some() && !http1_only && self.direct_http_route(candidate_id),
             candidate_id,
             &client,
         );
         let using_http3 = http3_client.is_some();
         let client = http3_client.unwrap_or(client);
+        if let Some(payload) = payload_diagnostics.as_mut() {
+            payload.authorization_ms = authorization_ms;
+            payload.http_dispatch_preparation_ms =
+                preparation_started.map(|start| start.elapsed().as_millis() as u64);
+        }
         let send_started = payload_diagnostics
             .as_ref()
             .map(|_| std::time::Instant::now());
         let pending_payload_diagnostics = payload_diagnostics.clone();
         let send = async move {
-            if let Some((template, started)) = dispatch.usage_event {
+            if let Some((template, started)) = dispatch.tracked_usage() {
                 let mut event = template.clone();
                 event.attempt =
                     budget.map_or(event.attempt, |budget| u16::from(budget.dispatches()));
@@ -519,8 +664,9 @@ impl GatewayRuntime {
         } else {
             match self
                 .is_basis_points_account(candidate_id)
-                .then(crate::transport::basis_points_progress_timeout)
-                .flatten()
+                .then_some(())
+                .filter(|_| !budget.is_some_and(|budget| budget.is_image_generation()))
+                .and_then(|_| crate::transport::basis_points_progress_timeout())
             {
                 Some(timeout) => tokio::time::timeout(timeout, send)
                     .await
@@ -555,8 +701,8 @@ impl GatewayRuntime {
                 .extensions_mut()
                 .insert(payload_diagnostics);
         }
+        self.observe_turn_state(upstream_response.headers(), scope, prepared);
         if upstream_response.status().is_success() {
-            self.observe_turn_state(upstream_response.headers(), scope, prepared);
             self.observe_codex_models_etag(
                 candidate_id,
                 &url,
@@ -570,3 +716,34 @@ impl GatewayRuntime {
 
 mod prepared;
 use prepared::apply_prepared_authorization;
+
+fn endpoint_observes_codex_quota(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    !["/images/generations", "/images/edits"]
+        .iter()
+        .any(|endpoint| path.ends_with(endpoint))
+}
+
+#[cfg(test)]
+mod quota_scope_tests {
+    use super::endpoint_observes_codex_quota;
+
+    #[test]
+    fn image_response_headers_do_not_update_the_codex_quota_ledger() {
+        for path in [
+            "/backend-api/codex/images/generations",
+            "/backend-api/codex/images/edits",
+            "/v1/images/generations",
+            "/v1/images/edits/",
+        ] {
+            assert!(!endpoint_observes_codex_quota(path), "{path}");
+        }
+        for path in [
+            "/backend-api/codex/responses",
+            "/v1/responses",
+            "/v1/chat/completions",
+        ] {
+            assert!(endpoint_observes_codex_quota(path), "{path}");
+        }
+    }
+}

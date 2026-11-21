@@ -242,7 +242,8 @@ fn canonical_header_name(name: &str) -> Option<&'static str> {
         .map(|(_, canonical)| *canonical)
 }
 
-pub(crate) fn basis_points_headers(
+/// Build the observed Office identity envelope without adding authorization.
+pub fn basis_points_headers(
     account_id: &str,
     account_user_id: Option<&str>,
     captured_headers: Option<&BasisPointsCapturedHeaders>,

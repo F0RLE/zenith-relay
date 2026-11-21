@@ -383,18 +383,40 @@ async fn all_sixteen_routes_execute_json_and_sse_with_actual_upstream_usage() {
                     assert!(body.contains(terminal), "{input:?} -> {output:?}: {body}");
                 }
             }
-            let events = events.lock().unwrap();
-            assert_eq!(events.len(), 2, "{input:?} -> {output:?}");
-            for event in events.iter() {
-                assert!(
-                    event.success,
-                    "{input:?} -> {output:?}: {:?}",
-                    event.error_category
-                );
-                assert_eq!(event.wire_api, input);
-                assert_eq!(event.input_tokens, Some(13));
-                assert_eq!(event.output_tokens, Some(7));
-                assert_eq!(event.cached_input_tokens, None);
+            {
+                let events = events.lock().unwrap();
+                assert_eq!(events.len(), 2, "{input:?} -> {output:?}");
+                for event in events.iter() {
+                    assert!(
+                        event.success,
+                        "{input:?} -> {output:?}: {:?}",
+                        event.error_category
+                    );
+                    assert_eq!(event.wire_api, input);
+                    assert_eq!(event.input_tokens, Some(13));
+                    assert_eq!(event.output_tokens, Some(7));
+                    assert_eq!(event.cached_input_tokens, None);
+                }
+            }
+            if input == WireApi::Responses && output != WireApi::Responses {
+                let sends_before = observed.requests.lock().unwrap().len();
+                for streaming in [false, true] {
+                    let response = reqwest::Client::new()
+                        .post(format!("{}/v1/responses", relay.base_url))
+                        .bearer_auth(LOCAL_KEY)
+                        .json(&json!({
+                            "model":"matrix-model", "stream":streaming,
+                            "input":[{"role":"user","content":"Synthetic input","status":false}]
+                        }))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{output:?}");
+                    let error: Value = response.json().await.unwrap();
+                    assert_eq!(error["error"]["code"], "adapter_invalid_request");
+                    assert_eq!(error["error"]["param"], "input.status");
+                }
+                assert_eq!(observed.requests.lock().unwrap().len(), sends_before);
             }
         }
         assert_eq!(observed.requests.lock().unwrap().len(), 8);

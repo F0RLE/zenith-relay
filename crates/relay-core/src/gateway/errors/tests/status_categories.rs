@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn session_budget_is_structured_request_terminal_without_account_penalty() {
+    let category = error_codes::UPSTREAM_SESSION_BUDGET_EXCEEDED;
+    for body in [
+        serde_json::json!({"code":"budget_reached"}),
+        serde_json::json!({"error":{"code":"budget_reached","retry_after":1}}),
+        serde_json::json!({"body":{"error":{"code":"budget_reached"}}}),
+        serde_json::json!({"response":{"status":"failed","error":{"code":"budget_reached"}}}),
+    ] {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::BAD_REQUEST,
+            Some(&serde_json::to_vec(&body).unwrap()),
+        );
+        assert_eq!(failure.category, category);
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
+        assert!(!retryable_failure(failure.status, category, false));
+        assert!(!retryable_failure(failure.status, category, true));
+        assert!(!failure_category_requires_cooldown(category));
+        assert!(!failure_category_affects_account_state(category));
+        assert_eq!(
+            upstream_event_failure_category(Some("error"), &body),
+            Some(category)
+        );
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert_ne!(
+                classify_upstream_error_value(status, &body).category,
+                category
+            );
+            let mut event = body.clone();
+            event["status"] = serde_json::json!(status.as_u16());
+            assert_ne!(
+                upstream_event_failure_category(Some("error"), &event),
+                Some(category)
+            );
+        }
+    }
+    for body in [
+        serde_json::json!({"error":{"message":"budget_reached"}}),
+        serde_json::json!({"input":{"code":"budget_reached"}}),
+        serde_json::json!({"code":"other_error","error":{"code":"budget_reached"}}),
+    ] {
+        assert_ne!(
+            classify_upstream_error_value(StatusCode::BAD_REQUEST, &body).category,
+            category
+        );
+        assert_ne!(
+            upstream_event_failure_category(Some("error"), &body),
+            Some(category)
+        );
+    }
+}
+
+#[test]
 fn siwc_eligibility_is_terminal_without_cooling_or_penalizing_the_account() {
     for (status, body) in [
         (
@@ -173,6 +230,32 @@ fn typed_adapter_stream_errors_keep_their_category_without_authorizing_replay() 
         assert_eq!(
             classify_upstream_error_value(StatusCode::BAD_GATEWAY, &ordinary).category,
             error_codes::UPSTREAM_BAD_GATEWAY
+        );
+    }
+}
+
+#[test]
+fn typed_stream_validation_keeps_its_category_and_does_not_authorize_replay() {
+    for body in [
+        serde_json::json!({"type":"error","code":"stream_invalid","param":"response.output_item.content"}),
+        serde_json::json!({"error":{"type":"stream_error","code":"stream_invalid"}}),
+        serde_json::json!({"type":"error","error":{"type":"stream_error","code":"stream_invalid"}}),
+        serde_json::json!({"type":"response.failed","response":{"error":{"type":"stream_error","code":"stream_invalid"}}}),
+    ] {
+        let classified = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &body);
+        assert_eq!(classified.category, error_codes::STREAM_INVALID);
+        let failure = AttemptFailure::classified_with_hint(
+            StatusCode::BAD_GATEWAY,
+            classified.category,
+            Default::default(),
+        );
+        assert_eq!(
+            failure.execution.certainty,
+            crate::scheduler::rotation::ExecutionCertainty::Unknown
+        );
+        assert_eq!(
+            classify_upstream_error_value(StatusCode::UNAUTHORIZED, &body).category,
+            error_codes::UPSTREAM_UNAUTHORIZED
         );
     }
 }
@@ -524,4 +607,13 @@ fn preserved_upstream_error_keeps_only_safe_structured_messages() {
     .unwrap();
     assert_eq!(unknown.code, "provider_error");
     assert_eq!(unknown.message, "upstream diagnostic");
+}
+
+#[test]
+fn absent_verified_model_is_distinct_from_an_account_authentication_failure() {
+    let failure = AttemptFailure::authorized_request(AuthorizedRequestError::ModelUnavailable);
+    assert_eq!(failure.status, StatusCode::NOT_ACCEPTABLE);
+    assert_eq!(failure.category, error_codes::UPSTREAM_MODEL_UNSUPPORTED);
+    assert!(failure.message.contains("verified Basis Points catalog"));
+    assert!(!failure_category_affects_account_state(failure.category));
 }

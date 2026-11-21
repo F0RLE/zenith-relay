@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { en } from "../../src/src/i18n/locales/en.ts";
+import { en } from "../../desktop/frontend/src/i18n/locales/en.ts";
 
 /** Print a translation starter; this never registers or publishes a language. */
 export function localeTemplate(code, source = en) {

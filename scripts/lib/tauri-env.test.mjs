@@ -23,11 +23,16 @@ test.skipIf(process.platform !== "win32")("Rust selection follows Relay's toolch
   const module = new URL("./tauri-env.mjs", import.meta.url).href;
   const code = `import {withZenithRustEnv} from ${JSON.stringify(module)};
     import {spawnSync} from 'node:child_process';
-    const r=spawnSync('rustc',['--print','sysroot'],{env:withZenithRustEnv(),encoding:'utf8',shell:true,windowsHide:true});
-    process.stdout.write(r.stdout ?? ''); process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);`;
+    const env=withZenithRustEnv();
+    const r=spawnSync('rustc',['--print','sysroot'],{env,encoding:'utf8',shell:true,windowsHide:true});
+    process.stdout.write(JSON.stringify({sysroot:r.stdout?.trim(),temp:env.TEMP,tmp:env.TMP}));
+    process.stderr.write(r.stderr ?? ''); process.exit(r.status ?? 1);`;
   const actual = spawnSync(process.execPath, ["-e", code], { cwd: tmpdir(), encoding: "utf8", windowsHide: true });
   expect(actual.status, actual.stderr).toBe(0);
-  expect(actual.stdout.trim()).toBe(expected.stdout.trim());
+  const result = JSON.parse(actual.stdout);
+  expect(result.sysroot).toBe(expected.stdout.trim());
+  expect(result.temp).toBe(join(repoRoot(), ".build", "desktop", "msbuild-temp"));
+  expect(result.tmp).toBe(result.temp);
 });
 
 test("only default Windows release output can receive the local production marker", () => {

@@ -10,6 +10,70 @@ fn prepend(client: &Value) -> Value {
 }
 
 #[test]
+fn only_the_relay_owned_catalog_prefix_is_excluded_from_alignment() {
+    let store = CacheContextStore::default();
+    let mut client = payload();
+    client["input"].as_array_mut().unwrap().extend([
+        json!({"type":"additional_tools","role":"developer","tools":[]}),
+        json!({"role":"user","content":"Synthetic next."}),
+    ]);
+    let mut upstream = prepend(&client);
+    upstream["input"].as_array_mut().unwrap().insert(
+        0,
+        json!({"type":"additional_tools","role":"developer","tools":[]}),
+    );
+    let observed = begin(&store, &client, "synthetic", 10);
+    let unproven = store.prepare(&observed, &upstream, "candidate-a", 11);
+    let aligned =
+        |upstream: &Value| store.prepare_with_prefix(&observed, upstream, "candidate-a", 11, 0..2);
+    let proven = aligned(&upstream);
+    assert_eq!(unproven.relay_history.shared_prefix_items, Some(0));
+    assert_eq!(proven.relay_history.shared_prefix_items, Some(0));
+    assert_eq!(
+        unproven
+            .relay_history
+            .leading_context_alignment
+            .unwrap()
+            .comparison,
+        CacheHistoryComparison::Rewritten
+    );
+    let alignment = proven.relay_history.leading_context_alignment.unwrap();
+    assert_eq!(alignment.skipped_client_items, 1);
+    assert_eq!(alignment.skipped_upstream_items, 3);
+    assert_eq!(alignment.skipped_upstream_relay_items, Some(2));
+    assert_eq!(alignment.shared_prefix_items, 3);
+    assert_eq!(alignment.comparison, CacheHistoryComparison::Unchanged);
+    upstream["input"][4]["tools"] = json!([{"type":"function","name":"synthetic"}]);
+    let edited = aligned(&upstream)
+        .relay_history
+        .leading_context_alignment
+        .unwrap();
+    assert_eq!(edited.shared_prefix_items, 1);
+    assert_eq!(edited.comparison, CacheHistoryComparison::Rewritten);
+}
+
+#[test]
+fn bps_alignment_counts_only_the_generated_developer_wrapper() {
+    let store = CacheContextStore::default();
+    let client = json!({"model":"synthetic","input":[{"role":"user","content":"question"}]});
+    let upstream = json!({"model":"synthetic","input":[
+        {"role":"developer","content":"client instructions"},
+        {"role":"developer","content":"synthetic BPS wrapper"},
+        {"role":"user","content":"question"}
+    ]});
+    let observed = begin(&store, &client, "first", 10);
+    let diagnostics = store.prepare_with_prefix(&observed, &upstream, "candidate-a", 11, 1..2);
+    let alignment = diagnostics.relay_history.leading_context_alignment.unwrap();
+    assert_eq!(alignment.skipped_upstream_items, 2);
+    assert_eq!(alignment.skipped_upstream_relay_items, Some(1));
+    assert_eq!(alignment.comparison, CacheHistoryComparison::Unchanged);
+    assert_eq!(
+        diagnostics.relay_history.comparison,
+        CacheHistoryComparison::Rewritten
+    );
+}
+
+#[test]
 fn relay_alignment_keeps_literal_and_temporal_prefixes_distinct() {
     let store = CacheContextStore::default();
     let client = payload();

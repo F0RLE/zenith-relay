@@ -278,7 +278,10 @@ fn degraded_route_model(_status: StatusCode, text: &str) -> Option<&'static str>
     crate::is_degraded_route_model(text).then_some(error_codes::UPSTREAM_ROUTE_DEGRADED)
 }
 
-fn context_too_large(_status: StatusCode, text: &str) -> Option<&'static str> {
+fn context_too_large(status: StatusCode, text: &str) -> Option<&'static str> {
+    if status != StatusCode::BAD_REQUEST {
+        return None;
+    }
     (text_has_any(
         text,
         &[

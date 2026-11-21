@@ -1,0 +1,29 @@
+.owner-customer-case { width: min(100%, 680px); min-width: 0; display: grid; gap: 12px; justify-items: start; text-align: start; }
+.owner-customer-case code { overflow-wrap: anywhere; }
+.customer-case-reference { display: grid; gap: 3px; max-width: 100%; padding-block-end: 4px; }
+.customer-case-reference span, .customer-case-last dt { color: var(--secondary); font-size: 13px; }
+.customer-case-panel { width: 100%; min-width: 0; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.customer-case-status, .customer-case-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.customer-case-status { justify-content: space-between; }
+.customer-case-status h2, .customer-case-review h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.customer-case-status strong { color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+.customer-case-status [data-state="suspended"] { color: var(--warning); background: var(--subtle); }
+.customer-case-status [data-state="closed"] { color: var(--secondary); background: var(--subtle); }
+.customer-case-last { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 12px; margin: 14px 0 0; font-size: 13px; }
+.customer-case-last dd { margin: 0; }
+.customer-case-review { display: grid; gap: 12px; border-block-start: 1px solid var(--border); margin-block-start: 16px; padding-block-start: 16px; }
+.hosted-entry-content .customer-case-panel p { margin: 0; font-size: 14px; line-height: 1.5; }
+.customer-case-panel > .customer-case-actions, .customer-case-panel > .customer-case-feedback { margin-block-start: 14px; }
+.customer-case-reason { display: grid; gap: 4px; width: min(100%, 18rem); font-size: 13px; }
+.customer-case-reason select { width: 100%; min-height: 44px; border: 1px solid var(--control-border); border-radius: 8px; padding: 8px 12px; background: var(--surface); color: var(--text); font: inherit; }
+.hosted-entry .customer-case-actions .key-button { min-height: 44px; white-space: normal; text-align: start; }
+.hosted-entry .customer-case-actions .customer-close-action, .hosted-entry-content .customer-case-panel p.customer-case-feedback { color: var(--error); }
+.hosted-entry.hosted-entry .customer-case-panel :is(button, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; text-decoration: none; }
+@media (max-width: 520px) {
+  .customer-case-panel { padding: 16px; }
+  .customer-case-last { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+  .customer-case-last dd + dt { margin-block-start: 4px; }
+}
+@media (forced-colors: active) {
+  .hosted-entry.hosted-entry .customer-case-panel :is(button, select):focus-visible { outline-color: Highlight; }
+}

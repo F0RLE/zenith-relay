@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod estimate;
+mod image;
+
+pub use image::{ImagePriceComponent, ImagePriceKind, image_price_components};
 
 pub use estimate::{
     CandidatePriceQuery, CatalogPriceResolver, estimate_api_equivalent_breakdown_with_token_price,
@@ -21,6 +24,8 @@ pub struct ApiEquivalentBreakdown {
     pub cache_read: Option<ApiEquivalentSummary>,
     pub cache_write: Option<ApiEquivalentSummary>,
     pub output: Option<ApiEquivalentSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<image::ImageEquivalentBreakdown>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -304,36 +309,40 @@ macro_rules! usage_total_columns_sql {
         concat!(
             $crate::usage_total_columns_sql!(@timing), ", ",
             $crate::usage_total_columns_sql!(@tokens), ", ",
-            $crate::usage_total_columns_sql!(@speed)
+            $crate::usage_total_columns_sql!(@speed), ", ",
+            $crate::usage_total_columns_sql!(@cache_rate)
         )
     };
     (logical) => {
         concat!(
             $crate::usage_total_columns_sql!(@timing),
             ", 0, 0, 0, 0, 0, 0, 0, 0, ",
-            $crate::usage_total_columns_sql!(@speed)
+            $crate::usage_total_columns_sql!(@speed), ", 0, 0"
         )
     };
     (physical) => {
         concat!(
             "COUNT(*), 0, 0, 0, 0, 0, 0, 0, ",
             $crate::usage_total_columns_sql!(@tokens),
-            ", 0, 0"
+            ", 0, 0, ",
+            $crate::usage_total_columns_sql!(@cache_rate)
         )
     };
     (@timing) => {
         "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
-    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+    COALESCE(SUM(latency_ms), 0), \
+    COALESCE(SUM(CASE WHEN is_image_usage = 0 THEN ttft_ms END), 0), \
+    COUNT(CASE WHEN is_image_usage = 0 THEN ttft_ms END), \
+    COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND generation_ms > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
         THEN generation_ms ELSE 0 END), 0), \
-    COUNT(CASE WHEN success != 0 AND generation_ms > 0 \
+    COUNT(CASE WHEN is_image_usage = 0 AND success != 0 AND generation_ms > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
         THEN generation_ms END), \
-    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms > 0 \
+    COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND generation_ms > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) > 0 \
         AND MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) <= generation_ms \
         THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0) - 1, 0) ELSE 0 END), 0)"
@@ -347,12 +356,18 @@ macro_rules! usage_total_columns_sql {
     };
     (@speed) => {
         concat!(
-            "COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
+            "COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
             "COALESCE(output_tokens, 0) <= latency_ms",
-            " THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
+            " THEN MAX(COALESCE(output_tokens, 0), 0) ELSE 0 END), 0), COALESCE(SUM(CASE WHEN is_image_usage = 0 AND success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 AND ",
             "COALESCE(output_tokens, 0) <= latency_ms",
             " THEN latency_ms ELSE 0 END), 0)"
         )
+    };
+    (@cache_rate) => {
+        "COALESCE(SUM(CASE WHEN input_tokens > 0 AND cached_input_tokens BETWEEN 0 AND input_tokens \
+         THEN input_tokens ELSE 0 END), 0), \
+         COALESCE(SUM(CASE WHEN input_tokens > 0 AND cached_input_tokens BETWEEN 0 AND input_tokens \
+         THEN cached_input_tokens ELSE 0 END), 0)"
     };
 }
 

@@ -139,6 +139,62 @@ async fn becoming_eligible_schedules_once_without_resetting_every_reconciliation
 }
 
 #[tokio::test]
+async fn traffic_activates_only_linked_registered_readers_and_detach_removes_the_link() {
+    let service = RefreshService::new(RefreshLimits::default()).unwrap();
+    let members = [
+        "account:siwc",
+        "account:codex",
+        "account:bps",
+        "account:unrelated",
+    ];
+    for member in members {
+        let mut entry = registration(1, false);
+        entry.identity.member_id = member.into();
+        service
+            .register(entry, |_| {
+                Box::pin(async {
+                    RefreshResult {
+                        refresh_value: (),
+                        outcome: RefreshOutcome::Success,
+                    }
+                })
+            })
+            .unwrap();
+    }
+    service.set_activity_groups([vec![
+        members[0].into(),
+        members[1].into(),
+        members[2].into(),
+        "account:missing".into(),
+    ]]);
+    service.set_member_active(members[0]);
+    {
+        let state = service.state.lock().unwrap();
+        assert_eq!(state.entries.len(), 4);
+        for (key, entry) in &state.coordinator.entries {
+            assert_eq!(entry.active, key.identity.member_id != members[3]);
+            assert!(!entry.automatic);
+        }
+    }
+    let mut changed = service.changed.subscribe();
+    service.set_member_active(members[0]);
+    assert!(!changed.has_changed().unwrap());
+    service.set_activity_groups([]);
+    for member in members {
+        service.set_active(&RefreshIdentity::new(member, 1, 1), false);
+    }
+    changed.borrow_and_update();
+    service.set_member_active(members[0]);
+    {
+        let state = service.state.lock().unwrap();
+        for (key, entry) in &state.coordinator.entries {
+            assert_eq!(entry.active, key.identity.member_id == members[0]);
+        }
+    }
+    service.shutdown().await;
+}
+
+#[tokio::test]
 async fn retiring_member_unblocks_waiters_but_retains_running_traffic_capacity() {
     let service = RefreshService::new(RefreshLimits {
         concurrent: 1,

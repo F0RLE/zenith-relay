@@ -14,7 +14,8 @@ fn hosting_limits_never_fill_a_canonical_model_or_another_host() {
         })),
         None,
         None,
-    );
+    )
+    .unwrap();
     assert_eq!(
         records["maker/future"]["limit"],
         json!({"context":1000,"output":100})

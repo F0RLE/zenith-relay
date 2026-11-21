@@ -1,0 +1,21 @@
+.hosted-app[data-workspace="customer"] { --hosted-tools-space: 328px; }
+.hosted-app[data-workspace="customer"] .customer-page-heading { padding-inline-end: var(--hosted-tools-space); }
+.hosted-app[data-workspace="customer"] .hosted-balance { max-inline-size: 124px; }
+.hosted-app[data-workspace="customer"] .hosted-balance svg { flex: none; }
+.hosted-app[data-workspace="customer"] .hosted-balance span { overflow: hidden; text-overflow: ellipsis; }
+.hosted-app[data-workspace="customer"] .hosted-balance:focus-visible { border-color: var(--accent); }
+.hosted-app .hosted-tools .customer-account-button:is([aria-current], :focus-visible) { color: var(--accent); background: var(--accent-soft); }
+.hosted-app .customer-workspace-error { color: var(--error); margin-block: 12px; }
+.hosted-app[data-workspace="customer"] .entry-wallet { margin-block-end: 16px; }
+@media (640px <= width <= 820px) {
+  .hosted-app[data-workspace="customer"] .relay-shell:not(.sidebar-collapsed) { --hosted-tools-space: 0px; }
+  .hosted-app[data-workspace="customer"] .relay-shell:not(.sidebar-collapsed) .hosted-tools {
+    position: sticky; inset: 0 auto auto; min-height: 68px; padding: 12px 24px; justify-content: flex-end;
+    background: var(--bg); border-block-end: 1px solid var(--border);
+  }
+}
+@media (max-width: 639px) {
+  .hosted-app[data-workspace="customer"] { --hosted-tools-space: 0px; }
+  .hosted-app[data-workspace="customer"] .hosted-balance { inline-size: 44px; flex: none; justify-content: center; padding: 0; }
+  .hosted-app[data-workspace="customer"] .hosted-balance span { display: none; }
+}

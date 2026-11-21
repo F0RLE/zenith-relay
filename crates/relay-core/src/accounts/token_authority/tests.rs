@@ -5,6 +5,7 @@ use std::time::Duration;
 mod auth_refresh;
 mod auth_revision;
 mod generations;
+mod renewal;
 mod rotation;
 mod slot_removal;
 

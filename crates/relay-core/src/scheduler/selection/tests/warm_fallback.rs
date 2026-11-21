@@ -16,6 +16,25 @@ fn busy_owner() -> PoolScheduler {
 }
 
 #[test]
+fn equally_ready_spillovers_follow_completion_order_within_a_clock_tick() {
+    let mut scheduler = busy_owner();
+    for id in ["a-cold", "z-warm"] {
+        assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", id, 101));
+    }
+    assert_eq!(
+        rotation::dispatch(&mut scheduler, 102, Some("cache:thread")),
+        "z-warm"
+    );
+    assert_eq!(
+        scheduler
+            .prompt_affinity_snapshot("cache:thread", 102)
+            .unwrap()
+            .0,
+        "owner"
+    );
+}
+
+#[test]
 fn repeated_spillovers_reuse_successful_alternative_without_moving_owner() {
     let mut scheduler = busy_owner();
     // A successful spillover is a soft reuse hint, not a durable owner move.
@@ -40,6 +59,76 @@ fn repeated_spillovers_reuse_successful_alternative_without_moving_owner() {
         rotation::dispatch(&mut scheduler, 115, Some("cache:thread")),
         "owner"
     );
+}
+
+#[test]
+fn siwc_chat_reuses_the_successful_spare_until_the_owner_cooldown_ends() {
+    use crate::scheduler::rotation::{
+        CacheAffinityReason, CacheAffinitySelection, CandidateBlockReason,
+    };
+
+    let mut scheduler = PoolScheduler::new();
+    let mut estimates = BTreeMap::new();
+    for (id, remaining) in [
+        ("owner", 5_400),
+        ("spare", 900),
+        ("cold", 9_400),
+        ("low", 100),
+    ] {
+        scheduler.upsert(oauth_candidate(id));
+        scheduler.keep_unknown_quota_affinity(id);
+        estimates.insert(
+            id.into(),
+            crate::CandidateQuotaReference {
+                source_account_id: format!("linked-{id}"),
+                remaining_basis_points: remaining,
+                observed_at_ms: 100,
+                valid_until_ms: Some(1_000),
+            },
+        );
+    }
+    scheduler.set_quota_references(estimates);
+    let chat = Some("cache:thread");
+    assert!(scheduler.bind_prompt_affinity("cache:thread", "owner", 100));
+    assert!(scheduler.set_cooldown("owner", "gpt-5", 200));
+    assert!(scheduler.set_cooldown("cold", "gpt-5", 102));
+    assert_eq!(rotation::dispatch(&mut scheduler, 101, chat), "spare");
+    assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", "spare", 101));
+
+    let selected = scheduler
+        .select_with_rotation_capture(
+            SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: chat,
+                now_ms: 102,
+            },
+            RotationOperation::Text,
+            None,
+        )
+        .unwrap();
+    assert_eq!(selected.candidate_id, "spare");
+    assert_eq!(
+        selected.diagnostics.reason,
+        SelectionReason::PromptCacheAffinity
+    );
+    let affinity = selected.diagnostics.cache_affinity.unwrap();
+    assert_eq!(affinity.selection, CacheAffinitySelection::WarmAlternative);
+    assert_eq!(affinity.reason, CacheAffinityReason::OwnerUnavailable);
+    assert_eq!(
+        affinity.owner_block_reason,
+        Some(CandidateBlockReason::RateLimited)
+    );
+    assert_eq!(rotation::dispatch(&mut scheduler, 103, chat), "spare");
+    assert!(!scheduler.bind_prompt_affinity_sticky("cache:thread", "spare", 103));
+    assert_eq!(
+        rotation::dispatch(&mut scheduler, 104, Some("cache:other")),
+        "cold"
+    );
+    assert_eq!(rotation::dispatch(&mut scheduler, 200, chat), "owner");
 }
 
 #[test]

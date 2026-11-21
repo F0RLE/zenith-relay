@@ -7,11 +7,13 @@ mod rules;
 mod speed;
 
 pub use crate::model_metadata::ModelMetadataCatalog;
-pub use claude_desktop::{claude_desktop_model_alias, claude_desktop_reasoning_model_alias};
+pub use claude_desktop::{
+    claude_desktop_catalog_model_alias, claude_desktop_model_alias,
+    claude_desktop_reasoning_model_alias,
+};
 pub(crate) use claude_desktop::{
     claude_desktop_model_alias_matches, is_claude_desktop_model_alias,
 };
-pub(crate) use codex::set_codex_service_tiers;
 pub use codex::{
     CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH, apply_codex_ultra_from_official_model,
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
@@ -20,6 +22,7 @@ pub use codex::{
     normalize_upstream_codex_catalog_entry, publish_routed_codex_context,
     routed_codex_catalog_entry, source_row_declares_reasoning,
 };
+pub(crate) use codex::{codex_model_uses_public_id, set_codex_service_tiers};
 pub use context::{
     deserialize_model_reasoning_allowed_levels, normalize_model_reasoning_allowed_levels,
     source_model_declares_image_input,

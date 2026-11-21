@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: bun
-    directory: /src
+    directory: /desktop/frontend
     schedule:
       interval: weekly
       day: monday
@@ -25,7 +25,7 @@ updates:
           - i18next
           - react-i18next
   - package-ecosystem: bun
-    directory: /web
+    directory: /hosted/web
     schedule:
       interval: weekly
       day: monday
@@ -40,7 +40,7 @@ updates:
           - minor
           - patch
   - package-ecosystem: cargo
-    directory: /src-tauri
+    directory: /desktop/src-tauri
     schedule:
       interval: weekly
       day: monday
@@ -60,6 +60,14 @@ updates:
       interval: weekly
       day: monday
       time: "09:20"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /hosted/server
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:25"
       timezone: Europe/Minsk
     open-pull-requests-limit: 5
   - package-ecosystem: github-actions

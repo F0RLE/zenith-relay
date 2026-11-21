@@ -1,4 +1,4 @@
-//! Selection-time evidence, not a claim about provider KV-cache residency.
+//! Cache-affinity inputs for candidate selection.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,10 @@ pub struct CacheAffinityDiagnostics {
     pub best_quota_remaining_basis_points: Option<u64>,
     pub best_provider_credits_micro_units: Option<u64>,
     pub best_provider_credits_unlimited: bool,
+    /// Above this fresh remaining quota, the primary warm member is protected
+    /// from quota-only rebalancing. Absent outside the automatic soft policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_low_water_basis_points: Option<u64>,
     pub quota_switch_margin_basis_points: u64,
     pub provider_credit_switch_margin_micro_units: u64,
     pub load_allowance_requests: u32,

@@ -3,6 +3,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn account_endpoints_reject_credentials_and_unencrypted_remote_origins() {
+    for endpoint in [
+        "https://example.test/v1/responses",
+        "http://127.0.0.1:1234/v1/responses",
+        "http://[::1]:1234/v1/responses",
+    ] {
+        assert_eq!(
+            normalized_responses_url(endpoint).unwrap().as_str(),
+            endpoint
+        );
+    }
+    for endpoint in [
+        "http://example.test/v1/responses",
+        "https://user:synthetic@example.test/v1/responses",
+        "https://example.test/v1/responses?token=synthetic",
+        "https://example.test/v1/responses#synthetic",
+        "file:///tmp/responses",
+        "http://127.0.0.1.example.test/v1/responses",
+    ] {
+        assert!(normalized_responses_url(endpoint).is_err());
+    }
+}
+
 #[tokio::test]
 async fn runtime_http2_does_not_hide_refused_stream_retries() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -180,7 +180,8 @@ fn messages_cache_writes_and_lifetimes_survive_generic_openai_conversion() {
     for client in [WireApi::Responses, WireApi::ChatCompletions] {
         // Exercise usage projection for both Responses and Chat Completions clients.
         let decoded = response::decode(WireApi::Messages, &body, "seed").unwrap();
-        let encoded = response::encode(client, &decoded, "test", &Default::default()).unwrap();
+        let encoded =
+            response::encode(client, &decoded, "test", &Default::default(), None).unwrap();
         let field = if client == WireApi::Responses {
             "input_tokens_details"
         } else {

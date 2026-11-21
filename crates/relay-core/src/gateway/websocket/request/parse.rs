@@ -3,6 +3,7 @@ use super::super::{
 };
 use crate::GatewayRuntime;
 use crate::gateway::continuation;
+use crate::gateway::execution::compatibility::{RejectedRequest, record_continuation_rejection};
 use crate::gateway::request::{
     RequestToolPolicy, ServiceTierPolicy, client_request_identity, codex_background_request_kind,
     is_managed_codex_client, normalize_codex_reasoning_placeholder,
@@ -26,17 +27,17 @@ impl super::ClientRequest {
         key: &AuthenticatedKey,
         headers: &HeaderMap,
         request_bytes: &[u8],
-        connection_response: Option<(&str, &str)>,
+        connection_responses: Option<&super::super::connection_responses::ConnectionResponses>,
     ) -> Result<Self, GatewayFailure> {
         let parsed =
-            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_response);
+            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_responses);
         if parsed
             .as_ref()
             .is_err_and(|failure| failure.category == crate::error_codes::MODEL_NOT_FOUND)
         {
             // Cold BPS access must not look like a missing model; known routes stay I/O-free.
             runtime.refresh_basis_points_access(key).await;
-            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_response)
+            Self::parse_on_connection(runtime, key, headers, request_bytes, connection_responses)
         } else {
             parsed
         }
@@ -57,8 +58,13 @@ impl super::ClientRequest {
         key: &AuthenticatedKey,
         headers: &HeaderMap,
         request_bytes: &[u8],
-        connection_response: Option<(&str, &str)>,
+        connection_responses: Option<&super::super::connection_responses::ConnectionResponses>,
     ) -> Result<Self, GatewayFailure> {
+        let started = std::time::Instant::now();
+        // Authentication belongs to the socket; the protocol preference belongs
+        // to this response.create. Keep retries and continuations request-scoped.
+        let key = runtime.snapshot_request_key(key);
+        let key = &key;
         if request_bytes.len() > super::super::MAX_WEBSOCKET_MESSAGE_BYTES {
             return Err(GatewayFailure::invalid_request(
                 "WebSocket request is too large",
@@ -66,7 +72,7 @@ impl super::ClientRequest {
         }
         let mut request_body: Value = serde_json::from_slice(request_bytes)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        let mut tool_policy = RequestToolPolicy::new(runtime, &request_body);
+        let mut tool_policy = RequestToolPolicy::for_responses(runtime, &request_body);
         let request_object = request_body
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
@@ -147,6 +153,15 @@ impl super::ClientRequest {
         let resolved_model = runtime
             .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .or_else(|| {
+                runtime.resolve_retained_continuation_model(
+                    key,
+                    &requested_model,
+                    WEBSOCKET_PROTOCOLS,
+                    &request_body,
+                    now_ms(),
+                )
+            })
+            .or_else(|| {
                 runtime
                     .route_recovery_enabled()
                     .then(|| {
@@ -175,14 +190,10 @@ impl super::ClientRequest {
                 ));
             }
         }
-        let connection_affinity_key = connection_response
-            .filter(|(id, _)| {
-                request_body
-                    .get("previous_response_id")
-                    .and_then(Value::as_str)
-                    == Some(*id)
-            })
-            .map(|(_, affinity)| affinity);
+        let connection_affinity_key = request_body
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .and_then(|id| connection_responses?.transient_affinity(id));
         let continuation = continuation::prepare_response_continuation(
             runtime,
             &key.id,
@@ -190,7 +201,24 @@ impl super::ClientRequest {
             now_ms(),
             connection_affinity_key,
         )
-        .map_err(|()| GatewayFailure::continuation_unavailable())?;
+        .map_err(|()| {
+            record_continuation_rejection(
+                runtime,
+                RejectedRequest {
+                    request_id: &request_id,
+                    attempt: 0,
+                    local_key_id: &key.id,
+                    requested_model: &requested_model,
+                    resolved_model: Some(&resolved_model),
+                    client_context_id: client_context_id.as_deref(),
+                    wire_api: crate::WireApi::Responses,
+                    transport: crate::UsageTransport::Websocket,
+                    service_tier: service_tier_policy.selected_tier(),
+                },
+                started.elapsed().as_millis() as u64,
+            );
+            GatewayFailure::continuation_unavailable()
+        })?;
         let prompt_affinity_key = runtime.prompt_affinity_key(
             &key.id,
             &resolved_model,
@@ -199,6 +227,7 @@ impl super::ClientRequest {
         );
         Ok(Self {
             local_key_id: key.id.clone(),
+            upstream_protocol: key.upstream_protocol,
             tool_policy,
             request_id,
             budget: SharedRequestBudget::for_incoming_request(runtime.request_dispatch_budget()),
@@ -214,11 +243,12 @@ impl super::ClientRequest {
             prompt_affinity_key,
             client_context_id,
             background_kind,
+            websocket_authorization: None,
         })
     }
 }
 
-fn valid_stream_id(stream_id: &str) -> bool {
+pub(in crate::gateway::websocket) fn valid_stream_id(stream_id: &str) -> bool {
     !stream_id.is_empty()
         && stream_id.len() <= 256
         && stream_id

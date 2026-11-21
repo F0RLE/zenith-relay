@@ -71,7 +71,10 @@ fn failure_frame(mut body: Value) -> Bytes {
     Bytes::from(format!("event: error\ndata: {body}\n\n"))
 }
 
-pub(super) fn guard_progress(inner: UpstreamStream, timeout: Option<Duration>) -> UpstreamStream {
+pub(in crate::gateway) fn guard_progress(
+    inner: UpstreamStream,
+    timeout: Option<Duration>,
+) -> UpstreamStream {
     Box::pin(stream::unfold(
         (
             Some(inner),

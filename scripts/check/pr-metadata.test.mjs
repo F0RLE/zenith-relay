@@ -17,6 +17,14 @@ describe("contributor consent", () => {
     expect(check()).toEqual([]);
   });
 
+  test.each([
+    "CONTRIBUTING.md",
+    "CONTRIBUTOR_LICENSE_AGREEMENT.md",
+  ])("the template links to the maintained document in docs: %s", (filename) => {
+    expect(template).toContain(`https://github.com/F0RLE/zenith-relay/blob/main/docs/${filename}`);
+    expect(readFileSync(new URL(`../../docs/${filename}`, import.meta.url), "utf8")).toMatch(/^# /);
+  });
+
   test("an untouched template does not imply consent", () => {
     expect(check(template).filter((error) => error.includes("Contributor Agreement"))).toHaveLength(1);
   });
@@ -52,7 +60,7 @@ describe("contributor consent", () => {
   });
 
   test("the linked agreement cannot be replaced with an unrelated document", () => {
-    expect(check(completed.replace("/CONTRIBUTOR_LICENSE_AGREEMENT.md)", "/LICENSE)")).length)
+    expect(check(completed.replace("/docs/CONTRIBUTOR_LICENSE_AGREEMENT.md)", "/LICENSE)")).length)
       .toBeGreaterThan(0);
   });
 
@@ -132,7 +140,7 @@ describe("release metadata", () => {
 
 describe("dependency automation exception", () => {
   const bot = { type: "Bot", login: "dependabot[bot]" };
-  const files = [{ filename: "src/package.json" }, { filename: "src/bun.lock" }];
+  const files = [{ filename: "desktop/frontend/package.json" }, { filename: "desktop/frontend/bun.lock" }];
   const dependencyPr = { user: bot, body: "Dependency update", changed_files: files.length };
 
   test("known dependency updates are exempt without pretending that a bot signed", () => {
@@ -145,7 +153,7 @@ describe("dependency automation exception", () => {
   });
 
   test("source changes in a dependency PR require a human PR", () => {
-    expect(validatePullRequest(dependencyPr, [files[0], { filename: "src/src/main.tsx" }]).errors.length)
+    expect(validatePullRequest(dependencyPr, [files[0], { filename: "desktop/frontend/src/main.tsx" }]).errors.length)
       .toBeGreaterThan(0);
   });
 
@@ -166,7 +174,7 @@ describe("dependency automation exception", () => {
   });
 
   test("renaming a non-dependency file cannot hide it from the policy", () => {
-    const renamed = [{ filename: "src/package.json", previous_filename: "LICENSE" }];
+    const renamed = [{ filename: "desktop/frontend/package.json", previous_filename: "LICENSE" }];
     expect(validatePullRequest({ ...dependencyPr, changed_files: 1 }, renamed).errors.length).toBeGreaterThan(0);
   });
 });
@@ -242,10 +250,10 @@ describe("workflow integration", () => {
 
   test("the bot exception fetches all file pages and checks their paths", async () => {
     const botPr = { user: { type: "Bot", login: "dependabot[bot]" }, body: null, changed_files: 1 };
-    const accepted = await runWorkflow(botPr, [{ filename: "src/bun.lock" }]);
+    const accepted = await runWorkflow(botPr, [{ filename: "desktop/frontend/bun.lock" }]);
     expect(accepted.failed).toEqual([]);
     expect(accepted.reads[1]).toEqual({ owner: "example-owner", repo: "example-relay", pull_number: 17, per_page: 100 });
-    const rejected = await runWorkflow(botPr, [{ filename: "src/src/main.tsx" }]);
+    const rejected = await runWorkflow(botPr, [{ filename: "desktop/frontend/src/main.tsx" }]);
     expect(rejected.failed).toHaveLength(1);
   });
 });

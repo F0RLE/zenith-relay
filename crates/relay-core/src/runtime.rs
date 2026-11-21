@@ -1,10 +1,7 @@
 use crate::ProxyConfig;
-#[cfg(test)]
-use crate::SourceProtocolBinding;
 use crate::accounts::{
     TokenAuthority, TokenDispatchRevision, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
-use crate::model_metadata::ModelMetadataCatalogHandle;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     AgentIdentityCredential, CodexIdentityEnvelope, basis_points_headers,
@@ -17,9 +14,11 @@ use crate::sources::discover_models_with_client;
 use crate::{
     CacheWriteTtl, CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode, ModelRegistry,
     ModelRules, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
-    RoutingDiagnostics, SourceAdapter, SourceConnector, SourceProtocolBindingKey, UsageCallback,
-    WireApi, decode_codex_model_alias,
+    RoutingDiagnostics, SourceAdapter, SourceProtocolBindingKey, UsageCallback, WireApi,
+    decode_codex_model_alias,
 };
+#[cfg(test)]
+use crate::{SourceConnector, SourceProtocolBinding};
 #[cfg(test)]
 use build::ReachabilityRequirement;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -42,7 +41,8 @@ mod authentication;
 mod authorization;
 mod basis_points_access;
 mod request_usage;
-pub(crate) use authorization::AuthorizationDispatch;
+pub(crate) use authorization::{AuthorizationDispatch, DispatchUsage};
+pub(crate) use request_usage::RequestIngressTiming;
 mod build;
 pub(crate) mod cache_context;
 mod candidates;
@@ -52,17 +52,25 @@ pub(crate) use clients::WebsocketTransportPreference;
 mod codex_metadata;
 mod config;
 mod control;
+mod http2_diagnostic;
 mod http3;
+pub use http2_diagnostic::{
+    Http2DispatchObservation, Http2RetryDiagnostic, diagnose_http2_retries,
+};
 mod http_recovery;
 mod images;
 mod models;
+mod provider_state;
 mod routing_cookies;
 mod selection;
 mod session_state;
 mod settings;
+pub(crate) mod siwc_socket;
 mod source_metadata;
 mod support;
 mod tool_catalog;
+mod upstream_protocol;
+pub use upstream_protocol::UpstreamProtocolPolicy;
 
 pub(in crate::runtime) use support::{
     all_native_wire_apis, apply_candidate_policy, client_wire_apis_to_native, model_rules,
@@ -71,7 +79,6 @@ pub(in crate::runtime) use support::{
     strip_prefix_ignore_ascii_case,
 };
 
-use config::source_candidate_id;
 pub use config::{
     DefaultServiceTier, GatewayRuntimeOptions, ModelContextPolicy, PoolAccess, PoolParticipant,
     RESPONSE_AFFINITY_DELETE_CANDIDATE_SQL, RESPONSE_AFFINITY_DELETE_EXPIRED_SQL,
@@ -88,25 +95,21 @@ use attempt::CandidateLeaseLane;
 pub use attempt::ExecutionFence;
 use control::RuntimeControl;
 use models::RuntimeModelState;
+use provider_state::{RuntimeAccountState, RuntimeProviderMetadata, RuntimeSourceState};
 pub(crate) use session_state::CodexTurnStateScope;
-use session_state::CodexTurnStateStore;
 pub use session_state::RuntimeContinuationStores;
+use session_state::RuntimeSessionState;
 
 #[cfg(test)]
 use crate::{
     CandidateKind, UsageEvent, normalize_source_protocol_bindings, unix_time_ms as current_time_ms,
 };
-pub(crate) use images::is_image_model_id;
-pub use images::normalize_image_base_model;
-
-/// Relay's virtual Image API model for OAuth account routes.
-///
-/// The account bridge sends this model in the Responses `image_generation`
-/// tool while the top-level Responses model remains the account's selected
-/// text model. Keep the public virtual id aligned with the current stable
-/// GPT Image model; provider routes still use the model selected by their own
-/// source catalog.
-pub const IMAGE_API_MODEL: &str = "gpt-image-2.5-sunburst";
+pub use images::is_image_model_id;
+pub use images::{
+    BPS_IMAGES_ENABLED, CODEX_IMAGE_MODELS, IMAGE_API_MODEL, ImageGenerationRestriction,
+    account_image_models, account_image_restriction, account_images_available,
+    account_model_enabled, normalize_image_base_model,
+};
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 pub(crate) const WEBSOCKET_CAPABILITY_TTL_MS: u64 = 5 * 60 * 1_000;
 pub(crate) const WEBSOCKET_FAST_PATH_BACKOFF_MS: u64 = 30 * 1_000;
@@ -115,53 +118,30 @@ static NEXT_ACTIVITY_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayRuntime {
     diagnostics_enabled: fn() -> bool,
+    rotation_debug: Option<Arc<dyn crate::RotationDebugSink>>,
     tool_policy: RwLock<crate::ToolPolicy>,
     clients: RuntimeHttpClients,
     http3: http3::Http3Transport,
     http_recovery: http_recovery::HttpRecovery,
-    discovery_client: reqwest::Client,
-    sources: BTreeMap<String, SourceConnector>,
-    /// Per-source HTTP clients for sources that configure a proxy. Sources
-    /// without a proxy use the shared `clients.http` client instead.
-    source_http_clients: BTreeMap<String, reqwest::Client>,
-    /// Per-source WebSocket clients for sources that configure a proxy.
-    source_websocket_clients: BTreeMap<String, reqwest::Client>,
-    source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
-    legacy_source_candidate_ids: BTreeMap<String, Option<String>>,
-    source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
-    chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
-    chatgpt_team_members: BTreeMap<String, BTreeSet<String>>,
-    chatgpt_team_breaker_recent: Mutex<BTreeMap<String, u64>>,
+    source_state: RuntimeSourceState,
+    account_state: RuntimeAccountState,
     keys: Vec<RuntimeKey>,
     model_state: RuntimeModelState,
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_availability: Arc<tokio::sync::Notify>,
     admission: Mutex<admission::AdmissionQueue>,
     admission_changed: tokio::sync::Notify,
-    official_codex_ultra: Mutex<BTreeMap<String, Value>>,
-    websocket_transport_observations:
-        Mutex<BTreeMap<(String, String), clients::WebsocketTransportObservation>>,
-    model_metadata: SourceModelMetadataState,
-    model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
-    passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
-    adapter_continuation_store: Arc<Mutex<crate::AdapterContinuationStore>>,
-    agent_message_cipher: Arc<crate::protocol::agent_messages::AgentMessageCipher>,
-    native_responses_replay_store: Arc<Mutex<NativeResponsesReplayStore>>,
-    cache_context_store: cache_context::CacheContextStore,
-    codex_turn_state_store: CodexTurnStateStore,
-    pub(crate) basis_points_catalog_store: tool_catalog::ToolCatalogStore,
+    provider_metadata: RuntimeProviderMetadata,
+    continuation_state: RuntimeContinuationStores,
+    session_state: RuntimeSessionState,
     control: RuntimeControl,
     max_retry_candidates: std::sync::atomic::AtomicUsize,
     quota_stale_after_ms: u64,
     default_service_tier_value: AtomicU8,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
-    response_route_affinity: Arc<Mutex<crate::scheduler::AffinityCache>>,
     activity_callback: Arc<Mutex<RuntimeActivityCallback>>,
     activity_runtime_id: u64,
     activity_revision: Arc<AtomicU64>,
-    chatgpt_team_breaker_callback: Arc<Mutex<RuntimeTeamBreakerCallback>>,
-    codex_catalog_hints: Mutex<BTreeMap<String, catalog_hints::CatalogHint>>,
-    codex_catalog_hint_callback: Mutex<catalog_hints::CatalogHintCallback>,
     pub(crate) usage: UsageCallback,
 }
 
@@ -179,17 +159,14 @@ struct PassiveQuotaState {
 #[derive(Clone, Debug)]
 struct CachedModelManifest {
     manifest_payload: Value,
-}
-
-#[derive(Default)]
-struct SourceModelMetadataState {
-    /// Native Codex transport cards. Model capabilities use the reference catalog.
-    codex_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    authorization: AuthorizationIncarnation,
+    account_context: (Option<String>, u64),
 }
 
 #[derive(Clone)]
 pub(crate) struct AuthenticatedKey {
     pub(crate) id: String,
+    pub(crate) upstream_protocol: UpstreamProtocolPolicy,
     scope: Arc<RwLock<CandidateScope>>,
     scope_revision: Arc<AtomicU64>,
     pub(crate) model_rules: ModelRules,
@@ -238,7 +215,6 @@ struct ChatGptAccountExecutor {
 
 struct AccountModelInventory {
     configured_models: BTreeSet<String>,
-    image_main_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -249,7 +225,10 @@ pub(crate) struct ExecutorRoute {
     /// The exact OAuth token generation that was used for this upstream
     /// request. This is request-local provenance, not route configuration.
     pub(crate) account_token_generation: Option<u64>,
+    pub(crate) account_token_revision: Option<TokenDispatchRevision>,
     pub(crate) client_context_id: Option<String>,
+    /// Volatile downstream WS lane identity; never an upstream cache key.
+    pub(crate) siwc_socket_context: Option<String>,
     /// Client contract. The adapter maps it to the upstream protocol.
     pub(crate) client_wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
@@ -270,9 +249,15 @@ pub(crate) struct ExecutorRoute {
     pub(crate) basis_points_discovery: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
     pub(crate) cache_context_observation: Option<cache_context::CacheContextObservation>,
+    pub(crate) cache_context_relay_prefix: std::ops::Range<usize>,
 }
 
 impl ExecutorRoute {
+    pub(crate) fn account_request_url(&self) -> std::result::Result<Url, AuthorizedRequestError> {
+        support::normalized_responses_url(self.upstream_url.as_str())
+            .map_err(|_| AuthorizedRequestError::NotReplayable)
+    }
+
     pub(crate) fn binding_key(&self) -> SourceProtocolBindingKey {
         SourceProtocolBindingKey {
             wire_api: self.client_wire_api,
@@ -329,6 +314,7 @@ pub(crate) struct AuthorizedResponse {
 
 #[derive(Debug)]
 pub(crate) enum AuthorizedRequestError {
+    HostedClaim(crate::gateway::hosted::ClaimError),
     Prepare(ExecutorPrepareError),
     Transport(reqwest::Error),
     NotReplayable,
@@ -339,6 +325,11 @@ pub(crate) enum AuthorizedRequestError {
     ProgressTimeout,
     HeadersTimeout,
     SendStartTimeout,
+    WebsocketSend,
+    WebsocketRequired {
+        status: reqwest::StatusCode,
+        message: &'static str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,6 +344,7 @@ pub(crate) enum ExecutorPrepareError {
 
 struct RuntimeKey {
     id: String,
+    upstream_protocol: RwLock<UpstreamProtocolPolicy>,
     enabled: bool,
     secret_hash: [u8; 32],
     scope: Arc<RwLock<CandidateScope>>,
@@ -382,11 +374,16 @@ impl RuntimeHttpClients {
 
 impl GatewayRuntime {
     pub async fn discover_models(&self) -> Result<Vec<String>> {
-        let provider_source = self.sources.values().next().ok_or_else(|| {
-            Error::Validation("at least one provider source is required".to_string())
-        })?;
+        let provider_source = self
+            .source_state
+            .connectors
+            .values()
+            .next()
+            .ok_or_else(|| {
+                Error::Validation("at least one provider source is required".to_string())
+            })?;
         discover_models_with_client(
-            &self.discovery_client,
+            &self.source_state.discovery_client,
             provider_source,
             provider_source.protocol_bindings(),
         )
@@ -425,10 +422,13 @@ impl fmt::Debug for GatewayRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GatewayRuntime")
-            .field("source_ids", &self.sources.keys().collect::<Vec<_>>())
+            .field(
+                "source_ids",
+                &self.source_state.connectors.keys().collect::<Vec<_>>(),
+            )
             .field(
                 "account_candidate_ids",
-                &self.chatgpt_accounts.keys().collect::<Vec<_>>(),
+                &self.account_state.executors.keys().collect::<Vec<_>>(),
             )
             .field("local_key_count", &self.keys.len())
             .field("max_retry_candidates", &self.max_retry_candidates)

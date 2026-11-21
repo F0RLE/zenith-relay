@@ -1,6 +1,6 @@
 use super::super::{
-    AdapterError, AdapterResult, Message, OutputFormat, Reasoning, Request, Role, ToolChoice,
-    checked, optional_u64, required_text,
+    AdapterError, AdapterResult, Message, OutputFormat, Reasoning, ReasoningDisplay, Request, Role,
+    ToolChoice, checked, optional_bool, optional_u64, required_text,
 };
 use crate::WireApi;
 use serde_json::Value;
@@ -130,7 +130,21 @@ pub(super) fn decode(request_body: &Value) -> AdapterResult<Request> {
             .get("thinkingConfig")
             .filter(|thinking| !thinking.is_null())
         {
-            checked(thinking, &["thinkingLevel", "thinkingBudget"])?;
+            checked(
+                thinking,
+                &["thinkingLevel", "thinkingBudget", "includeThoughts"],
+            )?;
+            decoded_request.reasoning_display = optional_bool(thinking, "includeThoughts")
+                .map_err(|error| {
+                    error.with_parameter("generationConfig.thinkingConfig.includeThoughts")
+                })?
+                .map(|include| {
+                    if include {
+                        ReasoningDisplay::Summarized
+                    } else {
+                        ReasoningDisplay::Omitted
+                    }
+                });
             let budget = thinking
                 .get("thinkingBudget")
                 .filter(|value| !value.is_null());

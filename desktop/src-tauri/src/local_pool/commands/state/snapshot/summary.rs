@@ -1,0 +1,438 @@
+use crate::local_pool::{
+    accounts::proxy::{proxy_route_is_usable, proxy_route_status},
+    models::{GatewaySettings, LocalAccountRecord, ProviderSourceRecord},
+    state::AccountCredentialFacts,
+};
+use zenith_relay_core::error_codes;
+use zenith_relay_core::model_metadata::ModelMetadataCatalog;
+use zenith_relay_core::protocol::ProxyMode;
+use zenith_relay_core::protocol::{
+    AccountOperationalInput, AccountSummary, QuotaWindowUsage, SourceSummary,
+    account_operational_state,
+};
+use zenith_relay_core::{
+    ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
+};
+
+pub(super) fn local_source_summary(
+    source_record: &ProviderSourceRecord,
+    refresh_revision: Option<u64>,
+    secret_available: bool,
+    runtime_available: Option<bool>,
+    api_equivalent: ApiEquivalentSummary,
+    reference_catalog: &ModelMetadataCatalog,
+) -> crate::local_pool::error::Result<SourceSummary> {
+    Ok(SourceSummary::from_stored_source(
+        source_record,
+        secret_available,
+        runtime_available,
+        api_equivalent,
+        source_record.last_error.clone(),
+        refresh_revision,
+        Some(reference_catalog),
+    ))
+}
+
+pub(super) struct LocalAccountSummaryContext<'a> {
+    pub(super) settings: &'a GatewaySettings,
+    pub(super) proxy_id: Option<String>,
+    pub(super) credentials: Option<AccountCredentialFacts>,
+    pub(super) common_proxy_available: bool,
+    pub(super) api_equivalent: ApiEquivalentSummary,
+    pub(super) quota_window_usage: Option<QuotaWindowUsage>,
+    pub(super) now_ms: u64,
+    pub(super) refreshing: bool,
+    pub(super) runtime_available: Option<bool>,
+    pub(super) runtime_quota_wait: bool,
+}
+
+pub(super) fn local_account_summary(
+    account_record: &LocalAccountRecord,
+    context: LocalAccountSummaryContext<'_>,
+) -> crate::local_pool::error::Result<AccountSummary> {
+    let LocalAccountSummaryContext {
+        settings,
+        proxy_id,
+        credentials,
+        common_proxy_available,
+        api_equivalent,
+        quota_window_usage,
+        now_ms,
+        refreshing,
+        runtime_available,
+        runtime_quota_wait,
+    } = context;
+    let secret_available = credentials.is_some();
+    let plan_use_disabled = credentials.is_some_and(|facts| !facts.plan_use_enabled);
+    let runtime_available = if plan_use_disabled {
+        Some(false)
+    } else {
+        runtime_available
+    };
+    let (proxy_mode, proxy_available) = credentials
+        .map(|credentials| {
+            proxy_route_status(settings, credentials.proxy_route(), common_proxy_available)
+        })
+        .unwrap_or((ProxyMode::Direct, false));
+    let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
+    let operational = account_operational_state(AccountOperationalInput::from_source(
+        &account_record.account,
+        secret_available,
+        proxy_available,
+        now_ms,
+        quota_stale_after_ms,
+    ));
+    Ok(AccountSummary {
+        route_group_id: settings
+            .account_route_group(&account_record.account.id)
+            .and_then(|group| group.account_ids.first().cloned()),
+        route_inactive: !settings.account_route_is_selected(&account_record.account.id),
+        credit_balance_key: credentials
+            .and_then(|facts| facts.credit_balance_key)
+            .map(hex::encode),
+        oauth_client_kind: credentials
+            .map(|facts| facts.oauth_client_kind)
+            .or(account_record.oauth_client_kind),
+        id: account_record.account.id.clone(),
+        label: account_record.account.label.clone(),
+        identity_hint: account_record
+            .account
+            .identity
+            .identity_hash
+            .chars()
+            .take(12)
+            .collect(),
+        provider_family: account_record.provider_family.clone(),
+        basis_points_available: credentials
+            .is_some_and(AccountCredentialFacts::basis_points_available),
+        basis_points_enabled: credentials
+            .is_some_and(AccountCredentialFacts::basis_points_available),
+        credential_diagnostics: credentials.is_some_and(|facts| facts.has_oauth).then(|| {
+            zenith_relay_core::protocol::CredentialDiagnostics::from_local(
+                account_record.account.auth_state,
+                secret_available,
+                credentials.is_some_and(|facts| facts.has_refresh_token),
+                credentials.and_then(|facts| facts.expires_at_ms),
+                now_ms,
+            )
+        }),
+        enabled: account_record.account.enabled,
+        in_pool: account_record.account.in_pool,
+        draining: account_record.account.draining,
+        operational_status: operational
+            .status
+            .with_runtime_available(runtime_available, runtime_quota_wait && !plan_use_disabled),
+        auth_state: account_record.account.auth_state,
+        health: account_record.account.health.summary_label(),
+        models: account_record
+            .pool_models(settings.codex_text_models_enabled)
+            .cloned()
+            .collect(),
+        pool_eligible: account_record.has_pool_models(settings),
+        image_generation_restriction: zenith_relay_core::account_image_restriction(
+            account_record.oauth_client_kind.unwrap_or_default(),
+            account_record.account.subscription.plan_type.as_deref(),
+        ),
+        allowed_models: account_record.allowed_models.clone(),
+        excluded_models: account_record.excluded_models.clone(),
+        priority: account_record.priority,
+        weight: account_record.weight,
+        api_equivalent,
+        economics: None,
+        // A subscription text forecast is not an image allowance.
+        quota_window_usage: quota_window_usage
+            .filter(|_| !account_record.image_pool_enabled || settings.codex_text_models_enabled),
+        purchase_cost_micro_usd: account_record.purchase_cost_micro_usd,
+        subscription: account_record.account.subscription.clone(),
+        quota: account_record.account.quota.clone(),
+        secret_available,
+        recovery_required: account_record.recovery.is_some(),
+        proxy_mode,
+        proxy_available,
+        proxy_id,
+        quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
+            account_record.account.auth_state,
+            &account_record.account.quota,
+            refreshing,
+        ),
+        refresh_state: Default::default(),
+        routing_block_reason: operational.routing_block_reason,
+        last_error_code: if plan_use_disabled {
+            Some("siwc_plan_use_disabled".into())
+        } else {
+            account_record.account.last_error_code.clone()
+        },
+        client_auth_status: account_record.client_auth_status.clone(),
+        last_client_login_redirect_at_ms: account_record.last_client_login_redirect_at_ms,
+    })
+}
+
+pub(in crate::local_pool::commands::state) fn oauth_account_runtime_available(
+    routing_order: &[CandidateRuntimeSnapshot],
+    account_id: &str,
+) -> Option<bool> {
+    routing_order
+        .iter()
+        .find(|candidate| {
+            candidate.kind == CandidateKind::OAuthAccount && candidate.candidate_id == account_id
+        })
+        // This projects operational status, not permission to admit another
+        // request. A full image lane remains a valid, temporarily busy route.
+        .map(|candidate| candidate.available || candidate.capacity_wait)
+}
+
+pub(super) fn account_runtime_warning(
+    account_record: &LocalAccountRecord,
+    settings: &GatewaySettings,
+    credentials: Option<AccountCredentialFacts>,
+    common_proxy_available: bool,
+) -> String {
+    let code = match credentials {
+        None => error_codes::ACCOUNT_RUNTIME_CREDENTIAL_MISSING,
+        Some(credentials) if !credentials.has_provider_account_id => {
+            error_codes::ACCOUNT_RUNTIME_PROVIDER_ACCOUNT_ID_MISSING
+        }
+        Some(credentials)
+            if !proxy_route_is_usable(
+                settings,
+                credentials.proxy_route(),
+                common_proxy_available,
+            ) =>
+        {
+            error_codes::ACCOUNT_RUNTIME_PROXY_INVALID
+        }
+        Some(_) => "account_runtime_not_registered",
+    };
+    let redacted = if account_record.account.id.chars().count() <= 12 {
+        account_record.account.id.clone()
+    } else {
+        format!(
+            "{}...",
+            account_record
+                .account
+                .id
+                .chars()
+                .take(8)
+                .collect::<String>()
+        )
+    };
+    format!("{code}:{redacted}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_pool::accounts::{
+        credentials::StoredCodexCredentials,
+        proxy::{effective_proxy_config, proxy_route_is_usable, proxy_route_status, proxy_status},
+    };
+
+    fn credentials() -> StoredCodexCredentials {
+        StoredCodexCredentials::new(
+            "account_snapshot_facts",
+            "synthetic-access".into(),
+            Some("synthetic-refresh".into()),
+            None,
+            None,
+            1,
+            1,
+            None,
+            Some("provider-account".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn image_only_accounts_do_not_receive_a_text_weekly_value_forecast() {
+        use zenith_relay_core::accounts::AccountAuthMode;
+
+        let grant = credentials();
+        let facts = AccountCredentialFacts::from_stored(&grant);
+        let mut record = crate::local_pool::accounts::records::new_account_record(
+            &grant,
+            AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            1,
+        )
+        .unwrap();
+        let forecast: QuotaWindowUsage = serde_json::from_value(serde_json::json!({
+            "ledgerKey":"synthetic-ledger", "kind":"secondary", "windowStartMs":0,
+            "observedAtMs":1, "windowMinutes":10080, "resetAtMs":604800000,
+            "availableBasisPoints":10000,
+            "calibration":{
+                "profileId":"synthetic-text", "workload":"gpt-test", "cacheBand":0,
+                "outputBand":10, "medianMicroUsd":1000, "lowMicroUsd":1000,
+                "highMicroUsd":1000, "accountCount":1, "profileCount":1,
+                "pricingCoverageBasisPoints":10000, "observedAtMs":1, "validUntilMs":1000
+            }
+        }))
+        .unwrap();
+        for (image_pool_enabled, text_enabled, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            record.image_pool_enabled = image_pool_enabled;
+            let settings = GatewaySettings {
+                codex_text_models_enabled: text_enabled,
+                ..GatewaySettings::default()
+            };
+            let summary = local_account_summary(
+                &record,
+                LocalAccountSummaryContext {
+                    settings: &settings,
+                    proxy_id: None,
+                    credentials: Some(facts),
+                    common_proxy_available: true,
+                    api_equivalent: ApiEquivalentSummary {
+                        micro_usd: 100,
+                        priced_tokens: 10,
+                        unpriced_tokens: 0,
+                    },
+                    quota_window_usage: Some(forecast.clone()),
+                    now_ms: 1,
+                    refreshing: false,
+                    runtime_available: Some(true),
+                    runtime_quota_wait: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.quota_window_usage.is_some(), expected);
+            assert_eq!(summary.api_equivalent.micro_usd, 100);
+            assert_eq!(summary.quota, record.account.quota);
+        }
+    }
+
+    #[test]
+    fn missing_credentials_preserve_stored_client_kind_without_inventing_codex() {
+        use zenith_relay_core::{accounts::AccountAuthMode, providers::chatgpt::OAuthClientKind};
+        for kind in [
+            Some(OAuthClientKind::Codex),
+            Some(OAuthClientKind::ExcelBps),
+            Some(OAuthClientKind::Siwc),
+            None,
+        ] {
+            let grant = credentials().with_oauth_client_kind(kind.unwrap_or_default());
+            let mut record = crate::local_pool::accounts::records::new_account_record(
+                &grant,
+                AccountAuthMode::OAuth,
+                vec![],
+                0,
+                1,
+            )
+            .unwrap();
+            assert_eq!(record.oauth_client_kind, Some(grant.oauth_client_kind()));
+            record.oauth_client_kind = kind;
+            let restored: LocalAccountRecord =
+                serde_json::from_value(serde_json::to_value(record).unwrap()).unwrap();
+            let summary = local_account_summary(
+                &restored,
+                LocalAccountSummaryContext {
+                    settings: &GatewaySettings::default(),
+                    proxy_id: None,
+                    credentials: None,
+                    common_proxy_available: true,
+                    api_equivalent: ApiEquivalentSummary {
+                        micro_usd: 10,
+                        priced_tokens: 1,
+                        unpriced_tokens: 0,
+                    },
+                    quota_window_usage: None,
+                    now_ms: 1,
+                    refreshing: false,
+                    runtime_available: None,
+                    runtime_quota_wait: false,
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.oauth_client_kind, kind);
+            assert!(!summary.secret_available);
+            assert_eq!(summary.api_equivalent.micro_usd, 10);
+            assert_eq!(
+                serde_json::to_value(&summary)
+                    .unwrap()
+                    .get("oauthClientKind")
+                    .is_some(),
+                kind.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_facts_match_proxy_decisions_without_reloading_the_common_secret() {
+        let settings = GatewaySettings::default();
+        let direct = credentials();
+        let direct_facts = AccountCredentialFacts::from_stored(&direct);
+        assert_eq!(
+            proxy_status(&settings, &direct, false),
+            proxy_route_status(&settings, direct_facts.proxy_route(), false)
+        );
+        assert_eq!(
+            effective_proxy_config(&settings, &direct).is_err(),
+            !proxy_route_is_usable(&settings, direct_facts.proxy_route(), false)
+        );
+
+        let mut required = settings.clone();
+        required.account_proxy_required = true;
+        assert!(!proxy_route_is_usable(
+            &required,
+            direct_facts.proxy_route(),
+            false
+        ));
+        assert!(effective_proxy_config(&required, &direct).is_err());
+
+        let account_proxy = direct
+            .clone()
+            .with_proxy_url(Some("http://127.0.0.1:8080".into()))
+            .unwrap();
+        let account_facts = AccountCredentialFacts::from_stored(&account_proxy);
+        assert_eq!(
+            proxy_status(&required, &account_proxy, false),
+            proxy_route_status(&required, account_facts.proxy_route(), false)
+        );
+        assert!(proxy_route_is_usable(
+            &required,
+            account_facts.proxy_route(),
+            false
+        ));
+        assert!(effective_proxy_config(&required, &account_proxy).is_ok());
+
+        let bypass = credentials().with_proxy_route(None, true).unwrap();
+        let bypass_facts = AccountCredentialFacts::from_stored(&bypass);
+        assert_eq!(
+            proxy_status(&required, &bypass, true),
+            proxy_route_status(&required, bypass_facts.proxy_route(), true)
+        );
+        assert!(!proxy_route_is_usable(
+            &required,
+            bypass_facts.proxy_route(),
+            true
+        ));
+
+        let mut common = settings.clone();
+        common.common_proxy_configured = true;
+        assert_eq!(
+            proxy_status(&common, &direct, false),
+            proxy_route_status(&common, direct_facts.proxy_route(), false)
+        );
+        assert_eq!(
+            proxy_status(&common, &direct, true),
+            proxy_route_status(&common, direct_facts.proxy_route(), true)
+        );
+        assert!(!proxy_route_is_usable(
+            &common,
+            direct_facts.proxy_route(),
+            false
+        ));
+        assert!(proxy_route_is_usable(
+            &common,
+            direct_facts.proxy_route(),
+            true
+        ));
+    }
+}

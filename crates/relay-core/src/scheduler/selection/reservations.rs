@@ -84,7 +84,7 @@ impl PoolScheduler {
         if !self.lane_allows(&candidate, lane) {
             return None;
         }
-        self.sync_all_rotation_candidates();
+        self.sync_rotation_candidates_for(Some((model, operation)));
         let mut prepared_rotation_request = rotation_request.cloned().unwrap_or_else(|| {
             self.rotation_request(
                 request_id,

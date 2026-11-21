@@ -302,6 +302,15 @@ fn checked_item(item: &Value, allowed: &[&str]) -> AdapterResult<()> {
     }) {
         return Err(AdapterError::parameter_unsupported_for("input"));
     }
+    if fields.get("status").is_some_and(|status| {
+        !status.is_null()
+            && !matches!(
+                status.as_str(),
+                Some("in_progress" | "completed" | "incomplete")
+            )
+    }) {
+        return Err(AdapterError::invalid_request().with_parameter("input.status"));
+    }
     let Some(metadata) = fields.get(METADATA).filter(|value| !value.is_null()) else {
         return Ok(());
     };

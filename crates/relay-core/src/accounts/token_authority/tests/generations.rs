@@ -11,12 +11,19 @@ async fn usage_observation_keeps_the_current_slot_fenced_without_waiting_for_ref
         )
         .unwrap();
     let entry = { lock(&authority.slots).get("account").cloned().unwrap() };
+    let revision = entry.snapshot();
     let busy = entry.lock().await;
-    assert_eq!(authority.with_usage_observation("account", 2, |_| ()), None);
-    drop(busy);
-    assert_eq!(authority.with_usage_observation("account", 1, |_| ()), None);
     assert_eq!(
-        authority.with_usage_observation("account", 2, |state| {
+        authority.with_usage_observation("account", 2, &revision, |_| ()),
+        None
+    );
+    drop(busy);
+    assert_eq!(
+        authority.with_usage_observation("account", 1, &revision, |_| ()),
+        None
+    );
+    assert_eq!(
+        authority.with_usage_observation("account", 2, &revision, |state| {
             assert!(entry.try_lock().is_none());
             assert!(entry.revision.try_write().is_err());
             state
@@ -26,7 +33,10 @@ async fn usage_observation_keeps_the_current_slot_fenced_without_waiting_for_ref
     assert!(entry.try_lock().is_some());
     assert!(entry.revision.try_write().is_ok());
     assert!(authority.remove("account"));
-    assert_eq!(authority.with_usage_observation("account", 2, |_| ()), None);
+    assert_eq!(
+        authority.with_usage_observation("account", 2, &revision, |_| ()),
+        None
+    );
 }
 
 #[tokio::test]

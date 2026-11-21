@@ -2,10 +2,64 @@
 
 Open Desktop work and acceptance criteria.
 Current contracts are in [PLANNING.md](PLANNING.md); development and release
-checks are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
-Future Hosted work has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
+checks are in [CONTRIBUTING.md](../CONTRIBUTING.md).
+Hosted implementation has its own [delivery plan](../hosted/HOSTED_RELAY_ROADMAP.md).
+
+## Delivery focus
+
+Prioritize a qualified current runtime, a reusable product core, and Hosted
+implementation over adding unrelated providers or expanding Desktop features.
+These are delivery priorities, not claims that planned capabilities are shipped.
+
+**Active:** Desktop/runtime confirmation and the first closed Hosted installation.
+The Hosted boundary qualifies one synthetic native text route; it does not close
+the installed-client and real-provider checks below.
+
+| Priority | Target | Exit evidence |
+| --- | --- | --- |
+| 1 | Confirm the existing runtime on the intended client/model/route combinations | Versioned automated checks and permitted installed-client/provider acceptance cover text → tool call → result → next answer, supported streaming, partial usage, cancellation, renewal and restart. Unsupported combinations remain explicit. |
+| 2 | Establish the shared product foundation through Hosted H00/H01 | Reviewed ownership and reuse boundaries, documented existing entry points, and contract fixtures show that Desktop and Hosted can use the same execution core without duplicating codecs or crossing authorization/state boundaries. |
+| 3 | Start Hosted implementation through H02 and its dependent packages | Buildable server composition, validated configuration, PostgreSQL/migration and API fixtures, followed by the ordered internal end-to-end proof in the Hosted plan. Public release retains its full acceptance gates. |
+| 4 | Expand subscription authorizations and application integrations after the first Hosted release passes acceptance | Each new connector proves its account lifecycle and permitted execution; each new client proves supported launch/connection modes, tool roundtrips and profile recovery using the shared product core. |
+
+Qualify each exact Hosted route before offering it; unrelated Desktop
+picker issues or unoffered connectors do not become server prerequisites.
+Neither a passing fixture nor a working personal account establishes commercial
+permission or live Hosted acceptance.
+
+Keep source/test, installed-application and provider evidence separate. Record
+the tested revision and relevant client/model/transport scope without retaining
+credentials or real conversations. Measure cold/warm cache reuse, first-output
+and end-to-end latency on matched inputs before claiming an optimization.
+Resolve demonstrated correctness or recovery failures first; defer unrelated
+feature breadth until these delivery targets have evidence.
 
 ## Local runtime P0 — finish and accept the current runtime
+
+### Current confirmation scope
+
+- Identify the checked source revision, built artifact and running executable;
+  qualify them separately when their contents differ.
+- Run the existing script, frontend production-build, unit, Core/Desktop Rust,
+  formatting and strict lint gates; correct demonstrated regressions in scope.
+- Exercise synthetic conversation, retry/cancellation, renewal, ownership,
+  partial-usage and restart cases through their existing test owners.
+- Qualify an installed client with isolated temporary configuration and a
+  synthetic loopback provider before claiming client/protocol compatibility.
+- Review retained runtime/cache counters read-only. Match cold/warm tasks and
+  client/provider scopes for any new performance claim; historical observations
+  alone do not establish an improvement from uninstalled changes.
+- [x] Installed Codex 0.167.0-alpha.3.2 → Desktop Relay 1.1.5 →
+  `gpt-6.1-sol` / `medium`: Responses/SSE single and parallel tool calls →
+  results → next answer. Each live scenario confirms two physical dispatches on
+  one candidate, unchanged model/effort and matching durable usage. Parallel
+  qualification independently checks both tool executions and result identities.
+- [ ] Complete the remaining real-provider, installed-UI and account-lifecycle
+  cases for their exact client/model/route combinations. Keep source, fixture
+  and live acceptance separate.
+
+Use the existing acceptance sections below for the exact cases. Report routine
+run results in the task conversation; do not add execution diaries to this file.
 
 ### Model, provider, and harness compatibility
 
@@ -19,11 +73,13 @@ qualification and specific missing semantics.
 | Catalog provenance and refresh | Source failures preserve valid data; changed identity/price/capability is traceable; generated exports update atomically without private inventory or manual model rows. |
 | Endpoint feature evidence | Advertised protocol does not grant unsupported continuation, tools, reasoning, cache, media, or usage semantics. Pins and explicit exclusions survive reload. |
 | Conversation compatibility | Each advertised source/client/version passes text → call → result → next answer in JSON and SSE, including its supported reasoning/media/schema features. |
+| OpenAI model migrations | Qualify the [current migration contract](../../.agents/skills/relay-protocol-adapters/references/contracts.md#openai-model-migrations): GPT-6.2 Responses-only upstream tool calling, model-specific options, ordered configuration/tool updates, encrypted reasoning and native versus summary compaction. Keep exact model/grant/endpoint evidence; do not infer parity from native passthrough. |
+| OpenAI cache and reasoning evidence | Qualify implicit/explicit breakpoints, mixed-TTL reads/writes and missing usage, plus opt-in provider comparisons and `input_transformations` where supported. Measure total cost and latency, not only cache-hit ratio; local fingerprints do not prove reasoning reuse. |
 | Client startup context | Establish a lossless foreign representation for standalone Responses results without `call_id` and interleaved system/developer instructions, including Messages-to-Gemini history, before claiming full client parity; do not invent calls, erase context, or hoist instructions. |
 | Native fidelity | Ordered schemas, precise numbers, repeated permitted headers, opaque state, and native extensions survive without lossy conversion. |
 | Accounting and errors | One logical outcome plus retained attempts; partial/unknown usage remains explicit; the failing stage and origin are safe and understandable. |
 | Client profiles | ChatGPT, Claude Desktop, and OpenCode expose only usable models/efforts/context for that route; attachment and recovery preserve user settings. |
-| Claude Desktop effort menus | Qualify picker → embedded Code capability lookup → wire effort, including Max/XHigh on opaque Relay IDs. Find a supported metadata path for exact per-model lists. `maxEffort` is only a cap; `modelCatalogUrl` requires Anthropic-signed content. Do not hide higher choices, infer Max from received High, or patch client signature checks. |
+| Claude Desktop effort menus | Qualify the actual Desktop picker/settings → embedded Code handoff and real-provider acceptance of Max/XHigh on catalog-derived opaque IDs. Find a supported metadata path for exact per-model lists. `maxEffort` is only a cap; `modelCatalogUrl` requires Anthropic-signed content. Do not hide higher choices, infer Max from received High, or patch client signature checks. |
 
 Use the [official contracts](../../.agents/skills/relay-protocol-adapters/references/contracts.md)
 and [conversation matrix](../../.agents/skills/relay-protocol-adapters/references/acceptance.md).
@@ -42,17 +98,21 @@ credential-family metadata.
 BPS multi-tool batching has a bounded [Relay-local contract](BASIS_POINTS.md) and
 synthetic roundtrip coverage for JSON/SSE, discovery, tool restrictions,
 disabled parallel policy, typed results, and opaque reasoning. Remaining live
-qualification must verify model adoption of the envelope, client acceptance of
-reversible call IDs and result grouping, and the complete tool-results/next-turn
-cycle on each intended harness. Measure cache reuse, TTFT and end-to-end latency
-separately, across the complete client execution cycle.
+qualification covers larger batches, custom tools, discovery, media, explicit
+disabled-parallel policy, interruption and malformed-batch outcomes on intended
+harnesses. Qualify other declared model/effort/client pairs individually, including
+multi-call envelope adoption, reversible IDs and grouped-result continuations.
+Measure matched cold/warm cache reuse, TTFT and end-to-end latency separately,
+across the complete client execution cycle.
 
 Request-stage diagnostics distinguish selected-attempt preparation, upstream
 headers/collection, normalized first stream output, and response/tool readiness.
 Qualify their coverage on the intended HTTP/SSE/discovery paths after installation;
 client receipt and between-request harness delays require client-side evidence.
 Cold-preparation qualification should compare request building, its initial
-schema-validation subset, catalog preparation, and attachment work. Locate live
+schema-validation subset, catalog preparation, and attachment work. Use the
+attachment breakdown to distinguish authorization, staging, upload/shared-wait
+time and physical upload/reuse counts on the installed build. Locate live
 bottlenecks with request-stage timings alongside synthetic validator benchmarks.
 Use context-size and cache-prefix diagnostics to verify the cause of TTFT and
 the safety of any history reduction before removing work.
@@ -61,7 +121,7 @@ the safety of any history reduction before removing work.
 | --- | --- |
 | Provider presets | Exact endpoint/region/key scope, Moonshot USD/CNY statistics, Kimi Code discovery/tools; quota readers only after their units/reset contract is verified. |
 | Lifecycle | Add, refresh, disable, trash/restore, removal, credential replacement, failed save/rollback, and restart on Desktop. |
-| Outcomes | Completed, incomplete, refusal, malformed terminal, interruption, late usage, cancellation, and safe pre-output retries. Check state, not only displayed text. |
+| Outcomes | Completed, incomplete, refusal, malformed terminal, interruption, late usage, cancellation, and safe pre-output retries. Distinguish local pre-dispatch rejections from dispatched attempts across HTTP, account-only and WebSocket paths. Check state, not only displayed text. |
 | Tools/state | Parallel calls, fragmented arguments, namespace/custom identity, Gemini optional IDs, signed reasoning, full-history and ID-based continuations, missing state after restart. |
 | Native extensions | Gemini continuation-token resumes with unchanged contents and owner; provider cache references/hosted tools; client-executed Responses discovery and PDF inputs/results on supported pairs. |
 | Authentication | OAuth renewal, same-token reauthentication, delayed 401/invalid grant, routing-cookie expiry; old turn/WS state must not cross authorization incarnations. |
@@ -83,8 +143,9 @@ the safety of any history reduction before removing work.
   cache hits.
 - Repeated and overlapping catalog lookups: verify earlier-result references,
   unchanged schema validation, and total input across all generations. Concurrent
-  identical images should share uploads within the existing account/credential
-  scope; include failure, cancellation and cache-capacity cases.
+  identical images: qualify shared uploads within the existing account/credential
+  scope using physical upload/reuse counts; include failure, cancellation and
+  cache-capacity cases.
 - Warm discovery-to-tool-less continuations, including client compaction through
   ordinary Responses: measure observed cached input and end-to-end latency
   against the cold path at matched model/effort/account. Check restart/expiry,
@@ -106,10 +167,15 @@ the safety of any history reduction before removing work.
 
 ### Concurrency and load
 
-- Verify HTTP/2 refusal behavior against the installed executable: no hidden
-  reqwest resend inside a recorded dispatch; preserve Relay's retry eligibility.
-- Finish native Responses WS multiplexing: independent lanes/FIFO, bounded
-  queues, scoped errors, continuation forks, retry/usage and disconnect ownership.
+- Qualify HTTP/2 refusal behavior on installed TLS/proxy/provider paths: no hidden
+  reqwest resend inside a recorded dispatch, with Relay's retry eligibility
+  preserved. Local prior-knowledge and certificate-verified TLS/ALPN/CONNECT
+  fixtures cover physical-send accounting, reset/failover budgets and fail-closed
+  proxy errors; installed binaries and actual provider/proxy combinations still
+  require their own evidence.
+- Qualify native Responses WS retry exhaustion, route/authorization changes,
+  queued-parent eviction and installed-provider behavior across native reuse
+  and automatic HTTP fallback.
 - Qualify mixed HTTP/SSE/WS/image admission on an authorized live pool. Local
   fixtures cover repeated mixed waves, lifecycle churn, bounded queue retention,
   and scheduler lock/reservation timings; they do not establish process-memory
@@ -121,26 +187,24 @@ the safety of any history reduction before removing work.
 
 - Measure startup, page reads, saves, pool switches, history sizes, first-output
   latency, refresh work, and lock waits. Optimize the measured path, not a
-  guessed protocol or assumed cache-hit benefit.
-- Extend typed retry/continuation ownership through remaining execution-stage
-  interfaces rather than adding independent mutable flags.
-  Preserve one request identity, budget, lease, and recorded outcome across
-  HTTP, account-only, and WS paths; add parity cases before extracting helpers.
-- Group remaining `GatewayRuntime` session/provider state into internal owners
-  with explicit lock boundaries. Preserve the model-policy owner; do not duplicate
-  continuation stores or replace locks with a new actor/cache layer without measurement.
-- Exercise policy-only updates without losing listeners, active streams,
-  leases, affinity, or authorization provenance. Measure restart persistence
-  needs for hard deadlines separately from disposable health hints.
+  guessed protocol or assumed cache-hit benefit. Qualify the existing native,
+  renderer, snapshot store-lock and command-roundtrip samples on the installed
+  build; distinguish refresh acknowledgement from completed work and isolate
+  lock waits separately.
+- Measure restart persistence needs for explicit provider backoff deadlines
+  beyond durable quota-reset snapshots, using recorded provider clocks and scope.
+  Analyze durations from the original normalization time when available, not
+  storage/finalization timestamps; unknown observation times remain unknown.
+  Keep credential ownership separate from disposable health and circuit hints.
+  Any restore must preserve policy-only edits while rejecting expired evidence,
+  replacement credentials and deleted/re-added members.
 
 ## Maintenance
 
-- Establish a maintainer-approved private vulnerability-reporting channel, then
-  document it in `SECURITY.md`. Enable GitHub private reporting or confirm another
-  confidential contact before advertising it; do not invent an address, supported
-  version policy or response-time promise. Public issues must not contain secrets
-  or nonpublic exploit details.
-- Upgrade Tauri/GTK as a tested platform change, not incidental cleanup.
+- Qualify dependency health separately from audit exit status. Apply compatible
+  fixes, verify affected paths and keep justified upstream constraints explicit.
+- Upgrade Tauri/GTK and Linux keyring dependencies as tested platform changes
+  that preserve credential-store compatibility.
 - Keep profile/history recovery, Windows paths, partial cleanup, transactional
   bulk mutations, and concurrent policy edits covered by their owning checks.
 - Keep current contracts, future work, user Help, and release history in their
@@ -149,11 +213,17 @@ the safety of any history reduction before removing work.
 
 ## Future connectors
 
+Expansion to other subscription authorizations follows acceptance of the first
+Hosted release. Maintain and qualify existing connections during the earlier
+stages; adding new subscription families belongs to priority 4. Each connector
+declares its independently qualified Desktop and Hosted scope rather than
+inheriting commercial or transfer permission from a personal login.
+
 - Qualify supported SIWC plan/quota telemetry before adding a quota reader;
   opaque token metadata and native Codex endpoints are not a compatible API.
 - SIWC local acceptance: authorize a real grant with user consent, verify catalog,
   text → tool call → result → next answer, refresh/restart/revocation and denied
-  plan permission. Qualify the Tauri WebView flow on supported platforms, including
+  plan permission. Qualify Desktop WebView sign-in on supported platforms, including
   MFA/social-login restrictions, proxy, cancel/reopen and copy-link browser recovery;
   the provider documents system-browser sign-in, not embedded compatibility.
   Local tests do not establish live provider acceptance. Native
@@ -167,10 +237,39 @@ usage, models, execution, and recovery. A generic API codec is not a subscriptio
 connector. Kimi Code subscription and MiniMax M Plan readers remain unqualified
 until their exact cloud contracts are verified.
 
-## Demand-gated future work
+## Claude Desktop connection
 
-- Distributed scheduling only after measured demand and shared admission,
-  member leases, durable ownership, and idempotent delivery exist.
-- Additional aliases/groups/profiles need scoped identities, collision checks,
-  independent ordering, enablement, and price fields; presentation cannot alter
-  protocol or scheduler policy.
+- [x] Save the connection in Claude Desktop's supported native configuration.
+  Keep its selector before account settings, separate from the launch path.
+- [ ] Verify supported Claude versions and coverage of sign-in, desktop and
+  backend traffic. The adapter targets an existing local profile on Windows.
+- [x] Apply reversible, field-scoped changes and restore only unchanged settings
+  owned by Relay. Preserve unrelated settings, later external edits, account
+  proxy bindings and pool routes.
+- [ ] Use Claude's supported protected credential storage; reject
+  combinations that would require plaintext secrets. The native adapter currently
+  rejects authenticated endpoints. Keep credentials out of
+  logs and diagnostics.
+- [ ] Distinguish saved, restart-required, confirmed and error states through the
+  status icon and tooltip. Green requires a verified application route, not just
+  a saved selection or successful proxy probe.
+- [ ] Accept with ordinary Windows launch, Relay closed, native sign-in outside
+  the pool, application restart, Windows reboot, proxy changes and restoration.
+  Verify traffic coverage and that unrelated applications remain unchanged.
+
+## Future application integrations
+
+After the first Hosted release passes acceptance, expand application support
+alongside the subscription-connector track. Reuse the shared execution core and
+existing profile/recovery owners; qualify each application's supported versions
+and direct-launch or pooled-API modes separately.
+
+- Verify installation detection, connection/launch, authentication and the full
+  text → tool call → result → next answer cycle on the supported transport.
+- Verify attachment, external configuration edits, disconnect and requested
+  snapshot restore while preserving chats, newer logins and unrelated settings.
+- Establish supported models, reasoning controls, context limits, streaming,
+  cancellation and restart behavior from that client's actual contract.
+
+Publish only accepted modes. Keep new clients and subscription families
+independent so an unqualified integration does not delay another qualified one.

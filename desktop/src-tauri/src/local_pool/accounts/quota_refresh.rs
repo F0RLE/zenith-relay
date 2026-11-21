@@ -1,0 +1,229 @@
+use super::import_orchestrator::{
+    ImportItemError, ImportItemStatus, credential_local_error, imported_identity,
+};
+#[cfg(test)]
+use super::refresh_observations::model_refresh_error_kind;
+use super::refresh_observations::{
+    AccountRefreshScope, RefreshReadKind, SubscriptionObservation, apply_models_read,
+    apply_quota_read, record_read_error,
+};
+use crate::local_pool::accounts::NativeSecretBackend;
+use crate::local_pool::accounts::authority::{
+    ProcessAccountLocks, ProcessLockConfig, ProcessLockError, credential_persistence,
+    default_refresh_adapter,
+};
+use crate::local_pool::accounts::credentials::{
+    CredentialStore, StoredCodexCredentials, bearer_authorization,
+};
+use crate::local_pool::accounts::oauth::CodexOAuthClient;
+use crate::local_pool::accounts::proxy::effective_proxy_config;
+use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
+use crate::local_pool::models::{LocalAccountRecord, ProviderSourceRecord};
+use crate::local_pool::profiles::codex;
+use crate::local_pool::refresh::{self, RefreshRead};
+use crate::local_pool::runtime::{
+    current_time_ms, sync_account_state_if_running, sync_refreshed_account_or_rollback,
+};
+use crate::local_pool::state::DesktopState;
+use futures_util::{StreamExt, stream};
+use reqwest::header::HeaderValue;
+use reqwest::redirect::Policy;
+use serde::Serialize;
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::{AppHandle, State};
+use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::accounts::{AccountAuthState, ReauthReason, TokenSet};
+use zenith_relay_core::error_codes;
+#[cfg(test)]
+use zenith_relay_core::providers::chatgpt::CodexSubscriptionMetadata;
+use zenith_relay_core::providers::chatgpt::{
+    AccountModelsClient, AgentIdentityCredential, CodexQuotaClient, CodexSubscriptionClient,
+    CodexSubscriptionRead, ModelDiscoveryFailure, ModelDiscoveryFailureCode, QuotaRefreshOutcome,
+};
+use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};
+use zenith_relay_core::scheduler::refresh::{RefreshKind, http::ManagementHttpScope};
+
+type CommandResult<T> = std::result::Result<T, CommandError>;
+
+mod credentials;
+mod profile;
+mod quota;
+mod reads;
+mod types;
+pub(in crate::local_pool::accounts) use quota::verify_reset_account_quota;
+
+pub(in crate::local_pool::accounts) use credentials::reconcile_registered_account_record;
+pub(crate) use credentials::sync_account_profile_bindings;
+pub(crate) use profile::sync_managed_account_profile;
+pub(crate) use quota::prepare_account_credentials;
+#[cfg(test)]
+pub(in crate::local_pool) use quota::quota_refresh_source;
+pub(in crate::local_pool::accounts) use quota::{
+    refresh_account_quotas, refresh_manual_account_quota,
+};
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use reads::{
+    apply_subscription_metadata, model_discovery_was_unauthorized, quota_refresh_was_unauthorized,
+};
+pub(in crate::local_pool::accounts) use reads::{
+    ensure_local_agent_identity_task, mark_access_only_reauthentication,
+    recover_account_authorization,
+};
+pub(in crate::local_pool) use reads::{
+    prepare_account_request_authorization, read_account_models_once, read_account_quota_once,
+};
+pub(crate) use reads::{refresh_account_models_once, refresh_account_quota_once};
+pub(in crate::local_pool) use types::PreparedAccountAuthorization;
+pub(crate) use types::PreparedAccountCredentials;
+pub use types::{
+    AccountQuotaOutcome, AccountQuotaRefreshItemResult, AccountQuotaRefreshResponse,
+    AccountQuotaRefreshStatus, ConfirmAccountImportResponse, ImportItemResult,
+};
+pub(in crate::local_pool::accounts) use types::{
+    QUOTA_COMMAND_TIMEOUT_OVERHEAD, QUOTA_REFRESH_BATCH_SIZE, TOKEN_REFRESH_SKEW_MS,
+};
+
+#[cfg(test)]
+pub(in crate::local_pool::accounts) use credentials::is_credential_refresh_error_code;
+pub(in crate::local_pool::accounts) use credentials::{
+    persist_authorization_failure, persisted_token_generation_is_newer, token_set_is_newer,
+};
+pub(in crate::local_pool::accounts) use types::MANAGED_PROFILE_OBSERVATION_LOCK;
+
+struct AccountProjectionErrors {
+    persist: &'static str,
+    missing: &'static str,
+    policy: &'static str,
+}
+
+pub(in crate::local_pool) struct RegisteredAccountAuthority {
+    pub(in crate::local_pool) tokens: TokenSet,
+    pub(in crate::local_pool) auth_state: AccountAuthState,
+}
+
+/// Registers tokens, then reads back the authority state that won.
+/// A newer registration can replace this one before the read returns.
+pub(in crate::local_pool) async fn register_active_authority(
+    state: &DesktopState,
+    account_id: &str,
+    tokens: TokenSet,
+    auth_state: AccountAuthState,
+    register_error: &str,
+    missing_tokens: &str,
+    missing_auth: &str,
+) -> LocalResult<RegisteredAccountAuthority> {
+    let authority = state.token_authority();
+    if let Err(error) = authority
+        .register_if_newer(account_id, tokens, auth_state)
+        .await
+    {
+        return Err(crate::local_pool::runtime::fail_closed(
+            state,
+            format!("{register_error}: {error}"),
+        )
+        .await);
+    }
+    let Some(tokens) = authority.tokens(account_id).await else {
+        return Err(
+            crate::local_pool::runtime::fail_closed(state, missing_tokens.to_string()).await,
+        );
+    };
+    let Some(auth_state) = authority.auth_state(account_id).await else {
+        return Err(crate::local_pool::runtime::fail_closed(state, missing_auth.to_string()).await);
+    };
+    Ok(RegisteredAccountAuthority { tokens, auth_state })
+}
+
+async fn project_registered_account(
+    state: &DesktopState,
+    account_id: &str,
+    tokens: &TokenSet,
+    authoritative_tokens: &TokenSet,
+    authoritative_auth_state: AccountAuthState,
+    errors: AccountProjectionErrors,
+) -> LocalResult<()> {
+    let authority_state_changed = token_set_is_newer(authoritative_tokens, tokens)
+        || authoritative_auth_state != AccountAuthState::Active;
+    if authority_state_changed
+        && reconcile_registered_account_record(
+            state,
+            account_id,
+            tokens,
+            authoritative_tokens,
+            authoritative_auth_state,
+        )
+        .is_err()
+    {
+        return Err(
+            crate::local_pool::runtime::fail_closed(state, errors.persist.to_string()).await,
+        );
+    }
+    let account = match state.store().and_then(|store| {
+        store
+            .account(account_id)
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))
+    }) {
+        Ok(account) => account,
+        Err(_) => {
+            return Err(
+                crate::local_pool::runtime::fail_closed(state, errors.missing.to_string()).await,
+            );
+        }
+    };
+    if !sync_account_state_if_running(state, &account.account.id).await {
+        return Err(
+            crate::local_pool::runtime::fail_closed(state, errors.policy.to_string()).await,
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn refresh_local_account_quota(
+    account_id: String,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<AccountQuotaRefreshResponse> {
+    let quota = refresh_manual_account_quota(&state, &account_id).await;
+    crate::local_pool::background::refresh_account_models_in_background(app, vec![account_id]);
+    quota.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn refresh_all_local_account_quotas(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<AccountQuotaRefreshItemResult>> {
+    let account_ids = state
+        .store()?
+        .accounts()
+        .iter()
+        .filter(|account| account.recovery.is_none())
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    let targets = quota::quota_refresh_targets(&state, &account_ids)?;
+    let results = refresh_account_quotas(&state, targets).await;
+    crate::local_pool::background::refresh_account_models_in_background(app, account_ids);
+    Ok(results)
+}
+
+fn load_stored_account<'a>(
+    state: &'a DesktopState,
+    account_id: &str,
+) -> LocalResult<(
+    std::sync::MutexGuard<'a, crate::local_pool::store::LocalPoolStore>,
+    LocalAccountRecord,
+)> {
+    let store = state.store()?;
+    let account = store
+        .account(account_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    Ok((store, account))
+}
+
+#[cfg(test)]
+mod tests;

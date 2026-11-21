@@ -1,0 +1,9 @@
+# Exact size guards preceding serde parsing. No filesystem, environment,
+# transport, or arbitrary decoder is treated as trusted.
+name: f0rle/zenith-relay-input-bounds
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: ^0.2.25
+dataExtensions:
+  - models/*.json

@@ -1,9 +1,9 @@
 use super::{
-    SourceConnector, SourceDiscovery, SourceProtocolBinding, SourceProtocolBindingKey,
-    SourceReadHints, catalog_capabilities, detected_model_price, normalized_model_ids,
+    SourceCatalogFailure, SourceConnector, SourceDiscovery, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceReadHints, detected_model_price, normalized_model_ids,
+    pages::{CATALOG_TIMEOUT, read_binding_catalog},
 };
-use crate::scheduler::refresh::http::{HttpClass, ManagementHttpScope};
-use crate::transport::{MAX_MODEL_CATALOG_BODY_BYTES, collect_limited};
+use crate::scheduler::refresh::http::ManagementHttpScope;
 use crate::{ApiModelPriceOverride, Error, Result, UpstreamProtocol};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -17,7 +17,7 @@ pub(crate) async fn discover_models_with_client(
     // legacy expanded model list from an explicit per-protocol allow-list.
     // Keep this compatibility helper broad; management paths use the public
     // discovery API above and retain that distinction.
-    discover_protocol_bindings_with_client(
+    let discovery = discover_protocol_bindings_with_client(
         client,
         source,
         bindings,
@@ -26,8 +26,15 @@ pub(crate) async fn discover_models_with_client(
         &SourceReadHints::default(),
         &ManagementHttpScope::default(),
     )
-    .await
-    .map(|discovery| discovery.models)
+    .await?;
+    let mut seen = BTreeSet::new();
+    let previous = bindings
+        .iter()
+        .flat_map(|binding| &binding.model_ids)
+        .filter(|model| seen.insert(crate::model_id_key(model)))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(discovery.models_with_previous(&previous))
 }
 
 pub(super) async fn discover_protocol_bindings_with_client(
@@ -49,97 +56,73 @@ pub(super) async fn discover_protocol_bindings_with_client(
     let mut conflicting_model_prices = HashSet::new();
     let mut successful_responses = 0usize;
     let mut capabilities = Vec::new();
-
-    for binding in bindings {
-        let (authorization_name, authorization) = source.authorization_for_binding(binding);
-        let model_catalog_request = client
-            .get(connector.models_endpoint_for_binding(binding).clone())
-            .headers(connector.protocol_headers_for_binding(binding))
-            .header(authorization_name.clone(), authorization.clone());
-        let (mut model_catalog_response, first_permit) = match scope
-            .send(client, model_catalog_request, HttpClass::Ordinary)
-            .await
+    let mut reads = Vec::new();
+    let mut remaining_budgets = Vec::<std::time::Duration>::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        let started = tokio::time::Instant::now();
+        let mut result =
+            read_binding_catalog(client, &connector, binding, bindings, hints, scope).await;
+        let remaining = CATALOG_TIMEOUT.saturating_sub(started.elapsed());
+        if let Ok(catalog) = &mut result
+            && let Some(resolved) = catalog.resolved_connector.take()
         {
-            Ok(response_with_permit) => response_with_permit,
-            Err(_) => {
-                last_error = Some(Error::ManagementHttpUnavailable);
-                continue;
-            }
-        };
-        let mut permit = Some(first_permit);
-        hints.observe(model_catalog_response.headers());
-        if model_catalog_response.status() == reqwest::StatusCode::NOT_FOUND
-            && resolved_base_url.is_none()
-            && root_v1_fallback_allowed(&connector, binding)
-        {
-            // The first response has no body to consume. Do not hold its slot
-            // while waiting for a separate /v1 retry at the same origin.
-            drop(permit.take());
-            if let Some(v1_connector) = connector.with_appended_v1(bindings) {
-                let retry_request = client
-                    .get(v1_connector.models_endpoint_for_binding(binding).clone())
-                    .headers(v1_connector.protocol_headers_for_binding(binding))
-                    .header(authorization_name, authorization);
-                if let Ok((candidate_response, candidate_permit)) =
-                    scope.send(client, retry_request, HttpClass::Ordinary).await
-                {
-                    hints.observe(candidate_response.headers());
-                    if candidate_response.status().is_success() {
-                        resolved_base_url = Some(
-                            v1_connector
-                                .base_url
-                                .as_str()
-                                .trim_end_matches('/')
-                                .to_string(),
-                        );
-                        connector = v1_connector;
-                        model_catalog_response = candidate_response;
-                        permit = Some(candidate_permit);
-                    }
-                }
+            resolved_base_url = Some(resolved.base_url.as_str().trim_end_matches('/').to_string());
+            connector = resolved;
+            // A source has one base URL. Re-read earlier catalogs at the
+            // resolved root instead of mixing evidence from different paths.
+            for ((previous, read), &budget) in bindings[..index]
+                .iter()
+                .zip(&mut reads)
+                .zip(&remaining_budgets)
+            {
+                *read = if budget.is_zero() {
+                    Err(Error::ManagementHttpUnavailable)
+                } else {
+                    tokio::time::timeout(
+                        budget,
+                        read_binding_catalog(client, &connector, previous, bindings, hints, scope),
+                    )
+                    .await
+                    .unwrap_or(Err(Error::ManagementHttpUnavailable))
+                };
             }
         }
-        if !model_catalog_response.status().is_success() {
-            last_error = Some(Error::UpstreamStatus(
-                model_catalog_response.status().as_u16(),
-            ));
-            continue;
+        reads.push(result);
+        remaining_budgets.push(remaining);
+    }
+    if resolved_base_url.is_some() && reads.iter().any(Result::is_err) {
+        return Err(reads
+            .into_iter()
+            .rev()
+            .find_map(Result::err)
+            .unwrap_or(Error::ManagementHttpUnavailable));
+    }
+    let partial = reads.iter().any(Result::is_err);
+    let mut failures = Vec::new();
+    let mut catalog_models = BTreeMap::<_, Vec<String>>::new();
+    for (binding, read) in bindings.iter().zip(reads) {
+        let catalog = match read {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                failures.push(SourceCatalogFailure::new(binding, &error));
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let upstream_models = catalog.models;
+        if partial {
+            catalog_models
+                .entry(
+                    binding
+                        .adapter
+                        .upstream_protocol(binding.wire_api)
+                        .wire_api(),
+                )
+                .or_default()
+                .extend(upstream_models.iter().map(|(model, _)| model.clone()));
         }
-        let model_catalog_bytes =
-            match collect_limited(model_catalog_response, MAX_MODEL_CATALOG_BODY_BYTES).await {
-                Ok(body_bytes) => body_bytes,
-                Err(error) => {
-                    last_error = Some(error);
-                    continue;
-                }
-            };
-        drop(permit);
-        let model_catalog_json: Value = match serde_json::from_slice(&model_catalog_bytes) {
-            Ok(catalog_json) => catalog_json,
-            Err(_) => {
-                last_error = Some(Error::InvalidUpstreamResponse(
-                    "upstream model response is invalid",
-                ));
-                continue;
-            }
-        };
-        let upstream_models = match parse_upstream_models(
-            binding.adapter.upstream_protocol(binding.wire_api),
-            &model_catalog_json,
-        ) {
-            Some(models) => models,
-            None => {
-                last_error = Some(Error::InvalidUpstreamResponse(
-                    "upstream model response is invalid",
-                ));
-                continue;
-            }
-        };
         successful_responses += 1;
-        capabilities.extend(catalog_capabilities(
-            &model_catalog_json,
-            crate::unix_time_ms(),
-        ));
+        capabilities.extend(catalog.capabilities);
 
         // Inventory and price metadata are independent of legacy route lists.
         for (model, price) in &upstream_models {
@@ -202,12 +185,17 @@ pub(super) async fn discover_protocol_bindings_with_client(
                     .is_none_or(|allowed| allowed.contains(&crate::model_id_key(model)))
             })
             .collect::<Vec<_>>();
+        let mut binding_models = HashSet::new();
         discovered_bindings.push(SourceProtocolBinding {
             wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
             cache_write_ttl: binding.cache_write_ttl,
-            model_ids: models.into_iter().map(|(model, _)| model).collect(),
+            model_ids: models
+                .into_iter()
+                .map(|(model, _)| model)
+                .filter(|model| binding_models.insert(crate::model_id_key(model)))
+                .collect(),
         });
     }
 
@@ -222,6 +210,8 @@ pub(super) async fn discover_protocol_bindings_with_client(
         detected_model_prices,
         resolved_base_url,
         capabilities,
+        catalog_models,
+        failures,
     })
 }
 
@@ -321,24 +311,26 @@ pub(super) fn merge_route_model_price(
     Some(merged)
 }
 
-fn root_v1_fallback_allowed(connector: &SourceConnector, binding: &SourceProtocolBinding) -> bool {
-    connector.base_url.path() == "/"
-        && matches!(
-            binding.adapter.upstream_protocol(binding.wire_api),
-            UpstreamProtocol::Responses | UpstreamProtocol::ChatCompletions
-        )
-}
-
 pub(super) fn parse_upstream_models(
     protocol: UpstreamProtocol,
     catalog_payload: &Value,
 ) -> Option<Vec<(String, Option<ApiModelPriceOverride>)>> {
-    let model_records = match protocol {
+    let model_records: &[Value] = match protocol {
         UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => {
-            catalog_payload
+            match catalog_payload
                 .get("models")
-                .or_else(|| catalog_payload.get("data"))?
-                .as_array()?
+                .or_else(|| catalog_payload.get("data"))
+            {
+                Some(records) => records.as_array()?,
+                None if catalog_payload
+                    .as_object()?
+                    .keys()
+                    .all(|key| key == "nextPageToken") =>
+                {
+                    &[]
+                }
+                None => return None,
+            }
         }
         UpstreamProtocol::Responses
         | UpstreamProtocol::ChatCompletions
@@ -348,47 +340,44 @@ pub(super) fn parse_upstream_models(
             .as_array()?,
     };
     let mut seen_model_ids = HashSet::new();
-    Some(
-        model_records
-            .iter()
-            .filter_map(|model_record| {
-                let model_id = match protocol {
-                    UpstreamProtocol::GeminiInteractions => model_record
-                        .get("name")
-                        .or_else(|| model_record.get("id"))?
-                        .as_str()
-                        .map(|name| name.strip_prefix("models/").unwrap_or(name)),
-                    UpstreamProtocol::GeminiGenerateContent => model_record
-                        .get("supportedGenerationMethods")
-                        .and_then(Value::as_array)
-                        .filter(|methods| {
-                            methods
-                                .iter()
-                                .any(|method| method.as_str() == Some("generateContent"))
-                        })
-                        .and_then(|_| model_record.get("name").or_else(|| model_record.get("id")))?
-                        .as_str()
-                        .map(|raw_model_name| {
-                            raw_model_name
-                                .strip_prefix("models/")
-                                .unwrap_or(raw_model_name)
-                        }),
-                    UpstreamProtocol::Responses
-                    | UpstreamProtocol::ChatCompletions
-                    | UpstreamProtocol::Messages => model_record
-                        .get("id")
-                        .or_else(|| model_record.get("name"))?
-                        .as_str()
-                        .map(|raw_model_name| {
-                            raw_model_name
-                                .strip_prefix("models/")
-                                .unwrap_or(raw_model_name)
-                        }),
-                }?;
-                seen_model_ids
-                    .insert(crate::model_id_key(model_id))
-                    .then(|| (model_id.to_string(), detected_model_price(model_record)))
-            })
-            .collect(),
-    )
+    let mut models = Vec::new();
+    for model_record in model_records {
+        let raw_model_id = match protocol {
+            UpstreamProtocol::GeminiGenerateContent | UpstreamProtocol::GeminiInteractions => {
+                model_record.get("name").or_else(|| model_record.get("id"))
+            }
+            UpstreamProtocol::Responses
+            | UpstreamProtocol::ChatCompletions
+            | UpstreamProtocol::Messages => {
+                model_record.get("id").or_else(|| model_record.get("name"))
+            }
+        }?
+        .as_str()?
+        .trim();
+        let model_id = raw_model_id
+            .strip_prefix("models/")
+            .unwrap_or(raw_model_id)
+            .trim();
+        // A malformed row makes the snapshot incomplete. It must not turn
+        // a failed refresh into a valid empty or partial inventory.
+        if model_id.is_empty() {
+            return None;
+        }
+        if protocol == UpstreamProtocol::GeminiGenerateContent
+            && !model_record
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+                .is_some_and(|methods| {
+                    methods
+                        .iter()
+                        .any(|method| method.as_str() == Some("generateContent"))
+                })
+        {
+            continue;
+        }
+        if seen_model_ids.insert(crate::model_id_key(model_id)) {
+            models.push((model_id.to_string(), detected_model_price(model_record)));
+        }
+    }
+    Some(models)
 }

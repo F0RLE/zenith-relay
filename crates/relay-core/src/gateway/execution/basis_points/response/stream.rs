@@ -71,6 +71,15 @@ enum EventSink<'a> {
 pub(in crate::gateway) fn emit_unseen_output(
     response: &Value,
     seen: &std::collections::HashSet<usize>,
+    emit: impl FnMut(Value),
+) {
+    emit_unseen_output_except(response, seen, None, emit);
+}
+
+pub(in crate::gateway) fn emit_unseen_output_except(
+    response: &Value,
+    seen: &std::collections::HashSet<usize>,
+    already_released: Option<usize>,
     mut emit: impl FnMut(Value),
 ) {
     let mut sequence = 0;
@@ -80,16 +89,32 @@ pub(in crate::gateway) fn emit_unseen_output(
     };
     if let Some(items) = response["output"].as_array() {
         for (index, item) in items.iter().enumerate() {
-            if !seen.contains(&index)
-                || matches!(
-                    item["type"].as_str(),
-                    Some("function_call" | "custom_tool_call")
-                )
+            if Some(index) != already_released
+                && (!seen.contains(&index)
+                    || matches!(
+                        item["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    ))
             {
                 emit_output_item(&mut cursor, index, item);
             }
         }
     }
+}
+
+pub(in crate::gateway) fn emit_completed_item(
+    index: usize,
+    item: &Value,
+    mut emit: impl FnMut(Value),
+) {
+    emit_output_item(
+        &mut EventCursor {
+            sink: EventSink::Parsed(&mut emit),
+            sequence: &mut 0,
+        },
+        index,
+        item,
+    );
 }
 
 impl EventCursor<'_> {

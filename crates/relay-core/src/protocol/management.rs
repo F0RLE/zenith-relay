@@ -19,10 +19,11 @@ mod routing;
 mod usage;
 
 pub use account::{
-    AccountRefreshState, AccountSummary, CredentialDiagnostics, CredentialRecovery,
-    CredentialStatus, QuotaWindowUsage, RefreshStatus, RevealedAccountIdentity, SourceRefreshState,
-    SourceSummary, SourceSummaryRecord, WeeklyValueCalibration, api_equivalent_projection_window,
-    model_has_native_account_route,
+    AccountEconomics, AccountMethodUsage, AccountRefreshState, AccountSummary,
+    CredentialDiagnostics, CredentialRecovery, CredentialStatus, QuotaWindowUsage, RefreshStatus,
+    RevealedAccountIdentity, SourceRefreshState, SourceSummary, SourceSummaryRecord,
+    WeeklyValueCalibration, api_equivalent_projection_window, model_has_native_account_route,
+    project_account_economics,
 };
 pub use desktop_capabilities::DesktopCapabilities;
 pub use model::{
@@ -38,12 +39,14 @@ pub use model_policy::{
     ModelPolicyError, canonical_pool_model_id, complete_model_display_order,
     configured_source_model_ids, update_model_reasoning_policy,
 };
-pub use model_protocols::{ModelProtocolRoute, apply_model_protocol_routes};
+pub use model_protocols::{
+    ModelProtocolRoute, apply_model_protocol_routes, apply_streaming_model_protocol_routes,
+};
 pub use routing::{
     AccountOperationalInput, AccountOperationalSource, AccountOperationalState,
-    AccountRoutingBlockReason, OperationalStatus, ProxyMode, QuotaRefreshStatus,
-    account_candidate_enabled, account_operational_state, operational_status, pool_routing_summary,
-    quota_refresh_status,
+    AccountRoutingBlockReason, OperationalStatus, PoolRotationProjection, PoolRotationView,
+    ProxyMode, QuotaRefreshStatus, account_candidate_enabled, account_operational_state,
+    operational_status, pool_rotation_view, pool_routing_summary, quota_refresh_status,
 };
 pub use usage::{
     UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageRange, UsageSummary, UsageTokenBreakdown,

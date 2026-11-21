@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod edits;
+pub use edits::{PoolRoutingEdit, RotationPreset};
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolRoutingMode {
@@ -9,12 +12,18 @@ pub enum PoolRoutingMode {
     Smart,
     #[default]
     Automatic,
-    /// Legacy equal-cycling alias; priority failover must be explicit.
-    InOrder,
+    SubscriptionExpiry,
+    #[serde(alias = "in_order")]
     RoundRobin,
     /// Opt into saved request shares without changing equal-cycling imports.
     WeightedRoundRobin,
     Failover,
+}
+
+impl PoolRoutingMode {
+    pub fn is_adaptive(self) -> bool {
+        matches!(self, Self::Automatic | Self::SubscriptionExpiry)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -112,7 +121,9 @@ impl PoolRoutingPolicy {
             || (self.version < 3
                 && matches!(
                     self.mode,
-                    PoolRoutingMode::WeightedRoundRobin | PoolRoutingMode::Failover
+                    PoolRoutingMode::WeightedRoundRobin
+                        | PoolRoutingMode::Failover
+                        | PoolRoutingMode::SubscriptionExpiry
                 ))
         {
             return Err("unsupported pool routing policy version");
@@ -200,13 +211,8 @@ impl PoolRoutingPolicy {
     pub(crate) fn upgrade_legacy_format(&mut self) {
         let supported = matches!(
             (self.version, self.mode),
-            (
-                1,
-                PoolRoutingMode::Smart | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
-            ) | (
-                2,
-                PoolRoutingMode::Automatic | PoolRoutingMode::InOrder | PoolRoutingMode::RoundRobin
-            )
+            (1, PoolRoutingMode::Smart | PoolRoutingMode::RoundRobin)
+                | (2, PoolRoutingMode::Automatic | PoolRoutingMode::RoundRobin)
         );
         if supported {
             self.version = 3;

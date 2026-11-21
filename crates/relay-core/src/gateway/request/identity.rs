@@ -160,5 +160,23 @@ fn fingerprint(kind: &str, value: &str) -> String {
     format!("client_{}", hex::encode(&digest.finalize()[..12]))
 }
 
+#[cfg(any(debug_assertions, test))]
+pub(crate) fn siwc_probe_contexts(session: &str) -> Vec<String> {
+    if !(16..=128).contains(&session.len())
+        || !session
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Vec::new();
+    }
+    // Single-chat identities only: never match a parent's affinity, window or installation.
+    SESSION_HEADERS
+        .iter()
+        .copied()
+        .chain(["thread-id"])
+        .map(|kind| fingerprint(kind, session))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests;

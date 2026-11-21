@@ -1,11 +1,11 @@
 use super::{
-    CACHE_FORMAT, MAX_AUXILIARY_RESPONSE_BYTES, MAX_CACHE_BYTES, ModelMetadataError, SOURCES,
-    SourceEnvelope, SourceState, loaded_state, map_io_error,
+    CACHE_FORMAT, MAX_CACHE_BYTES, ModelMetadataError, SOURCES, SourceEnvelope, SourceState,
+    loaded_state, map_io_error,
 };
-use crate::{catalog_io, model_metadata::MetadataCacheEnvelope};
+use crate::catalog_io;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,16 +69,12 @@ pub(super) fn read_states(
     };
     let header = match serde_json::from_slice::<CacheHeader<'_>>(&cache_bytes) {
         Ok(header) => header,
-        Err(error) if error.is_data() => return read_legacy_states(path, &cache_bytes, now, age),
         Err(_) => {
             states[0] = loaded_state(Err(ModelMetadataError::InvalidCache), now, age);
             return (states, parsed);
         }
     };
-    if header.format.as_deref() != Some(CACHE_FORMAT) {
-        return read_legacy_states(path, &cache_bytes, now, age);
-    }
-    if header.schema_version.as_u64() != Some(2) {
+    if header.format.as_deref() != Some(CACHE_FORMAT) || header.schema_version.as_u64() != Some(2) {
         states[0] = loaded_state(Err(ModelMetadataError::InvalidCache), now, age);
         return (states, parsed);
     }
@@ -99,48 +95,6 @@ pub(super) fn read_states(
                 // A malformed source cannot discard the remaining sources.
                 *state = loaded_state(envelope, now, age);
             }
-        }
-    }
-    (states, parsed)
-}
-
-fn read_legacy_states(
-    path: &Path,
-    cache_bytes: &[u8],
-    now: u64,
-    age: u64,
-) -> ([SourceState; 4], [Option<Value>; 4]) {
-    let mut states = std::array::from_fn(|_| SourceState::new(None, None, now, age));
-    let mut parsed = std::array::from_fn(|_| None);
-    let envelope = serde_json::from_slice::<MetadataCacheEnvelope>(cache_bytes)
-        .map_err(|_| ModelMetadataError::InvalidCache)
-        .and_then(|envelope| {
-            envelope.validate()?;
-            let legacy_payload = serde_json::value::to_raw_value(&envelope.payload)
-                .map(Arc::from)
-                .map_err(|_| ModelMetadataError::InvalidCache)?;
-            parsed[0] = Some(envelope.payload);
-            Ok(SourceEnvelope {
-                source_url: envelope.source_url,
-                revision: envelope.revision,
-                etag: envelope.etag,
-                last_modified: envelope.last_modified,
-                fetched_at_ms: envelope.fetched_at_ms,
-                stale: envelope.stale,
-                payload: legacy_payload,
-            })
-        });
-    states[0] = loaded_state(envelope, now, age);
-    for (i, file) in [(2, "openrouter-models.json"), (3, "litellm-models.json")] {
-        if let Ok(Some(envelope)) = catalog_io::read_json::<SourceEnvelope>(
-            &path.with_file_name(file),
-            MAX_AUXILIARY_RESPONSE_BYTES,
-        ) {
-            let validated = envelope.validate(i).map(|validated_payload| {
-                parsed[i] = Some(validated_payload);
-                envelope
-            });
-            states[i] = loaded_state(validated, now, age);
         }
     }
     (states, parsed)

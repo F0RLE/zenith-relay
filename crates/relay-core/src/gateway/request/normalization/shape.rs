@@ -5,7 +5,6 @@ pub(super) fn normalize_account_request_common(
     request_fields: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
-    request_fields.remove("max_output_tokens");
     normalize_empty_context_management(request_fields);
     normalize_codex_tool_schemas(request_fields);
     sanitize_unstored_reasoning_items(request_fields);

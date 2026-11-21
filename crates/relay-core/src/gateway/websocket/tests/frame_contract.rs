@@ -1,4 +1,5 @@
 use super::*;
+use axum::http::header::RETRY_AFTER;
 use serde_json::json;
 
 #[test]
@@ -312,15 +313,18 @@ data: {"type":"response.failed","response":{"error":{"code":"server_error","mess
 }
 
 #[test]
-fn absolute_usage_reset_becomes_retry_delay() {
+fn absolute_usage_reset_retains_its_millisecond_deadline() {
+    let observed = crate::unix_time_ms();
+    let reset = observed + 120_123;
     let value = json!({
         "type": "error",
-        "body": {"error": {"type": "usage_limit_reached", "resets_at": 1_700_000_120}}
+        "body": {"error": {"type": "usage_limit_reached", "resets_at": reset}}
     });
-    assert_eq!(
-        websocket_reset_delay_seconds(&value, 1_700_000_000),
-        Some(120)
-    );
+    let terminal = event_terminal(&value);
+    assert!(terminal.headers.get(RETRY_AFTER).is_none());
+    let clock = terminal.body_hint.retry_clock_for_account(true).unwrap();
+    assert_eq!(clock.not_before_ms, reset);
+    assert!((observed..=crate::unix_time_ms()).contains(&clock.observed_at_ms.unwrap()));
 }
 
 #[test]
@@ -374,7 +378,7 @@ fn upstream_status_accepts_string_status_codes() {
 }
 
 #[test]
-fn websocket_retry_headers_preserve_nested_reset_and_quota_hints() {
+fn websocket_retry_metadata_keeps_body_clocks_separate_from_actual_headers() {
     let value = json!({
         "body": {
             "error": {"resets_in_seconds": 45},
@@ -383,18 +387,24 @@ fn websocket_retry_headers_preserve_nested_reset_and_quota_hints() {
     });
     let headers = websocket_retry_headers(&value);
 
-    assert_eq!(
-        headers
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok()),
-        Some("45")
-    );
+    assert!(headers.get(RETRY_AFTER).is_none());
+    let terminal = event_terminal(&value);
+    let clock = terminal.body_hint.retry_clock_for_account(true).unwrap();
+    assert_eq!(clock.not_before_ms - clock.observed_at_ms.unwrap(), 45_000);
     assert_eq!(
         headers
             .get("x-codex-primary-used-percent")
             .and_then(|value| value.to_str().ok()),
         Some("99")
     );
+    let value = json!({"response":{
+        "error":{"resets_in_seconds":45},
+        "headers":{"retry_after":"120"}
+    }});
+    let terminal = event_terminal(&value);
+    assert_eq!(terminal.headers[RETRY_AFTER], "120");
+    let clock = terminal.body_hint.retry_clock_for_account(true).unwrap();
+    assert_eq!(clock.not_before_ms - clock.observed_at_ms.unwrap(), 120_000);
 }
 
 #[test]
@@ -503,4 +513,48 @@ fn relayed_subscription_reset_does_not_become_a_websocket_retry_deadline() {
         ErrorOrigin::Account,
     );
     assert!(account.retry_at_ms.is_some());
+}
+#[test]
+fn websocket_terminal_request_refusals_keep_status_and_category() {
+    use crate::error_codes;
+    use crate::gateway::websocket::resolved_terminal_failure;
+
+    for (code, status, category) in [
+        (
+            "context_length_exceeded",
+            StatusCode::BAD_REQUEST,
+            error_codes::UPSTREAM_CONTEXT_TOO_LARGE,
+        ),
+        (
+            "context_length_exceeded",
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::UPSTREAM_UNAVAILABLE,
+        ),
+        (
+            "invalid_access_program",
+            StatusCode::BAD_REQUEST,
+            error_codes::UPSTREAM_ACCESS_PROGRAM_INVALID,
+        ),
+        (
+            "access_program_not_enabled",
+            StatusCode::FORBIDDEN,
+            error_codes::UPSTREAM_ACCESS_PROGRAM_NOT_ENABLED,
+        ),
+    ] {
+        let payload = json!({"type":"error","status":status.as_u16(),"error":{"code":code}});
+        let terminal = event_terminal(&payload);
+        assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Failure));
+        assert_eq!(resolved_terminal_failure(&terminal), (status, category));
+        let mut without_status = payload;
+        without_status.as_object_mut().unwrap().remove("status");
+        let terminal = event_terminal(&without_status);
+        assert_eq!(
+            terminal.error_category,
+            Some(if code == "context_length_exceeded" {
+                error_codes::UPSTREAM_CONTEXT_TOO_LARGE
+            } else {
+                category
+            })
+        );
+    }
 }

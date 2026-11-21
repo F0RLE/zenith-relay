@@ -1,6 +1,66 @@
 use super::*;
 
 #[tokio::test]
+async fn siwc_web_search_evidence_survives_a_warm_catalog_rejection() {
+    let siwc = AccessServer::start(json!([]), false).await;
+    let native = AccessServer::start(json!([]), false).await;
+    *crate::poison::mutex(&siwc.state.generation_body) = super::super::json::completed_response();
+    let mut runtime = runtime(&siwc, &native).await;
+    let events = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+    let captured = events.clone();
+    let settings = Arc::get_mut(&mut runtime).unwrap();
+    settings.diagnostics_enabled = || true;
+    settings.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+    let (base, task) = recovery::gateway(runtime).await;
+    let client = retry_admission::bounded_client();
+    let mut payload = request(false);
+    for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+        if status == StatusCode::BAD_REQUEST {
+            payload["tools"].as_array_mut().unwrap().push(json!({
+                "type":"web_search","filters":{"allowed_domains":["synthetic.invalid"]}
+            }));
+            *crate::poison::mutex(&siwc.state.generation_status) = status;
+            *crate::poison::mutex(&siwc.state.generation_body) = json!({
+                "error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"Synthetic search rejection"}
+            });
+        }
+        let response = client
+            .post(format!("{base}/v1/responses"))
+            .bearer_auth("local-secret")
+            .header("x-codex-session-id", "synthetic-search-session")
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        response.bytes().await.unwrap();
+    }
+    let frames = crate::poison::mutex(&siwc.state.websocket_bodies);
+    let events = crate::poison::mutex(&events);
+    let attempts: Vec<_> = events
+        .iter()
+        .filter(|event| !event.is_request_completion())
+        .collect();
+    assert_eq!((frames.len(), attempts.len()), (2, 2));
+    for (i, (frame, event)) in frames.iter().zip(attempts).enumerate() {
+        let declared = i == 1;
+        let wire = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+        assert_eq!(wire.connection_reused, Some(declared));
+        assert_eq!(event.success, !declared);
+        assert!(event.tool_use.basis_points_catalog.is_some());
+        let tools = frame["tools"].as_array().unwrap();
+        assert_eq!(tools.iter().any(|t| t["type"] == "web_search"), declared);
+        assert_eq!(event.tool_use.client_web_search_declared, Some(declared));
+        let payload = wire.request_payload.as_ref().unwrap();
+        assert_eq!(payload.web_search_declared, Some(declared));
+        let diagnostic = serde_json::to_string(&event.tool_use).unwrap();
+        assert!(!diagnostic.contains("synthetic.invalid"));
+    }
+    assert_eq!(native.state.generation_requests.load(Ordering::SeqCst), 0);
+    task.abort();
+}
+
+#[tokio::test]
 async fn siwc_historical_catalog_collision_keeps_native_forwarding() {
     for stream in [false, true] {
         let siwc = AccessServer::start(json!([]), false).await;
@@ -120,7 +180,7 @@ async fn siwc_native_catalog_continuation_rejects_replaced_authorization() {
         .into_iter()
         .find(|route| route.candidate_id == "synthetic-account-0")
         .unwrap();
-    runtime.chatgpt_accounts["synthetic-account-0"]
+    runtime.account_state.executors["synthetic-account-0"]
         .token_authority
         .register(
             "synthetic-account-0",

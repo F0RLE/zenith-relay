@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn responses_history_rejects_invalid_status_before_foreign_conversion() {
+    let items = [
+        json!({"type":"message","role":"user","content":"Synthetic input"}),
+        json!({"type":"function_call","call_id":"call_synthetic","name":"lookup","arguments":"{}"}),
+        json!({"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"synthetic input"}),
+        json!({"type":"function_call_output","call_id":"call_synthetic","output":"synthetic result"}),
+        json!({"type":"reasoning","summary":[{"type":"summary_text","text":"Synthetic summary"}]}),
+    ];
+    for item in items {
+        let mut completed = item.clone();
+        completed["status"] = "completed".into();
+        assert!(decode::request(WireApi::Responses, &json!({"input":[completed]})).is_ok());
+        for status in [
+            json!(false),
+            json!(1),
+            json!([]),
+            json!({}),
+            json!(""),
+            json!("unknown"),
+        ] {
+            let mut invalid = item.clone();
+            invalid["status"] = status;
+            let request = json!({"input":[invalid]});
+            let error = decode::request(WireApi::Responses, &request).unwrap_err();
+            assert_eq!(error.code(), crate::error_codes::ADAPTER_INVALID_REQUEST);
+            assert_eq!(error.parameter(), Some("input.status"));
+            assert!(
+                prepare(WireApi::Responses, WireApi::Responses, &request, false).is_passthrough()
+            );
+        }
+    }
+}
+
+#[test]
+fn responses_invalid_history_status_is_named_on_each_foreign_json_and_sse_route() {
+    let request = json!({"input":[{"role":"user","content":"Synthetic input","status":false}]});
+    for upstream in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        for streaming in [false, true] {
+            let error = try_convert(WireApi::Responses, upstream, &request, streaming).unwrap_err();
+            assert_eq!(error.code(), crate::error_codes::ADAPTER_INVALID_REQUEST);
+            assert_eq!(error.parameter(), Some("input.status"));
+        }
+    }
+}
+
+#[test]
 fn chat_participant_names_cannot_be_silently_discarded_by_conversion() {
     for role in ["user", "assistant", "system", "developer", "tool"] {
         let mut request = input(WireApi::ChatCompletions);
@@ -544,11 +590,18 @@ fn mid_conversation_system_messages_are_not_hoisted_into_initial_instructions() 
             {"role":"system","content":"New instruction"},
             {"role":"user","content":"Continue"}
         ]);
-        request[if client == WireApi::Responses {
+        let field = if client == WireApi::Responses {
             "input"
         } else {
             "messages"
-        }] = history;
+        };
+        request[field] = history;
+        let system_index = if client == WireApi::Messages {
+            request[field].as_array_mut().unwrap().swap(2, 3);
+            3
+        } else {
+            2
+        };
         for upstream in WireApi::ALL {
             let converted = try_convert(client, upstream, &request, false);
             if upstream != client && matches!(upstream, WireApi::Messages | WireApi::Gemini) {
@@ -564,7 +617,10 @@ fn mid_conversation_system_messages_are_not_hoisted_into_initial_instructions() 
                     } else {
                         "messages"
                     };
-                    assert_eq!(converted.upstream_body()[field][2]["role"], "system");
+                    assert_eq!(
+                        converted.upstream_body()[field][system_index]["role"],
+                        "system"
+                    );
                 }
             }
         }

@@ -1,5 +1,5 @@
 use super::order::normalize;
-use super::{MAX_STRING_LENGTH, ReasoningMethod};
+use super::{MAX_STRING_LENGTH, ModelMetadataError, ReasoningMethod};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -86,6 +86,7 @@ pub(crate) fn enrich_reasoning_metadata(
         openrouter.cloned(),
         litellm.cloned(),
     )
+    .unwrap()
 }
 
 pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
@@ -93,7 +94,7 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
     models_dev_details: Option<Value>,
     openrouter: Option<Value>,
     litellm: Option<Value>,
-) -> Value {
+) -> Result<Value, ModelMetadataError> {
     // Extract compact reasoning evidence before consuming source records. It
     // must reflect each original source, not fields filled by the merge.
     let primary: BTreeMap<String, ReasoningRecord> = super::validate_metadata_payload(&models_dev)
@@ -151,7 +152,7 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
         models_dev_details,
         openrouter,
         litellm,
-    );
+    )?;
     let router = RecordIndex::new(&router);
     let lite = RecordIndex::new(&lite);
     let models_dev_details = detail_records.as_ref().map(RecordIndex::new);
@@ -248,5 +249,5 @@ pub(crate) fn enrich_reasoning_metadata_with_models_dev_details(
     }
     // Move the merged records into the JSON object; serializing the map here
     // would allocate a second complete tree while the first is still alive.
-    Value::Object(models.into_iter().collect())
+    Ok(Value::Object(models.into_iter().collect()))
 }

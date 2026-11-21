@@ -204,7 +204,13 @@ fn percent_to_basis_points(percent: f64) -> Result<u16, QuotaNormalizationError>
     if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
         return Err(QuotaNormalizationError::InvalidPercentage);
     }
-    Ok((percent * 100.0).round() as u16)
+    let rounded = (percent * 100.0).round() as u16;
+    // Exhausted and exactly full are evidence, not rounding artifacts.
+    Ok(if percent > 0.0 && percent < 100.0 {
+        rounded.clamp(1, 9_999)
+    } else {
+        rounded
+    })
 }
 
 fn cycle_fingerprint(

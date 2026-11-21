@@ -1,4 +1,4 @@
-const agreementConfirmation = "I have read and agree to the [Contributor Agreement](https://github.com/F0RLE/zenith-relay/blob/main/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.";
+const agreementConfirmation = "I have read and agree to the [Contributor Agreement](https://github.com/F0RLE/zenith-relay/blob/main/docs/CONTRIBUTOR_LICENSE_AGREEMENT.md), including its copyright assignment. If this PR is accepted, I assign to F0RLE the copyright I own in my original changes and confirm that I have permission to submit them.";
 
 const requiredHeadings = [
   "Contributor Agreement",
@@ -8,14 +8,14 @@ const requiredHeadings = [
 ];
 
 const dependencyFiles = new Set([
-  "src/package.json",
-  "src/bun.lock",
+  "desktop/frontend/package.json",
+  "desktop/frontend/bun.lock",
   "Cargo.toml",
   "Cargo.lock",
   "crates/relay-core/Cargo.toml",
   "crates/relay-core/Cargo.lock",
-  "src-tauri/Cargo.toml",
-  "src-tauri/Cargo.lock",
+  "desktop/src-tauri/Cargo.toml",
+  "desktop/src-tauri/Cargo.lock",
 ]);
 
 function isDependencyFile(path) {

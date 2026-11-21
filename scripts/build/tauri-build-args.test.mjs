@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { tauriBuildArgs } from "./tauri-build-args.mjs";
+import { tauriBuildArgs, tauriBuildOptions } from "./tauri-build-args.mjs";
+
+test("compact output is owned by the wrapper, not Tauri or Cargo", () => {
+  expect(tauriBuildOptions(["--compact", "--no-bundle", "--", "--locked"])).toEqual({
+    compact: true, args: ["--no-bundle", "--", "--locked"],
+  });
+  expect(tauriBuildOptions(["--no-bundle", "--", "--compact"])).toEqual({
+    compact: false, args: ["--no-bundle", "--", "--compact"],
+  });
+});
 
 test("an unsigned build passes configuration to Tauri and locked dependencies to Cargo", () => {
   const args = tauriBuildArgs(["--no-bundle"]);

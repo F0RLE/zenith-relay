@@ -35,20 +35,50 @@ impl ImageAttempt<'_> {
             success,
             status.as_u16(),
             category,
-            self.started.elapsed().as_millis() as u64,
+            self.route
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.transport.as_ref()?.upstream_response_ms)
+                .unwrap_or_else(|| self.started.elapsed().as_millis() as u64),
         );
         event.image_usage = Some(crate::usage::ImageUsage::default());
         if let Some(routing) = event.routing.as_mut() {
             routing.endpoint_kind = Some("images".to_owned());
+            if let Some(payload) = routing
+                .transport
+                .as_mut()
+                .and_then(|transport| transport.request_payload.as_mut())
+                && payload.mode == crate::usage::RequestPayloadMode::Full
+            {
+                payload.full_request_reason =
+                    Some(crate::usage::FullRequestReason::StatelessImageRequest);
+            }
         }
         event
     }
 }
 
 pub(super) fn image_capability_unavailable(bytes: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    text.contains("image generation is not enabled")
-        || text.contains(error_codes::IMAGE_GENERATION_NOT_ENABLED)
+    let Ok(payload) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+    let Some(error) = payload.get("error") else {
+        return false;
+    };
+    ["code", "type"].into_iter().any(|key| {
+        error.get(key).and_then(Value::as_str).is_some_and(|code| {
+            code.eq_ignore_ascii_case(error_codes::IMAGE_GENERATION_NOT_ENABLED)
+        })
+    }) || error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .is_some_and(|message| {
+            message
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("image generation is not enabled")
+        })
 }
 
 pub(super) fn direct_request_body(request: &PreparedImageRequest, source_model: &str) -> Vec<u8> {

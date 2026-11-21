@@ -262,8 +262,8 @@ export function withZenithRustEnv(env = process.env) {
       configureNinjaEnvironment(nextEnvironment, ninjaExecutable);
     }
 
-    // Keep MSBuild's temporary archive files inside Cargo's writable target tree.
-    const buildTemp = join(repoRoot(), "target", "msbuild-temp");
+    // Keep MSBuild's temporary archive files with local build diagnostics.
+    const buildTemp = join(repoRoot(), ".build", "desktop", "msbuild-temp");
     mkdirSync(buildTemp, { recursive: true });
     nextEnvironment.TEMP = buildTemp;
     nextEnvironment.TMP = buildTemp;
@@ -285,7 +285,7 @@ export function configureNinjaEnvironment(env, executable) {
 }
 
 export function tauriInvocation(args) {
-  const localCli = join(repoRoot(), "src", "node_modules", "@tauri-apps", "cli", "tauri.js");
+  const localCli = join(repoRoot(), "desktop", "frontend", "node_modules", "@tauri-apps", "cli", "tauri.js");
 
   if (existsSync(localCli)) {
     return {

@@ -20,8 +20,10 @@ use serde_json::{Value, json};
 
 mod agent_messages;
 mod catalog_prefix;
+mod function_code_branches;
 mod history_identity;
 mod history_messages;
+mod messages_tool_search;
 mod performance;
 mod preparation;
 mod reasoning_stream;

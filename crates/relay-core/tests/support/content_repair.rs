@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "content_repair/account_outcomes.rs"]
+mod account_outcomes;
+
+#[path = "content_repair/http_stages.rs"]
+mod http_stages;
+
 #[tokio::test]
 async fn compact_repair_with_generated_usage_does_not_repeat_execution() {
     assert_compact_repair_execution(true).await;
@@ -439,6 +445,13 @@ async fn compact_account_repairs_legacy_call_ids_after_strict_rejection() {
         Some(zenith_relay_core::AttemptOutcome::RetryRepair)
     );
     assert!(events[1].success);
+    assert_eq!(
+        events[1]
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.attempt_outcome),
+        Some(zenith_relay_core::AttemptOutcome::Completed)
+    );
 }
 
 #[tokio::test]

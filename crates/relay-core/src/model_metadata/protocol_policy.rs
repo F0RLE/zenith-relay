@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-const POLICY_JSON: &str = include_str!("../../../../catalog/protocol-policy.json");
+const POLICY_JSON: &str = include_str!("../../catalog/protocol-policy.json");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

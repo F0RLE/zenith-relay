@@ -2,6 +2,7 @@ mod availability;
 mod lifecycle;
 mod members;
 pub use members::{account_member_key, source_member_key};
+mod inspection;
 mod ownership;
 mod projection;
 mod rate_limits;
@@ -9,6 +10,7 @@ mod recovery;
 mod registry;
 mod reservations;
 mod snapshot;
+pub use inspection::{RotationDebugCapture, RotationDebugSink};
 
 pub(crate) use reservations::ReservationId;
 use reservations::Reservations;
@@ -19,7 +21,7 @@ use super::candidate::{
     CandidateHealth, CandidateKind, CandidateQuotaState, CandidateScope, RuntimeCandidate,
 };
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
-use super::cooldown::CooldownReason;
+use super::cooldown::{CooldownMetadata, CooldownReason, ProviderBackoff, ProviderClock};
 use super::rotation::{
     AttemptId as RotationAttemptId, AttemptObservation as RotationAttemptObservation,
     AuthState as RotationAuthState, QuotaState as RotationQuotaState,
@@ -33,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub use snapshot::{
     ActiveModelRuntime, AttemptOutcome, CandidateResourceHeadroom, CandidateRuntimeSnapshot,
-    ModelRetryRuntime, RequestTiming, RoutingDiagnostics, SelectionReason,
+    ModelRetryRuntime, RequestTiming, RequestTimingPhases, RoutingDiagnostics, SelectionReason,
 };
 
 // Keep response ownership across busy personal pools without allowing an
@@ -59,6 +61,8 @@ pub(crate) struct CooldownRequest<'a> {
     pub(crate) scope: &'a str,
     pub(crate) retry_at_ms: u64,
     pub(crate) reason: CooldownReason,
+    /// Explicit provider clock evidence, separate from inferred/policy delays.
+    pub(crate) provider_clock: Option<ProviderClock>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +78,9 @@ pub struct Selection {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     quota_references: BTreeMap<String, crate::CandidateQuotaReference>,
-    cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
+    keep_unknown_quota_affinity: BTreeSet<String>,
+    spend_deadlines: BTreeMap<String, crate::quota::QuotaSpendDeadline>,
+    cooldown_metadata: BTreeMap<(String, String), CooldownMetadata>,
     shared_rate_limits: BTreeMap<(String, String), rate_limits::RateLimitObservation>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
@@ -88,8 +94,9 @@ pub struct PoolScheduler {
     execution_fences: BTreeMap<String, (u64, u32)>,
     next_execution_fence_epoch: u64,
     capability_blocks: BTreeSet<(String, String)>,
-    /// Only structural permission edits advance this fence. Priority and
-    /// weight updates leave already reserved, still-permitted work intact.
+    /// Registrations and structural permission edits share one sequence so a
+    /// removed ID cannot match a pending retry when it is registered again.
+    next_candidate_permission_revision: u64,
     candidate_permission_revisions: BTreeMap<String, u64>,
     /// Removed candidates remain as tombstones while leases are active.
     retired_candidates: BTreeSet<String>,
@@ -111,7 +118,9 @@ impl PoolScheduler {
         Self {
             candidates: BTreeMap::new(),
             quota_references: BTreeMap::new(),
-            cooldown_reasons: BTreeMap::new(),
+            keep_unknown_quota_affinity: BTreeSet::new(),
+            spend_deadlines: BTreeMap::new(),
+            cooldown_metadata: BTreeMap::new(),
             shared_rate_limits: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
@@ -131,6 +140,7 @@ impl PoolScheduler {
             execution_fences: BTreeMap::new(),
             next_execution_fence_epoch: 0,
             capability_blocks: BTreeSet::new(),
+            next_candidate_permission_revision: 0,
             candidate_permission_revisions: BTreeMap::new(),
             retired_candidates: BTreeSet::new(),
             rotation: RotationEngine::default(),
@@ -148,32 +158,47 @@ impl PoolScheduler {
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Text, RotationOperation::Text)
+        self.select_for_operation(request, RotationOperation::Text, None, false)
     }
 
     pub(crate) fn select_image(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Image, RotationOperation::Image)
+        self.select_for_operation(request, RotationOperation::Image, None, false)
     }
 
     pub(crate) fn select_compaction(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        self.select_for_operation(request, InFlightLane::Text, RotationOperation::Compaction)
+        self.select_for_operation(request, RotationOperation::Compaction, None, false)
+    }
+
+    pub(crate) fn select_with_rotation_capture(
+        &mut self,
+        request: SelectionRequest<'_>,
+        operation: RotationOperation,
+        capture: Option<&mut Option<RotationDebugCapture>>,
+    ) -> Option<Selection> {
+        self.select_for_operation(request, operation, capture, true)
     }
 
     fn select_for_operation(
         &mut self,
         request: SelectionRequest<'_>,
-        lane: InFlightLane,
         operation: RotationOperation,
+        capture: Option<&mut Option<RotationDebugCapture>>,
+        diagnostics_enabled: bool,
     ) -> Option<Selection> {
-        let mut rotation_request = self.prepare_rotation_request(&request, operation)?;
-        if let Some(allowed) = &mut rotation_request.allowed_candidates {
-            allowed.retain(|candidate_id| self.lane_allows(&self.candidates[candidate_id], lane));
+        let lane = operation.into();
+        let mut prepared = self.prepare_rotation_request(&request, operation);
+        if let Some(projected) = &mut prepared {
+            self.retain_free_lanes(projected);
         }
+        if let Some(capture) = capture {
+            *capture = Some(self.capture_rotation(&request, prepared.as_ref(), lane, operation));
+        }
+        let rotation_request = prepared?;
         let owner = rotation_request.owner.clone();
         let selected = self.rotation.select(&rotation_request, request.now_ms)?;
         let reason = if owner.is_none()
             && !selected.recovery
-            && self.rotation.mode() == RotationMode::Automatic
+            && self.rotation.mode().is_adaptive()
             && !matches!(
                 selected.reason,
                 super::rotation::RotationSelectionReason::QuotaHeadroom
@@ -199,6 +224,9 @@ impl PoolScheduler {
                 super::rotation::RotationSelectionReason::ProviderCredits => {
                     SelectionReason::ProviderCredits
                 }
+                super::rotation::RotationSelectionReason::SubscriptionExpiry => {
+                    SelectionReason::SubscriptionExpiry
+                }
                 super::rotation::RotationSelectionReason::ManualPriority => {
                     SelectionReason::ManualPriority
                 }
@@ -220,12 +248,14 @@ impl PoolScheduler {
             usize::try_from(selected.eligible_candidates).unwrap_or(usize::MAX),
             lane,
         )?;
-        diagnostics.route_latency = Some(self.rotation.latency_diagnostics(
-            &selected.candidate_id,
-            &rotation_request.route_key,
-            request.now_ms,
-        ));
-        if let Some(key) = request.prompt_affinity_key {
+        if diagnostics_enabled {
+            diagnostics.route_latency = Some(self.rotation.latency_diagnostics(
+                &selected.candidate_id,
+                &rotation_request.route_key,
+                request.now_ms,
+            ));
+        }
+        if let Some(key) = request.prompt_affinity_key.filter(|_| diagnostics_enabled) {
             let preferred = rotation_request
                 .preferred
                 .as_deref()

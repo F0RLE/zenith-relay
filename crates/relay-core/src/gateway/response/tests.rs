@@ -1,3 +1,50 @@
+mod headers;
+mod output_snapshots;
+
+#[test]
+fn failure_evidence_keeps_http_envelopes_separate_from_terminal_status() {
+    use crate::usage::TransportFailureKind;
+    use std::sync::{Arc, Mutex};
+    let mut event = crate::gateway::test_support::test_usage_event();
+    event.success = false;
+    event.http_status = 429;
+    event.error_category = Some("upstream_rate_limited".into());
+    event.routing = Some(
+        serde_json::from_value(serde_json::json!({
+            "reason": "fair_rotation", "eligibleCandidates": 1,
+            "quotaRemainingBasisPoints": null, "inFlightBefore": 0, "dispatchesBefore": 0,
+            "transport": {"upstream":"http", "mode":"native", "responseFormat":"sse",
+                "upstreamHttpStatus":200, "downstreamHttpStatus":200}
+        }))
+        .unwrap(),
+    );
+    event.upstream_error = Some(crate::usage::UpstreamErrorDetails::from_value(
+        Some(429),
+        &serde_json::json!({"error":{"code":"rate_limit_exceeded"}}),
+    ));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let captured = recorded.clone();
+    let callback: crate::UsageCallback =
+        Arc::new(move |event| captured.lock().unwrap().push(event));
+    super::emit_callback(&callback, event.clone());
+    let result = recorded.lock().unwrap().pop().unwrap();
+    let transport = result.routing.unwrap().transport.unwrap();
+    assert_eq!(result.http_status, 429);
+    assert_eq!(transport.downstream_http_status, Some(200));
+    assert_eq!(transport.upstream_http_status, Some(200));
+    assert_eq!(transport.failure_kind, Some(TransportFailureKind::Upstream));
+    event.upstream_error = None;
+    let transport = event.routing.as_mut().unwrap().transport.as_mut().unwrap();
+    transport.upstream_http_status = None;
+    transport.downstream_http_status = None;
+    super::emit_callback(&callback, event);
+    let unknown = recorded.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        unknown.routing.unwrap().transport.unwrap().failure_kind,
+        None
+    );
+}
+
 use super::*;
 use crate::gateway::test_support::test_usage_event;
 use serde_json::Value;
@@ -58,6 +105,42 @@ fn cache_buckets_do_not_invent_missing_totals_or_positive_write_windows() {
 }
 
 #[test]
+fn responses_cache_usage_skips_empty_stream_envelope_usage() {
+    for placeholder in [Value::Null, serde_json::json!({})] {
+        let wire = format!(
+            "data: {}\n\n",
+            serde_json::json!({"type":"response.completed","usage":placeholder,"response":{
+                "status":"completed","usage":{"input_tokens":100,"output_tokens":10,
+                    "input_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}
+            }})
+        );
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, wire.as_bytes());
+        assert_eq!(event.input_tokens, Some(100));
+        assert_eq!(event.cached_input_tokens, Some(40));
+        assert_eq!(event.cache_write_input_tokens, Some(50));
+    }
+}
+
+#[test]
+fn cache_write_usage_skips_null_aliases_but_keeps_explicit_zero() {
+    for (primary, alternate, expected) in [
+        (Value::Null, serde_json::json!(40), Some(40)),
+        (serde_json::json!(0), serde_json::json!(40), Some(0)),
+        (Value::Null, Value::Null, None),
+    ] {
+        let body = serde_json::json!({"usage":{"input_tokens":100,"output_tokens":10,
+            "input_tokens_details":{"cached_tokens":50,"cache_write_tokens":primary},
+            "cache_write_tokens":alternate
+        }});
+        let mut event = test_usage_event();
+        populate_tokens(&mut event, &serde_json::to_vec(&body).unwrap());
+        assert_eq!(event.cached_input_tokens, Some(50));
+        assert_eq!(event.cache_write_input_tokens, expected);
+    }
+}
+
+#[test]
 fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
     for ttl in ["30m", "12h"] {
         let response = serde_json::json!({
@@ -75,6 +158,13 @@ fn response_cache_policy_is_observed_outside_usage_for_json_and_sse() {
             populate_tokens(&mut event, &body);
             assert_eq!(event.cache_write_input_tokens, Some(40));
             assert_eq!(event.cache_write_ttl.as_deref(), Some(ttl));
+            let usage = event.tool_use.provider_usage.as_ref().unwrap();
+            assert_eq!(usage.cache_retention.as_deref(), Some(ttl));
+            assert_eq!(
+                usage.cache_mode,
+                Some(crate::usage::CachePolicyMode::Implicit)
+            );
+            assert!(usage.cache_write_tokens_by_ttl.is_empty());
         }
     }
     let mut event = test_usage_event();
@@ -159,7 +249,10 @@ fn generated_usage_prevents_replaying_json_and_buffered_stream_failures() {
         let response = serde_json::json!({"status":"failed","output":[],"usage":usage,
             "error":{"code":"model_capacity_exhausted","message":"Synthetic capacity refusal"}
         });
-        let failure = validate_upstream_response(&response, None).err().unwrap();
+        let bytes = serde_json::to_vec(&response).unwrap();
+        let failure = validate_upstream_response(&response, &bytes, None)
+            .err()
+            .unwrap();
         assert_eq!(
             failure.execution.certainty,
             crate::scheduler::rotation::ExecutionCertainty::Accepted
@@ -174,6 +267,20 @@ fn generated_usage_prevents_replaying_json_and_buffered_stream_failures() {
             crate::scheduler::rotation::ExecutionCertainty::Accepted
         );
     }
+}
+
+#[test]
+fn duplicate_buffered_error_codes_do_not_authorize_basis_points_replay() {
+    let bytes = br#"{"error":{"code":"provider_unknown","code":"rate_limit_exceeded"}}"#;
+    let failure = completed_upstream_response(bytes, true, None).unwrap_err();
+    assert_eq!(
+        failure.failure.status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        failure.execution_for_transport(crate::runtime::AccountTransport::ExcelBasisPoints),
+        crate::scheduler::rotation::ExecutionObservation::unknown()
+    );
 }
 
 #[test]
@@ -347,8 +454,14 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
         let mut timing = BufferedResponseTiming::default();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             if basis_points {
-                collect_basis_points_response(upstream, Some("gpt-6-astra"), started, &mut timing)
-                    .await
+                collect_basis_points_response(
+                    upstream,
+                    Some("gpt-6-astra"),
+                    started,
+                    &mut timing,
+                    None,
+                )
+                .await
             } else {
                 super::collect_upstream_response(
                     upstream,
@@ -357,6 +470,7 @@ async fn buffered_collectors_time_fragmented_output_and_keep_partial_failures() 
                     prewarm,
                     started,
                     &mut timing,
+                    None,
                 )
                 .await
             }
@@ -779,6 +893,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     Some("gpt-6-astra"),
                     std::time::Instant::now(),
                     &mut timing,
+                    None,
                 )
                 .await;
                 let mut event = test_usage_event();
@@ -794,6 +909,7 @@ async fn buffered_account_collectors_stop_at_terminal_without_waiting_for_upstre
                     false,
                     std::time::Instant::now(),
                     &mut BufferedResponseTiming::default(),
+                    None,
                 )
                 .await
             }

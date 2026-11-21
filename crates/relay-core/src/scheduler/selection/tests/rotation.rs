@@ -31,7 +31,7 @@ pub(super) fn dispatch(scheduler: &mut PoolScheduler, now: u64, affinity: Option
         .unwrap();
     budget.with_budget(|budget| {
         scheduler
-            .begin_rotation_dispatch(reservation, budget)
+            .begin_rotation_dispatch(reservation, budget, now)
             .unwrap();
         scheduler
             .settle_rotation(
@@ -94,7 +94,7 @@ fn manual_rotation_ignores_weights_and_soft_affinity_with_native_aliases() {
 
 #[test]
 fn configured_order_and_operation_bindings_survive_rotation_admission() {
-    let mut scheduler = policy::mixed(PoolRoutingMode::InOrder);
+    let mut scheduler = policy::mixed(PoolRoutingMode::RoundRobin);
     let mut policy = scheduler.pool_routing.clone().unwrap();
     policy.members.rotate_left(2);
     scheduler.set_pool_routing(policy).unwrap();

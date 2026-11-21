@@ -1,9 +1,7 @@
 use crate::model_metadata::ModelMetadataCatalogHandle;
-use crate::pricing::PricingCatalog;
 use crate::protocol::ClientWireApi;
 use crate::{
-    LocalGatewayKey, ProviderSource, SourceProtocolBinding, WireApi, is_valid_model_id,
-    model_id_key,
+    LocalGatewayKey, ProviderSource, SourceProtocolBinding, is_valid_model_id, model_id_key,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,18 +24,6 @@ pub struct RuntimeActivitySnapshot {
     pub in_flight: u32,
     pub active_request_count: u32,
     pub active_models: Vec<crate::ActiveModelRuntime>,
-}
-
-pub(super) fn source_candidate_id(
-    source_id: &str,
-    binding: &SourceProtocolBinding,
-    legacy_protocol: WireApi,
-) -> String {
-    if binding.adapter.is_passthrough() && binding.wire_api == legacy_protocol {
-        return source_id.to_string();
-    }
-    let suffix = binding.adapter.route_suffix(binding.wire_api);
-    format!("{source_id}::{suffix}")
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +318,7 @@ pub trait ResponseAffinityStore: Send + Sync {
 pub struct GatewayRuntimeOptions {
     /// Host-owned opt-in for detailed request telemetry; never changes execution.
     pub diagnostics_enabled: fn() -> bool,
+    pub rotation_debug: Option<Arc<dyn crate::RotationDebugSink>>,
     pub tool_policy: crate::ToolPolicy,
     pub max_retry_candidates: usize,
     pub pool_routing: Option<crate::PoolRoutingPolicy>,
@@ -341,10 +328,6 @@ pub struct GatewayRuntimeOptions {
     /// Host restriction: native Codex credentials may execute Images only.
     /// Independent of editable model rules and preserved across catalog refreshes.
     pub native_codex_images_only: bool,
-    /// Legacy import compatibility only. Native Images never selects a text model.
-    pub image_base_model: Option<String>,
-    /// Legacy API compatibility; native Images routing does not consult pricing.
-    pub image_pricing_catalog: Option<Arc<PricingCatalog>>,
     /// Advisory presentation metadata. It only orders model-list responses;
     /// admission and routing remain owned by the runtime registry.
     pub model_metadata_catalog: Option<ModelMetadataCatalogHandle>,
@@ -368,11 +351,6 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
             .field("native_codex_images_only", &self.native_codex_images_only)
-            .field("image_base_model", &self.image_base_model)
-            .field(
-                "image_pricing_catalog",
-                &self.image_pricing_catalog.as_ref().map(|_| "configured"),
-            )
             .field(
                 "model_metadata_catalog",
                 &self.model_metadata_catalog.as_ref().map(|_| "configured"),
@@ -393,6 +371,7 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             diagnostics_enabled: || false,
+            rotation_debug: None,
             tool_policy: crate::ToolPolicy::default(),
             max_retry_candidates: 3,
             pool_routing: None,
@@ -400,8 +379,6 @@ impl Default for GatewayRuntimeOptions {
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             native_codex_images_only: false,
-            image_base_model: None,
-            image_pricing_catalog: None,
             model_metadata_catalog: None,
             model_reasoning_allowed_levels: BTreeMap::new(),
             model_context_policies: BTreeMap::new(),

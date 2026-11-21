@@ -1,4 +1,6 @@
 mod quota_wake;
+pub mod reset_policy;
+pub mod reset_resources;
 mod routes;
 
 pub use routes::select_automation_route;

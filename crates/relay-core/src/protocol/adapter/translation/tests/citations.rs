@@ -16,6 +16,50 @@ fn cited_response() -> Value {
 }
 
 #[test]
+fn converted_search_stream_accepts_optional_action_metadata() {
+    for client in [WireApi::ChatCompletions, WireApi::Messages, WireApi::Gemini] {
+        // Raw Responses URL annotations are representable by the Chat bridge;
+        // the other clients need their own native citation source contracts.
+        let with_citations = client == WireApi::ChatCompletions;
+        let mut events = cited_stream(with_citations);
+        if !with_citations {
+            events.retain(|event| event["type"] != "response.output_text.annotation.added");
+        }
+        let search = json!({"type":"web_search_call","id":"ws_test","status":"completed",
+            "action":{"type":"search","query":"synthetic query"}});
+        let mut terminal_search = search.clone();
+        terminal_search["action"]["sources"] =
+            json!([{"type":"url","url":"https://example.test/source"}]);
+        events.last_mut().unwrap()["response"]["output"][0] = terminal_search;
+        events.insert(
+            2,
+            json!({"type":"response.output_item.done","output_index":0,"item":search}),
+        );
+        let mut bridge = prepare(client, WireApi::Responses, &input(client), true)
+            .into_stream_bridge()
+            .unwrap();
+        for event in events {
+            let wire = format!("data: {event}\n\n");
+            for fragment in wire.as_bytes().chunks(7) {
+                bridge.push(fragment);
+            }
+        }
+        bridge.finish();
+        assert!(
+            bridge.completed().is_some(),
+            "{client:?} rejected hosted-search metadata"
+        );
+        if with_citations {
+            assert_eq!(
+                bridge.completed().unwrap().response_body["choices"][0]["message"]["annotations"]
+                    [0]["url_citation"]["url"],
+                "https://example.test/source"
+            );
+        }
+    }
+}
+
+#[test]
 fn responses_search_citations_use_concatenated_character_offsets_in_chat() {
     let result = prepare(
         WireApi::ChatCompletions,

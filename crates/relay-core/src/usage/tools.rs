@@ -68,6 +68,8 @@ pub struct ToolUseDiagnostics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_usage: Option<super::ProviderUsageDetails>,
     pub client_tool_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_web_search_declared: Option<bool>,
     /// Post-policy catalog before transport encoding, not native upstream tools.
     pub forwarded_tool_count: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,6 +206,7 @@ impl ToolUseDiagnostics {
             .as_ref()
             .is_some_and(|usage| !usage.is_empty())
             || self.client_tool_count > 0
+            || self.client_web_search_declared.is_some()
             || self.client_context.is_some()
             || self.upstream_context.is_some()
             || self.forwarded_tool_count > 0

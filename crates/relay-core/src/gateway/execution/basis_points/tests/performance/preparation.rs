@@ -77,9 +77,16 @@ async fn measure_bps_local_preparation_phases() {
             .unwrap();
             let catalog_done = Instant::now();
             assert!(
-                attach_input_images(&runtime, "synthetic-source", &endpoint, &headers, &mut body)
-                    .await
-                    .is_ok()
+                attach_input_images(
+                    &runtime,
+                    "synthetic-source",
+                    &endpoint,
+                    &headers,
+                    &mut body,
+                    None
+                )
+                .await
+                .is_ok()
             );
             let attachments_done = Instant::now();
             capture_prepared_context(&prepared, &body, &mut tool_use);

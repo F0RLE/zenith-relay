@@ -1,0 +1,329 @@
+use super::{
+    accounts::{
+        NativeSecretBackend,
+        authority::{ProcessAccountLocks, ProcessLockConfig},
+        credentials::CredentialStore,
+    },
+    state::DesktopOAuthEvents,
+    store::{LocalPoolStore, telemetry_db::TelemetryDb},
+};
+use std::path::PathBuf;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use tokio::sync::Notify;
+use zenith_relay_core::{
+    UsageEvent,
+    accounts::{AccountAccessState, AccountAuthState},
+    automations::WakeCoordinator,
+    providers::chatgpt::subscription_refresh_due,
+    scheduler::refresh::{
+        RefreshIdentity, RefreshKind, passive_quota_age_ms, quota_verification_delay,
+        service::RefreshService,
+    },
+};
+
+mod account_state;
+mod worker;
+
+pub(super) use worker::offload;
+
+pub(super) use account_state::apply_account_usage_state;
+use account_state::{current_account_usage, expire_account_access, persisted_auth_state};
+
+type TimedUsageCallback = Arc<dyn Fn(UsageEvent, chrono::DateTime<chrono::Utc>) + Send + Sync>;
+
+pub(crate) struct DesktopUsageWriter {
+    telemetry: Arc<TelemetryDb>,
+    store: Arc<Mutex<LocalPoolStore>>,
+    credentials: CredentialStore<NativeSecretBackend>,
+    account_locks: ProcessAccountLocks,
+    refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
+    wake: Arc<Mutex<WakeCoordinator>>,
+    failed: Arc<AtomicU64>,
+    wake_notify: Arc<Notify>,
+    state_events: DesktopOAuthEvents,
+}
+
+pub(crate) struct DesktopUsageWriterParts {
+    pub(crate) telemetry: Arc<TelemetryDb>,
+    pub(crate) store: Arc<Mutex<LocalPoolStore>>,
+    pub(crate) transient_root: PathBuf,
+    pub(crate) refresh: Arc<RefreshService<super::refresh::RefreshReadResult>>,
+    pub(crate) wake: Arc<Mutex<WakeCoordinator>>,
+    pub(crate) failed: Arc<AtomicU64>,
+    pub(crate) wake_notify: Arc<Notify>,
+    pub(crate) state_events: DesktopOAuthEvents,
+}
+
+struct AccountRefreshHint {
+    identity: RefreshIdentity,
+    refresh_now: bool,
+    passive_observation: Option<(u64, u64)>,
+    verification_delay_ms: Option<u64>,
+    retry_delay_ms: Option<u64>,
+}
+
+impl DesktopUsageWriter {
+    pub(crate) fn new(parts: DesktopUsageWriterParts) -> Self {
+        Self {
+            telemetry: parts.telemetry,
+            store: parts.store,
+            credentials: CredentialStore::from_backend(NativeSecretBackend),
+            // The default configuration is a fixed valid value. Constructing
+            // the lock itself performs no filesystem I/O; acquisition remains
+            // best-effort inside the synchronous usage callback.
+            account_locks: ProcessAccountLocks::with_config(
+                parts.transient_root,
+                ProcessLockConfig::default(),
+            )
+            .expect("default account lock configuration is valid"),
+            refresh: parts.refresh,
+            wake: parts.wake,
+            failed: parts.failed,
+            wake_notify: parts.wake_notify,
+            state_events: parts.state_events,
+        }
+    }
+
+    pub(crate) fn callback(&self) -> TimedUsageCallback {
+        let telemetry = self.telemetry.clone();
+        let store = self.store.clone();
+        let credentials = self.credentials.clone();
+        let account_locks = self.account_locks.clone();
+        let account_refresh = self.refresh.clone();
+        let wake = self.wake.clone();
+        let failed = self.failed.clone();
+        let wake_notify = self.wake_notify.clone();
+        let state_events = self.state_events.clone();
+        Arc::new(move |event, observed_at| {
+            if event.is_request_completion()
+                || event
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.attempt_outcome)
+                    == Some(zenith_relay_core::AttemptOutcome::RetryAuthorization)
+            {
+                if telemetry.record(&event).is_err() {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                } else if event.is_request_completion() {
+                    state_events.emit_usage_recorded();
+                }
+                return;
+            }
+            // Keep the local write synchronous so the usage callback's state contract remains durable.
+            let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
+            let observed_at = observed_at.to_rfc3339();
+            let account_id = event.account_id.clone();
+            // Hold credential-writer lock order and the exact OAuth revision
+            // through persistence. Delayed or busy ownership remains telemetry
+            // only, including success and quota observations, not just 401s.
+            let _account_guard = current_account_usage(&credentials, &account_locks, &event);
+            let (access_expiry, ignore_account_observation) =
+                if account_id.is_some() && _account_guard.is_none() {
+                    (None, true)
+                } else if event.http_status == 401 {
+                    match (account_id.as_deref(), event.account_token_generation) {
+                        (Some(account_id), Some(expected_generation)) => {
+                            match expire_account_access(
+                                &credentials,
+                                account_id,
+                                expected_generation,
+                                observed_at_ms,
+                            ) {
+                                Some(access_state) => (Some(access_state), false),
+                                None => (None, true),
+                            }
+                        }
+                        _ => (None, true),
+                    }
+                } else {
+                    (None, false)
+                };
+            let successful_auth_state = if event.success && !ignore_account_observation {
+                account_id
+                    .as_deref()
+                    .and_then(|account_id| persisted_auth_state(&credentials, account_id))
+            } else {
+                None
+            };
+            let recorded = telemetry.record(&event).is_ok();
+            let update = persist_usage_observation(
+                &store,
+                &wake,
+                UsageObservation {
+                    event: &event,
+                    observed_at: &observed_at,
+                    observed_at_ms,
+                    account_id: account_id.as_deref(),
+                    access_expiry,
+                    successful_auth_state,
+                    ignore_account_observation,
+                },
+            );
+            if update
+                .as_ref()
+                .is_ok_and(|(completed, _, _)| *completed > 0)
+            {
+                wake_notify.notify_one();
+            }
+            if recorded {
+                state_events.emit_usage_recorded();
+            }
+            if update
+                .as_ref()
+                .is_ok_and(|(_, _, visible_state_changed)| *visible_state_changed)
+            {
+                state_events.emit_state_changed();
+            }
+            if let Some(hint) = update.as_ref().ok().and_then(|(_, hint, _)| hint.as_ref()) {
+                account_refresh.set_member_active(&hint.identity.member_id);
+                if let Some((age_ms, observed_at_ms)) = hint.passive_observation {
+                    account_refresh.observe_passive_quota(&hint.identity, age_ms, observed_at_ms);
+                }
+                if let Some(delay_ms) = hint.verification_delay_ms {
+                    account_refresh.schedule_after(&hint.identity, RefreshKind::Quota, delay_ms);
+                }
+                if let Some(delay_ms) = hint.retry_delay_ms {
+                    account_refresh.respect_retry_after(
+                        &hint.identity,
+                        RefreshKind::Quota,
+                        delay_ms,
+                    );
+                }
+                if hint.refresh_now {
+                    account_refresh.mark_dirty(&hint.identity, RefreshKind::Quota);
+                }
+            }
+            if !recorded || update.is_err() {
+                failed.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+    }
+}
+
+struct UsageObservation<'a> {
+    event: &'a UsageEvent,
+    observed_at: &'a str,
+    observed_at_ms: u64,
+    account_id: Option<&'a str>,
+    access_expiry: Option<AccountAccessState>,
+    successful_auth_state: Option<AccountAuthState>,
+    ignore_account_observation: bool,
+}
+
+fn persist_usage_observation(
+    store: &Mutex<LocalPoolStore>,
+    wake: &Mutex<WakeCoordinator>,
+    observation: UsageObservation<'_>,
+) -> Result<(usize, Option<AccountRefreshHint>, bool), ()> {
+    let UsageObservation {
+        event,
+        observed_at,
+        observed_at_ms,
+        account_id,
+        access_expiry,
+        successful_auth_state,
+        ignore_account_observation,
+    } = observation;
+    store.lock().map_err(|_| ()).and_then(|mut store| {
+        let Some(account_id) = account_id else {
+            store
+                .touch_usage(&event.local_key_id, &event.source_id, observed_at)
+                .map_err(|_| ())?;
+            return Ok((0, None, false));
+        };
+
+        let mut account = store.account(account_id).cloned().ok_or(())?;
+        // Every dispatched result is bound to its credential generation, not
+        // just 401s. Keep late success, quota and failure data in telemetry but
+        // never apply it to a replacement login or complete its wake cycles.
+        let ignore_account_observation = ignore_account_observation
+            || event
+                .account_token_generation
+                .is_some_and(|generation| generation != account.account.token_generation);
+        if ignore_account_observation {
+            store
+                .touch_usage(&event.local_key_id, &event.source_id, observed_at)
+                .map_err(|_| ())?;
+            return Ok((0, None, false));
+        }
+        let visible_state = (
+            account.account.quota.clone(),
+            account.account.auth_state,
+            account.account.health,
+            account.account.last_error_code.clone(),
+        );
+        let refresh_now = apply_account_usage_state(
+            &mut account,
+            event,
+            observed_at_ms,
+            access_expiry,
+            successful_auth_state,
+            ignore_account_observation,
+        ) && account.account.is_automatic_quota_monitoring_eligible()
+            && account.recovery.is_none();
+        let new_passive = event.success
+            && !ignore_account_observation
+            && event.quota_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot != &visible_state.0
+                    && snapshot.updated_at_ms.is_some()
+                    && snapshot.updated_at_ms >= visible_state.0.updated_at_ms
+                    && snapshot == &account.account.quota
+            });
+        let passive_observation = new_passive
+            .then(|| {
+                (!subscription_refresh_due(
+                    account.account.subscription.active_until_ms,
+                    account.account.subscription.updated_at_ms,
+                    observed_at_ms,
+                ))
+                .then(|| {
+                    passive_quota_age_ms(&account.account.quota, observed_at_ms)
+                        .zip(account.account.quota.updated_at_ms)
+                })
+                .flatten()
+            })
+            .flatten();
+        let verification_delay_ms = new_passive
+            .then(|| quota_verification_delay(account_id, &account.account.quota, observed_at_ms))
+            .flatten();
+        let visible_state_changed = visible_state
+            != (
+                account.account.quota.clone(),
+                account.account.auth_state,
+                account.account.health,
+                account.account.last_error_code.clone(),
+            );
+        let mut coordinator = wake.lock().map_err(|_| ())?;
+        let mut updated_coordinator = coordinator.clone();
+        let mut automations = store.automations().clone();
+        let natural_use = if event.is_natural_account_use() && !ignore_account_observation {
+            updated_coordinator.mark_natural_use_for_account(account_id, observed_at_ms)
+        } else {
+            0
+        };
+        automations.state = updated_coordinator.state().clone();
+        store
+            .persist_account_usage(account, &event.local_key_id, observed_at, automations)
+            .map_err(|_| ())?;
+        *coordinator = updated_coordinator;
+        let (_, fence) = store.account_refresh_scope(account_id).map_err(|_| ())?;
+        Ok((
+            natural_use,
+            Some(AccountRefreshHint {
+                identity: fence.identity(),
+                refresh_now,
+                passive_observation,
+                verification_delay_ms,
+                retry_delay_ms: (refresh_now && event.http_status == 429)
+                    .then_some(event.retry_at_ms)
+                    .flatten()
+                    .map(|at| at.saturating_sub(observed_at_ms))
+                    .filter(|delay| *delay > 0),
+            }),
+            visible_state_changed,
+        ))
+    })
+}

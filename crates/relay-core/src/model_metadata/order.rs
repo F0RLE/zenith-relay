@@ -6,8 +6,8 @@ use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::BTreeSet, sync::LazyLock};
 
-pub const MODEL_ORDER_JSON: &str = include_str!("../../../../catalog/model-order.json");
-const MODEL_ORDER_SCHEMA: &str = include_str!("../../../../catalog/model-order.schema.json");
+pub const MODEL_ORDER_JSON: &str = include_str!("../../catalog/model-order.json");
+const MODEL_ORDER_SCHEMA: &str = include_str!("../../catalog/model-order.schema.json");
 
 static POLICY: LazyLock<OrderPolicy> =
     LazyLock::new(|| OrderPolicy::parse().expect("the bundled model order catalog must be valid"));

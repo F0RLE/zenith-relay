@@ -27,7 +27,7 @@ rather than introducing a parallel invocation or diagnostics layer.
   mutations. Route destructive actions through their existing confirmation
   boundary, not a newly unrestricted generic command.
 
-Use [the affected checks](../../../CONTRIBUTING.md#verification) for changed
+Use [the affected checks](../../../docs/CONTRIBUTING.md#verification) for changed
 serialization, errors, or registration. Verify the real IPC or existing mock
 boundary in addition to internal calculations. Add regression coverage
 only where existing checks leave a meaningful gap.

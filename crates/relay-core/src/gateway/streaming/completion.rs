@@ -56,15 +56,16 @@ impl StreamCompletionSettlement {
                 .as_mut()
                 .and_then(|routing| routing.transport.as_mut())
             {
+                if let Some(socket) = &progress.socket {
+                    socket.observe(transport);
+                }
                 transport
                     .request_payload
                     .clone_from(&progress.request_payload);
             }
             discovery_headers.clone_from(&progress.headers);
             // Canonical client errors omit the original provider's retry fields.
-            hint.retry_after_ms = hint
-                .retry_after_ms
-                .max(progress.cooldown_hint.retry_after_ms);
+            hint.merge_retry_clocks(progress.cooldown_hint);
             hint.global |= progress.cooldown_hint.global;
             if let Some(details) = &progress.upstream_error {
                 event.upstream_error = Some(details.clone());
@@ -157,9 +158,9 @@ impl StreamCompletionSettlement {
                 &self.route,
                 now_ms(),
             );
-            self.runtime.bind_prompt_affinity(
+            self.runtime.bind_prompt_affinity_for_lease(
                 self.prompt_affinity.as_deref(),
-                &self.candidate_id,
+                &self.lease,
                 now_ms(),
             );
             if self.uses_response_affinity {

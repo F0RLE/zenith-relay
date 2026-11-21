@@ -239,8 +239,7 @@ impl Challenge {
         )
     }
 
-    /// Transport errors, refusals, tool calls and unfinished generations are
-    /// observations of availability, not evidence of lower reasoning quality.
+    /// Score reasoning quality on completed answers only.
     pub fn evaluate_response(&self, response: &Value) -> Observation {
         if response["status"] != "completed"
             || response.get("error").is_some_and(|error| !error.is_null())

@@ -1,0 +1,510 @@
+use super::super::{
+    credentials::{CredentialError, CredentialErrorCode, CredentialRefresh, CredentialStore},
+    oauth::{CodexOAuthClient, OAuthClientKind, siwc::PendingSiwcRefresh},
+};
+use super::{CredentialLocks, lock_refresh_failure};
+use crate::accounts::SecretBackend;
+use crate::accounts::{
+    TokenDispatchRevision, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
+    TokenRefreshFailureKind,
+};
+use crate::error_codes;
+use std::{future::Future, pin::Pin, sync::Arc};
+
+mod siwc;
+
+pub trait CodexRefreshClient: Send + Sync {
+    fn refresh_siwc<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        _registration: &'a super::super::oauth::siwc::SiwcRegistration,
+        _refresh_token: &'a str,
+        _now_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PendingSiwcRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(async {
+            Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "siwc_refresh_client_missing",
+            ))
+        })
+    }
+    fn verify_siwc_refresh<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        _pending: PendingSiwcRefresh,
+        _now_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(async {
+            Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "siwc_refresh_client_missing",
+            ))
+        })
+    }
+    fn refresh<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        provider_account_id: Option<&'a str>,
+        refresh_token: &'a str,
+        now_ms: u64,
+        kind: OAuthClientKind,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>;
+}
+
+impl CodexRefreshClient for CodexOAuthClient {
+    fn refresh_siwc<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        registration: &'a super::super::oauth::siwc::SiwcRegistration,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PendingSiwcRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(self.exchange_siwc_refresh(registration, refresh_token, now_ms))
+    }
+    fn verify_siwc_refresh<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        pending: PendingSiwcRefresh,
+        now_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let tokens = self.verify_pending_siwc_refresh(pending, now_ms).await?;
+            CredentialRefresh::from_oauth(tokens).map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_refresh_response",
+                )
+            })
+        })
+    }
+    fn refresh<'a>(
+        &'a self,
+        _local_account_id: &'a str,
+        _provider_account_id: Option<&'a str>,
+        refresh_token: &'a str,
+        now_ms: u64,
+        kind: OAuthClientKind,
+    ) -> Pin<Box<dyn Future<Output = Result<CredentialRefresh, TokenRefreshFailure>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let tokens = self
+                .for_kind(kind)
+                .exchange_refresh_token(refresh_token, now_ms)
+                .await?;
+            CredentialRefresh::from_oauth(tokens).map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_refresh_response",
+                )
+            })
+        })
+    }
+}
+
+pub struct StoredRefreshAdapter<B, C> {
+    credentials: CredentialStore<B>,
+    client: Arc<C>,
+    locks: Arc<dyn CredentialLocks>,
+    refresh_skew_ms: u64,
+}
+
+impl<B, C> StoredRefreshAdapter<B, C> {
+    pub fn new(
+        credentials: CredentialStore<B>,
+        client: Arc<C>,
+        locks: Arc<dyn CredentialLocks>,
+        refresh_skew_ms: u64,
+    ) -> Self {
+        Self {
+            credentials,
+            client,
+            locks,
+            refresh_skew_ms,
+        }
+    }
+}
+
+impl<B, C> StoredRefreshAdapter<B, C>
+where
+    B: SecretBackend + Send + Sync,
+    C: CodexRefreshClient,
+{
+    async fn refresh_inner(
+        &self,
+        local_account_id: &str,
+        now_ms: u64,
+        revision: Option<&TokenDispatchRevision>,
+    ) -> Result<TokenRefresh, TokenRefreshFailure> {
+        let _guard = self
+            .locks
+            .acquire(local_account_id)
+            .await
+            .map_err(lock_refresh_failure)?;
+        let superseded = || {
+            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "credential_superseded")
+        };
+        if revision.is_some_and(|revision| revision.guard().is_none()) {
+            return Err(superseded());
+        }
+        let mut stored_credentials = self.credentials.require(local_account_id).map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                error_codes::CREDENTIAL_LOAD_FAILED,
+            )
+        })?;
+        let pending_siwc = {
+            let _revision_guard = revision
+                .map(|revision| revision.guard().ok_or_else(superseded))
+                .transpose()?;
+            let pending = if stored_credentials.siwc_registration().is_some() {
+                self.credentials
+                    .pending_siwc_rotation(&stored_credentials)
+                    .map_err(|error| {
+                        rotation_refresh_failure(error, stored_credentials.oauth_client_kind())
+                    })?
+            } else {
+                None
+            };
+            if pending.is_none()
+                && let Some(recovered) = self
+                    .credentials
+                    .recover_token_rotation(&stored_credentials)
+                    .map_err(|error| {
+                        rotation_refresh_failure(error, stored_credentials.oauth_client_kind())
+                    })?
+            {
+                stored_credentials = recovered;
+            }
+            pending
+        };
+        super::super::credentials::require_plan_permission(&stored_credentials).map_err(|_| {
+            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "siwc_plan_use_disabled")
+        })?;
+        if pending_siwc.is_none()
+            && stored_credentials.is_access_usable(now_ms, self.refresh_skew_ms)
+        {
+            return stored_credentials.to_token_refresh().map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_stored_credential",
+                )
+            });
+        }
+        if pending_siwc.is_none()
+            && let Some(retry_at_ms) = stored_credentials
+                .siwc_registration()
+                .and_then(|registration| registration.earliest_refresh_at_ms)
+                .filter(|at| *at > now_ms)
+        {
+            let failure = TokenRefreshFailure::deferred("siwc_refresh_too_early", retry_at_ms);
+            self.locks.renewal_failed(local_account_id, &failure);
+            return Err(failure);
+        }
+        if stored_credentials.refresh_is_paused(now_ms) {
+            return Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "token_refresh_backoff",
+            ));
+        }
+        let refresh_token = stored_credentials.refresh_token().ok_or_else(|| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::ExpiredRefreshToken,
+                error_codes::REFRESH_TOKEN_MISSING,
+            )
+        })?;
+        let refresh_started = std::time::Instant::now();
+        // Refuse to send a rotating grant unless a durable barrier exists.
+        // If every post-response write fails, another process/restart must not
+        // unknowingly resend a grant whose successful rotation we observed.
+        if pending_siwc.is_none() {
+            let _revision_guard = revision
+                .map(|revision| revision.guard().ok_or_else(superseded))
+                .transpose()?;
+            self.credentials
+                .checkpoint_token_rotation(&stored_credentials, None)
+                .map_err(|_| {
+                    TokenRefreshFailure::new(
+                        TokenRefreshFailureKind::Transient,
+                        error_codes::CREDENTIAL_PERSIST_FAILED,
+                    )
+                })?;
+        }
+        let refresh_result = if stored_credentials.siwc_registration().is_some() {
+            self.receive_and_verify_siwc(&stored_credentials, pending_siwc, now_ms, revision)
+                .await
+        } else {
+            self.client
+                .refresh(
+                    local_account_id,
+                    stored_credentials.provider_account_id(),
+                    refresh_token,
+                    now_ms,
+                    stored_credentials.oauth_client_kind(),
+                )
+                .await
+        };
+        let current = match self.credentials.require(local_account_id) {
+            Ok(current) => current,
+            Err(error)
+                if refresh_result.is_ok()
+                    && error.code == CredentialErrorCode::SecretStoreUnavailable
+                    && stored_credentials.siwc_registration().is_none() =>
+            {
+                stored_credentials.clone()
+            }
+            Err(_) => {
+                return Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    error_codes::CREDENTIAL_LOAD_FAILED,
+                ));
+            }
+        };
+        let same_siwc_grant = current.matches_siwc_grant(&stored_credentials);
+        if !current.matches_snapshot(&stored_credentials) && !same_siwc_grant {
+            // A newer authorization wins even if the old grant failed. Never
+            // turn a concurrent login into a persisted reauthentication state.
+            if current.oauth_client_kind() == stored_credentials.oauth_client_kind()
+                && current.provider_account_id() == stored_credentials.provider_account_id()
+                && current.provider_user_id() == stored_credentials.provider_user_id()
+                && !current.is_agent_identity()
+                && current.is_access_usable(now_ms, self.refresh_skew_ms)
+            {
+                return current.to_token_refresh().map_err(|_| superseded());
+            }
+            return Err(superseded());
+        }
+        if revision.is_some_and(|revision| revision.guard().is_none()) {
+            return Err(superseded());
+        }
+        let refreshed = match refresh_result {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                if stored_credentials.siwc_registration().is_some() {
+                    self.locks.renewal_failed(local_account_id, &error);
+                }
+                if stored_credentials.siwc_registration().is_none() {
+                    let _revision_guard = revision
+                        .map(|revision| revision.guard().ok_or_else(superseded))
+                        .transpose()?;
+                    // Preserve native OAuth's existing failure/backoff policy;
+                    // this barrier protects known successful rotations.
+                    self.credentials
+                        .clear_token_rotation(local_account_id)
+                        .map_err(|_| {
+                            TokenRefreshFailure::new(
+                                TokenRefreshFailureKind::Transient,
+                                error_codes::CREDENTIAL_PERSIST_FAILED,
+                            )
+                        })?;
+                }
+                if matches!(
+                    error.kind,
+                    TokenRefreshFailureKind::Transient
+                        | TokenRefreshFailureKind::ReusedRefreshToken
+                ) {
+                    let _revision_guard = revision
+                        .map(|revision| revision.guard().ok_or_else(superseded))
+                        .transpose()?;
+                    let failed_at_ms = now_ms.saturating_add(
+                        refresh_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    );
+                    self.credentials
+                        .save(&current.with_refresh_failure(failed_at_ms))
+                        .map_err(|_| {
+                            TokenRefreshFailure::new(
+                                TokenRefreshFailureKind::Transient,
+                                error_codes::CREDENTIAL_PERSIST_FAILED,
+                            )
+                        })?;
+                }
+                return Err(error);
+            }
+        };
+        let stored_credentials = if same_siwc_grant {
+            current
+        } else {
+            stored_credentials
+        };
+        let updated = stored_credentials
+            .apply_refresh(refreshed, now_ms)
+            .map_err(|_| {
+                TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "invalid_refresh_response",
+                )
+            })?;
+        {
+            // The on-disk secret write is synchronous. Hold the slot read
+            // guard while saving so a removed/re-added slot cannot receive
+            // the old provider result, even if it uses the same account id.
+            let _revision_guard = revision
+                .map(|revision| revision.guard().ok_or_else(superseded))
+                .transpose()?;
+            let persisted = self
+                .credentials
+                .checkpoint_token_rotation(&stored_credentials, Some(&updated))
+                .and_then(|()| self.credentials.save(&updated))
+                .and_then(|()| self.credentials.clear_token_rotation(local_account_id));
+            if persisted.is_err() {
+                if updated.siwc_registration().is_some() {
+                    return Err(TokenRefreshFailure::new(
+                        TokenRefreshFailureKind::Transient,
+                        error_codes::CREDENTIAL_PERSIST_FAILED,
+                    ));
+                }
+                // Transfer the known successful result to TokenAuthority's
+                // existing pending-persistence owner. It retains this pair
+                // across failed writes and will not exchange the old grant again.
+                return updated.to_token_refresh().map_err(|_| {
+                    TokenRefreshFailure::new(
+                        TokenRefreshFailureKind::Transient,
+                        "invalid_stored_credential",
+                    )
+                });
+            }
+        }
+        super::super::credentials::require_plan_permission(&updated).map_err(|_| {
+            TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "siwc_plan_use_disabled")
+        })?;
+        updated.to_token_refresh().map_err(|_| {
+            TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "invalid_stored_credential",
+            )
+        })
+    }
+}
+
+fn rotation_refresh_failure(error: CredentialError, kind: OAuthClientKind) -> TokenRefreshFailure {
+    let siwc = kind == OAuthClientKind::Siwc;
+    let (kind, code) = match error.code {
+        CredentialErrorCode::RotationOutcomeUnknown => (
+            if siwc {
+                TokenRefreshFailureKind::RotationOutcomeUnknown
+            } else {
+                TokenRefreshFailureKind::RotationRecoveryRequired
+            },
+            if siwc {
+                "siwc_rotation_outcome_unknown"
+            } else {
+                "token_rotation_outcome_unknown"
+            },
+        ),
+        CredentialErrorCode::RotationCheckpointInvalid => (
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            if siwc {
+                "siwc_rotation_checkpoint_invalid"
+            } else {
+                "token_rotation_checkpoint_invalid"
+            },
+        ),
+        _ => (
+            TokenRefreshFailureKind::Transient,
+            if siwc {
+                "siwc_rotation_store_unavailable"
+            } else {
+                "token_rotation_store_unavailable"
+            },
+        ),
+    };
+    TokenRefreshFailure::new(kind, code).with_stage(crate::accounts::TokenRefreshStage::Recovery)
+}
+
+fn siwc_refresh_definitely_rejected(code: &str) -> bool {
+    matches!(
+        code,
+        "siwc_refresh_too_early"
+            | "invalid_grant"
+            | "invalid_refresh_token"
+            | "token_expired"
+            | "refresh_token_expired"
+            | "refresh_token_invalidated"
+            | "refresh_token_reused"
+            | "invalid_client"
+            | "invalid_request"
+            | "invalid_scope"
+            | "unsupported_grant_type"
+            | "access_denied"
+    )
+}
+
+#[test]
+fn siwc_uncertain_rotation_reply_must_keep_the_recovery_checkpoint() {
+    for code in [
+        "transport",
+        "invalid_siwc_refresh_response",
+        "token_refresh_failed",
+        "server_error",
+        "temporarily_unavailable",
+    ] {
+        assert!(!siwc_refresh_definitely_rejected(code));
+    }
+    for code in [
+        "siwc_refresh_too_early",
+        "invalid_grant",
+        "refresh_token_reused",
+        "invalid_client",
+    ] {
+        assert!(siwc_refresh_definitely_rejected(code));
+    }
+}
+
+#[test]
+fn siwc_rotation_recovery_errors_keep_storage_outages_retryable() {
+    for (code, kind, expected) in [
+        (
+            CredentialErrorCode::SecretStoreUnavailable,
+            TokenRefreshFailureKind::Transient,
+            "siwc_rotation_store_unavailable",
+        ),
+        (
+            CredentialErrorCode::RotationOutcomeUnknown,
+            TokenRefreshFailureKind::RotationOutcomeUnknown,
+            "siwc_rotation_outcome_unknown",
+        ),
+        (
+            CredentialErrorCode::RotationCheckpointInvalid,
+            TokenRefreshFailureKind::RotationRecoveryRequired,
+            "siwc_rotation_checkpoint_invalid",
+        ),
+    ] {
+        let error = rotation_refresh_failure(
+            CredentialError {
+                code,
+                message: "private diagnostic must not escape".into(),
+            },
+            OAuthClientKind::Siwc,
+        );
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.code, expected);
+    }
+}
+
+impl<B, C> TokenRefreshAdapter for StoredRefreshAdapter<B, C>
+where
+    B: SecretBackend + Send + Sync,
+    C: CodexRefreshClient,
+{
+    fn refresh<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        _stale_refresh_token: &'a str,
+        now_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<TokenRefresh, TokenRefreshFailure>> + Send + 'a>> {
+        Box::pin(self.refresh_inner(local_account_id, now_ms, None))
+    }
+
+    fn refresh_fenced<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        _stale_refresh_token: &'a str,
+        now_ms: u64,
+        revision: &'a TokenDispatchRevision,
+    ) -> Pin<Box<dyn Future<Output = Result<TokenRefresh, TokenRefreshFailure>> + Send + 'a>> {
+        Box::pin(self.refresh_inner(local_account_id, now_ms, Some(revision)))
+    }
+}

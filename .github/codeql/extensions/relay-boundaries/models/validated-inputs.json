@@ -1,0 +1,11 @@
+{
+  "extensions": [{
+    "addsTo": { "pack": "codeql/rust-all", "extensible": "barrierModel" },
+    "data": [
+      ["zenith_relay_core::runtime::support::normalized_responses_url", "ReturnValue", "request-url", "manual"],
+      ["zenith_relay_core::runtime::support::normalized_responses_url", "ReturnValue.Field[core::result::Result::Ok(0)]", "request-url", "manual"],
+      ["zenith-relay::local_pool::accounts::proxy::diagnose::diagnostic_root", "ReturnValue", "path-injection", "manual"],
+      ["zenith-relay::local_pool::accounts::proxy::diagnose::diagnostic_root", "ReturnValue.Field[core::result::Result::Ok(0)].Field[core::option::Option::Some(0)]", "path-injection", "manual"]
+    ]
+  }]
+}

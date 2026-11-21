@@ -109,6 +109,17 @@ async fn bps_cache_context_observes_actual_tool_history_without_changing_request
             for (turn, event) in recorded.iter().enumerate() {
                 assert!(event.success);
                 assert_eq!(event.cached_input_tokens, Some(10_000));
+                if debug {
+                    let transport = event.routing.as_ref().unwrap().transport.as_ref().unwrap();
+                    let payload = transport.request_payload.as_ref().unwrap();
+                    let authorization = payload.authorization_ms.unwrap();
+                    let preparation = payload.http_dispatch_preparation_ms.unwrap();
+                    let send = payload.http_send_to_headers_ms.unwrap();
+                    assert!(
+                        authorization + preparation + send
+                            <= transport.response_headers_ms.unwrap()
+                    );
+                }
                 let context = event.routing.as_ref().unwrap().cache_context.as_ref();
                 assert_eq!(context.is_some(), debug);
                 if let Some(context) = context {
@@ -121,6 +132,15 @@ async fn bps_cache_context_observes_actual_tool_history_without_changing_request
                         }
                     );
                     assert!(context.provider.is_none());
+                    assert_eq!(
+                        context
+                            .relay_history
+                            .leading_context_alignment
+                            .as_ref()
+                            .unwrap()
+                            .skipped_upstream_relay_items,
+                        Some(1)
+                    );
                     if turn > 0 {
                         assert_eq!(context.candidate_changed, Some(false));
                         assert!(context.previous_completed_age_ms.is_some());

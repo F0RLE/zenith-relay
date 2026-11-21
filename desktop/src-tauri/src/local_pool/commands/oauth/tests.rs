@@ -1,0 +1,874 @@
+use crate::local_pool::{
+    accounts::{
+        NativeSecretBackend,
+        credentials::{
+            CredentialStore, StoredCodexCredentials, credential_local_error as credential_error,
+        },
+        oauth::CodexOAuthClient,
+        oauth_flow::{OAuthFlowStart, OAuthFlowStatus},
+        records::{self, new_account_record},
+    },
+    error::ErrorCode,
+    models::LocalAccountRecord,
+};
+
+use std::collections::BTreeSet;
+
+mod siwc_models;
+
+#[test]
+fn sign_in_presentation_accepts_the_renderer_contract() {
+    use super::SignInPresentationRequest;
+    use serde_json::{from_value, json};
+
+    let request =
+        from_value::<SignInPresentationRequest>(json!({ "embedded": true, "openWindow": false }))
+            .unwrap();
+    assert!(request.embedded);
+    assert!(!request.open_window);
+    assert!(!request.should_open_page(false));
+    assert!(request.should_open_page(true));
+    assert_eq!(
+        super::window::Presentation::requested(request.embedded).is_embedded(),
+        cfg!(windows)
+    );
+    let request =
+        from_value::<SignInPresentationRequest>(json!({ "embedded": true, "openWindow": true }))
+            .unwrap();
+    assert!(request.should_open_page(false));
+}
+
+#[test]
+fn prepared_sign_in_reports_a_closed_page_without_changing_flow_status() {
+    use super::{OAuthStartResponse, SignInPageState};
+    use crate::local_pool::accounts::oauth::OAuthClientKind;
+
+    let response = OAuthStartResponse {
+        flow: OAuthFlowStart {
+            login_id: "synthetic-login".into(),
+            authorization_url: "https://auth.example.test/authorize".into(),
+            redirect_uri: "http://localhost:1455/auth/callback".into(),
+            expires_at_ms: 60_000,
+            status: OAuthFlowStatus::Pending,
+            client_kind: OAuthClientKind::Codex,
+            target_account_id: None,
+            notes_account_id: None,
+            automatic_login: None,
+        },
+        embedded: true,
+        page_state: SignInPageState::Closed,
+    };
+    let value = serde_json::to_value(response).unwrap();
+    assert_eq!(value["embedded"], true);
+    assert_eq!(value["pageState"], "closed");
+    assert_eq!(value["loginId"], "synthetic-login");
+    assert_eq!(value["status"], "pending");
+}
+
+#[test]
+fn automatic_login_request_preserves_legacy_bool_and_rejects_extra_route_fields() {
+    use super::AutomaticLoginRequest;
+    use serde_json::{from_value, json};
+    assert!(matches!(
+        from_value::<AutomaticLoginRequest>(json!(true)).unwrap(),
+        AutomaticLoginRequest::Enabled(true)
+    ));
+    assert!(matches!(
+        from_value::<AutomaticLoginRequest>(json!(false)).unwrap(),
+        AutomaticLoginRequest::Enabled(false)
+    ));
+    let route = from_value::<AutomaticLoginRequest>(json!({"notesAccountId":"source"})).unwrap();
+    assert!(
+        matches!(route, AutomaticLoginRequest::Route { notes_account_id } if notes_account_id == "source")
+    );
+    for invalid in [
+        json!({}),
+        json!({"notesAccountId":true}),
+        json!({"notesAccountId":"source","accountId":"target"}),
+    ] {
+        assert!(from_value::<AutomaticLoginRequest>(invalid).is_err());
+    }
+}
+
+#[test]
+fn all_three_login_clients_can_start_without_converting_the_selected_kind() {
+    use crate::local_pool::accounts::oauth::OAuthClientKind;
+    for kind in [
+        OAuthClientKind::Codex,
+        OAuthClientKind::Siwc,
+        OAuthClientKind::ExcelBps,
+    ] {
+        assert_eq!(super::oauth_client_kind(None, Some(kind)).unwrap(), kind);
+    }
+    assert_eq!(
+        super::oauth_client_kind(None, None).unwrap(),
+        OAuthClientKind::Codex
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn route_automatic_login_without_saved_password_falls_back_to_manual() {
+    use super::window::automatic_login::LoginNotes;
+    use crate::local_pool::{accounts::oauth::OAuthClientKind, state::DesktopState};
+
+    let root = crate::files::test_temp_root("route-login");
+    let state = DesktopState::open(root.clone()).unwrap();
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let credentials = StoredCodexCredentials::new(
+        &account_id,
+        "synthetic-access".into(),
+        Some("synthetic-refresh".into()),
+        None,
+        Some(60_000),
+        1,
+        1,
+        Some("synthetic@example.test".into()),
+        Some("synthetic-workspace".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    credential_store.save(&credentials).unwrap();
+    let record =
+        new_account_record(&credentials, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+    state.store().unwrap().upsert_account(record).unwrap();
+
+    let route_results = [OAuthClientKind::Codex, OAuthClientKind::ExcelBps]
+        .map(|kind| LoginNotes::load(Some(&account_id), kind, &state, true));
+    let reauthentication =
+        LoginNotes::load(Some(&account_id), OAuthClientKind::ExcelBps, &state, false);
+
+    credential_store.delete(&account_id).unwrap();
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+    for result in route_results {
+        assert!(result.unwrap().is_none());
+    }
+    assert!(reauthentication.is_err());
+}
+
+use url::Url;
+use uuid::Uuid;
+
+use zenith_relay_core::{
+    accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
+    providers::chatgpt::{AgentIdentityCredential, ModelDiscoveryFailure, OAuthClientKind},
+};
+
+use super::account::{
+    apply_initial_model_issue, find_existing_account, initial_model_issue,
+    preserve_existing_settings,
+};
+use super::checkpoint::{
+    COMPLETION_CHECKPOINT_VERSION, OAuthCompletionCheckpoint, decode_completion_checkpoint,
+    encode_completion_checkpoint,
+};
+use super::completion::{
+    completion_rollback_owns_state, next_completion_generation,
+    restore_attempted_completion_credentials_if_current,
+};
+use super::flow::validated_authorization_url;
+
+use zenith_relay_core::providers::chatgpt::ModelDiscoveryFailureCode;
+
+#[tokio::test]
+async fn targeted_completion_keeps_account_proxy_and_direct_overrides() {
+    use crate::local_pool::accounts::import_session::SecretBackend;
+    use crate::local_pool::accounts::proxy::COMMON_PROXY_SECRET_REF;
+    use crate::local_pool::state::DesktopState;
+
+    for (proxy_url, bypass_common) in [
+        (Some("http://127.0.0.1:9".to_string()), false),
+        (None, true),
+    ] {
+        let root = crate::files::test_temp_root("oauth-proxy");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let mut settings = state.store().unwrap().gateway().clone();
+        settings.common_proxy_configured = true;
+        settings.account_proxy_required = false;
+        state.store().unwrap().replace_gateway(settings).unwrap();
+        let account_id = format!("account_{}", Uuid::new_v4().simple());
+        let credentials = StoredCodexCredentials::new(
+            &account_id,
+            "synthetic-access".into(),
+            Some("synthetic-refresh".into()),
+            Some("synthetic-id-token".into()),
+            Some(60_000),
+            1,
+            1,
+            Some("synthetic@example.test".into()),
+            Some("synthetic-workspace".into()),
+            None,
+            None,
+            Some("plus".into()),
+            false,
+        )
+        .unwrap()
+        .with_proxy_route(proxy_url, bypass_common)
+        .unwrap();
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        credential_store.save(&credentials).unwrap();
+        let record =
+            new_account_record(&credentials, AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+        state.store().unwrap().upsert_account(record).unwrap();
+        let flow = state.oauth_flow();
+        let start = flow
+            .start_for_account(&CodexOAuthClient::new().unwrap(), Some(&account_id), None)
+            .await
+            .unwrap();
+        let previous_common = NativeSecretBackend.load(COMMON_PROXY_SECRET_REF).unwrap();
+        NativeSecretBackend
+            .save(COMMON_PROXY_SECRET_REF, "synthetic-invalid-common-proxy")
+            .unwrap();
+        let result = super::complete_oauth(&start.login_id, &state).await;
+        match previous_common {
+            Some(previous) => NativeSecretBackend
+                .save(COMMON_PROXY_SECRET_REF, &previous)
+                .unwrap(),
+            None => NativeSecretBackend.delete(COMMON_PROXY_SECRET_REF).unwrap(),
+        }
+        flow.cancel(&start.login_id).await.unwrap();
+        credential_store.delete(&account_id).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        let error = result.expect_err("a callback is still required");
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert_eq!(error.message, "OAuth callback has not been received");
+    }
+}
+
+// Synthetic PKCS#8 bytes used only to exercise Agent Identity formatting.
+// This is not a credential and is never registered with a provider.
+const TEST_ED25519_PKCS8_FIXTURE: &str =
+    "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+
+#[test]
+fn authorization_url_validation_allows_generated_url_only() {
+    let oauth = CodexOAuthClient::new()
+        .unwrap()
+        .begin(1455, 10_000)
+        .unwrap();
+    let valid = OAuthFlowStart {
+        login_id: Uuid::new_v4().hyphenated().to_string(),
+        authorization_url: oauth.authorization_url().to_string(),
+        redirect_uri: oauth.pending().redirect_uri().to_string(),
+        expires_at_ms: oauth.pending().expires_at_ms(),
+        status: OAuthFlowStatus::Pending,
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
+        target_account_id: None,
+        notes_account_id: None,
+        automatic_login: None,
+    };
+    assert!(validated_authorization_url(&valid).is_ok());
+
+    let mut wrong_host = valid.clone();
+    wrong_host.authorization_url = wrong_host
+        .authorization_url
+        .replace("auth.openai.com", "attacker.invalid");
+    assert!(validated_authorization_url(&wrong_host).is_err());
+
+    let mut sensitive = valid.clone();
+    let mut url = Url::parse(&sensitive.authorization_url).unwrap();
+    url.query_pairs_mut().append_pair("access_token", "secret");
+    sensitive.authorization_url = url.to_string();
+    let error = validated_authorization_url(&sensitive).unwrap_err();
+    assert!(!format!("{error:?} {error}").contains("secret"));
+
+    let mut override_request = valid.clone();
+    let mut url = Url::parse(&override_request.authorization_url).unwrap();
+    url.query_pairs_mut()
+        .append_pair("request_uri", "https://attacker.invalid/request");
+    override_request.authorization_url = url.to_string();
+    assert!(validated_authorization_url(&override_request).is_err());
+
+    let mut duplicate_redirect = valid.clone();
+    let mut url = Url::parse(&duplicate_redirect.authorization_url).unwrap();
+    url.query_pairs_mut()
+        .append_pair("redirect_uri", &duplicate_redirect.redirect_uri);
+    duplicate_redirect.authorization_url = url.to_string();
+    assert!(validated_authorization_url(&duplicate_redirect).is_err());
+
+    let mut wrong_redirect = valid;
+    wrong_redirect.redirect_uri = "http://localhost:9999/auth/callback".into();
+    assert!(validated_authorization_url(&wrong_redirect).is_err());
+}
+
+#[test]
+fn exchanged_token_checkpoint_is_recoverable_and_fully_redacted() {
+    let login_id = Uuid::new_v4().hyphenated().to_string();
+    let checkpoint = OAuthCompletionCheckpoint {
+        siwc: None,
+        version: COMPLETION_CHECKPOINT_VERSION,
+        login_id: login_id.clone(),
+        client_kind: crate::local_pool::accounts::oauth::OAuthClientKind::Codex,
+        access_token: "checkpoint-access-secret".into(),
+        refresh_token: Some("checkpoint-refresh-secret".into()),
+        id_token: Some("checkpoint-id-secret".into()),
+        expires_at_ms: Some(60_000),
+        issued_at_ms: 1,
+        email: Some("private@example.test".into()),
+        provider_account_id: "provider-private-id".into(),
+        provider_user_id: Some("provider-user-private-id".into()),
+        plan_type: Some("plus".into()),
+        subscription_active_until_ms: Some(1_788_998_400_000),
+        account_is_fedramp: false,
+    };
+    let encoded = encode_completion_checkpoint(&checkpoint).unwrap();
+    let recovered = decode_completion_checkpoint(&encoded, &login_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.access_token, "checkpoint-access-secret");
+    assert!(
+        decode_completion_checkpoint(
+            "http://localhost:1455/auth/callback?code=callback-secret",
+            &login_id
+        )
+        .unwrap()
+        .is_none()
+    );
+    let rendered = format!("{recovered:?}");
+    for secret in [
+        "checkpoint-access-secret",
+        "checkpoint-refresh-secret",
+        "checkpoint-id-secret",
+        "private@example.test",
+        "provider-private-id",
+        "provider-user-private-id",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
+#[test]
+fn failed_initial_probe_keeps_account_with_typed_error() {
+    let mut record = account("account_saved", "provider-account", "refresh-token");
+    record.models.clear();
+    apply_initial_model_issue(
+        &mut record,
+        initial_model_issue(&ModelDiscoveryFailure {
+            code: ModelDiscoveryFailureCode::Unauthorized,
+            retryable: false,
+            retry_after_ms: None,
+            http_status: Some(401),
+        }),
+    );
+
+    assert_eq!(record.account.id, "account_saved");
+    assert!(record.models.is_empty());
+    assert_eq!(record.account.auth_state, AccountAuthState::Error);
+    assert_eq!(record.account.health, AccountHealthState::Unhealthy);
+    assert_eq!(
+        record.account.last_error_code.as_deref(),
+        Some("models_unauthorized")
+    );
+}
+
+#[test]
+fn initial_model_catalog_forbidden_degrades_without_blocking_or_inventing_models() {
+    for cached in [false, true] {
+        let mut record = account(
+            "account_forbidden",
+            "synthetic-account",
+            "synthetic-refresh",
+        );
+        record.account.auth_state = AccountAuthState::Active;
+        record.account.health = AccountHealthState::Healthy;
+        record.account.last_error_code = None;
+        if !cached {
+            record.models.clear();
+        }
+        let previous_models = record.models.clone();
+        let previous_discovered = record.discovered_models.clone();
+        let previous_membership = record.account.in_pool;
+        apply_initial_model_issue(
+            &mut record,
+            initial_model_issue(&ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Forbidden,
+                retryable: false,
+                retry_after_ms: None,
+                http_status: Some(403),
+            }),
+        );
+
+        assert_eq!(record.account.auth_state, AccountAuthState::Active);
+        assert_eq!(record.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            record.account.last_error_code.as_deref(),
+            Some("models_forbidden")
+        );
+        assert_eq!(record.models, previous_models);
+        assert_eq!(record.discovered_models, previous_discovered);
+        assert_eq!(record.account.in_pool, previous_membership);
+
+        let state = &mut record.account;
+        assert!(zenith_relay_core::accounts::accept_discovered_models(
+            &mut record.models,
+            &mut record.discovered_models,
+            &mut state.auth_state,
+            &mut state.health,
+            &mut state.last_error_code,
+            vec!["synthetic-recovered-model".into()],
+        ));
+        assert_eq!(state.auth_state, AccountAuthState::Active);
+        assert_eq!(state.health, AccountHealthState::Healthy);
+        assert!(state.last_error_code.is_none());
+        assert_eq!(
+            record.discovered_models,
+            Some(vec!["synthetic-recovered-model".into()])
+        );
+    }
+}
+
+#[test]
+fn initial_model_issue_preserves_independent_account_failures() {
+    use zenith_relay_core::accounts::ReauthReason;
+
+    for (auth, health, code) in [
+        (
+            AccountAuthState::Active,
+            AccountHealthState::Blocked,
+            "upstream_account_disabled",
+        ),
+        (
+            AccountAuthState::Error,
+            AccountHealthState::Unhealthy,
+            "quota_unauthorized",
+        ),
+        (
+            AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+            AccountHealthState::Unhealthy,
+            "invalid_grant",
+        ),
+        (
+            AccountAuthState::Active,
+            AccountHealthState::Degraded,
+            "checkpoint",
+        ),
+    ] {
+        for (failure, retryable) in [
+            (ModelDiscoveryFailureCode::Forbidden, false),
+            (ModelDiscoveryFailureCode::Unauthorized, false),
+            (ModelDiscoveryFailureCode::Transport, true),
+        ] {
+            let mut record = account(
+                "account_independent",
+                "synthetic-account",
+                "synthetic-refresh",
+            );
+            record.account.auth_state = auth;
+            record.account.health = health;
+            record.account.last_error_code = Some(code.into());
+            apply_initial_model_issue(
+                &mut record,
+                initial_model_issue(&ModelDiscoveryFailure {
+                    code: failure,
+                    retryable,
+                    retry_after_ms: None,
+                    http_status: None,
+                }),
+            );
+            assert_eq!(record.account.auth_state, auth, "{code}: {failure:?}");
+            assert_eq!(record.account.health, health, "{code}: {failure:?}");
+            assert_eq!(record.account.last_error_code.as_deref(), Some(code));
+        }
+    }
+}
+
+#[test]
+fn initial_model_probe_uses_the_registered_agent_identity() {
+    let oauth = StoredCodexCredentials::new(
+        "account_models",
+        "oauth-access-secret".into(),
+        Some("oauth-refresh-secret".into()),
+        None,
+        Some(1_785_000_060_000),
+        1_785_000_000_000,
+        1,
+        None,
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("business".into()),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        oauth
+            .authorization(1_785_000_000_000)
+            .map_err(credential_error)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer oauth-access-secret"
+    );
+
+    let registered = oauth.with_agent_identity(
+        AgentIdentityCredential::new(
+            TEST_ED25519_PKCS8_FIXTURE.into(),
+            "runtime-models".into(),
+            "task-models".into(),
+        )
+        .unwrap(),
+    );
+    let authorization = registered.authorization(1_785_000_000_000).unwrap();
+    assert!(
+        authorization
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion ")
+    );
+    assert_ne!(
+        authorization.to_str().unwrap(),
+        "Bearer oauth-access-secret"
+    );
+}
+
+#[test]
+fn duplicate_identity_preserves_local_id_and_user_settings() {
+    let mut current = account("account_existing", "provider-account", "old-refresh");
+    current.account.label = "My Codex".into();
+    current.account.tags = BTreeSet::from(["work".into()]);
+    current.account.enabled = false;
+    current.account.in_pool = true;
+    current.image_pool_enabled = true;
+    current.account.draining = true;
+    current.account.created_at_ms = 7;
+    current.account.last_used_at_ms = Some(8);
+    current.allowed_models = vec!["allowed".into()];
+    current.excluded_models = vec!["excluded".into()];
+    current.priority = -10;
+    current.weight = 4;
+    current.purchase_cost_micro_usd = Some(42_000_000);
+    current.cooldowns.insert("gpt-test".into(), 900);
+    current.consecutive_failures = 3;
+
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let identity_hash =
+        records::identity_hash("provider-account", None, Some("private@example.test"));
+    let existing =
+        find_existing_account(std::slice::from_ref(&current), &credentials, &identity_hash)
+            .unwrap()
+            .unwrap();
+    let mut updated_account = account("account_existing", "provider-account", "new-refresh");
+    updated_account.models = vec!["new-model".into()];
+    preserve_existing_settings(&mut updated_account, existing, OAuthClientKind::Codex);
+
+    assert_eq!(updated_account.account.id, "account_existing");
+    assert_eq!(updated_account.account.label, "My Codex");
+    assert_eq!(
+        updated_account.account.identity.identity_hash,
+        current.account.identity.identity_hash
+    );
+    assert_ne!(
+        updated_account.account.identity.stable_index,
+        current.account.identity.stable_index
+    );
+    assert_eq!(updated_account.account.tags, current.account.tags);
+    assert!(!updated_account.account.enabled);
+    assert!(updated_account.account.in_pool);
+    assert!(updated_account.image_pool_enabled);
+    assert!(updated_account.account.draining);
+    assert_eq!(updated_account.account.created_at_ms, 7);
+    assert_eq!(updated_account.account.last_used_at_ms, Some(8));
+    assert_eq!(updated_account.allowed_models, vec!["allowed"]);
+    assert_eq!(updated_account.excluded_models, vec!["excluded"]);
+    assert_eq!(updated_account.priority, -10);
+    assert_eq!(updated_account.weight, 4);
+    assert_eq!(updated_account.purchase_cost_micro_usd, Some(42_000_000));
+    assert!(updated_account.cooldowns.is_empty());
+    assert_eq!(updated_account.consecutive_failures, 0);
+    assert_eq!(updated_account.models, vec!["gpt-test"]);
+    assert_eq!(
+        updated_account.discovered_models,
+        Some(vec!["new-model".into()])
+    );
+    assert_eq!(updated_account.effective_models(), ["new-model"]);
+}
+
+#[test]
+fn duplicate_identity_keeps_models_when_the_new_snapshot_is_empty() {
+    let current = account("account_empty_models", "provider-account", "old-refresh");
+    let mut updated_account = account("account_empty_models", "provider-account", "new-refresh");
+    updated_account.models.clear();
+    updated_account.discovered_models = Some(Vec::new());
+
+    preserve_existing_settings(&mut updated_account, &current, OAuthClientKind::Codex);
+
+    assert_eq!(updated_account.models, current.models);
+    assert!(updated_account.discovered_models.is_none());
+    assert_eq!(updated_account.effective_models(), ["gpt-test"]);
+}
+
+#[test]
+fn reauthentication_settings_merge_preserves_the_new_quota_observation() {
+    let mut current = account("account_quota", "provider-account", "old-refresh");
+    current.account.quota.reset_credits_available = Some(0);
+    current.account.quota.updated_at_ms = Some(1_000);
+    let mut updated = account("account_quota", "provider-account", "new-refresh");
+    updated.account.quota.reset_credits_available = Some(2);
+    updated.account.quota.updated_at_ms = Some(2_000);
+    let fresh_quota = updated.account.quota.clone();
+
+    preserve_existing_settings(&mut updated, &current, OAuthClientKind::Codex);
+
+    assert_eq!(updated.account.quota, fresh_quota);
+    assert_ne!(updated.account.quota, current.account.quota);
+    current.account.quota.updated_at_ms = Some(3_000);
+    preserve_existing_settings(&mut updated, &current, OAuthClientKind::Codex);
+    assert_eq!(updated.account.quota, current.account.quota);
+}
+
+#[test]
+fn reauth_does_not_restore_an_expired_subscription_date_without_new_metadata() {
+    let mut current = account("account_expired", "provider-account", "old-refresh");
+    current.account.subscription = zenith_relay_core::quota::Subscription::normalize(
+        zenith_relay_core::quota::SubscriptionInput {
+            plan_type: Some("plus".into()),
+            active_until_ms: Some(1_000),
+            forbidden: false,
+            observed_at_ms: 2_000,
+        },
+    );
+    let mut updated_account = account("account_expired", "provider-account", "new-refresh");
+    preserve_existing_settings(&mut updated_account, &current, OAuthClientKind::Codex);
+
+    assert_eq!(updated_account.account.subscription.active_until_ms, None);
+    assert_eq!(
+        updated_account.account.subscription.status,
+        zenith_relay_core::quota::SubscriptionStatus::Active
+    );
+}
+
+#[test]
+fn duplicate_identity_conflict_is_redacted() {
+    let provider_account_id = "provider-private-id";
+    let accounts = vec![
+        account("account_one", provider_account_id, "refresh-one"),
+        account("account_two", provider_account_id, "refresh-two"),
+    ];
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let identity_hash =
+        records::identity_hash(provider_account_id, None, Some("private@example.test"));
+    let error = find_existing_account(&accounts, &credentials, &identity_hash).unwrap_err();
+    assert!(matches!(error.code, ErrorCode::RecoveryRequired));
+    assert!(!format!("{error:?} {error}").contains(provider_account_id));
+}
+
+#[test]
+fn oauth_commit_uses_the_freshest_durable_token_generation() {
+    let mut account = account("account_commit", "provider-account", "old-refresh");
+    account.account.token_generation = 7;
+    let credentials = StoredCodexCredentials::new(
+        "account_commit",
+        "newer-access-secret".into(),
+        Some("newer-refresh-secret".into()),
+        Some("newer-id-secret".into()),
+        Some(80_000),
+        80,
+        9,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        next_completion_generation(Some(&account), Some(&credentials)),
+        10
+    );
+}
+
+#[test]
+fn stale_oauth_rollback_never_claims_a_newer_account_snapshot() {
+    let attempted = StoredCodexCredentials::new(
+        "account_rollback",
+        "attempted-access-secret".into(),
+        Some("attempted-refresh-secret".into()),
+        Some("attempted-id-secret".into()),
+        Some(20_000),
+        20,
+        2,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let newer = StoredCodexCredentials::new(
+        "account_rollback",
+        "newer-access-secret".into(),
+        Some("newer-refresh-secret".into()),
+        Some("newer-id-secret".into()),
+        Some(30_000),
+        30,
+        3,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let attempted_record = new_account_record(
+        &attempted,
+        AccountAuthMode::OAuth,
+        vec!["gpt-test".into()],
+        0,
+        20,
+    )
+    .unwrap();
+    let newer_record = new_account_record(
+        &newer,
+        AccountAuthMode::OAuth,
+        vec!["gpt-test".into()],
+        0,
+        30,
+    )
+    .unwrap();
+
+    assert!(!completion_rollback_owns_state(
+        Some(&newer),
+        &attempted,
+        newer_record.matches_rollback_snapshot(&attempted_record),
+        false,
+    ));
+}
+
+#[test]
+fn completion_ownership_allows_a_watchdog_observation_but_not_token_change() {
+    let attempted = account("account_observation", "provider-account", "refresh-token");
+    let mut observed = attempted.clone();
+    observed.client_auth_status = Some("login_required".into());
+    observed.last_client_login_redirect_at_ms = Some(99);
+    assert!(observed.matches_rollback_snapshot(&attempted));
+
+    observed.account.token_generation = attempted.account.token_generation.saturating_add(1);
+    assert!(!observed.matches_rollback_snapshot(&attempted));
+}
+
+#[test]
+fn completion_credential_compensation_never_overwrites_a_newer_snapshot() {
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let account_id = format!("account_{}", Uuid::new_v4().simple());
+    let previous = StoredCodexCredentials::new(
+        &account_id,
+        "previous-access-secret".into(),
+        Some("previous-refresh-secret".into()),
+        Some("previous-id-secret".into()),
+        Some(10_000),
+        10,
+        1,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let attempted = StoredCodexCredentials::new(
+        &account_id,
+        "attempted-access-secret".into(),
+        Some("attempted-refresh-secret".into()),
+        Some("attempted-id-secret".into()),
+        Some(20_000),
+        20,
+        2,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    let newer = StoredCodexCredentials::new(
+        &account_id,
+        "newer-access-secret".into(),
+        Some("newer-refresh-secret".into()),
+        Some("newer-id-secret".into()),
+        Some(30_000),
+        30,
+        3,
+        Some("private@example.test".into()),
+        Some("provider-account".into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+
+    credential_store.save(&previous).unwrap();
+    assert!(
+        restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
+        .unwrap()
+    );
+    assert!(
+        credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&attempted)
+    );
+
+    credential_store.save(&newer).unwrap();
+    assert!(
+        !restore_attempted_completion_credentials_if_current(
+            &credential_store,
+            &account_id,
+            Some(&previous),
+            &attempted,
+        )
+        .unwrap()
+    );
+    assert!(
+        credential_store
+            .require(&account_id)
+            .unwrap()
+            .matches_snapshot(&newer)
+    );
+
+    credential_store.delete(&account_id).unwrap();
+}
+
+fn account(id: &str, provider_account_id: &str, refresh_token: &str) -> LocalAccountRecord {
+    let credentials = StoredCodexCredentials::new(
+        id,
+        "access-secret".into(),
+        Some(refresh_token.into()),
+        Some("id-secret".into()),
+        Some(60_000),
+        1,
+        1,
+        Some("private@example.test".into()),
+        Some(provider_account_id.into()),
+        None,
+        None,
+        Some("plus".into()),
+        false,
+    )
+    .unwrap();
+    new_account_record(
+        &credentials,
+        AccountAuthMode::OAuth,
+        vec!["gpt-test".into()],
+        0,
+        1,
+    )
+    .unwrap()
+}

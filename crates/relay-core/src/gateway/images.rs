@@ -9,6 +9,8 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 mod account;
+mod basis_points;
+mod diagnostics;
 mod execute;
 mod multipart;
 mod native;
@@ -18,7 +20,7 @@ mod tests;
 
 const IMAGE_PROTOCOLS: &[WireApi] = &[WireApi::Responses, WireApi::ChatCompletions];
 // Bounds apply to decoded bodies, not a potentially compressed Content-Length.
-const MAX_IMAGE_BODY_BYTES: usize = 128 * 1024 * 1024;
+use crate::protocol::images::MAX_IMAGE_BODY_BYTES;
 const MAX_IMAGE_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -70,6 +72,7 @@ async fn execute(
     request: Request<Body>,
     endpoint: ImageEndpoint,
 ) -> Response<Body> {
+    let started = tokio::time::Instant::now();
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
     if !valid_local_host(&headers) {
@@ -81,9 +84,14 @@ async fn execute(
     if !runtime.allows_client_wire_api(&key, ClientWireApi::ChatCompletions) {
         return client_api_forbidden();
     }
+    let body_started = runtime.diagnostics_enabled().then(std::time::Instant::now);
     let prepared = match prepare::prepare_request(&runtime, &key, &headers, body, endpoint).await {
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
-    execute::execute_prepared(runtime, key, prepared, endpoint).await
+    let ingress = crate::runtime::RequestIngressTiming {
+        body_read_and_parse_ms: body_started.map(|start| start.elapsed().as_millis() as u64),
+        ..Default::default()
+    };
+    execute::execute_prepared(runtime, key, prepared, endpoint, started, ingress).await
 }

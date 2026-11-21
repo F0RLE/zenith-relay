@@ -5,6 +5,61 @@ const ACCESS: &str = "synthetic-export-access-token";
 const REFRESH: &str = "synthetic-export-refresh-token";
 const ID_TOKEN: &str = "synthetic.export.id-token";
 
+#[test]
+fn proxy_bundle_uses_file_local_indices_and_redacts_auth_from_preview() {
+    let route = "http://fixture-login:fixture-password@proxy.example.test:8123/";
+    let mut accounts = [fixture(), fixture(), fixture(), fixture()];
+    for (i, account) in accounts.iter_mut().enumerate() {
+        account.account_id = Some(format!("fixture-account-{i}"));
+        account.transfer_proxy_url = match i {
+            0 | 1 => Some(route.into()),
+            2 => Some(route.replace("fixture-password", "distinct-password")),
+            _ => None,
+        };
+    }
+    let doc = build_account_export(AccountExportFormat::Zenith, &accounts, 1, None).unwrap();
+    let json: Value = serde_json::from_str(&doc.content).unwrap();
+    assert_eq!(json["version"], 2);
+    assert_eq!(json["proxies"].as_array().unwrap().len(), 2);
+    assert_eq!(json["accounts"][0]["proxyIndex"], 0);
+    assert_eq!(json["accounts"][1]["proxyIndex"], 0);
+    assert_eq!(json["accounts"][2]["proxyIndex"], 1);
+    assert!(json["accounts"][3].get("proxyIndex").is_none());
+    let other = r#"{"access_token":"synthetic-separate-account"}"#;
+    let batch =
+        crate::accounts::combine_import_documents(&[other.into(), doc.content.clone()]).unwrap();
+    let parsed = crate::accounts::parse_import(&batch, None, &[]).unwrap();
+    assert_eq!(parsed.items.len(), 5);
+    for (item, account) in parsed.items[1..].iter().zip(&accounts) {
+        assert_eq!(
+            item.bundle_proxy_url(),
+            account.transfer_proxy_url.as_deref()
+        );
+    }
+    assert_eq!(
+        parsed.preview.rows[1].bundle_proxy_endpoint.as_deref(),
+        Some("http://proxy.example.test:8123")
+    );
+    let visible = format!(
+        "{parsed:?} {:?} {}",
+        parsed.items,
+        serde_json::to_string(&parsed.preview).unwrap()
+    );
+    for secret in ["fixture-login", "fixture-password", "distinct-password"] {
+        assert!(!visible.contains(secret));
+    }
+    for invalid in [json!(-1), json!(2), json!("0"), Value::Null] {
+        let mut bad = json.clone();
+        bad["accounts"][0]["proxyIndex"] = invalid;
+        assert!(crate::accounts::parse_import(&bad.to_string(), None, &[]).is_err());
+    }
+    assert!(build_account_export(AccountExportFormat::Sub2api, &accounts, 1, None).is_err());
+    let plain = build_account_export(AccountExportFormat::Zenith, &[fixture()], 1, None).unwrap();
+    let plain: Value = serde_json::from_str(&plain.content).unwrap();
+    assert_eq!(plain["version"], 1);
+    assert!(plain.get("proxies").is_none());
+}
+
 fn siwc_fixture() -> AccountExportCredential {
     let registration = crate::providers::chatgpt::SiwcRegistration {
         client_id: "oaiapp_synthetic_export".into(),
@@ -368,6 +423,7 @@ fn request_rejects_duplicates_and_unsafe_account_ids() {
 
 fn fixture() -> AccountExportCredential {
     AccountExportCredential {
+        transfer_proxy_url: None,
         oauth_client_kind: Default::default(),
         siwc_registration: None,
         basis_points_headers: None,

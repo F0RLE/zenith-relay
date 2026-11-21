@@ -186,7 +186,7 @@ impl PreparedCatalog {
                 .map(SourceEnvelope::parse_source_payload)
                 .transpose()?;
         }
-        let payload = merge_payloads(parsed, stale_sources(states, now, max_age));
+        let payload = merge_payloads(parsed, stale_sources(states, now, max_age))?;
         Ok(Self {
             revision: metadata_payload_hash(&payload)?,
             payload,
@@ -202,21 +202,24 @@ pub(super) fn stale_sources(states: &[SourceState; 4], now: u64, max_age: u64) -
     })
 }
 
-pub(super) fn merge_payloads(mut parsed: [Option<Value>; 4], stale: [bool; 4]) -> Value {
+pub(super) fn merge_payloads(
+    mut parsed: [Option<Value>; 4],
+    stale: [bool; 4],
+) -> Result<Value, ModelMetadataError> {
     let mut old = std::array::from_fn(|_| None);
     for index in 0..4 {
         if stale[index] {
             old[index] = parsed[index].take();
         }
     }
-    let fresh = merge_source_payloads(parsed);
+    let fresh = merge_source_payloads(parsed)?;
     if old.iter().all(Option::is_none) {
-        return fresh;
+        return Ok(fresh);
     }
-    super::super::reference::fill_stale_gaps(fresh, merge_source_payloads(old))
+    super::super::reference::fill_stale_gaps(fresh, merge_source_payloads(old)?)
 }
 
-fn merge_source_payloads(parsed: [Option<Value>; 4]) -> Value {
+fn merge_source_payloads(parsed: [Option<Value>; 4]) -> Result<Value, ModelMetadataError> {
     let [models_dev, details, openrouter, litellm] = parsed;
     enrich_reasoning_metadata_with_models_dev_details(
         models_dev.unwrap_or_else(|| serde_json::json!({})),
@@ -286,45 +289,85 @@ pub(super) fn refresh_catalog_status(
 }
 
 pub(super) fn valid_source_payload(index: usize, source_payload: &Value) -> bool {
-    let valid_id = |id: &str| !id.trim().is_empty() && id.len() <= super::super::MAX_STRING_LENGTH;
     match index {
-        0 => validate_metadata_payload(source_payload).is_ok(),
-        1 => source_payload.as_object().is_some_and(|providers| {
-            !providers.is_empty()
-                && providers.len() <= super::super::MAX_RECORDS
-                && providers.values().any(|provider| {
-                    provider
-                        .get("models")
-                        .and_then(Value::as_object)
-                        .is_some_and(|models_by_id| {
-                            !models_by_id.is_empty()
-                                && models_by_id.len() <= super::super::MAX_RECORDS
-                                && models_by_id.iter().any(|(model_id, model_metadata)| {
-                                    valid_id(model_id) && model_metadata.is_object()
-                                })
-                        })
-                })
-        }),
+        0 => valid_primary_source_payload(source_payload),
+        1 => valid_details_source_payload(source_payload),
         2 => source_payload
             .get("data")
             .and_then(Value::as_array)
             .is_some_and(|model_records| {
                 !model_records.is_empty()
                     && model_records.len() <= super::super::MAX_RECORDS
-                    && model_records.iter().any(|model_record| {
+                    && model_records.iter().all(|model_record| {
                         model_record
                             .get("id")
                             .and_then(Value::as_str)
-                            .is_some_and(valid_id)
+                            .is_some_and(valid_source_identity)
                     })
             }),
         3 => source_payload.as_object().is_some_and(|model_entries| {
             !model_entries.is_empty()
                 && model_entries.len() <= super::super::MAX_RECORDS
+                && model_entries.iter().all(|(model_id, model_metadata)| {
+                    model_id == "sample_spec"
+                        || (valid_source_identity(model_id)
+                            && model_metadata.is_object()
+                            && model_metadata
+                                .get("litellm_provider")
+                                .is_none_or(|provider| {
+                                    provider.as_str().is_some_and(valid_source_identity)
+                                }))
+                })
                 && model_entries.iter().any(|(model_id, model_metadata)| {
-                    model_id != "sample_spec" && valid_id(model_id) && model_metadata.is_object()
+                    model_id != "sample_spec" && model_metadata.is_object()
                 })
         }),
         _ => false,
     }
+}
+
+fn valid_source_identity(identity: &str) -> bool {
+    !identity.trim().is_empty() && identity.len() <= super::super::MAX_STRING_LENGTH
+}
+
+fn valid_primary_source_payload(payload: &Value) -> bool {
+    let count = match payload.get("data").unwrap_or(payload) {
+        Value::Array(records) => records.len(),
+        Value::Object(records) => records.len(),
+        _ => return false,
+    };
+    // The shared reader tolerates malformed legacy rows. A source refresh
+    // must validate the entire replacement before retiring its saved data.
+    validate_metadata_payload(payload).is_ok_and(|records| records.len() == count)
+}
+
+fn valid_details_source_payload(payload: &Value) -> bool {
+    let Some(providers) = payload.as_object() else {
+        return false;
+    };
+    if providers.is_empty() || providers.len() > super::super::MAX_RECORDS {
+        return false;
+    }
+    let mut model_count = 0usize;
+    for (provider_id, provider) in providers {
+        if !valid_source_identity(provider_id) {
+            return false;
+        }
+        let Some(models) = provider.get("models").and_then(Value::as_object) else {
+            return false;
+        };
+        model_count = model_count.saturating_add(models.len());
+        if model_count > super::super::MAX_RECORDS
+            || !models.iter().all(|(model_id, metadata)| {
+                valid_source_identity(model_id)
+                    && metadata.is_object()
+                    && metadata
+                        .get("id")
+                        .is_none_or(|identity| identity.as_str().is_some_and(valid_source_identity))
+            })
+        {
+            return false;
+        }
+    }
+    model_count > 0
 }

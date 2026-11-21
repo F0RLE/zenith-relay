@@ -1,6 +1,189 @@
 use super::*;
 
 #[tokio::test]
+async fn delayed_cache_rejection_only_clears_the_binding_seen_at_admission() {
+    for (bound_at_admission, rebind, should_clear) in [
+        (true, false, true),
+        (true, true, false),
+        (false, true, false),
+    ] {
+        let runtime = runtime();
+        let prompt = "cache:synthetic-rejection";
+        let now = crate::unix_time_ms();
+        if bound_at_admission {
+            runtime.bind_prompt_affinity(Some(prompt), "source-a", now);
+        }
+        let (_, lease) = runtime
+            .select_and_reserve(
+                &key(&runtime),
+                "model-a",
+                &[WireApi::Responses],
+                &HashSet::from(["source-b".into()]),
+                (None, Some(prompt)),
+                now,
+            )
+            .await
+            .unwrap();
+        lease.begin_rotation_http_dispatch().unwrap();
+        if rebind && bound_at_admission {
+            assert!(runtime.invalidate_prompt_affinity(Some(prompt), "source-a"));
+        }
+        runtime.bind_prompt_affinity(Some(prompt), "source-a", now + 1);
+        assert_eq!(runtime.reject_prompt_affinity(&lease), should_clear);
+        assert_eq!(
+            runtime
+                .lock_scheduler()
+                .has_prompt_affinity(prompt, now + 1),
+            !should_clear
+        );
+    }
+}
+
+#[tokio::test]
+async fn late_prompt_completion_cannot_warm_a_readded_id() {
+    let runtime = runtime();
+    let prompt = "session:synthetic-replaced-owner";
+    let now = crate::unix_time_ms();
+    let (_, lease) = runtime
+        .select_and_reserve(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(prompt)),
+            now,
+        )
+        .await
+        .unwrap();
+    lease.begin_rotation_http_dispatch().unwrap();
+    let owner = lease.candidate_id();
+    let removed = runtime.lock_scheduler().remove(owner).unwrap();
+    runtime.bind_prompt_affinity_for_lease(Some(prompt), &lease, now);
+    assert!(!runtime.lock_scheduler().has_prompt_affinity(prompt, now));
+    runtime.lock_scheduler().upsert(removed);
+    runtime.bind_prompt_affinity_for_lease(Some(prompt), &lease, now);
+    assert!(!runtime.lock_scheduler().has_prompt_affinity(prompt, now));
+    lease.settle_rotation_success(now);
+}
+
+#[tokio::test]
+async fn credit_fallback_expiry_before_http_send_spends_no_wire_or_generation_budget() {
+    let runtime = runtime();
+    let budget = SharedRequestBudget::for_incoming_request(2);
+    let observed = 1_000;
+    {
+        let mut scheduler = runtime.lock_scheduler();
+        scheduler.set_quota_stale_after_ms(10);
+        assert!(scheduler.update_candidate_quota_at(
+            "source-a",
+            crate::CandidateQuotaState {
+                quota: CandidateQuota::CreditFallback,
+                provider_credits_micro_units: Some(100),
+                provider_credits_observed_at_ms: Some(observed),
+                ..Default::default()
+            },
+        ));
+    }
+    let (_, lease) = runtime
+        .select_and_reserve_with_budget(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::from(["source-b".into()]),
+            (None, None),
+            observed,
+            &budget,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.begin_rotation_http_dispatch(),
+        Err(RotationDispatchStartError::CandidateChanged)
+    );
+    assert_eq!(budget.dispatches(), 0);
+    assert_eq!(budget.with_budget(|b| b.wire_attempts()), 0);
+    drop(lease);
+    let alternative = reserve(&runtime, &budget, WireApi::Responses).await;
+    assert_eq!(alternative.candidate_id(), "source-b");
+}
+
+#[tokio::test]
+async fn late_prompt_completion_keeps_new_binding_without_rejecting_dispatch() {
+    let runtime = runtime();
+    let now = crate::unix_time_ms();
+    let affinity = "session:synthetic-late-completion";
+    let budget = SharedRequestBudget::for_incoming_request(3);
+    let (_, lease) = runtime
+        .select_and_reserve_with_budget(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(affinity)),
+            now,
+            &budget,
+        )
+        .await
+        .unwrap();
+    let newer_owner = if lease.candidate_id() == "source-a" {
+        "source-b"
+    } else {
+        "source-a"
+    };
+    runtime.bind_prompt_affinity(Some(affinity), newer_owner, now + 1);
+    let before = runtime
+        .lock_scheduler()
+        .prompt_affinity_binding(affinity, now + 1);
+
+    assert!(lease.begin_rotation_http_dispatch().is_ok());
+    runtime.bind_prompt_affinity_for_lease(Some(affinity), &lease, now + 2);
+    assert_eq!(
+        runtime
+            .lock_scheduler()
+            .prompt_affinity_binding(affinity, now + 2),
+        before
+    );
+    assert_eq!(budget.dispatches(), 1);
+    assert_eq!(lease.prompt_owner.as_ref().unwrap().1, None);
+}
+
+#[tokio::test]
+async fn prompt_completion_refreshes_its_current_owner_without_warming_another_chat() {
+    let runtime = runtime();
+    let now = crate::unix_time_ms();
+    let affinity = "session:synthetic-current-completion";
+    let (_, lease) = runtime
+        .select_and_reserve(
+            &key(&runtime),
+            "model-a",
+            &[WireApi::Responses],
+            &HashSet::new(),
+            (None, Some(affinity)),
+            now,
+        )
+        .await
+        .unwrap();
+    runtime.bind_prompt_affinity(Some(affinity), lease.candidate_id(), now + 1);
+    let before = runtime
+        .lock_scheduler()
+        .prompt_affinity_snapshot(affinity, now + 1)
+        .unwrap();
+    runtime.bind_prompt_affinity_for_lease(Some(affinity), &lease, now + 100);
+    let after = runtime
+        .lock_scheduler()
+        .prompt_affinity_snapshot(affinity, now + 100)
+        .unwrap();
+    assert_eq!(after.0, before.0);
+    assert!(after.1 > before.1);
+    runtime.bind_prompt_affinity_for_lease(Some("session:another-chat"), &lease, now + 101);
+    assert!(
+        !runtime
+            .lock_scheduler()
+            .has_prompt_affinity("session:another-chat", now + 101)
+    );
+}
+
+#[tokio::test]
 async fn changed_response_owner_revokes_pending_dispatch_without_spending_a_generation() {
     let runtime = runtime();
     let now = crate::unix_time_ms();
@@ -317,6 +500,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
             scope: "*",
             retry_at_ms: crate::unix_time_ms() + 60_000,
             reason: CooldownReason::Mandatory,
+            provider_clock: None,
         }),
         None,
         crate::unix_time_ms(),
@@ -327,7 +511,7 @@ async fn late_rejection_cannot_install_a_block_after_remove_and_same_id_readd() 
             "model-a",
             crate::unix_time_ms()
         ),
-        (0, None)
+        (0, None, None)
     );
     assert!(readded_candidate_lease.begin_rotation_dispatch().is_ok());
     readded_candidate_lease.settle_rotation_success(crate::unix_time_ms());

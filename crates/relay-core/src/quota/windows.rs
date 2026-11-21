@@ -128,6 +128,29 @@ mod tests {
     }
 
     #[test]
+    fn rounding_does_not_invent_exhaustion_or_exactly_full_quota() {
+        let secondary = QuotaWindowKind::Secondary;
+        let partial = QuotaWindow::normalize(input(secondary, 0.001, 1_000), None).unwrap();
+        assert_eq!(partial.available_basis_points, Some(1));
+        assert!(!partial.is_exhausted());
+        assert!(partial.exhaustion_transition().is_none());
+
+        let exhausted =
+            QuotaWindow::normalize(input(secondary, 0.0, 2_000), Some(&partial)).unwrap();
+        assert_eq!(exhausted.available_basis_points, Some(0));
+        assert!(
+            exhausted
+                .exhaustion_transition_from(Some(&partial))
+                .is_some()
+        );
+
+        let near_full = QuotaWindow::normalize(input(secondary, 99.999, 3_000), None).unwrap();
+        assert_eq!(near_full.available_basis_points, Some(9_999));
+        let full = QuotaWindow::normalize(input(secondary, 100.0, 4_000), None).unwrap();
+        assert_eq!(full.available_basis_points, Some(10_000));
+    }
+
+    #[test]
     fn full_transition_and_fingerprint_survive_restart() {
         let prior_window =
             QuotaWindow::normalize(input(QuotaWindowKind::Primary, 40.0, 1_000), None).unwrap();

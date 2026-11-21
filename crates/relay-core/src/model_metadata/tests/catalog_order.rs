@@ -344,11 +344,3 @@ fn preferred_protocol_is_unknown_for_unresolved_or_ambiguous_models() {
         None
     );
 }
-
-#[test]
-fn cache_hash_rejects_modified_payload() {
-    let payload = serde_json::json!({"openai/test":{"name":"Test","family":"gpt"}});
-    let mut envelope = MetadataCacheEnvelope::new(payload, 1).unwrap();
-    envelope.payload = serde_json::json!({"openai/other":{"name":"Other","family":"gpt"}});
-    assert_eq!(envelope.validate(), Err(ModelMetadataError::InvalidCache));
-}

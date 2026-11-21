@@ -32,6 +32,46 @@ fn automatic_ranks_linked_quota_without_changing_own_capacity() {
 }
 
 #[test]
+fn siwc_prompt_owner_survives_a_lost_linked_quota_observation() {
+    let mut scheduler = reference_quota_scheduler();
+    scheduler.keep_unknown_quota_affinity("account");
+    scheduler.bind_prompt_affinity("synthetic-chat", "account", 100);
+    scheduler.set_quota_references(BTreeMap::new());
+    assert_eq!(
+        rotation::dispatch(&mut scheduler, 100, Some("synthetic-chat")),
+        "account"
+    );
+    assert_eq!(rotation::dispatch(&mut scheduler, 100, None), "api-a");
+}
+
+#[test]
+fn a_linked_zero_preserves_or_moves_the_durable_siwc_owner_at_the_admission_margin() {
+    for (remaining, moves) in [(100, false), (999, false), (1_000, true)] {
+        let mut scheduler = reference_quota_scheduler();
+        scheduler.keep_unknown_quota_affinity("account");
+        scheduler
+            .quota_references
+            .get_mut("account")
+            .unwrap()
+            .remaining_basis_points = 0;
+        scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(remaining);
+        scheduler.bind_prompt_affinity("chat", "account", 100);
+        assert_eq!(
+            rotation::dispatch(&mut scheduler, 100, Some("chat")),
+            if moves { "api-a" } else { "account" }
+        );
+        assert_eq!(
+            scheduler.bind_prompt_affinity_sticky("chat", "api-a", 101),
+            moves
+        );
+        assert_eq!(
+            scheduler.prompt_affinity.get("chat", 101),
+            Some(if moves { "api-a" } else { "account" })
+        );
+    }
+}
+
+#[test]
 fn reference_quota_never_overrides_own_observation_or_auth() {
     for quota in [
         CandidateQuota::Available(100),
@@ -251,7 +291,7 @@ fn undated_or_future_observations_do_not_win_automatic_ranking() {
 
 #[test]
 fn credit_only_admission_expires_without_another_snapshot() {
-    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::InOrder] {
+    for mode in [PoolRoutingMode::Automatic, PoolRoutingMode::RoundRobin] {
         for unlimited in [false, true] {
             let mut scheduler = policy::mixed(mode);
             scheduler.set_quota_stale_after_ms(10);
@@ -269,7 +309,7 @@ fn credit_only_admission_expires_without_another_snapshot() {
 }
 
 #[test]
-fn automatic_switches_only_for_a_material_quota_lead() {
+fn automatic_quota_rebalancing_waits_for_a_low_warm_owner() {
     let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
     for (id, quota) in [("account", 9_900_u64), ("api-a", 3_300), ("api-b", 3_200)] {
         let member = scheduler.candidates.get_mut(id).unwrap();
@@ -287,19 +327,23 @@ fn automatic_switches_only_for_a_material_quota_lead() {
         "account"
     );
 
-    for (remaining, expected) in [(3_700, "account"), (4_199, "account"), (4_200, "api-a")] {
+    for remaining in [3_700, 4_199, 4_200, 9_000] {
         let api_a = scheduler.candidates.get_mut("api-a").unwrap();
         api_a.quota = CandidateQuota::Available(remaining);
         api_a.quota_updated_at_ms = Some(100);
         assert_eq!(
             rotation::dispatch(&mut scheduler, 100, Some("session:quota")),
-            expected
+            "account"
         );
-        assert_eq!(
-            scheduler.bind_prompt_affinity_sticky("session:quota", "api-a", 100),
-            expected == "api-a"
-        );
+        assert!(!scheduler.bind_prompt_affinity_sticky("session:quota", "api-a", 100));
     }
+    let account = scheduler.candidates.get_mut("account").unwrap();
+    account.quota = CandidateQuota::Available(1_000);
+    assert_eq!(
+        rotation::dispatch(&mut scheduler, 100, Some("session:quota")),
+        "api-a"
+    );
+    assert!(scheduler.bind_prompt_affinity_sticky("session:quota", "api-a", 100));
 }
 
 #[test]
@@ -353,7 +397,11 @@ fn quota_refresh_changes_admission_without_rebuilding_or_reweighting() {
 
 #[test]
 fn explicit_modes_ignore_quota_percentages() {
-    for mode in [PoolRoutingMode::InOrder, PoolRoutingMode::RoundRobin] {
+    for mode in [
+        PoolRoutingMode::RoundRobin,
+        PoolRoutingMode::WeightedRoundRobin,
+        PoolRoutingMode::Failover,
+    ] {
         let mut scheduler = policy::mixed(mode);
         for (id, quota) in [("account", 1_u64), ("api-a", 9_900), ("api-b", 8_000)] {
             let member = scheduler.candidates.get_mut(id).unwrap();
@@ -361,7 +409,7 @@ fn explicit_modes_ignore_quota_percentages() {
             member.quota_updated_at_ms = Some(100);
         }
         let first = rotation::dispatch(&mut scheduler, 100, None);
-        if mode == PoolRoutingMode::InOrder {
+        if mode == PoolRoutingMode::Failover {
             assert_eq!(first, "account");
         } else {
             let mut counts = BTreeMap::new();
@@ -434,7 +482,7 @@ fn prompt_affinity_has_a_bounded_load_margin_and_never_overrides_explicit_order(
     assert!(scheduler.release_for("api-b", Some("gpt-5")));
     assert!(scheduler.release_for("api-b", Some("gpt-5")));
     let mut policy = scheduler.pool_routing.clone().unwrap();
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     scheduler.set_pool_routing(policy).unwrap();
     assert_eq!(
         rotation::dispatch(&mut scheduler, 100, Some("cache:test")),
@@ -443,7 +491,7 @@ fn prompt_affinity_has_a_bounded_load_margin_and_never_overrides_explicit_order(
 }
 
 #[test]
-fn automatic_owner_yields_for_a_larger_fresh_quota_remainder() {
+fn automatic_owner_yields_only_when_its_fresh_quota_is_low() {
     let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
     for (id, quota) in [("account", 3_300_u64), ("api-a", 9_800), ("api-b", 3_200)] {
         let member = scheduler.candidates.get_mut(id).unwrap();
@@ -454,6 +502,10 @@ fn automatic_owner_yields_for_a_larger_fresh_quota_remainder() {
     let scope = CandidateScope::default();
     let tried = HashSet::new();
     let protocols = [WireApi::Responses, WireApi::ChatCompletions];
+    assert!(!scheduler.automatic_response_owner_should_yield(
+        "response", "gpt-5", &protocols, &scope, &tried, 100,
+    ));
+    scheduler.candidates.get_mut("account").unwrap().quota = CandidateQuota::Available(1_000);
     assert!(scheduler.automatic_response_owner_should_yield(
         "response", "gpt-5", &protocols, &scope, &tried, 100,
     ));
@@ -474,12 +526,13 @@ fn automatic_owner_yields_for_a_larger_fresh_quota_remainder() {
         SelectionReason::ResponseAffinity
     );
 
-    scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(3_200);
+    scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(1_000);
+    scheduler.candidates.get_mut("api-b").unwrap().quota = CandidateQuota::Available(1_000);
     assert!(!scheduler.automatic_response_owner_should_yield(
         "response", "gpt-5", &protocols, &scope, &tried, 100,
     ));
     let mut policy = scheduler.pool_routing.clone().unwrap();
-    policy.mode = PoolRoutingMode::InOrder;
+    policy.mode = PoolRoutingMode::RoundRobin;
     scheduler.set_pool_routing(policy).unwrap();
     scheduler.candidates.get_mut("api-a").unwrap().quota = CandidateQuota::Available(9_800);
     assert!(!scheduler.automatic_response_owner_should_yield(
@@ -526,7 +579,8 @@ fn automatic_response_owner_uses_the_same_load_priority_as_new_requests() {
         ("api-a", 2, 8_000, 9_000, false),
         ("account", 1, 9_000, 8_000, false),
         ("account", 2, 9_000, 8_000, true),
-        ("account", 1, 8_000, 9_000, true),
+        ("account", 1, 8_000, 9_000, false),
+        ("account", 1, 1_000, 9_000, true),
     ] {
         let mut scheduler = policy::mixed(PoolRoutingMode::Automatic);
         scheduler.candidates.get_mut("api-b").unwrap().enabled = false;

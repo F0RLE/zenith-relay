@@ -36,20 +36,23 @@ impl WebsocketTransportObservation {
 
 impl GatewayRuntime {
     pub(in crate::runtime) fn request_proxy(&self, candidate_id: &str) -> Option<&ProxyConfig> {
-        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+        if let Some(account) = self.account_state.executors.get(candidate_id) {
             return account.clients.proxy.as_ref();
         }
-        self.source_candidate_bindings
+        self.source_state
+            .candidate_bindings
             .get(candidate_id)
-            .and_then(|binding| self.sources.get(&binding.source_id))
+            .and_then(|binding| self.source_state.connectors.get(&binding.source_id))
             .and_then(|source| source.proxy.as_ref())
     }
 
     pub(super) fn direct_http_route(&self, candidate_id: &str) -> bool {
-        self.chatgpt_accounts.get(candidate_id).map_or_else(
+        self.account_state.executors.get(candidate_id).map_or_else(
             || {
-                self.source_candidate_bindings.contains_key(candidate_id)
-                    && !self.source_http_clients.contains_key(candidate_id)
+                self.source_state
+                    .candidate_bindings
+                    .contains_key(candidate_id)
+                    && !self.source_state.http_clients.contains_key(candidate_id)
                     && self.clients.direct
             },
             |account| account.clients.direct,
@@ -57,24 +60,26 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn request_client(&self, candidate_id: &str) -> &reqwest::Client {
-        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+        if let Some(account) = self.account_state.executors.get(candidate_id) {
             return &account.clients.http;
         }
         // Source candidates may have a per-source proxy; fall back to the
         // shared global client when no source-specific client exists.
-        self.source_http_clients
+        self.source_state
+            .http_clients
             .get(candidate_id)
             .unwrap_or(&self.clients.http)
     }
 
     pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
-        self.chatgpt_accounts
+        self.account_state
+            .executors
             .get(candidate_id)
             .map(|account| &account.clients.websocket)
             .or_else(|| {
                 // Source candidates with a proxy use a proxy-aware websocket
                 // client; others share the global websocket client.
-                self.source_websocket_clients.get(candidate_id)
+                self.source_state.websocket_clients.get(candidate_id)
             })
             .unwrap_or(&self.clients.websocket)
     }
@@ -121,7 +126,8 @@ impl GatewayRuntime {
         authorization: &AuthorizationIncarnation,
         now_ms: u64,
     ) -> WebsocketTransportPreference {
-        let mut observations = crate::poison::mutex(&self.websocket_transport_observations);
+        let mut observations =
+            crate::poison::mutex(&self.provider_metadata.websocket_transport_observations);
         observations.retain(|_, observation| observation.is_current(now_ms));
         match observations
             .get(&(capability_scope.to_string(), model.to_string()))
@@ -144,7 +150,8 @@ impl GatewayRuntime {
         model: &str,
         authorization: &AuthorizationIncarnation,
     ) {
-        let mut observations = crate::poison::mutex(&self.websocket_transport_observations);
+        let mut observations =
+            crate::poison::mutex(&self.provider_metadata.websocket_transport_observations);
         let key = (capability_scope.to_string(), model.to_string());
         if observations
             .get(&key)
@@ -194,7 +201,8 @@ impl GatewayRuntime {
         mut kind: WebsocketObservationKind,
         now_ms: u64,
     ) {
-        let mut observations = crate::poison::mutex(&self.websocket_transport_observations);
+        let mut observations =
+            crate::poison::mutex(&self.provider_metadata.websocket_transport_observations);
         observations.retain(|_, observation| observation.is_current(now_ms));
         let key = (capability_scope.to_string(), model.to_string());
         if matches!(kind, WebsocketObservationKind::SlowHandshakes(_))

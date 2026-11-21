@@ -29,9 +29,11 @@ pub(crate) const PROVIDER_CREDIT_SWITCH_MARGIN_MICRO_UNITS: u64 = 15_000_000;
 
 /// Ordinary candidates remain in the same band below a five-point quota lead.
 pub(crate) const QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 500;
-/// A warm preferred member yields at ten points; other candidates keep the
-/// ordinary band. This does not relax freshness, load, health or admission.
-pub(crate) const CACHE_AFFINITY_QUOTA_SWITCH_MARGIN_BASIS_POINTS: u64 = 1_000;
+/// A primary warm member considers quota-only rebalancing at or below 10%.
+/// Freshness, load, health and admission remain independent gates.
+pub(crate) const CACHE_AFFINITY_QUOTA_LOW_WATER_BASIS_POINTS: u64 = 1_000;
+/// Minimum headroom gain to move a warm chat or defer a low linked SIWC estimate.
+pub(crate) const MATERIAL_QUOTA_LEAD_BASIS_POINTS: u64 = 1_000;
 pub(crate) const CACHE_AFFINITY_EXTRA_REQUESTS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,14 +58,23 @@ pub struct RotationRoute {
     pub operation: RotationOperation,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RotationMode {
     #[default]
     Automatic,
+    /// Prefer the earliest fresh subscription deadline for independent work.
+    SubscriptionExpiry,
     /// Cycle through ready members in the user-configured order.
     RoundRobin,
     WeightedRoundRobin,
     Failover,
+}
+
+impl RotationMode {
+    pub fn is_adaptive(self) -> bool {
+        matches!(self, Self::Automatic | Self::SubscriptionExpiry)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +123,10 @@ pub struct RotationCandidate {
     pub quota_remaining_basis_points: Option<u64>,
     pub quota_observed_at_ms: Option<u64>,
     pub quota_reference: Option<crate::CandidateQuotaReference>,
+    /// A warm route can keep chat affinity without a direct quota measurement.
+    pub(crate) keep_unknown_quota_affinity: bool,
+    /// Fresh subscription deadlines guide independent adaptive selections.
+    pub spend_deadline: Option<crate::quota::QuotaSpendDeadline>,
     /// Provider-reported balance in millionths of one credit. This is a
     /// separate fallback signal and never changes percentage-quota state.
     pub provider_credits_micro_units: Option<u64>,
@@ -151,6 +166,8 @@ impl RotationCandidate {
             quota_remaining_basis_points: None,
             quota_observed_at_ms: None,
             quota_reference: None,
+            keep_unknown_quota_affinity: false,
+            spend_deadline: None,
             provider_credits_micro_units: None,
             provider_credits_unlimited: false,
             provider_credits_observed_at_ms: None,
@@ -306,8 +323,8 @@ pub struct RotationRequest {
     /// Soft locality preference, considered only within the ordinary
     /// Automatic selection group. It cannot replace a recovery trial.
     pub preferred: Option<String>,
-    /// Previously successful alternatives, in recency order. They only break
-    /// ties inside the admitted group and receive no extra load margin.
+    /// Previously successful alternatives, newest first. Used in adaptive
+    /// ranking without granting additional load allowance or ownership.
     pub warm_fallbacks: Vec<String>,
     pub tried: BTreeSet<String>,
     /// Principal/spend policy is a hard gate independent of priority. An
@@ -362,6 +379,8 @@ pub enum RotationSelectionReason {
     QuotaHeadroom,
     /// Automatic mode used provider credits because no fresh quota ranked.
     ProviderCredits,
+    /// Independent work uses the nearest at-risk subscription expiry group.
+    SubscriptionExpiry,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

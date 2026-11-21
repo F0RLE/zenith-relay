@@ -9,7 +9,9 @@ use crate::{ApiModelPriceOverride, Result};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
+mod apply;
 mod fetch;
+mod pages;
 mod pricing;
 
 pub(crate) use fetch::discover_models_with_client;
@@ -17,6 +19,38 @@ use pricing::detected_model_price;
 
 pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
     discover_source_models_for_protocol_bindings(source, &[]).await
+}
+
+/// Hosted qualification supplies a pinned client. Return observed IDs only, never
+/// a declared allow-list or a previous snapshot when a read fails.
+pub async fn observed_responses_models(
+    client: &reqwest::Client,
+    source: &ProviderSource,
+) -> Result<Vec<String>> {
+    source.validate()?;
+    if source.wire_api != super::WireApi::Responses {
+        return Err(crate::Error::Validation(
+            "expected a native Responses source".into(),
+        ));
+    }
+    let bindings = [SourceProtocolBinding::legacy(source.wire_api, &[])];
+    let connector = SourceConnector::new(source, &bindings)?;
+    let read = fetch::discover_protocol_bindings_with_client(
+        client,
+        &connector,
+        &bindings,
+        &[],
+        &BTreeSet::new(),
+        &SourceReadHints::default(),
+        &ManagementHttpScope::default(),
+    )
+    .await?;
+    if !read.failures.is_empty() || read.resolved_base_url.is_some() {
+        return Err(crate::Error::Validation(
+            "incomplete or changed catalog route".into(),
+        ));
+    }
+    Ok(read.models)
 }
 
 /// Discovers a source catalog using each explicitly configured binding.
@@ -28,7 +62,7 @@ pub async fn discover_source_models_for_protocol_bindings(
 ) -> Result<Vec<String>> {
     discover_source_models_and_protocol_bindings(source, protocol_bindings)
         .await
-        .map(|discovery| discovery.models)
+        .map(|discovery| discovery.models_with_previous(&source.models))
 }
 
 /// The result of binding-aware model discovery.
@@ -42,7 +76,7 @@ pub async fn discover_source_models_for_protocol_bindings(
 /// resolved automatically from the catalog and protocol hints. A valid empty
 /// response is still success and is represented by a binding with
 /// an empty `model_ids` list.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SourceDiscovery {
     pub models: Vec<String>,
     pub protocol_bindings: Vec<SourceProtocolBinding>,
@@ -54,27 +88,28 @@ pub struct SourceDiscovery {
     /// refreshed with discovery and never replace a user-configured override.
     pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
     pub capabilities: Vec<ModelEndpointCapability>,
+    /// Complete raw inventory by upstream protocol, retained only when another
+    /// binding failed. Binding allow-lists do not narrow these observations.
+    pub catalog_models: BTreeMap<super::WireApi, Vec<String>>,
+    pub failures: Vec<SourceCatalogFailure>,
 }
 
-impl SourceDiscovery {
-    /// Copies catalog evidence onto the stored source fields.
-    /// A resolved base URL replaces the endpoint. When discovery did not
-    /// resolve one, the current endpoint stays unchanged.
-    pub fn apply_catalog(
-        &self,
-        base_url: &mut String,
-        models: &mut Vec<String>,
-        protocol_bindings: &mut Vec<SourceProtocolBinding>,
-        protocol_config: &mut SourceProtocolConfig,
-        detected_model_prices: &mut BTreeMap<String, ApiModelPriceOverride>,
-    ) {
-        if let Some(resolved) = &self.resolved_base_url {
-            *base_url = resolved.clone();
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceCatalogFailure {
+    pub binding: SourceProtocolBinding,
+    /// Safe classification only; request URLs, headers and bodies stay private.
+    pub message: String,
+}
+
+impl SourceCatalogFailure {
+    fn new(binding: &SourceProtocolBinding, error: &crate::Error) -> Self {
+        Self {
+            binding: binding.clone(),
+            message: match error {
+                crate::Error::Validation(_) => "source protocol configuration is invalid".into(),
+                _ => error.to_string(),
+            },
         }
-        *models = self.models.clone();
-        *protocol_bindings = self.protocol_bindings.clone();
-        protocol_config.merge_catalog(self.capabilities.clone());
-        *detected_model_prices = self.detected_model_prices.clone();
     }
 }
 
@@ -178,6 +213,8 @@ pub async fn read_source_models_with_scope(
 /// authentication. The function succeeds when at least one binding returns a
 /// valid catalog response, even when that catalog is empty; it fails only when
 /// every binding request fails or is malformed.
+/// Every page of a binding must succeed before its inventory, prices, or
+/// endpoint evidence can contribute to the discovery result.
 pub async fn discover_source_models_and_protocol_bindings(
     source: &ProviderSource,
     protocol_bindings: &[SourceProtocolBinding],

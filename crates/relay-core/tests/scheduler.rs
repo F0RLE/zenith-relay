@@ -215,7 +215,8 @@ async fn upstream(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let parsed_body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let parsed_body: Value =
+        zenith_relay_core::bounded_json::from_slice(&body).unwrap_or(Value::Null);
     let model = parsed_body
         .get("model")
         .and_then(Value::as_str)
@@ -361,7 +362,7 @@ fn ordered_policy(ids: &[&str]) -> zenith_relay_core::PoolRoutingPolicy {
         PoolMemberKind, PoolRoutingMember, PoolRoutingMode, PoolRoutingPolicy,
     };
     PoolRoutingPolicy {
-        mode: PoolRoutingMode::InOrder,
+        mode: PoolRoutingMode::RoundRobin,
         members: ids
             .iter()
             .map(|id| PoolRoutingMember {

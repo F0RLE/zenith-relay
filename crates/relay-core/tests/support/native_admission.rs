@@ -124,6 +124,126 @@ async fn reasoning_checks_exact_capabilities_and_preserves_supported_native_exte
     }
 }
 
+#[tokio::test]
+async fn interleaved_system_checks_exact_route_evidence_before_reserving_or_sending() {
+    for client in [WireApi::Responses, WireApi::Messages] {
+        for reference in [None, Some(false), Some(true)] {
+            for status in [
+                CapabilityStatus::Unknown,
+                CapabilityStatus::Confirmed,
+                CapabilityStatus::Unsupported,
+            ] {
+                let observed = Arc::new(Mutex::new(Vec::new()));
+                let captured = observed.clone();
+                let upstream = spawn(Router::new().fallback(post(move |Json(body): Json<Value>| {
+                    captured.lock().unwrap().push(body);
+                    async move { Json(json!({
+                        "id":"msg_synthetic", "type":"message", "role":"assistant",
+                        "content":[{"type":"text","text":"Synthetic result"}],
+                        "stop_reason":"end_turn", "usage":{"input_tokens":3,"output_tokens":2}
+                    })) }
+                }))).await;
+                let mut source = RuntimeSource::unrestricted(ProviderSource {
+                    id: "synthetic-source".into(),
+                    name: "Synthetic source".into(),
+                    base_url: format!("{}/v1", upstream.base_url),
+                    api_key: SOURCE_KEY.into(),
+                    proxy_url: None,
+                    wire_api: WireApi::Messages,
+                    models: vec!["synthetic-model".into()],
+                });
+                source.protocol_config.endpoint_hint = Some(WireApi::Messages);
+                source.protocol_config.capabilities = vec![ModelEndpointCapability {
+                    model_id: "synthetic-model".into(),
+                    upstream_wire_api: WireApi::Messages,
+                    status: CapabilityStatus::Declared,
+                    origin: CapabilityOrigin::Manual,
+                    checked_at_ms: 1,
+                    features: [(ProtocolFeature::InterleavedSystem, status)].into(),
+                    reasoning_efforts: Vec::new(),
+                    token_limits: Default::default(),
+                    service_tiers: None,
+                }];
+                let metadata = json!({"vendor/synthetic-model":{
+                    "reasoning":false, "interleaved_system":reference
+                }});
+                let runtime = Arc::new(
+                    GatewayRuntime::from_pool(
+                        vec![source],
+                        vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                            id: "synthetic-key".into(),
+                            secret: LOCAL_KEY.into(),
+                        })],
+                        GatewayRuntimeOptions {
+                            model_metadata_catalog: Some(ModelMetadataCatalogHandle::new(
+                                ModelMetadataCatalog::from_models_dev_json(&metadata.to_string())
+                                    .unwrap(),
+                            )),
+                            ..GatewayRuntimeOptions::default()
+                        },
+                        Arc::new(|_| {}),
+                    )
+                    .unwrap(),
+                );
+                let gateway = spawn(gateway::router(runtime.clone())).await;
+                let history = json!([
+                    {"role":"user","content":"Earlier task"},
+                    {"role":"assistant","content":"Earlier answer"},
+                    {"role":"user","content":"Current task"},
+                    {"role":"system","content":"Current instruction"}
+                ]);
+                let body = if client == WireApi::Messages {
+                    json!({"model":"synthetic-model", "max_tokens":64, "messages":history})
+                } else {
+                    json!({"model":"synthetic-model", "input":history})
+                };
+                let path = if client == WireApi::Messages {
+                    "messages"
+                } else {
+                    "responses"
+                };
+                let response = reqwest::Client::new()
+                    .post(format!("{}/v1/{path}", gateway.base_url))
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                let excluded = reference == Some(false) || status == CapabilityStatus::Unsupported;
+                let available = reference == Some(true) || status.available();
+                let allowed = !excluded && (client == WireApi::Messages || available);
+                assert_eq!(
+                    response.status(),
+                    if allowed {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    "client={client:?} reference={reference:?} route={status:?}"
+                );
+                let _ = response.bytes().await.unwrap();
+                let requests = observed.lock().unwrap();
+                assert_eq!(requests.len(), usize::from(allowed));
+                assert_eq!(
+                    runtime.candidate_runtime_order()[0].dispatches,
+                    u64::from(allowed)
+                );
+                if allowed {
+                    if client == WireApi::Messages {
+                        assert_eq!(requests[0]["messages"], body["messages"]);
+                    } else {
+                        assert_eq!(requests[0]["messages"][3]["role"], "system");
+                        assert_eq!(
+                            requests[0]["messages"][3]["content"][0]["text"],
+                            "Current instruction"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn native_request(protocol: WireApi) -> (&'static str, Value, &'static str) {
     match protocol {
         WireApi::GeminiInteractions => (

@@ -123,11 +123,35 @@ impl<T: Send + Sync + 'static> RefreshService<T> {
         self.signal();
     }
 
+    /// Hosts replace this index when explicit connection groups change. Traffic
+    /// can then activate linked readers without scanning the host inventory.
+    pub fn set_activity_groups(&self, groups: impl IntoIterator<Item = Vec<String>>) {
+        let mut index = BTreeMap::new();
+        for group in groups {
+            for member in &group {
+                index.insert(member.clone(), group.clone());
+            }
+        }
+        self.state
+            .lock()
+            .expect("refresh state poisoned")
+            .activity_groups = index;
+    }
+
     pub fn set_member_active(&self, member_id: &str) {
         let mut service_state = self.state.lock().expect("refresh state poisoned");
         let identities = service_state
-            .entries
-            .range(RefreshKey::member_range(member_id))
+            .activity_groups
+            .get(member_id)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .chain(std::iter::once(member_id))
+            .flat_map(|member| {
+                service_state
+                    .entries
+                    .range(RefreshKey::member_range(member))
+            })
             .map(|(key, _)| key)
             .map(|key| key.identity.clone())
             .collect::<std::collections::BTreeSet<_>>();

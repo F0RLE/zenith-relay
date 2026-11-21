@@ -272,10 +272,9 @@ async fn local_key_account_scope_uses_relay_ids_not_provider_header_ids() {
     )
     .await;
 
-    assert_eq!(
-        models(&gateway).await,
-        [zenith_relay_core::IMAGE_API_MODEL, MODEL]
-    );
+    let mut expected_models = zenith_relay_core::CODEX_IMAGE_MODELS.to_vec();
+    expected_models.push(MODEL);
+    assert_eq!(models(&gateway).await, expected_models);
     assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
     assert_eq!(allowed_state.requests.lock().unwrap().len(), 1);
     assert!(denied_state.requests.lock().unwrap().is_empty());

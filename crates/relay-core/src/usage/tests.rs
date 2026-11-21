@@ -84,6 +84,45 @@ fn provider_cache_windows_are_normalized_without_guessing() {
     assert_eq!(normalize_reported_cache_ttls("0m"), None);
 }
 
+#[test]
+fn messages_fallback_observes_the_serving_model_without_rewriting_the_request() {
+    let mut event = failed_usage_event("synthetic", None);
+    event.routing = Some(
+        serde_json::from_value(json!({
+            "reason":"only_eligible", "eligibleCandidates":1,
+            "quotaRemainingBasisPoints":null, "inFlightBefore":0, "dispatchesBefore":0
+        }))
+        .unwrap(),
+    );
+    let requested = event.requested_model.clone();
+    for payload in [
+        json!({"type":"content_block_start","content_block":{
+            "type":"fallback","from":{"model":"claude-requested"},"to":{"model":"claude-serving"}}}),
+        json!({"type":"message_delta","usage":{"iterations":[
+            {"type":"message","model":"claude-requested"},
+            {"type":"fallback_message","model":"claude-intermediate"},
+            {"type":"fallback_message","model":"claude-serving"}]}}),
+    ] {
+        event.observe_response_metadata(&payload);
+        assert_eq!(
+            event
+                .routing
+                .as_ref()
+                .unwrap()
+                .upstream_response_model
+                .as_deref(),
+            Some("claude-serving")
+        );
+        assert_eq!(event.requested_model, requested);
+    }
+    event.observe_response_metadata(&json!({"type":"content_block_start","content_block":{
+        "type":"fallback","to":{"model":"sk-synthetic-secret"}}}));
+    assert_eq!(
+        event.routing.unwrap().upstream_response_model.as_deref(),
+        Some("claude-serving")
+    );
+}
+
 fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
     UsageEvent {
         request_id: "request".into(),
@@ -93,6 +132,7 @@ fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
         candidate_id: Some("candidate".into()),
         account_id: account_id.map(str::to_owned),
         account_token_generation: None,
+        account_token_revision: None,
         client_context_id: None,
         routing: None,
         requested_model: Some("model".into()),

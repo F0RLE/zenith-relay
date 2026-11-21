@@ -9,13 +9,10 @@ impl PoolScheduler {
             .as_ref()
             .map(|policy| match policy.mode {
                 crate::PoolRoutingMode::Automatic => RotationMode::Automatic,
+                crate::PoolRoutingMode::SubscriptionExpiry => RotationMode::SubscriptionExpiry,
                 crate::PoolRoutingMode::WeightedRoundRobin => RotationMode::WeightedRoundRobin,
                 crate::PoolRoutingMode::Failover => RotationMode::Failover,
-                // Both previously exposed manual choices now use one cycling
-                // mode. Their saved member order remains the manual priority.
-                crate::PoolRoutingMode::InOrder | crate::PoolRoutingMode::RoundRobin => {
-                    RotationMode::RoundRobin
-                }
+                crate::PoolRoutingMode::RoundRobin => RotationMode::RoundRobin,
                 // `set_pool_routing` validates activation before storing the
                 // policy. Smart is therefore a storage/import compatibility
                 // value only and must never silently select a runtime mode.
@@ -57,6 +54,9 @@ impl PoolScheduler {
         rotation_candidate.enabled = candidate.enabled;
         rotation_candidate.draining = candidate.draining;
         rotation_candidate.quota_reference = self.quota_references.get(&candidate.id).cloned();
+        rotation_candidate.keep_unknown_quota_affinity =
+            self.keep_unknown_quota_affinity.contains(&candidate.id);
+        rotation_candidate.spend_deadline = self.spend_deadlines.get(&candidate.id).copied();
         rotation_candidate.routes.clear();
         rotation_candidate.route_rates.clear();
         for model in &candidate.models {
@@ -83,10 +83,32 @@ impl PoolScheduler {
                 );
             }
         }
+        // Explicit, uncatalogued image IDs are request-owned routes, not saved
+        // model inventory. Keep active leases across unrelated synchronization.
+        if candidate.native_images {
+            for lease in self
+                .rotation_leases
+                .values()
+                .filter(|lease| lease.candidate_id == candidate.id)
+            {
+                if let Some(model) = lease.route_key.strip_suffix(":Image")
+                    && candidate.supports_model(model)
+                {
+                    rotation_candidate.add_route(&lease.route_key, model, RotationOperation::Image);
+                }
+            }
+        }
         Some(rotation_candidate)
     }
 
     pub(super) fn sync_all_rotation_candidates(&mut self) {
+        self.sync_rotation_candidates_for(None);
+    }
+
+    pub(super) fn sync_rotation_candidates_for(
+        &mut self,
+        requested: Option<(&str, RotationOperation)>,
+    ) {
         self.rotation
             .set_quota_stale_after_ms(self.quota_stale_after_ms);
         let current_candidate_ids = self.candidates.keys().cloned().collect::<BTreeSet<_>>();
@@ -99,10 +121,25 @@ impl PoolScheduler {
             if self.retired_candidates.contains(&candidate.id) {
                 continue;
             }
-            let Some(rotation_candidate) = self.rotation_candidate(candidate) else {
+            let Some(mut rotation_candidate) = self.rotation_candidate(candidate) else {
                 continue;
             };
+            if let Some((model, RotationOperation::Image)) = requested
+                && candidate.native_images
+                && candidate.supports_model(model)
+            {
+                rotation_candidate.add_route(
+                    Self::rotation_route_key(model, RotationOperation::Image),
+                    model,
+                    RotationOperation::Image,
+                );
+            }
             let candidate_id = rotation_candidate.id.clone();
+            let projected_models = rotation_candidate
+                .routes
+                .values()
+                .map(|route| route.model.clone())
+                .collect::<BTreeSet<_>>();
             let _ = self.rotation.upsert(rotation_candidate);
             let auth_state = if candidate.health.is_eligible() {
                 RotationAuthState::Ready
@@ -136,9 +173,10 @@ impl PoolScheduler {
                 ),
             };
             let global_not_before_ms = candidate.cooldowns.get("*").copied().filter(|_| {
-                self.cooldown_reasons
+                self.cooldown_metadata
                     .get(&(candidate_id.clone(), "*".into()))
-                    != Some(&CooldownReason::Transient)
+                    .and_then(|metadata| metadata.reason)
+                    != Some(CooldownReason::Transient)
             });
             let global_rate = global_not_before_ms
                 .map_or(RotationRateState::Ready, |not_before_ms| {
@@ -163,15 +201,16 @@ impl PoolScheduler {
                 candidate.provider_credits_unlimited,
                 candidate.provider_credits_observed_at_ms,
             );
-            for model in &candidate.models {
+            for model in &projected_models {
                 let not_before_ms = candidate
                     .cooldowns
                     .iter()
                     .filter(|(scope, _)| scope.as_str() == "*" || scope.eq_ignore_ascii_case(model))
                     .filter(|(scope, _)| {
-                        self.cooldown_reasons
+                        self.cooldown_metadata
                             .get(&(candidate_id.clone(), (*scope).clone()))
-                            != Some(&CooldownReason::Transient)
+                            .and_then(|metadata| metadata.reason)
+                            != Some(CooldownReason::Transient)
                     })
                     .map(|(_, not_before_ms)| *not_before_ms)
                     .max();
@@ -234,7 +273,7 @@ impl PoolScheduler {
         if self.retired {
             return None;
         }
-        self.sync_all_rotation_candidates();
+        self.sync_rotation_candidates_for(Some((selection_request.model, operation)));
         self.rotation_request_from_synced_state(selection_request, operation)
     }
 
@@ -346,14 +385,38 @@ impl PoolScheduler {
         scope: &CandidateScope,
         now_ms: u64,
     ) -> bool {
-        !self.retired
-            && !self.retired_candidates.contains(&candidate.id)
-            && !self.execution_fences.contains_key(&candidate.id)
-            && !self
-                .capability_blocks
-                .contains(&(candidate.id.clone(), crate::model_id_key(model)))
-            && self.quota_reserve_allows(candidate, now_ms)
-            && candidate.is_configured(model, allowed_protocols, scope)
+        self.rotation_configuration_block(candidate, model, allowed_protocols, scope, now_ms)
+            .is_none()
+    }
+
+    pub(super) fn rotation_configuration_block(
+        &self,
+        candidate: &RuntimeCandidate,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+        now_ms: u64,
+    ) -> Option<super::super::rotation::RotationConfigurationBlock> {
+        use super::super::rotation::RotationConfigurationBlock as Block;
+        if self.retired {
+            return Some(Block::RuntimeRetired);
+        }
+        if self.retired_candidates.contains(&candidate.id) {
+            return Some(Block::CandidateRetired);
+        }
+        if self.execution_fences.contains_key(&candidate.id) {
+            return Some(Block::ExecutionFence);
+        }
+        if self
+            .capability_blocks
+            .contains(&(candidate.id.clone(), crate::model_id_key(model)))
+        {
+            return Some(Block::CapabilityBlocked);
+        }
+        if !self.quota_reserve_allows(candidate, now_ms) {
+            return Some(Block::QuotaReserve);
+        }
+        candidate.configuration_block(model, allowed_protocols, scope)
     }
 }
 

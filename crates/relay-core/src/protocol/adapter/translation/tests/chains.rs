@@ -4,6 +4,7 @@ use super::*;
 fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
     let capabilities = crate::model_metadata::ModelCapabilities {
         reasoning: Some(false),
+        interleaved_system: Some(true),
         ..Default::default()
     };
     for client in WireApi::ALL {
@@ -32,6 +33,23 @@ fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
                     }, &capabilities).unwrap_or_else(|error| panic!("{client:?} -> {upstream:?}, stream={streaming}, round={round}: {error}"));
                     let mut decoded = decode::request(upstream, prepared.upstream_body()).unwrap();
                     decode::resolve_tool_history(&mut decoded.messages).unwrap();
+                    let inline_messages = upstream == WireApi::Messages
+                        && matches!(client, WireApi::Responses | WireApi::ChatCompletions);
+                    if inline_messages {
+                        let notices = prepared.upstream_body()["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|message| message["role"] == "system")
+                            .collect::<Vec<_>>();
+                        assert_eq!(notices.len(), round);
+                        for (index, notice) in notices.iter().enumerate() {
+                            assert_eq!(
+                                notice["content"][0]["text"],
+                                format!("Synthetic instruction {index}")
+                            );
+                        }
+                    }
                     if client == WireApi::Messages {
                         assert_eq!(
                             decoded
@@ -100,6 +118,16 @@ fn every_adapter_preserves_long_parallel_tool_chains_and_reversed_results() {
                         request = super::architecture::append_tool_results(
                             client, request, &completed, true,
                         );
+                        if inline_messages {
+                            let field = if client == WireApi::Responses {
+                                "input"
+                            } else {
+                                "messages"
+                            };
+                            request[field].as_array_mut().unwrap().push(json!({
+                                "role":"system", "content":format!("Synthetic instruction {round}")
+                            }));
+                        }
                     }
                     previous = Some(completed.continuation);
                 }

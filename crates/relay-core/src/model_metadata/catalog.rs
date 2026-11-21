@@ -33,8 +33,38 @@ impl ModelMetadataCatalog {
     }
 
     pub fn apply_codex_capabilities(&self, model: &str, catalog_entry: &mut Value) {
-        self.capabilities_for(model).apply_to_codex(catalog_entry);
-        crate::catalog::set_codex_service_tiers(catalog_entry, &self.service_tiers_for(model));
+        self.apply_codex_capabilities_for_route(model, None, catalog_entry);
+    }
+
+    /// Project a selected endpoint without changing the shared model reference.
+    pub fn apply_codex_capabilities_for_route(
+        &self,
+        model: &str,
+        route: Option<&crate::ModelEndpointCapability>,
+        catalog_entry: &mut Value,
+    ) {
+        let capabilities = self.capabilities_for(model).for_route(route);
+        capabilities.apply_to_codex(catalog_entry);
+        if capabilities
+            .protocol_features_for_route(route)
+            .get(&crate::ProtocolFeature::Images)
+            == Some(&crate::CapabilityStatus::Unsupported)
+            && let Some(modalities) = catalog_entry
+                .get_mut("input_modalities")
+                .and_then(Value::as_array_mut)
+        {
+            modalities.retain(|modality| modality.as_str() != Some("image"));
+        }
+        let allowed = route.and_then(|route| route.service_tiers.as_deref());
+        let tiers = self
+            .service_tiers_for(model)
+            .into_iter()
+            .filter(|tier| {
+                *tier == crate::DefaultServiceTier::Standard
+                    || allowed.is_none_or(|allowed| allowed.contains(tier))
+            })
+            .collect::<Vec<_>>();
+        crate::catalog::set_codex_service_tiers(catalog_entry, &tiers);
     }
 
     pub fn service_tiers_for(&self, model: &str) -> Vec<crate::DefaultServiceTier> {
@@ -236,6 +266,25 @@ impl ModelMetadataCatalog {
             }
             return order::inferred_provider(model);
         };
+        self.resolved_provider(metadata)
+    }
+
+    /// Publisher identity from reference records and unambiguous registered
+    /// names only. Do not apply the Desktop presentation fallback to Hosted.
+    pub fn reference_publishers(&self) -> BTreeMap<String, String> {
+        self.entries
+            .keys()
+            .chain(self.leaf_matches.keys())
+            .chain(
+                self.alias_matches
+                    .iter()
+                    .filter_map(|(id, entry)| entry.as_ref().map(|_| id)),
+            )
+            .filter_map(|id| Some((id.clone(), self.resolved_provider(self.resolve(id)?)?)))
+            .collect()
+    }
+
+    fn resolved_provider(&self, metadata: &ModelMetadata) -> Option<String> {
         metadata
             .canonical_model_id
             .as_deref()

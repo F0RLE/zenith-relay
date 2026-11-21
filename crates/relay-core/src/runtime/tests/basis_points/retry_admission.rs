@@ -57,7 +57,7 @@ pub(super) async fn pool_runtime(
         Arc::new(|_| {}),
     )
     .unwrap();
-    for account in runtime.chatgpt_accounts.values_mut() {
+    for account in runtime.account_state.executors.values_mut() {
         account.basis_points_url = server.responses_url.clone();
     }
     runtime
@@ -77,6 +77,56 @@ fn observe_reservations(runtime: &Arc<GatewayRuntime>) -> Arc<AtomicUsize> {
         }
     });
     events
+}
+
+#[tokio::test]
+async fn incompatible_account_compaction_records_one_local_rejection() {
+    let server = AccessServer::start(json!([{"id":"gpt-test"}]), false).await;
+    let usage = Arc::new(Mutex::new(Vec::<crate::UsageEvent>::new()));
+    let captured = usage.clone();
+    let mut runtime = pool_runtime(&server, 2, false).await;
+    runtime.usage = Arc::new(move |event| crate::poison::mutex(&captured).push(event));
+    let runtime = Arc::new(runtime);
+    let (base, task) = super::recovery::gateway(runtime.clone()).await;
+    let response = bounded_client()
+        .post(format!("{base}/v1/responses/compact"))
+        .bearer_auth("local-secret")
+        .json(&json!({"model":"gpt-test","input":"private-preparation-sentinel"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "adapter_parameter_unsupported");
+    assert_eq!(body["error"]["param"], "endpoint");
+    assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+    let usage = crate::poison::mutex(&usage);
+    assert_eq!(usage.len(), 1);
+    let event = &usage[0];
+    assert_eq!(event.attempt, 0);
+    assert_eq!(event.source_id, "relay");
+    assert_eq!(event.http_status, 400);
+    assert!(!event.success);
+    assert!(event.candidate_id.is_none());
+    assert!(event.account_id.is_none());
+    assert!(event.total_tokens.is_none());
+    assert!(event.cooldown_scope.is_none());
+    assert_eq!(
+        event.upstream_error.as_ref().unwrap().parameter.as_deref(),
+        Some("endpoint")
+    );
+    assert!(
+        !serde_json::to_string(event)
+            .unwrap()
+            .contains("private-preparation-sentinel")
+    );
+    assert!(
+        runtime
+            .candidate_runtime_order()
+            .iter()
+            .all(|candidate| candidate.in_flight == 0)
+    );
+    task.abort();
 }
 
 #[tokio::test]
@@ -196,7 +246,15 @@ async fn incompatible_bps_pool_does_not_block_a_later_compatible_request() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(events.load(Ordering::SeqCst), 0);
         assert_eq!(server.state.generation_requests.load(Ordering::SeqCst), 0);
+        // Peer discovery completes in the background after admission can proceed.
+        let discovery = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.account_state.access_prefetch.lock(),
+        )
+        .await
+        .unwrap();
         assert_eq!(server.state.access_requests.load(Ordering::SeqCst), 5);
+        drop(discovery);
         {
             let scheduler = runtime.lock_scheduler();
             for index in 0..5 {
@@ -283,10 +341,17 @@ async fn incompatible_bps_route_can_fall_back_to_a_compatible_native_account() {
             }
             assert_eq!(events.load(Ordering::SeqCst), 2);
             // Catalog discovery is independent of execution admission.
+            let discovery = tokio::time::timeout(
+                Duration::from_secs(2),
+                runtime.account_state.access_prefetch.lock(),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 server.state.access_requests.load(Ordering::SeqCst),
                 bps_count
             );
+            drop(discovery);
             assert!(!runtime.lock_scheduler().is_retired());
             task.abort();
         }

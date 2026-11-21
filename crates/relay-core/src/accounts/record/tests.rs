@@ -199,6 +199,8 @@ fn model_discovery_preserves_independent_account_failures() {
         for (code, retryable) in [
             ("models_transport", true),
             ("models_forbidden", false),
+            ("models_http_status", false),
+            ("models_endpoint_not_found", false),
             ("models_unauthorized", false),
         ] {
             let mut auth_state = initial_auth;
@@ -244,7 +246,12 @@ fn model_discovery_transient_failure_preserves_terminal_catalog_failure() {
         "models_unauthorized",
         false,
     );
-    for (code, retryable) in [("models_transport", true), ("models_forbidden", false)] {
+    for (code, retryable) in [
+        ("models_transport", true),
+        ("models_forbidden", false),
+        ("models_endpoint_not_found", false),
+        ("models_http_status", false),
+    ] {
         apply_model_discovery_failure(
             &mut auth_state,
             &mut health,
@@ -328,6 +335,70 @@ fn model_discovery_failure_rechecks_legacy_block_without_granting_access() {
     assert_eq!(auth, AccountAuthState::Active);
     assert_eq!(health, AccountHealthState::Degraded);
     assert_eq!(code.as_deref(), Some("models_forbidden"));
+}
+
+#[test]
+fn model_discovery_catalog_failures_do_not_block_a_healthy_account() {
+    for code in [
+        "models_http_status",
+        "models_endpoint_not_found",
+        "models_invalid_response",
+        "models_response_too_large",
+        "models_upstream",
+    ] {
+        let mut auth = AccountAuthState::Active;
+        let mut health = AccountHealthState::Healthy;
+        let mut last_error = None;
+        apply_model_discovery_failure(&mut auth, &mut health, &mut last_error, code, false);
+        assert_eq!(auth, AccountAuthState::Active);
+        assert_eq!(health, AccountHealthState::Degraded, "{code}");
+        assert_eq!(last_error.as_deref(), Some(code));
+        assert!(
+            crate::account_candidate_health(
+                auth,
+                health,
+                crate::quota::SubscriptionStatus::Active,
+                last_error.as_deref(),
+            )
+            .is_eligible()
+        );
+
+        health = AccountHealthState::Unhealthy;
+        assert!(repair_model_discovery_block(auth, &mut health, Some(code)));
+        assert_eq!(health, AccountHealthState::Degraded);
+        assert_eq!(last_error.as_deref(), Some(code));
+        assert!(!repair_model_discovery_block(auth, &mut health, Some(code)));
+    }
+}
+
+#[test]
+fn model_discovery_catalog_repair_preserves_authentication_and_real_blocks() {
+    for auth in [
+        AccountAuthState::Active,
+        AccountAuthState::Error,
+        AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+    ] {
+        for code in [
+            "models_http_status",
+            "models_endpoint_not_found",
+            "models_unauthorized",
+            "models_invalid_access_token",
+            "models_invalid_account_id",
+            "workspace_disabled",
+        ] {
+            for initial_health in [AccountHealthState::Unhealthy, AccountHealthState::Blocked] {
+                if auth == AccountAuthState::Active
+                    && initial_health == AccountHealthState::Unhealthy
+                    && matches!(code, "models_http_status" | "models_endpoint_not_found")
+                {
+                    continue;
+                }
+                let mut health = initial_health;
+                assert!(!repair_model_discovery_block(auth, &mut health, Some(code)));
+                assert_eq!(health, initial_health);
+            }
+        }
+    }
 }
 
 #[test]

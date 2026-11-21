@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { startupAssets } from "./frontend-bundle-assets.mjs";
 
-const distDirectory = resolve(import.meta.dirname, "../../src/dist");
+const distDirectory = resolve(import.meta.dirname, "../../desktop/frontend/dist");
 const indexPath = join(distDirectory, "index.html");
 const limits = {
   initialJavaScript: 150 * 1024,
@@ -54,7 +54,7 @@ const initialAssets = [...new Set([...htmlAssets, ...startupAssets(manifest).map
 const initialJavaScript = initialAssets.filter((path) => path.endsWith(".js"));
 const initialCss = initialAssets.filter((path) => path.endsWith(".css"));
 const allAssets = collectAssets(distDirectory);
-const registry = JSON.parse(readFileSync(new URL("../../src/src/i18n/registry.json", import.meta.url), "utf8"));
+const registry = JSON.parse(readFileSync(new URL("../../desktop/frontend/src/i18n/registry.json", import.meta.url), "utf8"));
 const languageAssets = registry.map(locale => {
   const entry = manifest[`src/i18n/locales/${locale.code}.${locale.format}`];
   if (!entry) throw new Error(`Missing lazy language pack: ${locale.code}`);

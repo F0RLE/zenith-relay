@@ -14,7 +14,7 @@ const targets = [
 test("CodeQL models only exact test-only trusted-path return values", () => {
   const pack = Bun.YAML.parse(readFileSync(new URL("codeql-pack.yml", modelsRoot), "utf8"));
   expect(pack.library).toBe(true);
-  expect(pack.extensionTargets).toEqual({ "codeql/rust-all": "^0.2.24" });
+  expect(pack.extensionTargets).toEqual({ "codeql/rust-all": "^0.2.25" });
   expect(pack.dataExtensions).toEqual(["models/*.json"]);
   expect(pack.dependencies).toBeUndefined();
 
@@ -39,7 +39,7 @@ test("operator-path models remain limited to ignored read-only public-catalog pr
 });
 
 test("the modeled FIFO channel validates its parent's private fixture before use", () => {
-  const source = readFileSync(new URL("../../src-tauri/src/local_pool/profiles/codex/tests/binding_safety/direct_reads.rs", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../../desktop/src-tauri/src/local_pool/profiles/codex/tests/binding_safety/direct_reads.rs", import.meta.url), "utf8");
   expect(source).toMatch(/#\[cfg\(unix\)\]\s*fn fifo_child_root\(\) -> Option<PathBuf>/);
   expect(source).toContain("assert_eq!(root.parent(), Some(temporary_directory.as_path()))");
   expect(source).toContain('.strip_prefix("zenith-relay-profile-backup-fifo-")');
@@ -51,10 +51,10 @@ test("the modeled FIFO channel validates its parent's private fixture before use
 test("modeled fixture wrappers remain test-only and reserve through the shared helper", () => {
   const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
   expect(source("crates/relay-core/src/lib.rs")).toMatch(/#\[cfg\(test\)\]\s*mod test_support;/);
-  expect(source("src-tauri/src/files.rs")).toMatch(/#\[cfg\(test\)\]\s*mod test_support;/);
+  expect(source("desktop/src-tauri/src/files.rs")).toMatch(/#\[cfg\(test\)\]\s*mod test_support;/);
   const core = source("crates/relay-core/src/test_support.rs");
   expect(core).toContain("SystemRandom::new().fill(&mut random).unwrap()");
   expect(core).toContain("fixture_root::create(label, &hex::encode(random))");
-  expect(source("src-tauri/src/files/test_support.rs"))
+  expect(source("desktop/src-tauri/src/files/test_support.rs"))
     .toContain("fixture_root::create(label, &uuid::Uuid::new_v4().simple().to_string())");
 });

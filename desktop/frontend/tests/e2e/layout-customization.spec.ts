@@ -1,0 +1,110 @@
+import { expect, test, type Locator, type Page } from "../bun-playwright";
+import { installTauriMock } from "./tauri-mock";
+
+async function columnOrder(table: Locator) {
+  return table.locator("thead th[data-column]").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")));
+}
+
+async function dragColumn(page: Page, table: Locator, column: string, target: string) {
+  const sourceBox = await table.locator(`th[data-column="${column}"] .usage-column-heading`).boundingBox();
+  const targetBox = await table.locator(`th[data-column="${target}"]`).boundingBox();
+  if (!sourceBox || !targetBox) throw new Error("Column header is not visible");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width - 2, targetBox.y + targetBox.height / 2, { steps: 5 });
+  await page.mouse.up();
+}
+
+async function expectColumnAlignment(table: Locator) {
+  const centered = await table.evaluate((element) => element.classList.contains("usage-request-table"));
+  const alignmentByColumn: Record<string, string> = {
+    time: "left", model: "left", name: "left", connection: "left",
+    timing: "right", speed: "right", tokens: "right", equivalent: "right",
+    requests: "right", success: "right", total: "right", input: "right", output: "right", cache: "right",
+  };
+  const cells = await table.locator("th[data-column], td[data-column]").evaluateAll((elements) => elements.map((element) => ({
+    column: element.getAttribute("data-column")!,
+    alignment: getComputedStyle(element).textAlign,
+  })));
+  expect(cells.length).toBeGreaterThan(0);
+  for (const { column, alignment } of cells) {
+    expect(alignment, `Alignment of ${column}`).toBe(centered ? "center" : alignmentByColumn[column] ?? "center");
+  }
+}
+
+test("usage report columns move with pointer input and persist independently", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, usageFailure: true, accountCount: 4 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+
+  let table = page.locator(".usage-request-table");
+  await dragColumn(page, table, "time", "status");
+  await expect.poll(() => columnOrder(table)).toEqual(["status", "time", "model", "reasoning", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await expectColumnAlignment(table);
+
+  await page.getByRole("tab", { name: "Models" }).click();
+  table = page.locator(".usage-aggregate-table");
+  await dragColumn(page, table, "name", "requests");
+  await expect.poll(() => columnOrder(table)).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
+  await expectColumnAlignment(table);
+
+  await page.getByRole("tab", { name: "Pool members" }).click();
+  table = page.locator(".usage-aggregate-table");
+  await dragColumn(page, table, "name", "success");
+  await expect.poll(() => columnOrder(table)).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
+  await expectColumnAlignment(table);
+
+  await page.getByRole("tab", { name: "Errors" }).click();
+  table = page.locator(".usage-error-table");
+  await dragColumn(page, table, "time", "model");
+  await expect.poll(() => columnOrder(table)).toEqual(["model", "time", "connection", "origin", "error", "request"]);
+  await expectColumnAlignment(table);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect.poll(() => columnOrder(page.locator(".usage-request-table"))).toEqual(["status", "time", "model", "reasoning", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await page.getByRole("tab", { name: "Models" }).click();
+  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
+  await page.getByRole("tab", { name: "Pool members" }).click();
+  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
+  await page.getByRole("tab", { name: "Errors" }).click();
+  await expect.poll(() => columnOrder(page.locator(".usage-error-table"))).toEqual(["model", "time", "connection", "origin", "error", "request"]);
+
+});
+
+test("account grouping is explicit and saved on connections", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountCount: 4 });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const grouping = page.getByRole("button", { name: "Group by plan" });
+  await expect(grouping).toHaveAttribute("aria-pressed", "false");
+  await grouping.click();
+  await expect(grouping).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".account-list .account-plan-group-heading")).toHaveCount(4);
+  expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
+    const rect = card.getBoundingClientRect();
+    return rect.width >= 280 && rect.width <= 340 && getComputedStyle(card).gridColumnStart === "auto";
+  }))).toBe(true);
+  await page.setViewportSize({ width: 600, height: 760 });
+  expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
+    const style = getComputedStyle(card);
+    return style.gridColumnStart === "auto" && style.gridColumnEnd === "auto";
+  }))).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await page.mouse.move(1, 1);
+  await page.screenshot({ path: "output/playwright/account-groups-en-1160x760.png" });
+
+  await page.reload();
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Group by plan" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("tab", { name: "Sources" }).click();
+  const sourceCards = page.locator(".source-card");
+  await expect(sourceCards).toHaveCount(1);
+  expect(await sourceCards.evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
+  await page.screenshot({ path: "output/playwright/source-cards-en-600x760.png" });
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Group by plan" })).toHaveCount(0);
+  await expect(page.locator(".pool-member-list .account-plan-group-heading")).toHaveCount(0);
+});

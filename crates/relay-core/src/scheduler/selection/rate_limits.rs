@@ -12,6 +12,8 @@ pub(super) struct RateLimitObservation {
     bucket: [u8; 32],
     observed_at_ms: u64,
     retry_at_ms: u64,
+    /// Evidence for this exact bucket, separate from other limits on the model.
+    provider_clock: Option<ProviderClock>,
     backoff_ms: u64,
 }
 
@@ -32,12 +34,28 @@ impl PoolScheduler {
             now_ms.saturating_sub(observation.observed_at_ms) < OBSERVATION_TTL_MS
         });
         let model = request.scope.to_ascii_lowercase();
-        let previous = self
+        let matching = self
             .shared_rate_limits
             .iter()
-            .filter(|((_, scope), observation)| *scope == model && observation.bucket == bucket)
+            .filter(|((_, scope), observation)| *scope == model && observation.bucket == bucket);
+        let previous = matching
+            .clone()
             .map(|(_, observation)| observation)
             .max_by_key(|observation| observation.retry_at_ms);
+        let provider_clock = ProviderClock::latest(
+            request
+                .provider_clock
+                .filter(|clock| {
+                    clock.not_before_ms <= request.retry_at_ms && clock.not_before_ms > now_ms
+                })
+                .into_iter()
+                .chain(matching.filter_map(|(_, observation)| {
+                    observation
+                        .provider_clock
+                        .filter(|clock| clock.not_before_ms > now_ms)
+                })),
+        );
+        request.provider_clock = provider_clock;
         let backoff_ms = previous.map_or(MIN_BACKOFF_MS, |observation| {
             if observation.retry_at_ms <= now_ms {
                 observation.backoff_ms.saturating_mul(2)
@@ -67,6 +85,7 @@ impl PoolScheduler {
                 bucket,
                 observed_at_ms: now_ms,
                 retry_at_ms: request.retry_at_ms,
+                provider_clock,
                 backoff_ms,
             },
         );
@@ -74,6 +93,7 @@ impl PoolScheduler {
         for ((member, scope), observation) in &mut self.shared_rate_limits {
             if *scope == model && observation.bucket == bucket {
                 observation.retry_at_ms = request.retry_at_ms;
+                observation.provider_clock = provider_clock;
                 observation.backoff_ms = backoff_ms;
                 members.push(member.clone());
             }

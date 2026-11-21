@@ -1,17 +1,10 @@
 use super::*;
 
-fn desktop_aliases(model: &str) -> [String; 4] {
-    use sha2::{Digest, Sha256};
-    let legacy_suffix = Sha256::digest(crate::model_id_key(model).as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("-");
+fn desktop_aliases(model: &str) -> [String; 3] {
     [
         crate::claude_desktop_model_alias(model),
         crate::claude_desktop_reasoning_model_alias(model),
-        format!("claude-zenith-{legacy_suffix}"),
-        format!("claude-fable-5-zenith-{legacy_suffix}"),
+        crate::claude_desktop_catalog_model_alias(model),
     ]
 }
 
@@ -79,7 +72,25 @@ fn claude_desktop_aliases_resolve_real_models_without_changing_other_client_ids(
     assert_resolution(&runtime, "claude-fable-5-zenith-invalid", None);
     assert_resolution(&runtime, "claude-sonnet-5-relay-invalid", None);
     assert_resolution(&runtime, "claude-fable-5-relay-invalid", None);
+    assert_resolution(&runtime, "claude-relay-invalid", None);
     assert_resolution(&runtime, "unknown", None);
+}
+
+#[test]
+fn retired_claude_desktop_aliases_do_not_resolve_pool_models() {
+    use sha2::{Digest, Sha256};
+    let model = "gpt-test";
+    let runtime = desktop_runtime(&[model]);
+    let suffix = Sha256::digest(crate::model_id_key(model).as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join("-");
+    for prefix in ["claude-zenith-", "claude-fable-5-zenith-"] {
+        let alias = format!("{prefix}{suffix}");
+        assert_resolution(&runtime, &alias, None);
+        assert_resolution(&runtime, &alias.to_uppercase(), None);
+    }
 }
 
 #[test]
@@ -136,19 +147,17 @@ fn claude_desktop_aliases_do_not_shadow_or_admit_raw_reserved_names() {
         let runtime = desktop_runtime(&[
             &alias,
             "gpt-test",
-            "claude-zenith-unmanaged",
-            "claude-fable-5-zenith-unmanaged",
             "claude-sonnet-5-relay-unmanaged",
             "claude-fable-5-relay-unmanaged",
+            "claude-relay-unmanaged",
         ]);
         assert_resolution(&runtime, &alias, Some("gpt-test"));
         for nested_alias in desktop_aliases(&alias) {
             assert_resolution(&runtime, &nested_alias, Some(&alias));
         }
-        assert_resolution(&runtime, "claude-zenith-unmanaged", None);
-        assert_resolution(&runtime, "claude-fable-5-zenith-unmanaged", None);
         assert_resolution(&runtime, "claude-sonnet-5-relay-unmanaged", None);
         assert_resolution(&runtime, "claude-fable-5-relay-unmanaged", None);
+        assert_resolution(&runtime, "claude-relay-unmanaged", None);
 
         let without_original = desktop_runtime(&[&alias]);
         assert_resolution(&without_original, &alias, None);

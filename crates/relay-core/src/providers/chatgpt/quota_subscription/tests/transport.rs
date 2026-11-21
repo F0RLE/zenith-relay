@@ -332,6 +332,10 @@ async fn incomplete_error_bodies_preserve_http_classification_and_retry_after() 
         );
         assert_eq!(failure.endpoint_stage(), Some("accounts_check"));
         assert_eq!(failure.response_format(), Some("html"));
+        assert_eq!(
+            failure.transport_failure(),
+            (status == 200).then_some("body_transport")
+        );
         assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
     }
 }

@@ -48,7 +48,13 @@ async fn delayed_invalid_grant_cannot_block_a_readded_identical_bearer_incarnati
         let persistence = persistence.clone();
         tokio::spawn(async move {
             authority
-                .prepare_and_persist("account", 10, 0, adapter.as_ref(), persistence.as_ref())
+                .prepare_and_persist_with_revision(
+                    "account",
+                    10,
+                    0,
+                    adapter.as_ref(),
+                    persistence.as_ref(),
+                )
                 .await
         })
     };
@@ -59,13 +65,13 @@ async fn delayed_invalid_grant_cannot_block_a_readded_identical_bearer_incarnati
         .await
         .unwrap();
     adapter.release.notify_one();
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .unwrap()
-            .unwrap(),
-        Err(TokenAuthorityError::AccountNotFound)
-    ));
+    let failure = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(failure.error, TokenAuthorityError::AccountNotFound);
+    assert!(failure.revision.unwrap().guard().is_none());
     assert_eq!(
         authority.auth_state("account").await,
         Some(AccountAuthState::Active)
@@ -118,6 +124,51 @@ async fn old_401_cannot_invalidate_a_readded_identical_bearer_and_generation() {
     assert_eq!(current.expires_at_ms(), tokens.expires_at_ms());
     assert!(persistence.auth_states.lock().unwrap().is_empty());
     assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn failed_preparation_revision_is_current_only_until_login_replacement() {
+    let authority = TokenAuthority::new(1).unwrap();
+    let adapter = RefreshOnce {
+        calls: AtomicUsize::new(0),
+    };
+    let persistence = CapturePersistence::default();
+    let missing = authority
+        .prepare_and_persist_with_revision("account", 10, 0, &adapter, &persistence)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.error, TokenAuthorityError::AccountNotFound);
+    assert!(missing.revision.is_none());
+
+    let tokens = TokenSet::access_only("synthetic-same-bearer", Some(1), 0).unwrap();
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    let failure = authority
+        .prepare_and_persist_with_revision("account", 10, 0, &adapter, &persistence)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.error, TokenAuthorityError::AccessTokenExpired);
+    let revision = failure.revision.unwrap();
+    assert!(revision.guard().is_some());
+    assert_eq!(
+        authority.auth_state("account").await,
+        Some(AccountAuthState::DegradedAccessOnly)
+    );
+
+    authority
+        .register("account", tokens.clone(), AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert!(revision.guard().is_none());
+    assert!(authority.remove("account"));
+    authority
+        .register("account", tokens, AccountAuthState::Active)
+        .await
+        .unwrap();
+    assert!(revision.guard().is_none());
+    assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

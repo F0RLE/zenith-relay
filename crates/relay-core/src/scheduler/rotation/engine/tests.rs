@@ -1,8 +1,13 @@
 use super::*;
 
 mod cache_diagnostics;
+mod decision_trace;
+mod expiry_spending;
 mod latency_diagnostics;
+mod priced;
 mod quota_affinity;
+mod scenarios;
+mod weighted_credit;
 
 fn candidate(id: &str, priority: i32, weight: u32) -> RotationCandidate {
     let mut candidate = RotationCandidate::new(id, "responses:gpt", "gpt-6");
@@ -27,6 +32,23 @@ fn preferred_request(id: u64, candidate_id: &str) -> RotationRequest {
     let mut request = request(id);
     request.preferred = Some(candidate_id.to_owned());
     request
+}
+
+fn record_ready_latency(
+    engine: &mut RotationEngine,
+    candidate_id: &str,
+    latency_ms: u64,
+    now_ms: u64,
+) {
+    let minimum = LatencyWindow::default().snapshot(now_ms).minimum_samples;
+    for _ in 0..minimum {
+        engine.observe_first_output_latency(
+            candidate_id,
+            "responses:gpt",
+            Some(latency_ms),
+            now_ms,
+        );
+    }
 }
 
 #[test]
@@ -129,6 +151,9 @@ fn cache_affinity_load_margin_preserves_quota_and_independent_load_balancing() {
 
     assert!(engine.set_quota_remaining("idle", Some(9_000), Some(100)));
     let selected = engine.select(&preferred_request(4, "warm"), 100).unwrap();
+    assert_eq!(selected.candidate_id, "warm");
+    assert!(engine.set_quota_remaining("warm", Some(1_000), Some(100)));
+    let selected = engine.select(&preferred_request(5, "warm"), 100).unwrap();
     assert_eq!(selected.candidate_id, "idle");
     assert_eq!(selected.reason, RotationSelectionReason::QuotaHeadroom);
     assert!(engine.release_unstarted(busy.lease_id));
@@ -174,32 +199,23 @@ fn cache_affinity_load_margin_compares_normalized_physical_capacity() {
 
 #[test]
 fn cache_affinity_load_margin_does_not_override_health_or_latency() {
-    for warm_health in [
-        HealthRuntime {
-            failure_score_milli: HEALTH_FAILURE_SWITCH_MARGIN_MILLI,
-            observed_at_ms: Some(100),
-            ..HealthRuntime::default()
-        },
-        HealthRuntime {
-            first_output_latency_ms: Some(1_000),
-            latency_observed_at_ms: Some(100),
-            ..HealthRuntime::default()
-        },
-    ] {
+    for use_latency in [false, true] {
         let mut warm = candidate("warm", 0, 1);
         warm.max_concurrency = 4;
         let mut engine = engine_with([warm, candidate("idle", 0, 1)]);
-        engine
-            .health
-            .insert(("warm".into(), "responses:gpt".into()), warm_health);
-        engine.health.insert(
-            ("idle".into(), "responses:gpt".into()),
-            HealthRuntime {
-                first_output_latency_ms: Some(100),
-                latency_observed_at_ms: Some(100),
-                ..HealthRuntime::default()
-            },
-        );
+        if use_latency {
+            record_ready_latency(&mut engine, "warm", 1_000, 100);
+            record_ready_latency(&mut engine, "idle", 100, 100);
+        } else {
+            engine.health.insert(
+                ("warm".into(), "responses:gpt".into()),
+                HealthRuntime {
+                    failure_score_milli: HEALTH_FAILURE_SWITCH_MARGIN_MILLI,
+                    observed_at_ms: Some(100),
+                    ..HealthRuntime::default()
+                },
+            );
+        }
         let busy = engine.reserve(&request(1).with_owner("warm"), 100).unwrap();
         assert_eq!(
             engine
@@ -278,7 +294,7 @@ fn measure_cache_affinity_under_parallel_load() {
 }
 
 #[test]
-fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
+fn balanced_quota_preserves_affinity_until_the_warm_member_is_low() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
     for (id, remaining) in [("a", 8_100), ("b", 8_000)] {
         assert!(engine.sync_candidate_state(
@@ -300,6 +316,14 @@ fn balanced_quota_margin_preserves_affinity_without_hiding_a_material_lead() {
             .select(&preferred_request(2, "b"), 100)
             .unwrap()
             .candidate_id,
+        "b"
+    );
+    assert!(engine.set_quota_remaining("b", Some(1_000), Some(100)));
+    assert_eq!(
+        engine
+            .select(&preferred_request(3, "b"), 100)
+            .unwrap()
+            .candidate_id,
         "a"
     );
 }
@@ -312,7 +336,11 @@ fn cache_owner_rebalance_uses_fresh_quota_margins_not_completion_order() {
         (Some(8_499), Some(8_000), false),
         (Some(8_500), Some(8_000), false),
         (Some(8_999), Some(8_000), false),
-        (Some(9_000), Some(8_000), true),
+        (Some(9_000), Some(8_000), false),
+        (Some(10_000), Some(1_001), false),
+        (Some(1_999), Some(1_000), false),
+        (Some(2_000), Some(1_000), true),
+        (Some(1_001), Some(1), true),
         (Some(9_000), None, true),
         (None, Some(8_000), false),
         (None, None, false),
@@ -528,7 +556,12 @@ fn soft_failure_score_decays_after_its_half_life() {
 #[test]
 fn latency_is_only_used_as_a_soft_tie_breaker_in_automatic_mode() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
-    for (request_id, candidate_id, latency_ms) in [(1, "a", 100), (2, "b", 1_000)] {
+    for request_id in 1..=40 {
+        let (candidate_id, latency_ms) = if request_id % 2 == 1 {
+            ("a", 100)
+        } else {
+            ("b", 1_000)
+        };
         let lease = engine
             .reserve(&request(request_id).with_owner(candidate_id), 0)
             .unwrap();
@@ -543,11 +576,34 @@ fn latency_is_only_used_as_a_soft_tie_breaker_in_automatic_mode() {
                 &budget,
                 0,
                 Some(latency_ms),
+                true,
             )
             .unwrap();
     }
 
-    assert_eq!(engine.select(&request(3), 0).unwrap().candidate_id, "a");
+    assert_eq!(
+        engine
+            .select(&preferred_request(41, "b"), 0)
+            .unwrap()
+            .candidate_id,
+        "a"
+    );
+    assert_eq!(
+        engine
+            .select(&request(42).with_owner("b"), 0)
+            .unwrap()
+            .candidate_id,
+        "b"
+    );
+    engine.set_mode(RotationMode::RoundRobin);
+    let selected = (43..=46)
+        .map(|id| {
+            let lease = engine.reserve(&request(id), 0).unwrap();
+            assert!(engine.release_unstarted(lease.lease_id));
+            lease.candidate_id
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(selected, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
 }
 
 #[test]
@@ -601,7 +657,7 @@ fn soft_health_uses_a_common_baseline_before_affinity_and_weights() {
 #[test]
 fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
-    engine.observe_first_output_latency("a", "responses:gpt", Some(100), 0);
+    record_ready_latency(&mut engine, "a", 100, 0);
     assert_eq!(
         engine
             .select(&preferred_request(1, "b"), 0)
@@ -609,7 +665,7 @@ fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
             .candidate_id,
         "b"
     );
-    engine.observe_first_output_latency("b", "responses:gpt", Some(1_000), 0);
+    record_ready_latency(&mut engine, "b", 1_000, 0);
     assert_eq!(
         engine
             .select(&preferred_request(2, "b"), 0)
@@ -629,8 +685,8 @@ fn missing_and_stale_latency_do_not_block_ordinary_rotation() {
 #[test]
 fn future_latency_observations_do_not_override_fresh_owner_preference() {
     let mut engine = engine_with([candidate("a", 0, 1), candidate("b", 0, 1)]);
-    engine.observe_first_output_latency("a", "responses:gpt", Some(1), 101);
-    engine.observe_first_output_latency("b", "responses:gpt", Some(1_000), 100);
+    record_ready_latency(&mut engine, "a", 1, 101);
+    record_ready_latency(&mut engine, "b", 1_000, 100);
     assert_eq!(
         engine
             .select(&preferred_request(1, "b"), 100)
@@ -690,7 +746,7 @@ fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations()
         health: HealthObservation::Success,
     };
     engine
-        .settle_with_latency(lease.lease_id, observation, &budget, 10, Some(100))
+        .settle_with_latency(lease.lease_id, observation, &budget, 10, Some(100), true)
         .unwrap();
 
     assert_eq!(
@@ -703,7 +759,7 @@ fn success_latency_uses_the_lease_route_and_does_not_update_sibling_operations()
             .contains_key(&("a".to_owned(), "responses:gpt".to_owned()))
     );
     assert_eq!(
-        engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500)),
+        engine.settle_with_latency(lease.lease_id, observation, &budget, 20, Some(500), true),
         Err(SettlementError::UnknownLease)
     );
     assert_eq!(
@@ -729,6 +785,7 @@ fn late_success_latency_cannot_update_a_readded_candidate() {
             &budget,
             10,
             Some(100),
+            true,
         )
         .unwrap();
 
@@ -1135,6 +1192,7 @@ fn late_success_does_not_clear_a_newer_failure() {
             &previous_budget,
             2,
             Some(100),
+            true,
         )
         .unwrap();
     assert_eq!(engine.circuit("a", "responses:gpt"), before);

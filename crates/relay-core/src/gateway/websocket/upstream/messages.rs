@@ -1,83 +1,5 @@
 use super::super::*;
 
-pub(super) async fn initial_application_messages(
-    upstream: &mut UpstreamWebSocket,
-    origin: ErrorOrigin,
-    expected_model: Option<&str>,
-) -> Result<Vec<UpstreamMessage>, GatewayFailure> {
-    let mut messages = Vec::new();
-    let mut buffered_bytes = 0_usize;
-    loop {
-        let message = first_application_message(upstream, origin).await?;
-        let message_bytes = match &message {
-            UpstreamMessage::Text(text) => text.len(),
-            UpstreamMessage::Binary(bytes) => bytes.len(),
-            _ => 0,
-        };
-        buffered_bytes = buffered_bytes.saturating_add(message_bytes);
-        if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
-            return Err(GatewayFailure::message_too_large(origin));
-        }
-        if expected_model.is_some_and(|expected| message_serves_rejected_model(&message, expected))
-        {
-            // A terminal response may be the first frame and already contain
-            // generated output. Its rejection must not authorize replay.
-            if initial_message_state(&message).0 {
-                messages.push(message);
-                return Ok(messages);
-            }
-            return Err(GatewayFailure::classified(
-                StatusCode::NOT_FOUND,
-                error_codes::UPSTREAM_ROUTE_DEGRADED,
-                origin,
-            ));
-        }
-        let (has_generation, terminal) = initial_message_state(&message);
-        let committed = has_generation || terminal.outcome.is_some();
-        messages.push(message);
-        if committed {
-            return Ok(messages);
-        }
-    }
-}
-
-async fn first_application_message(
-    upstream: &mut UpstreamWebSocket,
-    origin: ErrorOrigin,
-) -> Result<UpstreamMessage, GatewayFailure> {
-    let mut heartbeat = interval_at(
-        TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
-        WEBSOCKET_HEARTBEAT_INTERVAL,
-    );
-    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = heartbeat.tick() => {
-                send_message(upstream, UpstreamMessage::Ping(Default::default()))
-                    .await
-                    .map_err(|_| GatewayFailure::transport(origin))?;
-            }
-            message = upstream.next() => {
-                match message {
-                    Some(Ok(message @ (UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)))) => {
-                        return Ok(message);
-                    }
-                    Some(Ok(UpstreamMessage::Ping(ping_payload))) => {
-                        send_message(upstream, UpstreamMessage::Pong(ping_payload))
-                            .await
-                            .map_err(|_| GatewayFailure::transport(origin))?;
-                    }
-                    Some(Ok(UpstreamMessage::Pong(_))) => {}
-                    Some(Ok(UpstreamMessage::Close { .. })) | None => {
-                        return Err(GatewayFailure::closed(origin));
-                    }
-                    Some(Err(_)) => return Err(GatewayFailure::transport(origin)),
-                }
-            }
-        }
-    }
-}
-
 pub(in crate::gateway::websocket) fn first_message_terminal(
     message: &UpstreamMessage,
 ) -> Option<EventTerminal> {
@@ -101,7 +23,9 @@ pub(in crate::gateway::websocket) fn message_serves_rejected_model(
     })
 }
 
-pub(super) fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTerminal) {
+pub(in crate::gateway::websocket) fn initial_message_state(
+    message: &UpstreamMessage,
+) -> (bool, EventTerminal) {
     let upstream_message_bytes = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
@@ -121,7 +45,9 @@ pub(super) fn initial_message_state(message: &UpstreamMessage) -> (bool, EventTe
     )
 }
 
-pub(super) fn initial_messages_are_empty_incomplete(messages: &[UpstreamMessage]) -> bool {
+pub(in crate::gateway::websocket) fn initial_messages_are_empty_incomplete(
+    messages: &[UpstreamMessage],
+) -> bool {
     let payloads = messages
         .iter()
         .filter_map(|message| match message {

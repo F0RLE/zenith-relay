@@ -1,0 +1,122 @@
+use super::super::{
+    ImportItemError, ImportedCredentialMaterial, ItemResult, credential_item_error,
+    find_existing_account, proxy_item_error,
+};
+use crate::local_pool::accounts::NativeSecretBackend;
+use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
+use crate::local_pool::accounts::proxy::effective_proxy_config;
+use crate::local_pool::models::{GatewaySettings, LocalAccountRecord};
+use crate::local_pool::state::DesktopState;
+use uuid::Uuid;
+use zenith_relay_core::error_codes;
+
+type ReconciledImportCredentials =
+    zenith_relay_core::providers::chatgpt::connector::import::ResolvedImport<LocalAccountRecord>;
+
+/// Match imported material to a local account and keep secrets the import did
+/// not replace.
+pub(super) fn reconcile_imported_credentials(
+    state: &DesktopState,
+    credential_store: &CredentialStore<NativeSecretBackend>,
+    settings: &GatewaySettings,
+    issued_at_ms: u64,
+    mut material: ImportedCredentialMaterial,
+    bundle_proxy_url: Option<String>,
+) -> ItemResult<ReconciledImportCredentials> {
+    let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
+        ImportItemError::new(
+            error_codes::PROVIDER_ACCOUNT_ID_MISSING,
+            "ChatGPT account id is missing from imported credentials",
+        )
+    })?;
+    let existing_account = find_existing_account(
+        state,
+        credential_store,
+        provider_account_id,
+        material.provider_user_id.as_deref(),
+        material.email.as_deref(),
+        material.oauth_client_kind,
+    )?;
+    let local_account_id = existing_account
+        .as_ref()
+        .map(|account| account.account.id.clone())
+        .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
+    if existing_account.is_some() && material.siwc_registration.is_some() {
+        return Err(ImportItemError::new(
+            error_codes::DUPLICATE_ITEM,
+            "SIWC registration already exists; sign in again on the existing connection instead of replacing its tokens",
+        ));
+    }
+    let old_credential = credential_store
+        .load(&local_account_id)
+        .map_err(credential_item_error)?;
+    if old_credential
+        .as_ref()
+        .is_some_and(|stored| stored.oauth_client_kind() != material.oauth_client_kind)
+    {
+        return Err(ImportItemError::recovery(
+            "import cannot replace credentials from a different OAuth client",
+        ));
+    }
+    let preserved_refresh_token = material.refresh_token.is_none()
+        && old_credential
+            .as_ref()
+            .and_then(StoredCodexCredentials::refresh_token)
+            .is_some();
+    if preserved_refresh_token {
+        material.refresh_token = old_credential
+            .as_ref()
+            .and_then(StoredCodexCredentials::refresh_token)
+            .map(str::to_string);
+    }
+    let generation = old_credential
+        .as_ref()
+        .map(StoredCodexCredentials::generation)
+        .into_iter()
+        .chain(
+            existing_account
+                .as_ref()
+                .map(|account| account.account.token_generation),
+        )
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let subscription_active_until_ms = material.subscription_active_until_ms;
+    let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
+    if let Some(previous_credentials) = old_credential.as_ref() {
+        credentials = credentials
+            .fill_missing_login_from(previous_credentials)
+            .with_proxy_route(
+                previous_credentials.proxy_url().map(str::to_owned),
+                previous_credentials.bypass_common_proxy(),
+            )
+            .map_err(credential_item_error)?;
+    } else if existing_account.is_none() && bundle_proxy_url.is_some() {
+        credentials = credentials
+            .with_proxy_route(bundle_proxy_url, false)
+            .map_err(credential_item_error)?;
+    }
+    let proxy = effective_proxy_config(settings, &credentials).map_err(proxy_item_error)?;
+    let provider_account_id = credentials
+        .provider_account_id()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ImportItemError::new(
+                error_codes::PROVIDER_ACCOUNT_ID_MISSING,
+                "ChatGPT account id is missing from imported credentials",
+            )
+        })?;
+    let identity_is_registered = credentials
+        .agent_identity()
+        .is_none_or(|agent| agent.task_id().is_some());
+    Ok(ReconciledImportCredentials {
+        credentials,
+        old_credential,
+        existing_account,
+        preserved_refresh_token,
+        subscription_active_until_ms,
+        proxy,
+        provider_account_id,
+        identity_is_registered,
+    })
+}

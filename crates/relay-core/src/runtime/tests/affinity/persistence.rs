@@ -194,11 +194,16 @@ fn prompt_affinity_orders_durable_mutations_without_holding_the_scheduler() {
 }
 
 #[test]
-fn prompt_affinity_orders_lazy_restoration_before_a_successful_rebalance() {
+fn prompt_affinity_orders_lazy_restoration_before_quota_based_owner_updates() {
+    assert_ordered_affinity_completion(1_000, "source-b", 200);
+    assert_ordered_affinity_completion(6_000, "source-a", 100);
+}
+
+fn assert_ordered_affinity_completion(owner_quota: u64, expected_owner: &str, bound_at_ms: u64) {
     let key = "cache:ordered-restore";
     let (store, entered, release) = blocking_store(key, BlockedOperation::Find);
     let runtime = prompt_runtime(store.clone());
-    for (candidate, quota) in [("source-a", 6_000), ("source-b", 9_000)] {
+    for (candidate, quota) in [("source-a", owner_quota), ("source-b", 9_000)] {
         assert!(runtime.update_candidate_availability_at(
             candidate,
             true,
@@ -282,15 +287,44 @@ fn prompt_affinity_orders_lazy_restoration_before_a_successful_rebalance() {
     );
     assert_eq!(
         runtime.lock_scheduler().prompt_affinity_snapshot(key, 200),
-        Some(("source-b".to_owned(), 200 + crate::PROMPT_AFFINITY_TTL_MS))
+        Some((
+            expected_owner.to_owned(),
+            bound_at_ms + crate::PROMPT_AFFINITY_TTL_MS
+        ))
     );
     assert_eq!(
         crate::poison::mutex(&store.bindings)
             .get(key)
             .unwrap()
             .candidate_id,
-        "source-b"
+        expected_owner
     );
+}
+
+#[test]
+fn prompt_affinity_restore_accepts_only_current_candidate_ids() {
+    for candidate_id in [
+        "source-a",
+        "source-a::responses_to_chat_completions",
+        "removed-source",
+    ] {
+        let store = Arc::new(RecordedResponseAffinityStore::default());
+        let runtime = prompt_runtime(store.clone());
+        let key = "cache:current-candidate";
+        *crate::poison::mutex(&store.restored_binding) = Some(ResponseAffinityBinding {
+            key: key.to_owned(),
+            candidate_id: candidate_id.to_owned(),
+            expires_at_ms: 100 + crate::PROMPT_AFFINITY_TTL_MS,
+        });
+        runtime.restore_prompt_affinity_from_store(key, 100);
+        let restored = runtime.lock_scheduler().prompt_affinity_snapshot(key, 100);
+        assert_eq!(
+            restored,
+            (candidate_id == "source-a")
+                .then(|| ("source-a".to_owned(), 100 + crate::PROMPT_AFFINITY_TTL_MS)),
+        );
+        assert!(crate::poison::mutex(&store.upserts).is_empty());
+    }
 }
 
 #[test]

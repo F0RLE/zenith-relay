@@ -29,6 +29,16 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// A fresh entitlement deadline, separate from OAuth-token expiry.
+    pub fn active_deadline_ms(&self, now_ms: u64, stale_after_ms: u64) -> Option<u64> {
+        (self.status == SubscriptionStatus::Active
+            && !self.is_free_plan()
+            && crate::quota::observation_is_fresh(self.updated_at_ms, now_ms, stale_after_ms))
+        .then_some(self.active_until_ms)
+        .flatten()
+        .filter(|deadline| *deadline > now_ms)
+    }
+
     pub fn normalize(subscription_input: SubscriptionInput) -> Self {
         let plan_type = subscription_input
             .plan_type

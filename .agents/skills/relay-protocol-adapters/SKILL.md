@@ -10,7 +10,7 @@ Qualify the complete cycle: text, tool call, tool result, then the next
 assistant response.
 
 Follow the official provider contract workflow in
-[CONTRIBUTING.md](../../../CONTRIBUTING.md#api-and-protocol-references).
+[CONTRIBUTING.md](../../../docs/CONTRIBUTING.md#api-and-protocol-references).
 Use the affected [PLANNING.md](../../../docs/project/PLANNING.md) contract;
 consult [ROADMAP.md](../../../docs/project/ROADMAP.md) when the task concerns
 unfinished capability or acceptance, not as a prerequisite for every fix.
@@ -34,6 +34,9 @@ unfinished capability or acceptance, not as a prerequisite for every fix.
   state from client-supplied history and foreign opaque payloads.
 - Read the exact endpoint's [official contract](references/contracts.md) first.
   For undocumented account transports, mark observed behavior explicitly.
+  OpenAI model upgrades also use the maintained
+  [migration contract](references/contracts.md#openai-model-migrations), including
+  endpoint-specific tools, append-only updates, reasoning and cache-write usage.
   Use [implementations.md](references/implementations.md) only for a targeted
   implementation comparison; record its inspected SHA and file paths if used.
   For BPS-specific source discovery, use
