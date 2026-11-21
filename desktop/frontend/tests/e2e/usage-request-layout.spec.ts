@@ -58,10 +58,13 @@ for (const scenario of [
   { width: 1060, locale: "ru", theme: "dark" },
   { width: 980, locale: "ru", theme: "dark" },
   { width: 840, locale: "en", theme: "light" },
+  { width: 840, locale: "ru", theme: "dark", fallbackFont: true },
   { width: 700, locale: "ru", theme: "dark" },
+  { width: 700, locale: "ru", theme: "dark", fallbackFont: true },
   { width: 390, locale: "ru", theme: "dark" },
 ] as const) {
-  test(`request table balances separate model and reasoning columns: ${scenario.width} ${scenario.locale}${"fallbackFont" in scenario ? " fallback font" : ""}`, async ({ page }) => {
+  const fallback = "fallbackFont" in scenario;
+  test(`request table balances separate model and reasoning columns: ${scenario.width} ${scenario.locale}${fallback ? " fallback font" : ""}`, async ({ page }) => {
     const accountLabel = "long.synthetic.member.0123456789@example.test";
     await page.setViewportSize({ width: scenario.width, height: 900 });
     await installTauriMock(page, {
@@ -71,7 +74,7 @@ for (const scenario of [
       usageRepeatedRequests: true,
     });
     await page.goto("/");
-    if ("fallbackFont" in scenario) {
+    if (fallback) {
       await page.addStyleTag({ content: ".app { font-family: Verdana, sans-serif !important; }" });
     }
     await page.getByRole("button", { name: scenario.locale === "ru" ? "Использование" : "Usage", exact: true }).click();
@@ -132,7 +135,7 @@ for (const scenario of [
       expect(await wrapper.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await expect(row.locator(".request-link")).toBeInViewport();
     }
-    await (tableLayout ? table : row).screenshot({ path: `output/playwright/usage-requests-columns-${scenario.locale}-${scenario.width}.png` });
+    await (tableLayout ? table : row).screenshot({ path: `output/playwright/usage-requests-columns-${scenario.locale}-${scenario.width}${fallback ? "-fallback" : ""}.png` });
     await row.getByRole("button", { name: /req|relay-synthetic/ }).click();
     await expect(page.getByRole("dialog")).toBeVisible();
   });

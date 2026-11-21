@@ -544,6 +544,7 @@
   overflow-wrap: normal;
 }
 
+.usage-request-table .usage-column-heading { padding-inline: 0; }
 .usage-request-table .usage-column-heading > span { overflow-wrap: normal; }
 .usage-request-table td .request-link { padding-inline: 2px; }
 
@@ -645,7 +646,7 @@
 .usage-column-heading:hover,
 .usage-column-heading:focus-visible { color: var(--relay-text); }
 
-@container usage (min-width: 581px) {
+@container usage (width > 640px) {
   .usage-request-table { display: grid; }
   .usage-request-table :is(thead, tbody, tr) {
     display: grid;
@@ -653,16 +654,14 @@
     grid-column: 1 / -1;
   }
   .usage-request-table :is(th, td) {
-    min-width: 0;
+    min-width: min-content;
     height: auto;
     display: flex;
     align-items: center;
     justify-content: center;
   }
-  .usage-request-table th { min-width: min-content; min-height: 46px; }
-  .usage-request-table .usage-column-heading { min-width: min-content; }
+  .usage-request-table th { min-height: 46px; }
   .usage-request-table td { min-height: 52px; }
-  .usage-request-table td[data-column="request"] { min-width: min-content; }
   .usage-request-table :is(th, td)[data-column="status"] { padding-inline: 4px; white-space: nowrap; }
   .usage-request-table th:is([data-column="tokens"], [data-column="request"]) { padding-inline: 2px; }
   .usage-request-connection {
@@ -683,9 +682,12 @@
   .usage-request-table td:is([data-column="time"], [data-column="timing"], [data-column="speed"], [data-column="tokens"], [data-column="equivalent"]) { white-space: nowrap; }
 }
 
-@container usage (min-width: 581px) and (max-width: 700px) {
-  .usage-request-model { min-width: 0; }
+@container usage (640px < width <= 800px) {
   .usage-request-table .usage-column-heading > span { overflow-wrap: anywhere; }
+}
+
+@container usage (max-width: 700px) {
+  .usage-request-model { min-width: 0; }
 }
 
 .usage-sortable-table th[data-dragging="true"] .usage-column-heading { opacity: 0.55; }
@@ -1353,7 +1355,9 @@
   .usage-metric > svg { width: 26px; height: 26px; flex-basis: 26px; padding: 6px; }
   .usage-metric-copy > strong { font-size: 20px; line-height: 26px; }
   .usage-filter-panel { padding: 12px; }
+}
 
+@container usage (max-width: 640px) {
   .usage-page > .relay-table-wrap:has(> .usage-sortable-table) {
     overflow: visible;
     border: 0;
