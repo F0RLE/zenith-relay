@@ -155,9 +155,9 @@ Clone this repository. The commands below are the same on Windows, macOS, and
 Linux. Install Bun, Rust, and the native tools listed below before running
 `bun run setup`; it installs the locked project dependencies:
 
-- [Bun](https://bun.sh) 1.4.2 or newer.
+- [Bun](https://bun.sh) 1.4.5 or newer.
 - [rustup](https://rustup.rs). The committed `rust-toolchain.toml` selects the
-  Rust 1.100.0 toolchain; both Rust packages use Edition 2024.
+  Rust 1.100.0 toolchain; Relay uses Edition 2024.
 - Native libraries for the desktop shell:
   - Windows: MSVC, Windows SDK, CMake, Ninja, and the WebView2 runtime.
     Relay supports a portable bundle and a regular Visual Studio Build Tools
@@ -448,7 +448,7 @@ review requirements and merge bypasses. Local files do not prove those settings
 are enabled; verify them in the repository settings before a release.
 
 Third-party Actions are pinned to full commit IDs. Dependabot maintains those
-pins, both Cargo packages, and the actual Bun lockfiles in `desktop/frontend` and `hosted/web`.
+pins, all three Cargo lockfiles, and both Bun lockfiles.
 Runtime CI fetches the current RustSec database once, records its commit, and
 uses that same snapshot for both Cargo audits. Both frontend packages run
 `bun audit`. A new advisory can fail CI without a source change; investigate
@@ -477,6 +477,10 @@ Remove that hold only after a fixed stable parent is available and the synthetic
 Codex encrypted-authorization fixture still passes. Do not change its format or
 master key. Replace each Git pin when a reviewed published release includes its
 fix; keep dependency audits and compiler checks enabled.
+
+Hosted keeps `webauthn-rs` on 0.5.5: 0.6.2 requires `crypto-glue` with an RSA
+feature the fixed `rsa` 0.10.0 removed. The resolved prerelease fails
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html).
 
 Native credentials use `keyring-core` with an application-owned store: Windows
 Credential Manager and macOS Keychain keep their existing providers; Linux uses

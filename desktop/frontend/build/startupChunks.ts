@@ -39,12 +39,9 @@ export function startupChunks(): Plugin {
       const root = config.root.replaceAll("\\", "/");
       bootstrapEntry = `${root}/src/bootstrap.ts`;
       workspaceEntry = `${root}/src/main.tsx`;
-      // These small helpers are shared by Connections, Pool and Usage. Keep
-      // their common code in one dictionary rather than extra shared chunks.
+      // Coalesce small shared helpers; keep account and proxy workflows lazy.
       sharedEntries = [
-        `${root}/src/features/relay/accountEconomics.ts`,
         `${root}/src/features/relay/hooks/useRelativeTimeClock.ts`,
-        `${root}/src/features/relay/hooks/useProxyPool.ts`,
         `${root}/src/features/relay/state/selectionModel.ts`,
         `${root}/src/features/relay/pages/usage/usageFormatting.ts`,
         `${root}/src/features/relay/sourceUrl.ts`,

@@ -26,7 +26,7 @@ pedantic = { level = "allow", priority = -1 }
 experimental-bps-images = ["zenith-relay-core/experimental-bps-images"]
 
 [build-dependencies]
-tauri-build = { version = "2.7.4", features = [] }
+tauri-build = { version = "2.7.6", features = [] }
 
 [dependencies]
 # age 0.12 requires crypto-bigint 0.5 via HPKE/P-256 (RUSTSEC-2026-0387).
@@ -38,7 +38,7 @@ chrono = "0.4.45"
 hex = "0.4.3"
 hyper = { version = "1.12.0", default-features = false, features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
-keyring-core = "1.0.1"
+keyring-core = "1.1.0"
 rand = "0.10.4"
 reqwest = { version = "0.13.5", default-features = false, features = ["form", "json", "rustls", "stream"] }
 futures-util = "0.3.34"
@@ -47,8 +47,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 sys-locale = "0.3.2"
-sysinfo = "0.40.3"
-tauri = { version = "2.12.5", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
+sysinfo = "0.40.4"
+tauri = { version = "2.12.7", features = ["image-ico", "image-png", "macos-proxy", "tray-icon"] }
 open = "5.4.5"
 percent-encoding = "2.3.2"
 rustls-platform-verifier = "0.7.1"
@@ -59,13 +59,13 @@ tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt-multi-
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 tower = { version = "0.5.3", features = ["util"] }
-toml_edit = "0.25.19"
-url = "2.5.8"
-uuid = { version = "1.29.2", features = ["v4"] }
+toml_edit = "0.25.20"
+url = "2.5.9"
+uuid = { version = "1.29.3", features = ["v4"] }
 zenith-relay-core = { path = "../../crates/relay-core" }
 zenith-relay-vault-envelope = { path = "../../crates/relay-vault-envelope" }
 zenith-relay-hosted-device = { path = "../../crates/relay-hosted-device" }
-zeroize = "1.9.1"
+zeroize = "1.9.2"
 
 [dev-dependencies]
 chacha20poly1305 = "0.11.0"
@@ -78,7 +78,7 @@ libc = "0.2.191"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust", "vendored"] }
-zbus = { version = "6.3.0", default-features = false, features = ["tokio"] }
+zbus = { version = "6.5.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
@@ -86,7 +86,7 @@ apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 windows-native-keyring-store = "1.1.0"
-wry = { version = "0.57.2", default-features = false }
+wry = { version = "0.57.3", default-features = false }
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "2.1.0"
