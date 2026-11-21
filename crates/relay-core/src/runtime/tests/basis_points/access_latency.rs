@@ -209,11 +209,13 @@ async fn generation_access_waits_for_the_bound_response_owner() {
         Some("synthetic-account-0"),
     );
     tokio::pin!(future);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut future)
-            .await
-            .is_err()
-    );
+    tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(2), slow.state.first_started.notified()) => {
+            result.expect("the bound owner's access request should start");
+        }
+        () = &mut future => panic!("refresh completed before the bound owner was released"),
+    }
+    assert!(futures_util::poll!(&mut future).is_pending());
     assert_eq!(slow.state.access_requests.load(Ordering::SeqCst), 1);
     assert!(
         runtime

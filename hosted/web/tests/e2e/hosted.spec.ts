@@ -129,9 +129,12 @@ test("mobile navigation traps focus, dismisses and returns to its trigger", asyn
   const drawer = page.getByRole("dialog", { name: "Навигация", exact: true });
   await expect(drawer).toBeVisible();
   await expect(page.locator(".relay-content")).toHaveAttribute("inert", "");
-  await drawer.getByRole("button", { name: "Свернуть меню", exact: true }).focus();
+  const first = drawer.getByRole("button", { name: "Закрыть меню", exact: true }).first();
+  await expect(first).toBeFocused();
   await page.keyboard.press("Shift+Tab");
-  expect(await drawer.evaluate(element => element.contains(document.activeElement))).toBe(true);
+  await expect(drawer.getByRole("button", { name: "Выйти", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(first).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(drawer).toHaveCount(0);
   await expect(trigger).toBeFocused();
