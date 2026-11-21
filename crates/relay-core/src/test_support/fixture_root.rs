@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(super) fn create(label: &str, nonce: &str) -> PathBuf {
+pub(super) fn create(label: &str, suffix: &str) -> PathBuf {
     assert!(
         !label.is_empty()
             && label.len() <= 64
@@ -12,8 +12,8 @@ pub(super) fn create(label: &str, nonce: &str) -> PathBuf {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     );
-    assert!(nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    let root = std::env::temp_dir().join(format!("zenith-relay-{label}-{nonce}"));
+    assert!(suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let root = std::env::temp_dir().join(format!("zenith-relay-{label}-{suffix}"));
     reserve(&root).expect("test fixture directory must be exclusively owned");
     root
 }
@@ -51,7 +51,7 @@ fn fixture_roots_are_reserved_and_never_reuse_existing_data() {
 
 #[test]
 fn fixture_roots_reject_unsafe_components_before_touching_the_filesystem() {
-    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const SUFFIX: &str = "0123456789abcdef0123456789abcdef";
     for label in [
         "",
         ".",
@@ -62,16 +62,12 @@ fn fixture_roots_reject_unsafe_components_before_touching_the_filesystem() {
         "a b",
         "тест",
     ] {
-        assert!(std::panic::catch_unwind(|| create(label, NONCE)).is_err());
+        assert!(std::panic::catch_unwind(|| create(label, SUFFIX)).is_err());
     }
     let long_label = "x".repeat(65);
-    assert!(std::panic::catch_unwind(|| create(&long_label, NONCE)).is_err());
-    for nonce in [
-        "",
-        "../escape",
-        "0123456789abcdef",
-        "0123456789abcdef0123456789abcdeg",
-    ] {
-        assert!(std::panic::catch_unwind(|| create("invalid-component", nonce)).is_err());
+    assert!(std::panic::catch_unwind(|| create(&long_label, SUFFIX)).is_err());
+    let non_hex = "g".repeat(32);
+    for suffix in ["", "../escape", &SUFFIX[..16], &non_hex] {
+        assert!(std::panic::catch_unwind(|| create("invalid-component", suffix)).is_err());
     }
 }

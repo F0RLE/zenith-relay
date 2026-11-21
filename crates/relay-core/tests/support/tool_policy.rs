@@ -78,7 +78,7 @@ async fn stream_parser_rejects_deferred_then_accepts_original(
     State(bodies): State<Arc<Mutex<Vec<Value>>>>,
     body: Bytes,
 ) -> Response<Body> {
-    let body: Value = serde_json::from_slice(&body).unwrap();
+    let body = parse_fixture_request(&body).unwrap();
     let deferred = has_deferred_tool_search(&body);
     bodies.lock().unwrap().push(body);
     let payload = if deferred {

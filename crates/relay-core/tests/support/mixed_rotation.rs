@@ -8,7 +8,7 @@ async fn mixed_http(
     uri: Uri,
     body: Bytes,
 ) -> Response<Body> {
-    let value: Value = serde_json::from_slice(&body).unwrap();
+    let value: Value = zenith_relay_core::bounded_json::from_slice(&body).unwrap();
     let image = uri.path().ends_with("/images/generations");
     let reply = if image {
         assert_eq!(value["model"], "gpt-image-2.5-sunburst");
