@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { forwardCodexGateway } from "./fixtures/codex-gateway-forward.mjs";
+import { CodexQualificationOutput } from "./fixtures/codex-qualification-output.mjs";
 
 const listen = async server => {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -68,4 +69,41 @@ test("gateway observer forwards bytes before EOF and preserves multiline UTF-8 S
 
 test("gateway observer rejects a non-loopback origin before touching a response", async () => {
   await expect(forwardCodexGateway({ origin: "https://provider.invalid", response: null })).rejects.toThrow("loopback");
+});
+
+test("a sparse terminal qualifies indexed completed items in output order", () => {
+  const proof = new CodexQualificationOutput();
+  const reasoning = { type: "reasoning", id: "rs_test", summary: [] };
+  const call = { type: "function_call", id: "fc_test", call_id: "call_test", name: "lookup", arguments: "{}" };
+  const event = (suffix, output_index, item) => ({ type: `response.output_item.${suffix}`, output_index, item });
+  proof.observe(event("added", 0, reasoning));
+  proof.observe(event("done", 1, call));
+  proof.observe(event("done", 0, reasoning));
+  const terminal = { id: "resp_test", status: "completed", output: [] };
+  expect(proof.finish(terminal).output).toEqual([reasoning, call]);
+  expect(terminal.output).toEqual([]);
+  expect(proof.finish({ ...terminal, output: [reasoning, call] }).output).toEqual([reasoning, call]);
+});
+
+test("a sparse terminal cannot hide a pending, unindexed or contradictory output", () => {
+  const item = { type: "function_call", id: "fc_test", arguments: "{}" };
+  const done = { type: "response.output_item.done", output_index: 0, item };
+  const terminal = { id: "resp_test", status: "completed", output: [] };
+  for (const events of [
+    [{ ...done, output_index: 1 }], [{ ...done, output_index: undefined }],
+    [{ ...done, type: "response.output_item.added" }],
+    [{ type: "response.output_text.delta", output_index: 1, delta: "synthetic" }, done],
+    [{ type: "response.output_text.delta", delta: "synthetic" }, done],
+    [done, { type: "response.function_call_arguments.delta", output_index: 0, delta: "extra" }],
+    [{ ...done, response_id: "first" }, { type: "response.completed", response: { id: "second" } }],
+    [done, { ...done, item: { ...item, arguments: "changed" } }],
+    [{ ...done, type: "response.output_item.added" }, { ...done, item: { ...item, id: "another" } }],
+    [{ ...done, item: null }], [{ ...done, output_index: 2 ** 40 }],
+  ]) {
+    const proof = new CodexQualificationOutput();
+    expect(() => { for (const e of events) proof.observe(e); proof.finish(terminal); }).toThrow();
+  }
+  const proof = new CodexQualificationOutput();
+  proof.observe(done);
+  expect(() => proof.finish({ ...terminal, output: [{ ...item, arguments: "different" }] })).toThrow();
 });

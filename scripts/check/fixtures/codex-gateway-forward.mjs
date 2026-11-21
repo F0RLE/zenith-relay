@@ -2,6 +2,7 @@ import { request } from "node:http";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
+import { CodexQualificationOutput } from "./codex-qualification-output.mjs";
 
 const LIMIT = 512 * 1024;
 const EVENTS = new Set([
@@ -21,7 +22,7 @@ export function loopbackOrigin(value) {
 }
 
 /** Forward bytes incrementally; retain only bounded, allowlisted observations. */
-export async function forwardCodexGateway({ origin, bytes, response, timeoutMs, key, onTerminal = () => {} }) {
+export async function forwardCodexGateway({ origin, bytes, response, timeoutMs, key, onTerminal }) {
   origin = loopbackOrigin(origin);
   const start = performance.now();
   const elapsed = () => Math.round(performance.now() - start);
@@ -43,6 +44,7 @@ export async function forwardCodexGateway({ origin, bytes, response, timeoutMs, 
     if (typeof requestId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) observed.requestId = requestId;
     const isSse = upstream.headers["content-type"]?.includes("text/event-stream");
     const decoder = new StringDecoder("utf8");
+    const output = onTerminal && new CodexQualificationOutput();
     let pending = "", data = [], terminals = 0;
     const frame = () => {
       if (!data.length) return;
@@ -53,6 +55,7 @@ export async function forwardCodexGateway({ origin, bytes, response, timeoutMs, 
       try { event = JSON.parse(text); } catch { throw new Error("Gateway emitted invalid SSE JSON"); }
       const type = EVENTS.has(event.type) ? event.type : "other";
       observed.eventTypes[type] = (observed.eventTypes[type] ?? 0) + 1;
+      output?.observe(event);
       if (event.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta.length) observed.firstTextMs ??= elapsed();
       if (event.type === "response.function_call_arguments.delta" && typeof event.delta === "string" && event.delta.length) observed.firstToolArgumentsMs ??= elapsed();
       if (["response.completed", "response.incomplete", "response.failed"].includes(event.type)) {
@@ -62,7 +65,7 @@ export async function forwardCodexGateway({ origin, bytes, response, timeoutMs, 
         const usage = event.response?.usage;
         if (usage) observed.usage = { inputTokens: usage.input_tokens ?? null,
           cachedInputTokens: usage.input_tokens_details?.cached_tokens ?? null, outputTokens: usage.output_tokens ?? null };
-        onTerminal(event.response);
+        onTerminal?.(output.finish(event.response));
       }
     };
     const line = (value) => {

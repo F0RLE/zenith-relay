@@ -225,8 +225,7 @@ export async function qualifyCodexWire({ cliPath, catalog, effort = "low", gatew
       }
       if (gateway) {
         const observed = await forwardCodexGateway({ origin: gateway, bytes, response, timeoutMs, key: live ? live.key : KEY,
-          onTerminal(terminal) {
-            if (!live) return;
+          onTerminal: live ? (terminal) => {
             if (terminal?.status !== "completed") throw new Error("Live response did not complete");
             const allowed = index === 0 ? ["message", "reasoning", "function_call"] : ["message", "reasoning"];
             if (!Array.isArray(terminal.output) || terminal.output.some(item => !allowed.includes(item?.type))) {
@@ -242,7 +241,7 @@ export async function qualifyCodexWire({ cliPath, catalog, effort = "low", gatew
                 try { args = JSON.parse(call?.arguments); } catch { throw new Error("Live fixture arguments are invalid"); }
                 if (matching.length !== 1 || typeof call.call_id !== "string" || !call.call_id.trim()
                   || args?.value !== "synthetic" || Object.keys(args).length !== 1) throw new Error("Live response did not select the exact fixture tools");
-                return { ...call, response_id: terminal.id };
+                return { call_id: call.call_id, arguments: call.arguments, response_id: terminal.id };
               });
             } else {
               const text = terminal.output.flatMap(item => item.type === "message" ? item.content ?? [] : [])
@@ -251,7 +250,7 @@ export async function qualifyCodexWire({ cliPath, catalog, effort = "low", gatew
                 throw new Error("Live provider acknowledgement does not match the audited results");
               }
             }
-          },
+          } : undefined,
         });
         wire.responses.push(observed);
         responseFinished = performance.now();

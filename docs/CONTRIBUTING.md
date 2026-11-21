@@ -1019,6 +1019,8 @@ connections, extra generations and unrelated built-in execution fail qualificati
 The output distinguishes `live_gateway` from synthetic modes and reports client
 cycle and between-request time. Match its Relay request IDs against retained
 usage/attempt records before claiming physical-send counts or accounting acceptance.
+When a completed stream leaves `output` empty, the check uses indexed
+`response.output_item.done` snapshots without changing the SSE sent to Codex.
 
 Add `--scenario parallel` to qualify two independent MCP functions in the first
 response and both distinct results in the next request. Each tool has its own audit

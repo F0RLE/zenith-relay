@@ -42,7 +42,7 @@ function fakeClient(calls, { noCycle = false, badResult = false, metadataPart = 
     expect(first.status).toBe(200);
     const frames = (await first.text()).split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
     const response = frames.find(frame => frame.type === "response.completed").response;
-    const call = response.output[0];
+    const call = response.output[0] ?? frames.find(frame => frame.type === "response.output_item.done")?.item;
     const audit = await fetch(`${origin}/fixture/tool-call`, { method: "POST", headers: { "x-relay-fixture-token": token } });
     expect(audit.status).toBe(204);
     const output = metadataPart ? [{ type: "input_text", text: FIXTURE_RESULT }, { type: "input_text", text: "Synthetic client execution metadata" }]
@@ -143,7 +143,7 @@ describe("isolated Codex wire qualification", () => {
       gatewayOrigin: "http://127.0.0.1:1", live: { key: "synthetic-private-gateway-key" } })).rejects.toThrow("consent");
   });
 
-  test("live mode preserves dynamic call identity and keeps gateway credentials out of the child", async () => {
+  test.each([false, true])("live mode preserves call identity and key isolation with sparse terminal: %s", async sparse => {
     const calls = [], received = [];
     const key = "synthetic-private-gateway-key";
     const gateway = createServer(async (request, response) => {
@@ -154,7 +154,9 @@ describe("isolated Codex wire qualification", () => {
         ? [{ type: "function_call", call_id: "observed-call", name: FIXTURE_TOOL, arguments: '{"value": "synthetic"}' }]
         : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: FIXTURE_RESULT }] }];
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.end(`data: ${JSON.stringify({ type: "response.completed", response: { id: "observed-response", status: "completed", output } })}\n\n`);
+      const events = sparse ? [{ type: "response.output_item.done", output_index: 0, item: output[0] }] : [];
+      events.push({ type: "response.completed", response: { id: "observed-response", status: "completed", output: sparse ? [] : output } });
+      response.end(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
     });
     await new Promise(resolve => gateway.listen(0, "127.0.0.1", resolve));
     try {
