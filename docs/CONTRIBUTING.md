@@ -450,7 +450,7 @@ are enabled; verify them in the repository settings before a release.
 Third-party Actions are pinned to full commit IDs. Dependabot maintains those
 pins, all three Cargo lockfiles, and both Bun lockfiles.
 Runtime CI fetches the current RustSec database once, records its commit, and
-uses that same snapshot for both Cargo audits. Both frontend packages run
+uses that same snapshot for all Cargo audits. Both frontend packages run
 `bun audit`. A new advisory can fail CI without a source change; investigate
 and remediate it rather than pinning an old database to obtain a passing check.
 

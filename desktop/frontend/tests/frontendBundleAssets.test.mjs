@@ -25,19 +25,24 @@ test("Markdown descriptions share their reader without absorbing Help or applica
   ]) expect(group.test.test(`/app/${path}`)).toBe(false);
 });
 
-test("shared value helpers join the workspace without pulling lazy pages or the native loader", () => {
+test("the workspace groups small helpers without pulling account or proxy workflows into startup", () => {
   const root = "/app";
   const main = `${root}/src/main.tsx`;
   const bootstrap = `${root}/src/bootstrap.ts`;
-  const value = `${root}/src/features/relay/accountEconomics.ts`;
+  const value = `${root}/src/features/relay/pages/usage/usageFormatting.ts`;
   const clock = `${root}/src/features/relay/hooks/useRelativeTimeClock.ts`;
+  const economics = `${root}/src/features/relay/accountEconomics.ts`;
+  const proxies = `${root}/src/features/relay/hooks/useProxyPool.ts`;
   const modules = {
     [main]: { importedIds: ["react"], dynamicImports: ["pool"] },
     [bootstrap]: { importedIds: ["native"] },
     [value]: { importedIds: ["formatting"] },
     [clock]: { importedIds: ["react"] },
+    [economics]: { importedIds: ["billing"] },
+    [proxies]: { importedIds: ["proxy-checks"] },
     formatting: { importedIds: [] }, react: { importedIds: [] },
-    native: { importedIds: [] }, pool: { importedIds: [value] },
+    billing: { importedIds: [] }, "proxy-checks": { importedIds: [] },
+    native: { importedIds: [] }, pool: { importedIds: [value, economics, proxies] },
   };
   const plugin = startupChunks();
   plugin.configResolved({ root });
@@ -46,7 +51,9 @@ test("shared value helpers join the workspace without pulling lazy pages or the 
   const groups = plugin.config().build.rolldownOptions.output.codeSplitting.groups;
   const workspace = groups.find(group => group.name === "workspace");
   for (const id of [value, clock, "formatting", "react"]) expect(workspace.test(id)).toBe(true);
-  for (const id of ["native", "pool", main]) expect(workspace.test(id)).toBe(false);
+  for (const id of [economics, proxies, "billing", "proxy-checks", "native", "pool", main]) {
+    expect(workspace.test(id)).toBe(false);
+  }
 });
 
 test("startup grouping follows static dependencies through cycles and ignores external modules", () => {
