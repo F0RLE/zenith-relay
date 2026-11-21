@@ -1,11 +1,20 @@
 //! Native client for one owner-approved installation. The approval code is not a bearer.
 mod copy;
 mod inventory;
+mod observations;
+mod pool;
+mod request;
 pub use copy::{
     COPY_COMMIT_PATH, COPY_STATUS_PATH, CopyInput, CopyKey, CopyPlan, CopyProof, CopyProxy,
     CopyReview, CopyState, MAX_REVIEW_CODE,
 };
 pub use inventory::{DevicePage, SavedSource};
+pub use observations::{
+    DeviceAccess, DeviceOverview, DeviceRead, DeviceUsage, Execution, GenerationRate, Overview,
+    OverviewMetrics, PoolCapacity, ReadScope, UsageFilter, UsagePage, UsageRow, valid_hours,
+    valid_read_scopes,
+};
+pub use pool::{PoolAction, PoolChange, PoolMembership, PoolReview, PoolState};
 use ring::{
     digest::{Context, SHA256},
     rand::{SecureRandom, SystemRandom},

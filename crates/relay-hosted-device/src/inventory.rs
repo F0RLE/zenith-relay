@@ -1,7 +1,6 @@
-use super::{DeviceKey, RESPONSE, SCOPE};
-use reqwest::{Client, StatusCode, header};
-use serde::{Deserialize, Deserializer, Serialize};
-use std::{net::SocketAddr, time::Duration};
+use super::request::{model_id, nullable};
+use super::{DeviceKey, PoolMembership, PoolReview, RESPONSE, SCOPE};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Deserialize, Serialize)]
@@ -13,6 +12,8 @@ pub struct SavedSource {
     pub credential_state: String,
     pub proxy_bound: bool,
     pub verified_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PoolMembership>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -24,89 +25,44 @@ pub struct DevicePage {
     pub items: Vec<SavedSource>,
     #[serde(deserialize_with = "nullable")]
     pub next_after: Option<Uuid>,
-}
-
-// Both fields must be present on the wire; missing pagination is not proof of the last page.
-fn nullable<'de, T: Deserialize<'de>, D: Deserializer<'de>>(d: D) -> Result<Option<T>, D::Error> {
-    Option::deserialize(d)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Meta {
-    pub(super) api_version: String,
-    pub(super) request_id: Uuid,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    data: DevicePage,
-    meta: Meta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_access: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_review: Option<PoolReview>,
 }
 
 impl DeviceKey {
     pub async fn connections(&self, after: Option<Uuid>) -> Result<DevicePage, &'static str> {
-        const NETWORK: &str = "device_server_unavailable";
-        let target = self.target();
-        let mut url = url::Url::parse(&format!(
-            "{}/api/hosted/v1/device/connections",
-            target.origin
-        ))
-        .map_err(|_| NETWORK)?;
+        self.connection_page(after, false).await
+    }
+
+    pub async fn connections_with_pool(
+        &self,
+        after: Option<Uuid>,
+    ) -> Result<DevicePage, &'static str> {
+        match self.connection_page(after, true).await {
+            Err("device_endpoint_unavailable") => self.connections(after).await,
+            result => result,
+        }
+    }
+
+    async fn connection_page(
+        &self,
+        after: Option<Uuid>,
+        pool: bool,
+    ) -> Result<DevicePage, &'static str> {
+        let mut url = self.read_url(if pool { "pool" } else { "connections" })?;
         if let Some(cursor) = after {
             url.query_pairs_mut()
                 .append_pair("after", &cursor.to_string());
         }
-        let mut client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .timeout(Duration::from_secs(10));
-        if url.domain() == Some("localhost") {
-            client = client.resolve(
-                "localhost",
-                SocketAddr::from(([127, 0, 0, 1], url.port_or_known_default().ok_or(NETWORK)?)),
-            );
-        }
-        let mut r = client
-            .build()
-            .map_err(|_| NETWORK)?
-            .get(url)
-            .bearer_auth(self.bearer().as_str())
-            .send()
-            .await
-            .map_err(|_| NETWORK)?;
-        if r.status() == StatusCode::UNAUTHORIZED {
-            return Err("device_not_authorized");
-        }
-        if r.status() != StatusCode::OK {
-            return Err(NETWORK);
-        }
-        const MAX: usize = 768 * 1024;
-        if r.content_length().is_some_and(|n| n > MAX as u64)
-            || r.headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(';').next())
-                != Some("application/json")
-        {
-            return Err(RESPONSE);
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = r.chunk().await.map_err(|_| NETWORK)? {
-            if chunk.len() > MAX - body.len() {
-                return Err(RESPONSE);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let reply: Envelope = serde_json::from_slice(&body).map_err(|_| RESPONSE)?;
-        let p = reply.data;
-        if reply.meta.api_version != "1"
-            || reply.meta.request_id.is_nil()
-            || p.scope != SCOPE
-            || p.installation_id != target.installation
-            || p.device_id != target.device
-            || !(1..=253402300799).contains(&p.expires_at_s)
+        let p: DevicePage = self.read(url).await?;
+        if p.scope != SCOPE
+            || !self.expected_read(p.installation_id, p.device_id, p.expires_at_s)
+            || p.pool_access.is_some() != pool
+            || p.pool_review
+                .as_ref()
+                .is_some_and(|r| p.pool_access != Some(true) || !r.valid(p.expires_at_s))
             || p.items.len() > 32
             || p.next_after
                 .is_some_and(|n| p.items.len() != 32 || p.items.last().is_none_or(|r| r.id != n))
@@ -122,13 +78,13 @@ impl DeviceKey {
                 || !matches!(row.credential_state.as_str(), "stored" | "revoked")
                 || row.verified_models.len() > 128
                 || row.credential_state == "revoked" && !row.verified_models.is_empty()
-                || !row.verified_models.iter().all(|s| {
-                    s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-                        && s.len() <= 128
-                        && s.bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"._:/-".contains(&c))
-                })
+                || !row.verified_models.iter().all(|s| model_id(s))
                 || row.verified_models.windows(2).any(|w| w[0] >= w[1])
+                || row.pool.is_some() != (pool && row.credential_state == "stored")
+                || row
+                    .pool
+                    .as_ref()
+                    .is_some_and(|s| !s.valid(p.pool_access == Some(true)))
             {
                 return Err(RESPONSE);
             }

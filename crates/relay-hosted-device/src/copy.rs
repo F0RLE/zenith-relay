@@ -432,7 +432,7 @@ fn parse_reply(plan: &CopyPlan, raw: &[u8]) -> Result<CopyState, &'static str> {
     #[serde(deny_unknown_fields)]
     struct Envelope {
         data: Reply,
-        meta: super::inventory::Meta,
+        meta: super::request::Meta,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
