@@ -818,7 +818,7 @@ bun scripts/build/cargo.mjs test --manifest-path desktop/src-tauri/Cargo.toml --
 
 It opens hidden WebViews against a synthetic loopback page, checks private
 storage isolation and verifies cache cleanup. The embedded pane is also checked
-for client-area placement and the absence of the Relay IPC bridge.
+for client-area placement and the absence of Tauri command access.
 
 ### Shared runtime
 

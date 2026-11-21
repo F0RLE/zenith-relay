@@ -7,7 +7,7 @@ import { secondsUntil, useRelativeTimeClock } from "../hooks/useRelativeTimeCloc
 import { useTransientFlag } from "../hooks/useTransientFlag";
 import { useTotpPreview } from "../hooks/useTotpPreview";
 import { useRelayState } from "../state/RelayStateProvider";
-import { Button, CopyButton, SecretField, copyText } from "./Ui";
+import { CopyButton, IconButton, SecretField, copyText } from "./Ui";
 
 type AccountLoginNotesProps = {
   accountId?: string;
@@ -254,19 +254,16 @@ export function AccountLoginNotes({ accountId, loginId }: AccountLoginNotesProps
         <strong>{preview?.code ?? "—"}</strong>
         {preview?.code ? <small>{t("accounts.loginCodeRemaining", { count: remaining })}</small> : null}
         {preview?.code ? (
-          <Button
+          <IconButton
             className="account-login-copy"
-            variant="secondary"
+            label={copyFailed ? `${t("common.copy")}: ${t("common.copyFailed")}` : codeCopied ? t("feedback.copied") : t("common.copy")}
             disabled={copying}
             data-copied={codeCopied ? "true" : "false"}
             title={copyFailed ? t("common.copyFailed") : undefined}
-            aria-label={copyFailed ? `${t("common.copy")}: ${t("common.copyFailed")}` : undefined}
             aria-live="polite"
             icon={codeCopied ? <Check aria-hidden /> : <Copy aria-hidden />}
             onClick={() => void copyCode()}
-          >
-            {codeCopied ? t("feedback.copied") : t("common.copy")}
-          </Button>
+          />
         ) : null}
       </div> : null}
       {loadFailed || saveFailed ? <div className="account-login-feedback">

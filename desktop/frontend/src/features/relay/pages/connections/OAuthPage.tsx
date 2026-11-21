@@ -1,8 +1,9 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useLayoutEffect, useRef, useState } from "react";
 import { CircleAlert, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { OAuthPageState, OAuthViewBounds } from "../../api/types";
+const OAuthEditMenu = lazy(async () => ({ default: (await import("./OAuthEditMenu")).OAuthEditMenu }));
 
 let viewRevision = 0;
 
@@ -17,9 +18,10 @@ export function OAuthPage({ loginId, pageState, suspended, automatic, unavailabl
   const { t } = useTranslation();
   const slot = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<"opening" | "ready" | "failed">("opening");
+  const [menuReady, setMenuReady] = useState<string | null>(null);
   useLayoutEffect(() => {
     const element = slot.current;
-    if (!element || pageState !== "opened" || suspended || automatic || unavailable) return;
+    if (!element || menuReady !== loginId || pageState !== "opened" || suspended || automatic || unavailable) return;
     let frame = 0;
     let disposed = false;
     let lastGeometry = "";
@@ -84,17 +86,17 @@ export function OAuthPage({ loginId, pageState, suspended, automatic, unavailabl
       cancelAnimationFrame(frame);
       void relayCommands.placeOAuthView(loginId, ++viewRevision, null).catch(() => undefined);
     };
-  }, [automatic, loginId, onReady, pageState, suspended, unavailable]);
+  }, [automatic, loginId, menuReady, onReady, pageState, suspended, unavailable]);
 
   const state = pageState === "opened" ? status : pageState;
-  return <section className="oauth-page" aria-label={t("accounts.signInPage")}>
+  return <><section className="oauth-page" aria-label={t("accounts.signInPage")}>
     <div className="oauth-page-slot" ref={slot}>
       {unavailable || state === "ready" ? null : <div className="oauth-page-state" role={state === "failed" ? "alert" : state === "opening" ? "status" : undefined}>
         {state === "failed" ? <CircleAlert aria-hidden /> : state === "opening" ? <Loader2 className="spin" aria-hidden /> : null}
         <span>{t(state === "closed" ? "accounts.signInPageClosed" : state === "failed" ? "accounts.signInPageUnavailable" : automatic ? "accounts.automaticSignInProgress" : "accounts.preparingSignIn")}</span>
       </div>}
     </div>
-  </section>;
+  </section>{pageState === "opened" && !suspended && !automatic && !unavailable ? <Suspense fallback={null}><OAuthEditMenu loginId={loginId} active slot={slot} onReady={setMenuReady} /></Suspense> : null}</>;
 }
 
 function measure(element: HTMLElement): OAuthViewBounds | null {

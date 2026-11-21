@@ -23,6 +23,8 @@ mod proxy;
 
 #[cfg(windows)]
 pub use embedded::SignInBounds;
+#[cfg(windows)]
+pub use embedded::{EditAction, EditResult};
 use proxy::{ProxyBridge, webview_proxy};
 
 const SIGN_IN_WINDOW: &str = "codex-sign-in";
@@ -359,6 +361,17 @@ pub(super) async fn place_embedded_sign_in(
         return Ok(false);
     };
     view.place(revision, bounds).await
+}
+
+#[cfg(windows)]
+pub(super) async fn edit_embedded_sign_in(
+    login_id: &str,
+    request_id: String,
+    action: EditAction,
+    value: Option<String>,
+) -> Result<EditResult, LocalPoolError> {
+    let view = embedded_view(login_id).ok_or_else(window_open_error)?;
+    view.edit(request_id, action, value).await
 }
 
 fn build_sign_in_window(

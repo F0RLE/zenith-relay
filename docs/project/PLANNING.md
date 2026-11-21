@@ -595,6 +595,10 @@ private windows; cleanup waits for WebView2 processes using that directory,
 then applies bounded file-lock retries off the UI thread. Process inspection is
 limited to this cleanup, and no command-line data enters diagnostics. Leftovers
 after an interrupted cleanup are never reopened.
+The embedded pane sends bounded edit-menu coordinates and action flags to the
+main window, without field contents. Relay handles clipboard actions only after
+a menu selection, bound to the active sign-in and menu; provider pages receive
+no clipboard or Tauri command access.
 Linux/macOS use the engine's new ephemeral context/data store. Codex, SIWC and
 BPS never reuse browser cookies or site storage from an earlier opening. Focusing
 an open page or continuing it manually keeps the current attempt. OAuth state,

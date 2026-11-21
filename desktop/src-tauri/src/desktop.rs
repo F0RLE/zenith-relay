@@ -257,6 +257,8 @@ fn desktop_commands() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send 
         local_pool::commands::oauth::resume_codex_oauth,
         #[cfg(windows)]
         local_pool::commands::oauth::update_codex_oauth_view,
+        #[cfg(windows)]
+        local_pool::commands::oauth::edit_codex_oauth_view,
         local_pool::commands::oauth::cancel_codex_oauth,
         local_pool::commands::oauth::complete_codex_oauth,
         local_pool::commands::automations::create_quota_wake_automation,

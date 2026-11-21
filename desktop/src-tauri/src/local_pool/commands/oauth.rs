@@ -411,6 +411,29 @@ pub(crate) fn close_embedded_sign_in() {
 
 #[cfg(windows)]
 pub use window::SignInBounds;
+#[cfg(windows)]
+pub use window::{EditAction, EditResult};
+
+#[cfg(windows)]
+#[tauri::command]
+pub async fn edit_codex_oauth_view(
+    window: tauri::WebviewWindow,
+    login_id: String,
+    request_id: String,
+    action: EditAction,
+    value: Option<String>,
+) -> CommandResult<EditResult> {
+    if !crate::tray::is_main_window_label(window.label()) {
+        return Err(LocalPoolError::new(
+            crate::local_pool::error::ErrorCode::InvalidState,
+            "The sign-in edit menu belongs to the main window.",
+        )
+        .into());
+    }
+    window::edit_embedded_sign_in(&login_id, request_id, action, value)
+        .await
+        .map_err(Into::into)
+}
 
 #[cfg(windows)]
 #[tauri::command]

@@ -337,7 +337,12 @@ test("revealing and saving notes preserves other fields and resets visibility on
   await expectSecretGeometry(dialog);
   await dialog.locator(".account-login-copy").click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("123456");
-  await expect(dialog.locator(".account-login-copy")).toContainText("Скопировано");
+  const copy = dialog.locator(".account-login-copy");
+  await expect(copy).toHaveAttribute("aria-label", "Скопировано");
+  await expect(copy).toHaveAttribute("data-copied", "true");
+  await expect(copy).toHaveText("");
+  await expect(copy).toHaveCSS("width", "32px");
+  await expect(copy).toHaveCSS("height", "32px");
   await dialog.getByLabel("Пароль", { exact: true }).fill("synthetic-new-password");
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);

@@ -1074,7 +1074,7 @@
 }
 
 .relay-dialog.sign-in-dialog.oauth-with-page {
-  width: min(1096px, 100%);
+  width: min(960px, 100%);
   height: min(760px, calc(100dvh - 76px));
 }
 
@@ -1085,7 +1085,7 @@
 
 .oauth-workspace {
   display: grid;
-  grid-template-columns: clamp(304px, 33%, 338px) minmax(0, 1fr);
+  grid-template-columns: clamp(304px, 36%, 338px) minmax(0, 1fr);
   gap: 16px;
   height: 100%;
   min-height: 0;
@@ -1488,6 +1488,7 @@
 .oauth-workspace .account-login-fields :is(.relay-field > input, .secret-field > input) {
   min-height: 38px;
   padding-block: 6px;
+  scroll-margin-block: 4px;
 }
 
 @media (max-height: 620px) {
@@ -1563,10 +1564,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-.account-login-code .account-login-copy {
+.account-login-code > .account-login-copy,
+.account-login-code > .relay-disabled-tooltip-anchor:has(.account-login-copy) {
   margin-left: auto;
+}
+
+.account-login-code .account-login-copy {
+  width: 32px;
+  height: 32px;
   min-height: 32px;
-  padding-inline: 10px;
+  padding: 0;
 }
 
 .account-login-feedback {

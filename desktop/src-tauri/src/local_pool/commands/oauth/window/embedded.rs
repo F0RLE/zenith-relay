@@ -14,6 +14,9 @@ use super::{
 };
 use crate::local_pool::{accounts::oauth::OAuthClientKind, error::LocalPoolError};
 
+mod edit_menu;
+pub use edit_menu::{EditAction, EditResult};
+
 #[derive(Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignInBounds {
@@ -48,6 +51,7 @@ struct NativeView {
     _profile: PrivateProfile,
     visible: bool,
     revision: u64,
+    menu: Option<edit_menu::Pending>,
 }
 
 impl NativeView {
@@ -97,6 +101,7 @@ impl SignInView {
             generation,
         };
         let app = app.clone();
+        let login_id = navigation.login_id.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         handle
             .app
@@ -106,8 +111,9 @@ impl SignInView {
                     if !session_is_current(generation) {
                         return Err(window_open_error());
                     }
-                    // Wry, not a Tauri-managed webview: no Relay IPC initialization,
-                    // custom protocols, capabilities or event listeners in this page.
+                    // The provider has no Tauri command access. Its only message
+                    // is bounded edit-menu metadata; actions originate in Relay.
+                    let menu_app = app.clone();
                     let view = build(
                         &parent,
                         profile.path(),
@@ -123,6 +129,7 @@ impl SignInView {
                             !navigation.intercept_callback(&url)
                                 && allowed_page(navigation.client_kind, &navigation.redirect, &url)
                         },
+                        move |raw| edit_menu::requested(&menu_app, generation, &login_id, raw),
                     )?;
                     if !session_is_current(generation) {
                         return Err(window_open_error());
@@ -134,6 +141,7 @@ impl SignInView {
                             _profile: profile,
                             visible: false,
                             revision: 0,
+                            menu: None,
                         }))
                     });
                     drop(previous);
@@ -219,6 +227,66 @@ impl SignInView {
         })
     }
 
+    pub(super) async fn edit(
+        &self,
+        request_id: String,
+        action: EditAction,
+        value: Option<String>,
+    ) -> Result<EditResult, LocalPoolError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.dispatch(move |native| {
+            if action == EditAction::Dismiss
+                && native
+                    .menu
+                    .as_ref()
+                    .is_none_or(|menu| !menu.matches(&request_id))
+            {
+                let _ = sender.send(Ok(EditResult {
+                    ok: true,
+                    text: None,
+                }));
+                return;
+            }
+            let script = native
+                .menu
+                .as_ref()
+                .ok_or_else(edit_menu::unavailable)
+                .and_then(|menu| menu.script(&request_id, action, value.as_deref()));
+            let script = match script {
+                Ok(script) => script,
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
+            };
+            if action != EditAction::Read {
+                native.menu = None;
+            }
+            let sender = std::sync::Mutex::new(Some(sender));
+            let _ = native
+                .view
+                .evaluate_script_with_callback(&script, move |raw| {
+                    let result = serde_json::from_str::<EditResult>(&raw)
+                        .ok()
+                        .filter(|result| {
+                            result.ok
+                                && result
+                                    .text
+                                    .as_ref()
+                                    .is_none_or(|text| text.len() <= 1_048_576)
+                        })
+                        .ok_or_else(edit_menu::unavailable);
+                    if let Some(sender) = zenith_relay_core::poison::mutex(&sender).take() {
+                        let _ = sender.send(result);
+                    }
+                });
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+            .await
+            .map_err(|_| edit_menu::unavailable())?
+            .map_err(|_| edit_menu::unavailable())?
+    }
+
     fn dispatch(&self, update: impl FnOnce(&mut NativeView) + Send + 'static) -> bool {
         let generation = self.generation;
         self.app
@@ -246,6 +314,7 @@ pub(super) fn build(
     url: Url,
     proxy: Option<Url>,
     navigate: impl Fn(String) -> bool + 'static,
+    edit_menu: impl Fn(&str) + 'static,
 ) -> Result<WebView, LocalPoolError> {
     let mut context = WebContext::new(Some(profile.to_path_buf()));
     let mut builder = WebViewBuilder::new_with_web_context(&mut context)
@@ -255,6 +324,8 @@ pub(super) fn build(
         .with_visible(false)
         .with_focused(false)
         .with_devtools(false)
+        .with_initialization_script(edit_menu::SCRIPT)
+        .with_ipc_handler(move |request| edit_menu(request.body()))
         .with_navigation_handler(navigate)
         .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
         .with_download_started_handler(|_, _| false)

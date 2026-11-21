@@ -147,7 +147,7 @@ async fn exercise_embedded(app: &AppHandle, root: &Path, url: Url) -> Result<(),
     let (sender, receiver) = oneshot::channel();
     app.run_on_main_thread(move || {
         let result: Result<(), String> = (|| {
-            let view = embedded::build(&native_parent, profile.path(), url, None, |_| true)
+            let view = embedded::build(&native_parent, profile.path(), url, None, |_| true, |_| {})
                 .map_err(|error| format!("{error:?}"))?;
             let bounds = wry::Rect {
                 position: PhysicalPosition::new(120, 80).into(),
@@ -175,7 +175,12 @@ async fn exercise_embedded(app: &AppHandle, root: &Path, url: Url) -> Result<(),
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         if observed["tauri"] != "undefined" || observed["storage"] != serde_json::Value::Null {
-            return Err("embedded provider page inherits Relay IPC or renderer storage".into());
+            return Err(
+                "embedded provider page inherits Tauri commands or renderer storage".into(),
+            );
+        }
+        if observed["editMenu"] != "function" {
+            return Err("embedded sign-in edit-menu driver was not initialized".into());
         }
         if app.get_webview_window("main").is_none() {
             return Err("embedded sign-in replaced the main Tauri webview".into());
@@ -207,7 +212,7 @@ async fn evaluate_child(app: &AppHandle) -> Result<Value, String> {
             if let Some((view, _)) = slot.as_ref() {
                 let sender = Mutex::new(Some(sender));
                 let _ = view.evaluate_script_with_callback(
-                    "({title:document.title,tauri:typeof window.__TAURI_INTERNALS__,storage:location.protocol==='http:'?localStorage.getItem('relay-isolation'):null})",
+                    "({title:document.title,tauri:typeof window.__TAURI_INTERNALS__,editMenu:typeof window.__relaySignInEdit,storage:location.protocol==='http:'?localStorage.getItem('relay-isolation'):null})",
                     move |value| {
                         if let Some(sender) = sender.lock().unwrap().take() {
                             let _ = sender.send(value);

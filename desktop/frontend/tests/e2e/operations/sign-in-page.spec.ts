@@ -29,6 +29,7 @@ test("the native pane follows resize, yields to the proxy picker and hides on co
   const panel = dialog.getByRole("region", { name: "Sign-in page" });
   const placement = async () => (await invokes(page)).findLast(({ command }) => command === "update_codex_oauth_view")?.args.bounds as OAuthViewBounds | null | undefined;
   await expect(panel).toHaveText("The sign-in page will appear here.");
+  expect((await dialog.boundingBox())!.width).toBeLessThanOrEqual(960);
   expect(await placement()).toBeUndefined();
   await dialog.getByRole("button", { name: "Open sign-in page" }).click();
   await expect(dialog.getByRole("button", { name: "Go to sign-in page" })).toBeVisible();
@@ -181,12 +182,19 @@ test("sign-in notes remember both states after closing the dialog and reloading"
 
 for (const [width, height] of [[1160, 760], [840, 560], [390, 620]] as const) {
   test(`notes and the sign-in pane stay separate at ${width}px`, async ({ page }, testInfo) => {
-    const locale = width === 840 ? "ru" : "en";
+    const locale = width === 390 ? "en" : "ru";
     const labels = locale === "ru"
       ? { notes: "Заметки", email: "Почта", codeSeed: "Секрет 2FA", open: "Открыть форму" }
       : { notes: "Notes", email: "Email", codeSeed: "2FA secret", open: "Open sign-in page" };
     await page.setViewportSize({ width, height });
     await installTauriMock(page, { populated: true, locale, theme: width === 840 ? "light" : "dark" });
+    await page.addInitScript(() => {
+      const tauri = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+      const invoke = tauri.invoke.bind(tauri);
+      tauri.invoke = async (command, args) => command === "preview_totp_code"
+        ? { code: "123456", expiresAtMs: Date.now() + 30_000 }
+        : invoke(command, args);
+    });
     const dialog = await openSignIn(page, locale);
     const openLabel = dialog.getByRole("button", { name: labels.open, exact: true }).locator("span");
     expect(await openLabel.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -213,11 +221,90 @@ for (const [width, height] of [[1160, 760], [840, 560], [390, 620]] as const) {
     expect(width > 700 ? slot!.x >= column!.x + column!.width : slot!.y >= column!.y + column!.height).toBe(true);
     expect(slot!.width).toBeGreaterThan(260);
     expect(slot!.height).toBeGreaterThan(140);
-    await page.mouse.move(0, 0);
-    await dialog.screenshot({ path: testInfo.outputPath("oauth-layout.png") });
     const seed = dialog.getByLabel(labels.codeSeed, { exact: true });
+    await seed.fill("GEZDGNBVGY3TQOJQ");
+    const copy = dialog.locator(".account-login-copy");
+    await expect(copy).toBeVisible();
+    await expect(copy).toHaveText("");
+    await expect(copy).toHaveCSS("width", "32px");
+    await expect(copy).toHaveCSS("height", "32px");
+    await page.mouse.move(0, 0);
+    await dialog.screenshot({ path: testInfo.outputPath("oauth-layout.png"), scale: "css" });
+    await dialog.screenshot({ path: `output/playwright/sign-in-compact-${width}.png`, scale: "css" });
     await seed.scrollIntoViewIfNeeded();
     await expect(seed).toBeInViewport({ ratio: 1 });
     expect(await dialog.locator(".oauth-page-slot").boundingBox()).toEqual(slot);
   });
 }
+
+test("provider edit actions use the launcher menu and hide the native pane while open", async ({ page }) => {
+  await installTauriMock(page, { populated: true, locale: "ru" });
+  const dialog = await openSignIn(page, "ru");
+  await dialog.getByRole("button", { name: "Открыть форму", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Перейти к форме", exact: true })).toBeEnabled();
+  await expect.poll(async () => (await invokes(page)).findLast(({ command }) => command === "update_codex_oauth_view")?.args.bounds).toBeTruthy();
+  const context = { loginId: "oauth_synthetic", requestId: "synthetic-menu", x: 30, y: 80, canCopy: true, canCut: true, canPaste: true, canSelectAll: true };
+  await emitTauriEvent(page, "relay-oauth-edit-menu", context);
+  const menu = page.getByRole("menu", { name: "Контекстное меню", exact: true });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem")).toHaveCount(4);
+  await expect.poll(async () => (await invokes(page)).findLast(({ command }) => command === "update_codex_oauth_view")?.args.bounds).toBeNull();
+  await page.screenshot({ path: "output/playwright/sign-in-launcher-edit-menu.png" });
+  await menu.getByRole("menuitem", { name: "Копировать", exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("synthetic selection");
+  expect((await invokes(page)).filter(({ command }) => command === "edit_codex_oauth_view").map(({ args }) => args.action)).toEqual(["read", "dismiss"]);
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "paste-menu" });
+  await menu.getByRole("menuitem", { name: "Вставить", exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  expect((await invokes(page)).findLast(({ command }) => command === "edit_codex_oauth_view")?.args).toEqual({ loginId: context.loginId, requestId: "paste-menu", action: "paste", value: "synthetic selection" });
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "select-menu" });
+  await menu.getByRole("menuitem", { name: "Выделить всё", exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  expect((await invokes(page)).findLast(({ command }) => command === "edit_codex_oauth_view")?.args.action).toBe("selectAll");
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "cancel-menu" });
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, loginId: "old-attempt" });
+  await expect(menu).toHaveCount(0);
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "readonly-menu", canCut: false, canPaste: false });
+  await expect(menu.getByRole("menuitem")).toHaveCount(2);
+  await expect(menu.getByRole("menuitem", { name: "Вставить", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "close-menu" });
+  await expect(menu).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: context.loginId, status: "callback_received" });
+  await expect(menu).toHaveCount(0);
+  await expect.poll(async () => (await invokes(page)).findLast(({ command }) => command === "edit_codex_oauth_view")?.args).toEqual({ loginId: context.loginId, requestId: "close-menu", action: "dismiss" });
+  await emitTauriEvent(page, "relay-oauth-edit-menu", { ...context, requestId: "late-menu" });
+  await expect(menu).toHaveCount(0);
+});
+
+test("provider cut keeps the selection when copying fails and can retry", async ({ page }) => {
+  await installTauriMock(page, { populated: true });
+  const dialog = await openSignIn(page);
+  await dialog.getByRole("button", { name: "Open sign-in page", exact: true }).click();
+  await expect.poll(async () => (await invokes(page)).findLast(({ command }) => command === "update_codex_oauth_view")?.args.bounds).toBeTruthy();
+  const context = { loginId: "oauth_synthetic", requestId: "cut-menu", x: 30, y: 80, canCopy: true, canCut: true, canPaste: true, canSelectAll: true };
+  await emitTauriEvent(page, "relay-oauth-edit-menu", context);
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await page.evaluate(() => {
+    const exec = document.execCommand.bind(document);
+    let fail = true;
+    document.execCommand = (command, ...args) => {
+      if (command === "copy" && fail) { fail = false; return false; }
+      return exec(command, ...args);
+    };
+  });
+  const cut = menu.getByRole("menuitem", { name: "Cut", exact: true });
+  await cut.click();
+  await expect(cut).toBeEnabled();
+  expect((await invokes(page)).filter(({ command }) => command === "edit_codex_oauth_view").map(({ args }) => args.action)).toEqual(["read"]);
+  await cut.click();
+  await expect(menu).toHaveCount(0);
+  expect((await invokes(page)).filter(({ command }) => command === "edit_codex_oauth_view").map(({ args }) => args.action)).toEqual(["read", "read", "cut"]);
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("synthetic selection");
+});

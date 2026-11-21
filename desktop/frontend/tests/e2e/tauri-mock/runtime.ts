@@ -1250,6 +1250,7 @@ export function initializeTauriMock(input: MockOptions) {
           }
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "update_codex_oauth_view": return true;
+          case "edit_codex_oauth_view": return { ok: true, ...(args.action === "read" ? { text: "synthetic selection" } : {}) };
           case "cancel_codex_oauth": return null;
           case "complete_codex_oauth": {
             if (input.oauthCompletionDeferred) {
