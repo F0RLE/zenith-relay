@@ -99,7 +99,7 @@ test("account usage keeps API equivalent, payback, and provider quota windows se
   await expect(accountUsage).toBeVisible();
 });
 
-test("usage request columns reorder, resize, and open details only from the details button", async ({ page }) => {
+test("usage request columns reorder, fit automatically, and open details only from the details button", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -126,12 +126,13 @@ test("usage request columns reorder, resize, and open details only from the deta
   await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
   await expect(details).toHaveCount(0);
 
-  for (const column of ["model", "connection", "timing", "speed", "equivalent", "status"]) {
+  for (const column of ["model", "reasoning", "connection", "timing", "speed", "equivalent", "status"]) {
     await expect(table.locator(`th[data-column="${column}"]`)).toHaveCSS("text-align", "center");
     await expect(row.locator(`td[data-column="${column}"]`)).toHaveCSS("text-align", "center");
   }
   const statusHeading = table.getByLabel(/^Move the Status column/);
   const timeHeading = table.getByLabel(/^Move the Time column/);
+  await timeHeading.scrollIntoViewIfNeeded();
   const [statusBounds, timeBounds] = await Promise.all([statusHeading.boundingBox(), timeHeading.boundingBox()]);
   expect(statusBounds).not.toBeNull();
   expect(timeBounds).not.toBeNull();
@@ -139,24 +140,20 @@ test("usage request columns reorder, resize, and open details only from the deta
   await page.mouse.down();
   await page.mouse.move(timeBounds!.x + 3, timeBounds!.y + timeBounds!.height / 2, { steps: 5 });
   await page.mouse.up();
-  await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")))).toEqual(["status", "time", "model", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")))).toEqual(["status", "time", "model", "reasoning", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
 
-  const modelResize = table.getByRole("separator", { name: /^Resize the Model column/ });
-  const bounds = await modelResize.boundingBox();
-  expect(bounds).not.toBeNull();
-  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(bounds!.x + bounds!.width / 2 + 36, bounds!.y + bounds!.height / 2, { steps: 4 });
-  await page.mouse.up();
-  await expect(table).toHaveAttribute("data-resized", "true");
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null"))).toMatchObject({ order: ["status", "time", "model", "connection", "timing", "speed", "tokens", "equivalent", "request"], widths: { model: expect.any(Number) } });
+  await expect(table.getByRole("separator")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null"))).toEqual({ order: ["status", "time", "model", "reasoning", "connection", "timing", "speed", "tokens", "equivalent", "request"] });
 
   await page.reload();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.locator(".usage-request-table thead th").first()).toHaveAttribute("data-column", "status");
-  await expect(page.locator(".usage-request-table")).toHaveAttribute("data-resized", "true");
+  await expect(table).toHaveCSS("table-layout", "auto");
   await page.setViewportSize({ width: 840, height: 560 });
-  expect(await page.locator(".usage-request-table").evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth)).toBe(true);
+  expect(await table.evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth + 1)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBe(true);
+  await requestLink.scrollIntoViewIfNeeded();
+  await expect(requestLink).toBeInViewport();
 });
 
 test("usage shows request speed while keeping protocol, service tier and identifiers in details", async ({ page }) => {
@@ -189,7 +186,7 @@ test("usage shows request speed while keeping protocol, service tier and identif
   await expect(page.locator(".usage-overview").getByText("Generation speed", { exact: true })).toHaveCount(0);
 });
 
-test("usage preserves saved column order and widths when obsolete columns are removed", async ({ page }) => {
+test("usage preserves saved column order and retires fixed widths", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   const oldOrder = ["model", "protocol", "time", "tier", "status", "connection", "timing", "speed", "tokens", "equivalent", "request"];
   await page.addInitScript((order) => localStorage.setItem("relay.usageRequestTableLayout", JSON.stringify({
@@ -198,12 +195,12 @@ test("usage preserves saved column order and widths when obsolete columns are re
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const table = page.locator(".usage-request-table");
-  await expect(table).toHaveAttribute("data-resized", "true");
+  await expect(table).toHaveCSS("table-layout", "auto");
   await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column"))))
-    .toEqual(["model", "time", "status", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
-  await expect(table.getByRole("separator", { name: /^Resize the Model column/ })).toHaveAttribute("aria-valuenow", "240");
+    .toEqual(["model", "reasoning", "time", "status", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+  await expect(table.getByRole("separator")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null").widths))
-    .toEqual({ model: 240, time: 150, status: 150, connection: 150, timing: 150, speed: 150, tokens: 150, equivalent: 150, request: 150 });
+    .toBeUndefined();
 });
 
 test("usage adds speed beside timing without discarding the saved layout", async ({ page }) => {
@@ -215,19 +212,19 @@ test("usage adds speed beside timing without discarding the saved layout", async
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const table = page.locator(".usage-request-table");
-  await expect(table).toHaveAttribute("data-resized", "true");
+  await expect(table).toHaveCSS("table-layout", "auto");
   await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column"))))
-    .toEqual(["model", "time", "status", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
+    .toEqual(["model", "reasoning", "time", "status", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("relay.usageRequestTableLayout") ?? "null").widths))
-    .toEqual({ model: 240, time: 150, status: 150, connection: 150, timing: 150, speed: 88, tokens: 150, equivalent: 150, request: 150 });
+    .toBeUndefined();
 });
 
 test("usage repairs incomplete or malformed saved column layouts", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  const defaults = ["time", "status", "model", "connection", "timing", "speed", "tokens", "equivalent", "request"];
+  const defaults = ["time", "status", "model", "reasoning", "connection", "timing", "speed", "tokens", "equivalent", "request"];
   for (const [stored, order] of [
-    [JSON.stringify({ order: ["model", "protocol", "time"], widths: { model: 200 } }), ["model", "time", ...defaults.filter((column) => column !== "model" && column !== "time")]],
+    [JSON.stringify({ order: ["model", "protocol", "time"], widths: { model: 200 } }), ["model", "reasoning", "time", ...defaults.filter((column) => !["model", "reasoning", "time"].includes(column))]],
     [JSON.stringify({ order: ["model", "model"] }), defaults],
     [JSON.stringify({ order: defaults, widths: Object.fromEntries(defaults.map((column) => [column, column === "model" ? null : 150])) }), defaults],
     ["not-json", defaults],
@@ -236,7 +233,7 @@ test("usage repairs incomplete or malformed saved column layouts", async ({ page
     await page.reload();
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     const table = page.locator(".usage-request-table");
-    await expect(table).toHaveAttribute("data-resized", "false");
+    await expect(table).toHaveCSS("table-layout", "auto");
     await expect.poll(() => table.locator("thead th").evaluateAll((headers) => headers.map((header) => header.getAttribute("data-column")))).toEqual(order);
   }
 });

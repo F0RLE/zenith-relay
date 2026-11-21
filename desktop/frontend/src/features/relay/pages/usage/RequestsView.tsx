@@ -1,14 +1,13 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import type { KeyboardEvent, PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { EmptyState, StatusIcon } from "../../components/Ui";
-import { loadRequestTableLayout, reorderColumns, REQUEST_COLUMN_IDS, REQUEST_COLUMN_MAX_WIDTH, REQUEST_COLUMN_MIN_WIDTH, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
+import { loadRequestTableLayout, reorderColumns, REQUEST_TABLE_LAYOUT_KEY, shiftColumn, useColumnDrag } from "./useColumnLayout";
 import type { RequestColumnId, RequestTableLayout } from "./useColumnLayout";
 import { tokenSpeed } from "../../usageSpeed";
 import { usageSpeedSample, type UsageRow } from "./usageData";
 import { formatUsageApiEquivalent } from "./usageFormatting";
-import { formatDurationMs, formatTiming, requestStatusHint, requestStatusKind } from "./usageReportFormat";
-import { UsageModel, CompactNumber, SpeedValue, RequestStatusGlyph } from "./usageReportParts";
+import { formatDurationMs, formatReasoningEffort, formatReasoningSummary, formatTiming, requestStatusHint, requestStatusKind } from "./usageReportFormat";
+import { CompactNumber, SpeedValue, RequestStatusGlyph } from "./usageReportParts";
 import { UsageTableRow, type UsageColumns } from "./UsageTableRow";
 
 type RequestsViewProps = {
@@ -29,7 +28,6 @@ export const RequestsView = memo(function RequestsView({
 function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t, i18n } = useTranslation();
   const [layout, setLayout] = useState<RequestTableLayout>(loadRequestTableLayout);
-  const [resize, setResize] = useState<{ column: RequestColumnId; pointerId: number; startX: number; startWidth: number } | null>(null);
   useEffect(() => {
     try { localStorage.setItem(REQUEST_TABLE_LAYOUT_KEY, JSON.stringify(layout)); } catch { }
   }, [layout]);
@@ -51,9 +49,16 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
         </span>;
       },
     },
-    model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
+    model: { label: t("common.model"), cell: (row) => <code className="usage-request-model">{row.model ?? "-"}</code> },
+    reasoning: { label: t("usage.reasoning"), cell: (row) => <span className="usage-request-reasoning" data-relay-tooltip={formatReasoningSummary(row, t)}>{formatReasoningEffort(row.effectiveReasoningEffort ?? row.requestedReasoningEffort, t)}</span> },
     connection: { label: t("usage.poolMember"), cell: (row) => <span className="usage-request-connection">{row.connection}</span> },
-    timing: { label: t("usage.timing"), cell: (row) => <span data-relay-tooltip={t(row.imageUsage ? "usage.responseTime" : "usage.elapsedTiming")}>{row.imageUsage ? formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t) : formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t)}</span> },
+    timing: {
+      label: t("usage.timing"),
+      cell: (row) => {
+        const value = row.imageUsage ? formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t) : formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t);
+        return <span data-relay-tooltip={t(row.imageUsage ? "usage.responseTime" : "usage.elapsedTiming")}>{value.split(" / ").map((part, index) => <span key={index} className="usage-request-timing-part">{index ? " / " : ""}{part}</span>)}</span>;
+      },
+    },
     speed: { label: t("usage.generationSpeedShort"), cell: (row) => <SpeedValue value={row.imageUsage ? null : tokenSpeed(usageSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatUsageApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
@@ -74,47 +79,12 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
       ),
     },
   }), [formatTime, i18n.language, i18n.resolvedLanguage, onSelect, t]);
-  const resized = REQUEST_COLUMN_IDS.every((columnId) => layout.widths[columnId] != null);
-  const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, columnId) => total + (layout.widths[columnId] ?? 0), 0) : 0;
-  const captureWidths = (table: HTMLTableElement) => Object.fromEntries(Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]")).map((cell) => {
-    const columnId = cell.dataset["column"] as RequestColumnId;
-    return [columnId, Math.max(REQUEST_COLUMN_MIN_WIDTH[columnId], Math.round(cell.getBoundingClientRect().width))];
-  })) as Record<RequestColumnId, number>;
   const moveColumn = (column: RequestColumnId, target: RequestColumnId, after = false) => setLayout((previousLayout) => ({ ...previousLayout, order: reorderColumns(previousLayout.order, column, target, after) }));
   const moveColumnBy = (column: RequestColumnId, offset: number) => setLayout((previousLayout) => ({ ...previousLayout, order: shiftColumn(previousLayout.order, column, offset) }));
   const { bind: bindColumnDrag, drag: columnDrag } = useColumnDrag(moveColumn, moveColumnBy);
-  const startResize = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
-    const table = event.currentTarget.closest("table");
-    const header = event.currentTarget.closest("th");
-    if (!(table instanceof HTMLTableElement) || !(header instanceof HTMLTableCellElement)) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setLayout((previousLayout) => ({ ...previousLayout, widths: captureWidths(table) }));
-    setResize({ column, pointerId: event.pointerId, startX: event.clientX, startWidth: header.getBoundingClientRect().width });
-  };
-  const resizeColumn = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
-    if (!resize || resize.column !== column || resize.pointerId !== event.pointerId) return;
-    const width = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], Math.round(resize.startWidth + event.clientX - resize.startX)));
-    setLayout((previousLayout) => previousLayout.widths[column] === width ? previousLayout : { ...previousLayout, widths: { ...previousLayout.widths, [column]: width } });
-  };
-  const resizeColumnByKeyboard = (event: KeyboardEvent<HTMLSpanElement>, column: RequestColumnId) => {
-    if (event.key === "Home") {
-      event.preventDefault();
-      setLayout((previousLayout) => ({ ...previousLayout, widths: {} }));
-      return;
-    }
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-    const table = event.currentTarget.closest("table");
-    if (!(table instanceof HTMLTableElement)) return;
-    event.preventDefault();
-    const widths = captureWidths(table);
-    widths[column] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], widths[column] + (event.key === "ArrowRight" ? 12 : -12)));
-    setLayout((previousLayout) => ({ ...previousLayout, widths }));
-  };
 
-  return <div className="relay-table-wrap">
-    <table className="relay-table usage-request-table usage-sortable-table" data-resized={resized ? "true" : "false"}>
-      <colgroup>{layout.order.map((columnId) => <col key={columnId} data-column={columnId} style={resized ? { width: `${(layout.widths[columnId] ?? 0) / totalWidth * 100}%` } : undefined} />)}</colgroup>
+  return <div className="relay-table-wrap usage-request-table-wrap">
+    <table className="relay-table usage-request-table usage-sortable-table" style={{ gridTemplateColumns: layout.order.map((columnId) => columnId === "status" ? "min-content" : "auto").join(" ") }}>
       <thead><tr>{layout.order.map((columnId) => <th
         key={columnId}
         data-column={columnId}
@@ -122,22 +92,6 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
         data-drop={columnDrag?.target === columnId && columnDrag.column !== columnId ? (columnDrag.after ? "after" : "before") : undefined}
       >
         <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[columnId].label })} {...bindColumnDrag(columnId)}><span>{columns[columnId].label}</span></button>
-        <span
-          className="usage-column-resizer"
-          role="separator"
-          tabIndex={0}
-          aria-orientation="vertical"
-          aria-label={t("usage.resizeColumn", { column: columns[columnId].label })}
-          aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[columnId]}
-          aria-valuemax={REQUEST_COLUMN_MAX_WIDTH}
-          aria-valuenow={Math.round(layout.widths[columnId] ?? REQUEST_COLUMN_MIN_WIDTH[columnId])}
-          onPointerDown={(event) => startResize(event, columnId)}
-          onPointerMove={(event) => resizeColumn(event, columnId)}
-          onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setResize(null); }}
-          onLostPointerCapture={() => setResize(null)}
-          onDoubleClick={() => setLayout((previousLayout) => ({ ...previousLayout, widths: {} }))}
-          onKeyDown={(event) => resizeColumnByKeyboard(event, columnId)}
-        />
       </th>)}</tr></thead>
       <tbody>{rows.map((row) => <UsageTableRow key={row.id} row={row} columns={columns} order={layout.order} />)}</tbody>
     </table>

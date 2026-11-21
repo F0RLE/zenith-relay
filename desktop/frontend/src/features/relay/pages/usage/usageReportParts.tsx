@@ -30,7 +30,7 @@ export function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedRe
   const changed = Boolean(requested && effective && requested !== effective);
   return <span className="usage-model-value">
     <code>{row.model ?? "-"}</code>
-    {effort ? <small data-relay-tooltip={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : undefined}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
+    {effort ? <small data-relay-tooltip={changed ? t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(requested, t), effective: formatReasoningEffort(effective, t) }) : formatReasoningEffort(effort, t)}>{changed ? `${formatReasoningEffort(requested, t)} → ${formatReasoningEffort(effective, t)}` : formatReasoningEffort(effort, t)}</small> : null}
   </span>;
 }
 

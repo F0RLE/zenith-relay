@@ -510,6 +510,8 @@
   table-layout: fixed;
 }
 
+.usage-request-table { table-layout: auto; }
+
 .usage-sortable-table th,
 .usage-sortable-table td {
   text-align: center;
@@ -532,17 +534,37 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Fixed table layout shares space equally; explicit user resizing stays inline. */
-.usage-request-table col { width: auto; }
+.usage-request-table td {
+  height: 52px;
+  padding-block: 10px;
+}
+
+.usage-request-table :is(th, td) {
+  padding-inline: 6px;
+  overflow-wrap: normal;
+}
+
+.usage-request-table .usage-column-heading > span { overflow-wrap: normal; }
+.usage-request-table td .request-link { padding-inline: 2px; }
 
 .usage-request-connection {
   display: block;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.usage-request-table .usage-model-value {
-  display: flex;
+.usage-request-timing-part { display: inline-block; white-space: pre; }
+
+.usage-request-model,
+.usage-request-reasoning {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
+
+.usage-request-model { min-width: 12ch; font-weight: 600; }
 
 .usage-request-status {
   display: grid;
@@ -624,14 +646,28 @@
 .usage-column-heading:focus-visible { color: var(--relay-text); }
 
 @container usage (min-width: 581px) {
-  .usage-request-table :is(th, td)[data-column="status"] { padding-inline: 8px; }
-  .usage-request-table th:is([data-column="tokens"], [data-column="request"]) { padding-inline: 4px; }
-  .usage-request-connection,
-  .usage-request-table .usage-model-value code {
+  .usage-request-table { display: grid; }
+  .usage-request-table :is(thead, tbody, tr) {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+  }
+  .usage-request-table :is(th, td) {
+    min-width: 0;
+    height: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .usage-request-table th { min-width: min-content; min-height: 46px; }
+  .usage-request-table .usage-column-heading { min-width: min-content; }
+  .usage-request-table td { min-height: 52px; }
+  .usage-request-table td[data-column="request"] { min-width: min-content; }
+  .usage-request-table :is(th, td)[data-column="status"] { padding-inline: 4px; white-space: nowrap; }
+  .usage-request-table th:is([data-column="tokens"], [data-column="request"]) { padding-inline: 2px; }
+  .usage-request-connection {
     max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
   }
   .usage-sortable-table:not(.usage-request-table) :is(th, td):is([data-column="time"], [data-column="model"], [data-column="name"], [data-column="connection"]) {
     text-align: left;
@@ -642,42 +678,19 @@
   .usage-sortable-table:not(.usage-request-table) .usage-model-value { align-items: flex-start; }
 }
 
+@container usage (min-width: 1001px) {
+  .usage-request-table .usage-column-heading > span { white-space: nowrap; }
+  .usage-request-table td:is([data-column="time"], [data-column="timing"], [data-column="speed"], [data-column="tokens"], [data-column="equivalent"]) { white-space: nowrap; }
+}
+
+@container usage (min-width: 581px) and (max-width: 700px) {
+  .usage-request-model { min-width: 0; }
+  .usage-request-table .usage-column-heading > span { overflow-wrap: anywhere; }
+}
+
 .usage-sortable-table th[data-dragging="true"] .usage-column-heading { opacity: 0.55; }
 .usage-sortable-table th[data-drop="before"],
 .usage-sortable-table th[data-drop="after"] { background: var(--relay-accent-soft); }
-
-.usage-column-resizer {
-  position: absolute;
-  z-index: 3;
-  top: 0;
-  right: 0;
-  width: 8px;
-  height: 100%;
-  cursor: col-resize;
-  touch-action: none;
-}
-
-.usage-column-resizer::after {
-  position: absolute;
-  top: 25%;
-  bottom: 25%;
-  left: 3px;
-  width: 1px;
-  background: var(--relay-border-strong);
-  opacity: 0;
-  content: "";
-}
-
-.usage-sortable-table th:hover .usage-column-resizer::after { opacity: 1; }
-
-.usage-column-resizer:hover::after,
-.usage-column-resizer:focus-visible::after {
-  width: 2px;
-  opacity: 1;
-  background: var(--relay-border-strong);
-}
-
-.usage-column-resizer:focus-visible { outline: 0; }
 
 .usage-aggregate-table col[data-column="name"] { width: 19%; }
 .usage-aggregate-table col[data-column="requests"] { width: 8%; }
@@ -1321,10 +1334,9 @@
   .usage-account-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-scope-controls > .relay-icon-button { justify-self: end; }
   .usage-scope-controls[data-filter-count="3"] > :nth-child(3) { grid-column: 1 / -1; }
-  .usage-request-table [data-column="tokens"] { display: none; }
-  .usage-sortable-table th { font-size: 11px; }
-  .usage-sortable-table th,
-  .usage-sortable-table td { padding-inline: 6px; }
+  .usage-sortable-table:not(.usage-request-table) th { font-size: 11px; }
+  .usage-sortable-table:not(.usage-request-table) th,
+  .usage-sortable-table:not(.usage-request-table) td { padding-inline: 6px; }
 }
 
 @container usage (max-width: 580px) {
@@ -1405,7 +1417,8 @@
   .usage-request-table td[data-column="time"] { order: 0; }
   .usage-request-table td[data-column="status"] { order: 1; }
   .usage-request-table td[data-column="model"] { order: 2; }
-  .usage-request-table td[data-column="connection"] { order: 3; display: grid; grid-column: 1 / -1; }
+  .usage-request-table td[data-column="reasoning"] { order: 3; }
+  .usage-request-table td[data-column="connection"] { order: 4; display: grid; grid-column: 1 / -1; }
   .usage-request-table td[data-column="timing"] { order: 5; }
   .usage-request-table td[data-column="speed"] { order: 6; }
   .usage-request-table td[data-column="tokens"] { order: 7; display: grid; }
@@ -1413,6 +1426,7 @@
   .usage-request-table td[data-column="request"] { order: 9; }
 
   .usage-sortable-table .usage-model-value { align-items: flex-start; }
+  .usage-request-model { white-space: normal; overflow-wrap: anywhere; }
   .usage-sortable-table .request-link { margin: 0; justify-content: flex-start; white-space: normal; }
   .usage-sortable-table .request-link code { overflow-wrap: anywhere; }
   .usage-token-breakdown { grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); }
