@@ -6,6 +6,7 @@ use futures_util::{FutureExt, SinkExt, StreamExt};
 use reqwest::{Method, Request, Response, StatusCode, header};
 use reqwest_websocket::Message;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -17,6 +18,7 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use planner::CatalogReplay;
 pub(crate) use stream::SiwcStreamError;
 
 const MAX_SESSIONS: usize = 32;
@@ -85,9 +87,25 @@ pub(crate) struct PendingSocket {
     plan: planner::Plan,
     response_id: Option<String>,
     completed_output: crate::gateway::NativeReplayCapture,
+    catalog_approval: Option<CatalogCheckpointApproval>,
     url: url::Url,
     diagnostics: SocketDiagnostics,
     pub(super) payload_diagnostics: Option<RequestPayloadDiagnostics>,
+}
+
+/// One physical generation. The socket may become idle before native catalog
+/// validation finishes, but its checkpoint is not usable until approved.
+#[derive(Clone, Default)]
+pub(crate) struct CatalogCheckpointApproval(Arc<AtomicBool>);
+
+impl CatalogCheckpointApproval {
+    pub(crate) fn approve(self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_approved(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone)]
@@ -261,9 +279,15 @@ impl GatewayRuntime {
             });
         }
         let connection = connection.expect("connected socket");
+        let catalog = dispatch.usage_event.and_then(|usage| usage.siwc_catalog);
         let plan = payload
-            .with_diagnostics(diagnostics_mode.is_some())
-            .plan(connection.checkpoint.as_ref());
+            .with_diagnostics(
+                diagnostics_mode.is_some(),
+                dispatch
+                    .usage_event
+                    .and_then(|usage| usage.event.client_context_id.as_deref()),
+            )
+            .plan_catalog(connection.checkpoint.as_ref(), catalog);
         let payload_diagnostics = diagnostics_mode.map(|mode| {
             let mut diagnostics =
                 RequestPayloadDiagnostics::identity(plan.payload.as_bytes(), mode);
@@ -280,6 +304,7 @@ impl GatewayRuntime {
             plan,
             response_id: None,
             completed_output: crate::gateway::NativeReplayCapture::default(),
+            catalog_approval: catalog.map(|_| CatalogCheckpointApproval::default()),
             url: request.url().clone(),
             diagnostics: SocketDiagnostics {
                 reused,

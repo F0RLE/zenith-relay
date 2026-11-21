@@ -17,6 +17,7 @@ pub(crate) struct AuthorizationDispatch<'a> {
 pub(crate) struct DispatchUsage<'a> {
     pub(crate) event: &'a crate::UsageEvent,
     pub(crate) siwc_socket_context: Option<&'a str>,
+    pub(crate) siwc_catalog: Option<&'a super::siwc_socket::CatalogReplay>,
     pending_since: Option<std::time::Instant>,
 }
 
@@ -25,6 +26,7 @@ impl<'a> DispatchUsage<'a> {
         Self {
             event,
             siwc_socket_context: None,
+            siwc_catalog: None,
             pending_since: Some(started),
         }
     }
@@ -33,12 +35,21 @@ impl<'a> DispatchUsage<'a> {
         Self {
             event,
             siwc_socket_context: None,
+            siwc_catalog: None,
             pending_since: None,
         }
     }
 
     pub(crate) fn with_siwc_socket_context(mut self, context: Option<&'a str>) -> Self {
         self.siwc_socket_context = context;
+        self
+    }
+
+    pub(crate) fn with_siwc_catalog(
+        mut self,
+        catalog: Option<&'a super::siwc_socket::CatalogReplay>,
+    ) -> Self {
+        self.siwc_catalog = catalog;
         self
     }
 }

@@ -9,7 +9,9 @@ mod catalog;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub(crate) use catalog::{catalog_stats, catalog_stats_with_sizes, serialized_bytes};
+pub(crate) use catalog::{
+    catalog_stats, catalog_stats_with_sizes, responses_web_search_declared, serialized_bytes,
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

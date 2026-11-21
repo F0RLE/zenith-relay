@@ -6,6 +6,7 @@ use axum::{
 };
 use std::collections::VecDeque;
 
+mod attribution;
 mod queue;
 
 struct Fixture {
@@ -88,11 +89,20 @@ impl Fixture {
     }
 
     async fn pending(&self, store: &SocketStore, body: &Value) -> PendingSocket {
+        self.pending_in_context(store, body, "conversation").await
+    }
+
+    async fn pending_in_context(
+        &self,
+        store: &SocketStore,
+        body: &Value,
+        context: &str,
+    ) -> PendingSocket {
         let prepared = planner::parse(&serde_json::to_vec(body).unwrap()).unwrap();
         let key = prepared.session_key(
             "key",
             "account",
-            "conversation",
+            context,
             &self.url,
             crate::protocol::UsageWorkload::Conversation,
         );
@@ -114,7 +124,7 @@ impl Fixture {
             }
         };
         let plan = prepared
-            .with_diagnostics(true)
+            .with_diagnostics(true, Some(context))
             .plan(connection.checkpoint.as_ref());
         let mut payload =
             RequestPayloadDiagnostics::identity(plan.payload.as_bytes(), TransportMode::Native);
@@ -128,6 +138,7 @@ impl Fixture {
             plan,
             response_id: None,
             completed_output: crate::gateway::NativeReplayCapture::default(),
+            catalog_approval: None,
             url: self.url.clone(),
             diagnostics: SocketDiagnostics {
                 reused,
@@ -168,8 +179,11 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
         "name":"lookup","arguments":"{}","status":"completed","namespace":null,
         "encrypted_function_args":null,"encrypted_content":null,"async":null,
         "created_by":"synthetic-provider-provenance","parsed_arguments":{}});
+    let trace = "00000000-0000-4000-8000-000000000001";
     let search = json!({"type":"web_search_call","id":"ws_test","status":"completed",
         "action":{"type":"search","query":"synthetic"},
+        "metadata":{"turn_id":trace},
+        "internal_chat_message_metadata_passthrough":{"turn_id":trace},
         "created_by":"synthetic-search-provenance"});
     let answer = json!({"type":"message","id":"msg_test","role":"assistant",
         "content":[{"type":"output_text","text":"synthetic answer"}]});
@@ -180,8 +194,19 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     ])
     .await;
     let store = SocketStore::default();
-    let first = request(json!([{"role":"user","content":"synthetic"}]));
-    let response = fixture.pending(&store, &first).await.send().await.unwrap();
+    let first = request(json!([
+        {"type":"additional_tools","role":"developer","tools":[{"type":"web_search"}]},
+        {"role":"user","content":"synthetic"}
+    ]));
+    let pending = fixture.pending(&store, &first).await;
+    let before_send = pending.payload_diagnostics.as_ref().unwrap();
+    assert_eq!(before_send.web_search_declared, None);
+    let response = pending.send().await.unwrap();
+    let full = response
+        .extensions()
+        .get::<RequestPayloadDiagnostics>()
+        .unwrap();
+    assert_eq!(full.web_search_declared, Some(true));
     assert!(
         !response
             .extensions()
@@ -194,6 +219,7 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
     assert!(text.contains("cached_tokens"));
     assert!(text.contains("synthetic-provider-provenance"));
     assert!(text.contains("synthetic-search-provenance"));
+    assert!(text.contains(trace));
     let mut next = first.clone();
     let result = json!({"type":"function_call_output","call_id":"call_test","output":"ok"});
     let mut replay = call;
@@ -208,10 +234,9 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
         replay.as_object_mut().unwrap().remove(field);
     }
     let mut replayed_search = search;
-    replayed_search
-        .as_object_mut()
-        .unwrap()
-        .remove("created_by");
+    for field in ["created_by", "metadata"] {
+        replayed_search.as_object_mut().unwrap().remove(field);
+    }
     next["input"]
         .as_array_mut()
         .unwrap()
@@ -224,20 +249,14 @@ async fn wire_tool_cycle_reuses_socket_and_sends_only_new_items() {
             .unwrap()
             .reused
     );
+    let delta = response
+        .extensions()
+        .get::<RequestPayloadDiagnostics>()
+        .unwrap();
+    assert_eq!(delta.mode, crate::usage::RequestPayloadMode::Continuation);
+    assert_eq!(delta.web_search_declared, Some(false));
     assert_eq!(
-        response
-            .extensions()
-            .get::<RequestPayloadDiagnostics>()
-            .unwrap()
-            .mode,
-        crate::usage::RequestPayloadMode::Continuation
-    );
-    assert_eq!(
-        response
-            .extensions()
-            .get::<RequestPayloadDiagnostics>()
-            .unwrap()
-            .socket_output_reconciled,
+        delta.socket_output_reconciled,
         Some(crate::usage::SocketOutputReconciliation::OmittedAllowlistedOutputFields)
     );
     assert!(response.text().await.unwrap().contains("synthetic answer"));

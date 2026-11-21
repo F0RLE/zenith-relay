@@ -94,8 +94,14 @@ async fn siwc_websocket_preserves_native_and_converted_client_modes() {
             );
             let transport = usage[0].routing.as_ref().unwrap().transport.as_ref();
             assert_eq!(transport.is_some(), debug);
+            assert_eq!(
+                usage[0].tool_use.client_web_search_declared,
+                (debug && !chat).then_some(false)
+            );
             if debug {
                 let transport = transport.unwrap();
+                let payload = transport.request_payload.as_ref().unwrap();
+                assert_eq!(payload.web_search_declared, Some(false));
                 assert_eq!(transport.upstream, crate::UsageTransport::Websocket);
                 assert_eq!(transport.response_headers_ms, None);
                 assert_eq!(

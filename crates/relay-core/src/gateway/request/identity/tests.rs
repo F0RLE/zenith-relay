@@ -3,6 +3,41 @@ use axum::http::HeaderValue;
 use serde_json::json;
 
 #[test]
+fn siwc_probe_selects_the_chat_not_its_shared_cache_key_or_child_threads() {
+    let session = "synthetic-siwc-probe-session";
+    let targets = siwc_probe_contexts(session);
+    let matches = |headers: &HeaderMap, body: &Value| {
+        client_request_identity(headers, body)
+            .context_id
+            .is_some_and(|id| targets.contains(&id))
+    };
+    let cache_only = json!({"prompt_cache_key":session});
+    assert!(!matches(&HeaderMap::new(), &cache_only));
+    for header in [
+        "x-session-id",
+        "session_id",
+        "thread-id",
+        "x-codex-session-id",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(header, HeaderValue::from_static(session));
+        assert!(matches(&headers, &Value::Null));
+        assert!(matches(&headers, &json!({"prompt_cache_key":"unrelated"})));
+        headers.insert(header, HeaderValue::from_static("another-synthetic-chat"));
+        assert!(!matches(&headers, &cache_only));
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("x-codex-window-id", HeaderValue::from_static(session));
+    assert!(!matches(&headers, &cache_only));
+    let metadata = |thread| json!({"client_metadata":{"session_id":session,"thread_id":thread}});
+    assert!(matches(&headers, &metadata(session)));
+    assert!(!matches(&headers, &metadata("different-thread")));
+    for invalid in ["", "*", "selected,another", "test session not an id"] {
+        assert!(siwc_probe_contexts(invalid).is_empty());
+    }
+}
+
+#[test]
 fn sibling_threads_share_root_affinity_but_not_context() {
     let headers = HeaderMap::new();
     let first = client_request_identity(

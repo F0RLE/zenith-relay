@@ -295,7 +295,10 @@ pub(super) async fn dispatch_request_attempt(
                 lease: Some(lease),
                 usage_event: Some(
                     crate::runtime::DispatchUsage::tracked(&authorization_event, started)
-                        .with_siwc_socket_context(route.siwc_socket_context.as_deref()),
+                        .with_siwc_socket_context(route.siwc_socket_context.as_deref())
+                        .with_siwc_catalog(
+                            discovery_session.as_ref().and_then(|s| s.siwc_catalog()),
+                        ),
                 ),
             },
             attachment_owner.as_ref(),

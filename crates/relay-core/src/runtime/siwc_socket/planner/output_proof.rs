@@ -1,22 +1,24 @@
-use super::{Fingerprint, fingerprint, replay_item};
+use super::replay_item::METADATA;
+use super::{Fingerprint, ReplayItem, fingerprint};
 use crate::usage::{
     SocketOutputMismatch, SocketOutputReconciliation, SocketReplayField, SocketReplayItemKind,
-    SocketUnknownFieldChanges,
+    SocketReplayValueKind, SocketUnknownFieldChanges,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Diagnostics add at most 32 small field proofs per socket; never retain bodies.
 pub(super) const MAX_ITEMS: usize = 32;
-const MAX_UNKNOWN_FIELDS: usize = 16;
+pub(super) const MAX_UNKNOWN_FIELDS: usize = 16;
 
 /// Only a drop of optional completion status or redundant SDK parse data
 /// can match. Keep opaque or changed fields and the stored response intact.
 pub(super) fn function_projections(
-    value: &Value,
-) -> impl Iterator<Item = (Fingerprint, SocketOutputReconciliation)> {
+    replay: &ReplayItem<'_>,
+) -> impl Iterator<Item = (Fingerprint, SocketOutputReconciliation)> + use<> {
     use SocketOutputReconciliation::*;
     let mut proofs = [None; 3];
+    let value = replay.raw;
     if value["type"] == "function_call"
         && value
             .get("status")
@@ -33,32 +35,29 @@ pub(super) fn function_projections(
             decoration.is_null()
                 || crate::strict_json::parse(arguments).is_ok_and(|args| args == **decoration)
         });
-        if status.is_some() || parsed.is_some() {
-            let mut projected = replay_item(value).into_owned();
-            let object = projected.as_object_mut().expect("function item");
+        if status.is_some() {
+            proofs[0] = Some((
+                replay.projected_hash(&["status"]),
+                OmittedCompletedFunctionStatus,
+            ));
+        }
+        if parsed.is_some() {
+            proofs[1] = Some((
+                replay.projected_hash(&["parsed_arguments"]),
+                OmittedParsedFunctionArguments,
+            ));
             if status.is_some() {
-                object.remove("status");
-                proofs[0] = Some((fingerprint(&projected), OmittedCompletedFunctionStatus));
-                projected["status"] = Value::String("completed".into());
-            }
-            if parsed.is_some() {
-                let object = projected.as_object_mut().expect("function item");
-                object.remove("parsed_arguments");
-                proofs[1] = Some((fingerprint(&projected), OmittedParsedFunctionArguments));
-                if status.is_some() {
-                    projected
-                        .as_object_mut()
-                        .expect("function item")
-                        .remove("status");
-                    proofs[2] = Some((fingerprint(&projected), OmittedOptionalFunctionFields));
-                }
+                proofs[2] = Some((
+                    replay.projected_hash(&["parsed_arguments", "status"]),
+                    OmittedOptionalFunctionFields,
+                ));
             }
         }
     }
     proofs.into_iter().flatten()
 }
 
-const FIELDS: [(&str, SocketReplayField); 27] = [
+const FIELDS: [(&str, SocketReplayField); 29] = [
     ("type", SocketReplayField::Type),
     ("id", SocketReplayField::Id),
     ("status", SocketReplayField::Status),
@@ -80,10 +79,8 @@ const FIELDS: [(&str, SocketReplayField); 27] = [
     ("caller", SocketReplayField::Caller),
     ("input", SocketReplayField::Input),
     ("output", SocketReplayField::Output),
-    (
-        "internal_chat_message_metadata_passthrough",
-        SocketReplayField::Metadata,
-    ),
+    (METADATA, SocketReplayField::Metadata),
+    ("metadata", SocketReplayField::ItemMetadata),
     ("execution", SocketReplayField::Execution),
     ("tools", SocketReplayField::Tools),
     ("action", SocketReplayField::Action),
@@ -92,7 +89,12 @@ const FIELDS: [(&str, SocketReplayField); 27] = [
     ("result", SocketReplayField::Result),
     ("revised_prompt", SocketReplayField::RevisedPrompt),
     ("created_by", SocketReplayField::CreatedBy),
+    ("agent", SocketReplayField::Agent),
 ];
+
+pub(super) fn is_extension(name: &str) -> bool {
+    !FIELDS.iter().any(|(known, _)| name == *known)
+}
 
 /// Hashes remain volatile and are deliberately not serializable or debuggable.
 pub(super) struct OutputProof {
@@ -107,21 +109,15 @@ pub(super) struct OutputProof {
 
 struct UnknownProof {
     value: Fingerprint,
-    null: bool,
+    kind: SocketReplayValueKind,
 }
 
 impl OutputProof {
-    pub(super) fn new(value: &Value) -> Self {
-        let had_created_by = value.get("created_by").is_some();
-        let had_metadata = value
-            .get("internal_chat_message_metadata_passthrough")
-            .is_some();
-        let value = replay_item(value);
-        let omittable_created_by = had_created_by && value.get("created_by").is_none();
-        let omittable_metadata = had_metadata
-            && value
-                .get("internal_chat_message_metadata_passthrough")
-                .is_none();
+    pub(super) fn new(replay: &ReplayItem<'_>) -> Self {
+        let value = replay.raw;
+        let omittable_created_by =
+            value.get("created_by").is_some() && replay.get("created_by").is_none();
+        let omittable_metadata = value.get(METADATA).is_some() && replay.get(METADATA).is_none();
         let kind = match value.get("type").and_then(Value::as_str) {
             Some("message") => SocketReplayItemKind::Message,
             Some("reasoning") => SocketReplayItemKind::Reasoning,
@@ -132,17 +128,14 @@ impl OutputProof {
             Some("tool_search_output") => SocketReplayItemKind::ToolSearchOutput,
             _ => SocketReplayItemKind::Other,
         };
-        let fields = std::array::from_fn(|index| value.get(FIELDS[index].0).map(fingerprint));
-        let mut other = value.into_owned();
-        if let Some(object) = other.as_object_mut() {
-            for (name, _) in FIELDS {
-                object.remove(name);
-            }
-        }
+        let fields = std::array::from_fn(|index| replay.get(FIELDS[index].0).map(fingerprint));
         let mut unknown = BTreeMap::new();
-        if let Some(object) = other.as_object() {
-            for (name, value) in object {
-                let key = fingerprint(&Value::String(name.clone()));
+        let mut unknown_count = 0;
+        let other = if let Some(object) = value.as_object() {
+            let extensions = object.iter().filter(|(name, _)| is_extension(name));
+            for (name, value) in extensions.clone() {
+                unknown_count += 1;
+                let key = crate::json_fingerprint::sha256(name).expect("JSON string serializes");
                 if unknown.len() == MAX_UNKNOWN_FIELDS
                     && unknown
                         .last_key_value()
@@ -154,22 +147,25 @@ impl OutputProof {
                     key,
                     UnknownProof {
                         value: fingerprint(value),
-                        null: value.is_null(),
+                        kind: SocketReplayValueKind::from(value),
                     },
                 );
                 if unknown.len() > MAX_UNKNOWN_FIELDS {
                     unknown.pop_last();
                 }
             }
-        }
+            (unknown_count != 0).then(|| {
+                crate::json_fingerprint::canonical_fields_sha256(extensions)
+                    .expect("JSON serializes")
+            })
+        } else {
+            Some(fingerprint(value))
+        };
         Self {
             fields,
-            other: (!other.as_object().is_some_and(|object| object.is_empty()))
-                .then(|| fingerprint(&other)),
+            other,
             unknown,
-            truncated: other
-                .as_object()
-                .is_none_or(|object| object.len() > MAX_UNKNOWN_FIELDS),
+            truncated: !value.is_object() || unknown_count > MAX_UNKNOWN_FIELDS,
             kind,
             omittable_created_by,
             omittable_metadata,
@@ -179,12 +175,9 @@ impl OutputProof {
     pub(super) fn recognized_omission(
         &self,
         replayed: &Value,
+        paired_turn_omitted: bool,
     ) -> Option<SocketOutputReconciliation> {
-        if self.omittable_metadata
-            && replayed
-                .get("internal_chat_message_metadata_passthrough")
-                .is_none()
-        {
+        if !paired_turn_omitted && self.omittable_metadata && replayed.get(METADATA).is_none() {
             return Some(SocketOutputReconciliation::OmittedAllowlistedOutputFields);
         }
         (self.omittable_created_by && replayed.get("created_by").is_none()).then_some(
@@ -197,7 +190,7 @@ impl OutputProof {
     }
 
     pub(super) fn mismatch(&self, index: usize, current: Option<&Value>) -> SocketOutputMismatch {
-        let current = current.map(Self::new);
+        let current = current.map(|item| Self::new(&ReplayItem::new(item)));
         let mut fields = FIELDS
             .iter()
             .enumerate()
@@ -230,7 +223,8 @@ impl OutputProof {
             match current.and_then(|proof| proof.unknown.get(name)) {
                 None if current.is_none_or(|proof| proof.covers(name)) => {
                     changes.removed += 1;
-                    changes.null_only &= before.null;
+                    changes.null_only &= before.kind == SocketReplayValueKind::Null;
+                    changes.single_removed_type = Some(before.kind);
                 }
                 Some(after) if before.value != after.value => {
                     changes.changed += 1;
@@ -243,9 +237,12 @@ impl OutputProof {
             for (name, after) in &current.unknown {
                 if !self.unknown.contains_key(name) && self.covers(name) {
                     changes.added += 1;
-                    changes.null_only &= after.null;
+                    changes.null_only &= after.kind == SocketReplayValueKind::Null;
                 }
             }
+        }
+        if changes.truncated || changes.removed != 1 || changes.added != 0 || changes.changed != 0 {
+            changes.single_removed_type = None;
         }
         changes.null_only &= !changes.truncated;
         changes

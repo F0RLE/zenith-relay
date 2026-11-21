@@ -56,9 +56,11 @@ impl PendingSocket {
         if let Some(payload) = self.payload_diagnostics.as_mut() {
             payload.body_bytes = sent.body_bytes;
             payload.content_encoding = sent.content_encoding;
+            payload.web_search_declared = self.plan.web_search_declared;
         }
         let diagnostics = self.diagnostics.clone();
         let payload_diagnostics = self.payload_diagnostics.clone();
+        let catalog_approval = self.catalog_approval.clone();
         let url = self.url.clone();
         let stream = futures_util::stream::try_unfold(Some(self), |state| async move {
             let Some(mut state) = state else {
@@ -125,8 +127,9 @@ impl PendingSocket {
                     && let Some(response) = state
                         .completed_output
                         .finish(event.get("response").cloned(), state.response_id.as_deref())
-                    && let Some(checkpoint) = state.plan.state.complete(&response)
+                    && let Some(mut checkpoint) = state.plan.state.complete(&response)
                 {
+                    checkpoint.catalog_approval = state.catalog_approval;
                     state.connection.checkpoint = Some(checkpoint);
                     state.lane.touched = Instant::now();
                     state.lane.reset_reason = None;
@@ -145,6 +148,9 @@ impl PendingSocket {
         response.extensions_mut().insert(diagnostics);
         if let Some(payload) = payload_diagnostics {
             response.extensions_mut().insert(payload);
+        }
+        if let Some(approval) = catalog_approval {
+            response.extensions_mut().insert(approval);
         }
         Ok(response)
     }

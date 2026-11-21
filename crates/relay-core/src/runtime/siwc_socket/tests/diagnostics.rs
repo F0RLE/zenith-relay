@@ -4,7 +4,7 @@ use crate::usage::{FullRequestReason, SocketReplayField, SocketReplayItemKind};
 fn checkpoint(body: &Value, output: &Value, diagnostics: bool) -> planner::Checkpoint {
     planner::parse(&serde_json::to_vec(body).unwrap())
         .unwrap()
-        .with_diagnostics(diagnostics)
+        .with_diagnostics(diagnostics, None)
         .plan(None)
         .state
         .complete(&json!({"id":"synthetic-response","status":"completed","output":output}))
@@ -53,7 +53,8 @@ fn output_mismatch_reports_only_fixed_field_labels_and_relative_index() {
         json!({
             "outputIndex":1,"fields":["id","content","other"],
             "itemKind":"message", "unknownFields":{
-                "added":0,"removed":1,"changed":0,"nullOnly":false,"truncated":false
+                "added":0,"removed":1,"changed":0,"nullOnly":false,"truncated":false,
+                "singleRemovedType":"string"
             }
         })
     );
@@ -194,6 +195,7 @@ fn unknown_extension_changes_are_bounded_content_free_and_never_authorize_replay
         assert_eq!(unknown.changed, u32::from(!null_only));
         assert_eq!(unknown.null_only, null_only);
         assert!(!unknown.truncated);
+        assert!(unknown.single_removed_type.is_none());
         assert!(
             !serde_json::to_string(&mismatch)
                 .unwrap()
@@ -226,6 +228,7 @@ fn truncated_unknown_proofs_cannot_claim_null_only_or_change_replay_decisions() 
     let unknown = mismatch.unknown_fields.unwrap();
     assert_eq!(unknown.removed, 16);
     assert!(unknown.truncated);
+    assert!(unknown.single_removed_type.is_none());
     assert!(!unknown.null_only);
     assert!(
         !serde_json::to_string(&mismatch)

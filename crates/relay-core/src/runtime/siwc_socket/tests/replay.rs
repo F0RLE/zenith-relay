@@ -1,8 +1,11 @@
 use super::*;
 use crate::usage::FullRequestReason;
 
+mod message_status;
 mod nullable;
 mod provenance;
+mod root_attribution;
+mod turn_metadata;
 
 fn checkpoint(body: &Value, output: &Value) -> planner::Checkpoint {
     plan(body, None)

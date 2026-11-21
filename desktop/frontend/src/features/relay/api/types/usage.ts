@@ -143,7 +143,7 @@ export type RoutingDiagnostics = {
       /** Fixed field labels only; no item values, arbitrary keys or fingerprints. */
       socketOutputMismatch?: {
         outputIndex: number;
-        fields: ("type" | "id" | "status" | "role" | "content" | "summary" | "encrypted_content" | "phase" | "name" | "namespace" | "arguments" | "encrypted_arguments" | "encrypted_function_args" | "async" | "call_id" | "caller" | "input" | "output" | "metadata" | "execution" | "tools" | "action" | "author" | "recipient" | "result" | "revised_prompt" | "created_by" | "other")[];
+        fields: ("type" | "id" | "status" | "role" | "content" | "summary" | "encrypted_content" | "phase" | "name" | "namespace" | "arguments" | "encrypted_arguments" | "encrypted_function_args" | "async" | "call_id" | "caller" | "input" | "output" | "metadata" | "item_metadata" | "execution" | "tools" | "action" | "author" | "recipient" | "result" | "revised_prompt" | "created_by" | "agent" | "other")[];
         itemKind?: "message" | "reasoning" | "function_call" | "custom_tool_call" | "web_search_call" | "tool_search_call" | "tool_search_output" | "other" | null;
         /** Bounded aggregate differences; no unknown keys, values or hashes. */
         unknownFields?: {
@@ -152,15 +152,20 @@ export type RoutingDiagnostics = {
           changed: number;
           nullOnly: boolean;
           truncated: boolean;
+          singleRemovedType?: "null" | "boolean" | "number" | "string" | "array" | "object" | null;
         } | null;
       } | null;
       socketOutputReconciled?:
+        | "omitted_completed_message_status"
         | "omitted_completed_function_status"
         | "omitted_parsed_function_arguments"
         | "omitted_optional_function_fields"
         | "omitted_reasoning_created_by"
+        | "omitted_root_agent_attribution"
+        | "omitted_duplicate_turn_metadata"
         | "omitted_allowlisted_output_fields"
         | null;
+      webSearchDeclared?: boolean | null;
       jsonBytes: number;
       /** Encoded body bytes, excluding HTTP/WebSocket framing and TLS. */
       bodyBytes: number;
@@ -269,6 +274,7 @@ export type ToolUseDiagnostics = {
     cacheRetention?: string;
   };
   clientToolCount: number;
+  clientWebSearchDeclared?: boolean | null;
   /** Post-policy catalog, before BPS prompt encoding or other transport changes. */
   forwardedToolCount: number;
   clientSchemaBytes?: number;

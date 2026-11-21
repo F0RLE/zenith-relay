@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 pub(crate) use crate::unix_time_ms as now_ms;
 pub(crate) use errors::{basis_points_transport_rejected, failure_category_affects_account_state};
+#[cfg(any(debug_assertions, test))]
+pub(crate) use request::siwc_probe_contexts;
 pub(crate) use streaming::NativeReplayCapture;
 
 mod auth;

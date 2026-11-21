@@ -43,6 +43,48 @@ fn dictionary_count(database: &TelemetryDb) -> i64 {
 }
 
 #[test]
+fn web_search_declarations_roundtrip_independently_in_failed_sends() {
+    with_database("relay-search-declarations", |db| {
+        for (id, client, sent) in [
+            ("legacy", None, None),
+            ("not-written", Some(true), None),
+            ("trimmed", Some(true), Some(false)),
+            ("wire-only", Some(false), Some(true)),
+            ("declared", Some(true), Some(true)),
+            ("absent", Some(false), Some(false)),
+        ] {
+            let mut attempt = event(id);
+            attempt.success = false;
+            attempt.http_status = 400;
+            attempt.tool_use.client_web_search_declared = client;
+            let routing = attempt.routing.as_mut().unwrap();
+            routing.attempt_outcome = Some(zenith_relay_core::AttemptOutcome::ReturnedFailure);
+            let mut body =
+                json!({"mode":"full","jsonBytes":10,"bodyBytes":10,"contentEncoding":"identity"});
+            if let Some(declared) = sent {
+                body["webSearchDeclared"] = json!(declared);
+            }
+            routing.transport = Some(
+                serde_json::from_value(json!({
+                    "upstream":"websocket","mode":"native","requestPayload":body
+                }))
+                .unwrap(),
+            );
+            db.record(&attempt).unwrap();
+            let report = db.request_diagnostics(id).unwrap();
+            let row = &report["attempts"][0];
+            assert_eq!(row["httpStatus"], 400);
+            assert_eq!(row["tools"]["clientWebSearchDeclared"], json!(client));
+            let payload = &row["routing"]["transport"]["requestPayload"];
+            assert_eq!(
+                payload.get("webSearchDeclared"),
+                body.get("webSearchDeclared")
+            );
+        }
+    });
+}
+
+#[test]
 fn diagnostics_share_immutable_snapshots_and_collect_unreferenced_corrections() {
     with_database("relay-diagnostic-dedup", |database| {
         let mut observation = event("synthetic");

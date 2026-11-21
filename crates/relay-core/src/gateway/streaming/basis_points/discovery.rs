@@ -346,6 +346,7 @@ impl DiscoveryStream {
         // The completed reader is no longer needed for validation or replay.
         // Release it before waiting for another generation's response headers.
         self.inner = None;
+        let catalog_approval = self.discovery.catalog_approval.take();
         let mut event = self.event.clone();
         event.attempt = u16::from(self.discovery.budget.dispatches());
         event.latency_ms = self.started.elapsed().as_millis() as u64;
@@ -473,6 +474,9 @@ impl DiscoveryStream {
             };
             self.offset = 0;
             self.emit(json!({"type":kind,"response":terminal}));
+            if let Some(approval) = catalog_approval {
+                approval.approve();
+            }
             self.terminal = true;
             return Ok(());
         }
@@ -530,22 +534,27 @@ impl DiscoveryStream {
         {
             transport.request_payload = None;
         }
+        if let Some(approval) = catalog_approval {
+            approval.approve();
+        }
         let response = dispatch_continuation(
             &self.settlement.runtime,
             &self.settlement.lease,
             &self.settlement.route,
             &self.discovery.budget,
             &self.discovery.owner,
-            &self.event,
+            crate::runtime::DispatchUsage::observed(&self.event)
+                .with_siwc_catalog(self.discovery.session.siwc_catalog()),
             &self.discovery.upstream,
         )
         .await;
         self.update_progress();
-        let response = response
+        let mut response = response
             .map_err(|error| {
                 DiscoveryFailure::Upstream(Box::new(AttemptFailure::authorized_request(error)))
             })?
             .response;
+        self.discovery.catalog_approval = response.extensions_mut().remove();
         let socket = response
             .extensions()
             .get::<crate::runtime::siwc_socket::SocketDiagnostics>()

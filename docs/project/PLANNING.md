@@ -739,6 +739,10 @@ preserving array order, opaque strings and the outgoing payload. A completed
 reasoning item's omitted `status` is equivalent to `status=completed` only for
 this comparison, matching Codex's typed replay. IDs, ciphertext, summaries,
 unknown fields and non-completed statuses remain part of the proof.
+An identified assistant message with a content array may omit its original
+`status: "completed"` on replay, matching [Codex's optional message status](https://github.com/openai/codex/blob/340a18ed7cd0aea3bc218838d9ac1f0f30efb1ac/codex-rs/protocol/src/models.rs#L1108-L1120)
+(`omitted_completed_message_status`). Adding or changing that status, or removing
+it from earlier input, requires full history.
 For an identified function call, the replay may omit `status: "completed"` or
 SDK `parsed_arguments` that are null or exactly reproduce the original JSON
 arguments. Relay compares all other fields, keeps the upstream output on the
@@ -751,6 +755,17 @@ Malformed provenance and other item kinds remain exact. This does not remove
 fields from forwarded output, full-history requests or the new continuation suffix.
 An omitted string `created_by` on a matching allowlisted item also reports
 `socketOutputReconciled` when the relevant diagnostics are available.
+On identified reasoning, assistant messages and function/custom calls, replay
+may omit the [producing agent](https://github.com/openai/openai-node/blob/2442a0ca8a934aa4b41fe1c797717e4713568739/src/resources/beta/responses/responses.ts)
+only for the exact object `{"agent_name":"/root"}` with no conflicting creator.
+Introduced or changed attribution, other agents and edits to earlier input require
+full history. A standalone match reports `omitted_root_agent_attribution`.
+On these items and identified, completed `web_search_call` items, Relay accepts
+omitting `metadata: {"turn_id": …}` only when the same UUID appears in
+`internal_chat_message_metadata_passthrough.turn_id`.
+Omitting that exact duplicate reports `omitted_duplicate_turn_metadata`. Added,
+changed, uncorroborated or extended item metadata and changes to earlier input
+require full history. Mismatches in the item's `metadata` use `item_metadata`.
 The same comparison treats absent, null and empty-array reasoning `content` as
 equivalent, matching Codex's `Option` serialization. Nonempty content remains exact.
 Optional nullable message `phase`, reasoning `encrypted_content` and
@@ -786,6 +801,11 @@ unindexed sequence without IDs.
 Omitted replay terminal fields can use observed
 state; explicit invalid IDs/output shapes and conflicting response IDs cannot
 be repaired into a valid checkpoint.
+After Relay's native tool lookup, the same socket can continue from the final
+upstream response even though the client never received the lookup call or result.
+Relay verifies the original prefix, every public output and every tool declaration
+it regenerated before a replayed call. A changed catalog, missing declaration or
+client-supplied lookalike requires full history.
 Changed or unproven history sends the complete input over WebSocket. Context-free
 HTTP turns, expired session waits and exhausted retained-lane capacity use isolated
 full-history sockets without sharing continuation state. A failed upgrade returns an error rather than an HTTP
@@ -817,11 +837,11 @@ Unnormalized `created_by` differences likewise have a fixed label without its va
 The mismatch also classifies the completed item using fixed kind labels. Documented
 execution, tool catalog, action and image-result fields have separate labels;
 these labels do not make unsupported hosted tools eligible. Unknown fields retain
-the strict comparison. Diagnostics report only added/removed/changed counts and
-whether all observed differences are null omissions/additions, using at most 16
-volatile key/value proofs per item. Truncated proofs explicitly mark incomplete
-counts and cannot claim null-only differences. Neither diagnostic authorizes a
-continuation or retains unknown field names or values.
+the strict comparison. Diagnostics report added/removed/changed counts and
+whether all observed differences are null omissions/additions. For exactly one
+removed extension, `singleRemovedType` gives its JSON type, not its name or value.
+Truncated proofs (over 16 unknown fields) omit the type and cannot claim null-only
+differences. Diagnostics never authorize continuation.
 Proof selection is independent of JSON key order. Truncated comparisons count
 only proven changes; an unretained field is not reported as added or removed.
 Continuation comparison ignores known client-only attribution/telemetry metadata
@@ -925,6 +945,8 @@ Local lookups share the request budget, lease and exact authorization incarnatio
 they cannot change accounts, replay executable calls, or execute client tools.
 SIWC lookups also keep the originating chat's WebSocket lane. When the completed
 output matches, only the lookup result and newly loaded definitions are appended.
+A completed generation is eligible for continuation only after catalog validation.
+Rejected output leaves a healthy socket reusable but requires full history.
 Each attempt reports its own upstream connection and actual frame size.
 Malformed local reads can be corrected within eight bounded lookup rounds.
 Usage is recorded for each actual generation; hidden lookup usage is not free
@@ -3398,6 +3420,10 @@ No raw provider-usage record is invented or persisted for this export.
 `observedAt` is the database observation/update timestamp in UTC, not request
 start time. Tool call counts before and after client translation are separate;
 batch expansion can make them differ without indicating a failure.
+`tools.clientWebSearchDeclared` measures a built-in search declaration in the
+incoming Responses request; `routing.transport.requestPayload.webSearchDeclared`
+measures the declaration in the SIWC frame actually written, after delta trimming.
+Both are opt-in. A missing observation is unknown; neither flag counts search calls.
 The export names the pre-transport tool-policy snapshot `tools.policyCatalog`,
 not `forwarded*`: BPS embeds a catalog index and loaded contracts as prompt text.
 `renderedSchemaBytes` counts parameter-schema text, not all prompt/wire bytes;

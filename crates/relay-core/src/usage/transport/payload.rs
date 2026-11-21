@@ -57,6 +57,7 @@ pub enum SocketReplayField {
     Input,
     Output,
     Metadata,
+    ItemMetadata,
     Execution,
     Tools,
     Action,
@@ -65,7 +66,33 @@ pub enum SocketReplayField {
     Result,
     RevisedPrompt,
     CreatedBy,
+    Agent,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketReplayValueKind {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+impl From<&serde_json::Value> for SocketReplayValueKind {
+    fn from(value: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        match value {
+            Value::Null => Self::Null,
+            Value::Bool(_) => Self::Boolean,
+            Value::Number(_) => Self::Number,
+            Value::String(_) => Self::String,
+            Value::Array(_) => Self::Array,
+            Value::Object(_) => Self::Object,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -76,6 +103,8 @@ pub struct SocketUnknownFieldChanges {
     pub changed: u32,
     pub null_only: bool,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_removed_type: Option<SocketReplayValueKind>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -107,10 +136,13 @@ pub enum SocketReplayItemKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SocketOutputReconciliation {
+    OmittedCompletedMessageStatus,
     OmittedCompletedFunctionStatus,
     OmittedParsedFunctionArguments,
     OmittedOptionalFunctionFields,
     OmittedReasoningCreatedBy,
+    OmittedRootAgentAttribution,
+    OmittedDuplicateTurnMetadata,
     OmittedAllowlistedOutputFields,
 }
 
@@ -124,6 +156,9 @@ pub struct RequestPayloadDiagnostics {
     pub socket_output_mismatch: Option<SocketOutputMismatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_output_reconciled: Option<SocketOutputReconciliation>,
+    /// Declaration in the written SIWC frame, not provider acceptance or execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search_declared: Option<bool>,
     pub json_bytes: u64,
     pub body_bytes: u64,
     pub content_encoding: RequestContentEncoding,
@@ -171,6 +206,7 @@ impl RequestPayloadDiagnostics {
             }),
             socket_output_mismatch: None,
             socket_output_reconciled: None,
+            web_search_declared: None,
             json_bytes: bytes.len() as u64,
             body_bytes: bytes.len() as u64,
             content_encoding: RequestContentEncoding::Identity,
@@ -256,6 +292,10 @@ mod tests {
             serde_json::to_value(restored).unwrap(),
             serde_json::json!({"outputIndex":0,"fields":["other"]})
         );
+        let legacy = serde_json::json!({"added":0,"removed":1,"changed":0,"nullOnly":false,"truncated":false});
+        let restored: SocketUnknownFieldChanges = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.single_removed_type.is_none());
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub(super) fn document(tools: &ToolUseDiagnostics) -> Value {
     });
     json!({
         "clientToolCount": tools.client_tool_count, "policyCatalog": policy_catalog,
+        "clientWebSearchDeclared": tools.client_web_search_declared,
         "toolCallCount": tools.tool_call_count, "upstreamToolCallCount": tools.upstream_tool_call_count,
         "toolCallsReadyMs": tools.tool_calls_ready_ms, "terminalOutput": tools.terminal_output,
         "clientSchemaBytes": tools.client_schema_bytes,

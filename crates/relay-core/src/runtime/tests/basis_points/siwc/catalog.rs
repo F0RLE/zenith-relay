@@ -4,6 +4,7 @@ use reqwest_websocket::{Message, Upgrade};
 
 mod full_history;
 mod lifecycle;
+mod replay;
 
 fn request(stream: bool) -> Value {
     let mut tools = (0..32).map(|i| json!({"type":"function","name":format!("lookup_{i}"),

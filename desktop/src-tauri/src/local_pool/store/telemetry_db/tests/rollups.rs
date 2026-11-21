@@ -86,6 +86,7 @@ fn usage_survives_database_reopen() {
                 "cacheWriteTokensByTtl":{"5m":1}
             })).unwrap()),
             client_tool_count: 73,
+            client_web_search_declared: None,
             forwarded_tool_count: 73,
             tool_choice: ToolChoiceMode::Auto,
             requested_parallel_tool_calls: Some(true),

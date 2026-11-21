@@ -44,6 +44,8 @@ pub(super) use headers::{
     forwarded_responses_headers, is_managed_codex_client,
 };
 pub(in crate::gateway) use identity::history_affinity_fingerprint;
+#[cfg(any(debug_assertions, test))]
+pub(crate) use identity::siwc_probe_contexts;
 pub(super) use identity::{client_context_fingerprint, client_request_identity};
 mod codex_reasoning;
 pub(in crate::gateway) use codex_page_context::normalize_codex_page_context;

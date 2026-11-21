@@ -4,6 +4,40 @@ use std::io::{self, Write};
 
 const MAX_NAMESPACE_DEPTH: usize = 16;
 
+/// Declarations present in this Responses payload, not calls or an inherited catalog.
+pub(crate) fn responses_web_search_declared(request: &Value) -> bool {
+    let declares_search = |container: &Value| {
+        container
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    matches!(
+                        tool.get("type").and_then(Value::as_str),
+                        Some(
+                            "web_search"
+                                | "web_search_2025_08_26"
+                                | "web_search_preview"
+                                | "web_search_preview_2025_03_11"
+                        )
+                    )
+                })
+            })
+    };
+    let declares_in_input = |item: &Value| {
+        matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("additional_tools" | "tool_search_output")
+        ) && declares_search(item)
+    };
+    declares_search(request)
+        || match request.get("input") {
+            Some(Value::Array(items)) => items.iter().any(declares_in_input),
+            Some(item) => declares_in_input(item),
+            None => false,
+        }
+}
+
 fn arrays(request_payload: &Value, visit_array: &mut impl FnMut(&Value)) {
     for field in ["tools", "functions"] {
         if let Some(tool_array) = request_payload.get(field) {

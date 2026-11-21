@@ -5,6 +5,7 @@ use super::presentation::{
 };
 use super::response::{invalid_tool_output, parse_transport_envelope, validate_tool_completion};
 use crate::protocol::AdapterError;
+use crate::runtime::siwc_socket::CatalogReplay;
 use crate::usage::ToolUseDiagnostics;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -409,6 +410,14 @@ impl DiscoverySession {
         released_index: Option<usize>,
     ) {
         let completed = response["status"] == "completed";
+        if completed
+            && let Some(replay) = self.siwc_catalog()
+            && response["output"]
+                .as_array()
+                .is_some_and(|items| !items.iter().any(native::is_lookup))
+        {
+            replay.confirm(response, &self.prior_messages);
+        }
         if let Some(items) = response.get_mut("output").and_then(Value::as_array_mut) {
             let mut index = 0;
             items.retain(|item| {
@@ -431,6 +440,10 @@ impl DiscoverySession {
 
     pub(in crate::gateway) fn is_native(&self) -> bool {
         self.native.is_some()
+    }
+
+    pub(in crate::gateway) fn siwc_catalog(&self) -> Option<&CatalogReplay> {
+        self.native.as_ref().map(|native| &native.replay)
     }
 
     pub(in crate::gateway) fn retained_native_prefix_len(&self) -> usize {

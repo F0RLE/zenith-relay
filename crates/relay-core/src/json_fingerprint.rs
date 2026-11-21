@@ -20,20 +20,39 @@ pub(crate) fn canonical_sha256(value: &Value) -> Result<[u8; 32], serde_json::Er
     sha256(&Canonical(value))
 }
 
+/// Fingerprint selected object members without cloning their (possibly large) values.
+pub(crate) fn canonical_fields_sha256<'a>(
+    fields: impl Iterator<Item = (&'a String, &'a Value)>,
+) -> Result<[u8; 32], serde_json::Error> {
+    sha256(&CanonicalFields::new(fields))
+}
+
 struct Canonical<'a>(&'a Value);
+
+struct CanonicalFields<'a>(Vec<(&'a String, &'a Value)>);
+
+impl<'a> CanonicalFields<'a> {
+    fn new(fields: impl Iterator<Item = (&'a String, &'a Value)>) -> Self {
+        let mut fields: Vec<_> = fields.collect();
+        fields.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        Self(fields)
+    }
+}
+
+impl Serialize for CanonicalFields<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (key, value) in &self.0 {
+            map.serialize_entry(key, &Canonical(value))?;
+        }
+        map.end()
+    }
+}
 
 impl Serialize for Canonical<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self.0 {
-            Value::Object(object) => {
-                let mut entries: Vec<_> = object.iter().collect();
-                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-                let mut map = serializer.serialize_map(Some(entries.len()))?;
-                for (key, value) in entries {
-                    map.serialize_entry(key, &Canonical(value))?;
-                }
-                map.end()
-            }
+            Value::Object(object) => CanonicalFields::new(object.iter()).serialize(serializer),
             Value::Array(items) => {
                 let mut sequence = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {

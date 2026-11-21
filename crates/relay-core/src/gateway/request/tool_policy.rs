@@ -38,6 +38,15 @@ impl RequestToolPolicy {
         }
     }
 
+    pub(in crate::gateway) fn for_responses(runtime: &GatewayRuntime, request: &Value) -> Self {
+        let mut policy = Self::new(runtime, request);
+        if policy.diagnostics.client_context.is_some() {
+            policy.diagnostics.client_web_search_declared =
+                Some(crate::tool_policy::responses_web_search_declared(request));
+        }
+        policy
+    }
+
     pub(in crate::gateway) fn capture_cache_context(
         &mut self,
         runtime: &GatewayRuntime,

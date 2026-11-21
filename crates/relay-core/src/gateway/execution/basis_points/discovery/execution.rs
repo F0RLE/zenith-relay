@@ -11,7 +11,7 @@ use crate::gateway::response::{
 };
 use crate::runtime::{
     AuthenticatedKey, AuthorizationDispatch, AuthorizationIdentityPolicy, AuthorizedResponse,
-    CandidateLease, DispatchUsage, ExecutorRoute,
+    CandidateLease, DispatchUsage, ExecutorRoute, siwc_socket::CatalogCheckpointApproval,
 };
 use crate::scheduler::rotation::SharedRequestBudget;
 use crate::usage::{ReasoningEffortDiagnostics, ToolUseDiagnostics, UsageEvent};
@@ -28,6 +28,7 @@ pub(in crate::gateway) struct StreamingDiscovery {
     pub upstream: Value,
     pub owner: crate::runtime::AuthorizationIncarnation,
     pub budget: SharedRequestBudget,
+    pub catalog_approval: Option<CatalogCheckpointApproval>,
 }
 
 pub(in crate::gateway::execution) struct DiscoveryResponse {
@@ -146,7 +147,7 @@ pub(in crate::gateway::execution) struct DiscoveryExecution<'a> {
 /// of entering the outer candidate retry/rotation loop.
 #[allow(clippy::result_large_err)]
 pub(in crate::gateway::execution) async fn resolve(
-    first: AuthorizedResponse,
+    mut first: AuthorizedResponse,
     original: &Value,
     mut upstream: Value,
     mut context: DiscoveryExecution<'_>,
@@ -173,6 +174,7 @@ pub(in crate::gateway::execution) async fn resolve(
         && original.get("stream").and_then(Value::as_bool) == Some(true)
         && (session.is_native() || !requires_buffering(original))
     {
+        let catalog_approval = first.response.extensions_mut().remove();
         return Ok(DiscoveryResponse {
             response: first.response,
             streaming: Some(StreamingDiscovery {
@@ -180,12 +182,16 @@ pub(in crate::gateway::execution) async fn resolve(
                 upstream,
                 owner: first.authorization_incarnation,
                 budget: context.budget.clone(),
+                catalog_approval,
             }),
         });
     }
     let expected_owner = first.authorization_incarnation;
     let mut response = first.response;
     loop {
+        let catalog_approval = response
+            .extensions_mut()
+            .remove::<CatalogCheckpointApproval>();
         context.route.observe_http_payload(&response);
         let status = response.status();
         let headers = response.headers().clone();
@@ -304,6 +310,9 @@ pub(in crate::gateway::execution) async fn resolve(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("application/json"),
             );
+            if let Some(approval) = catalog_approval {
+                approval.approve();
+            }
             return Ok(reqwest::Response::from(completed).into());
         }
         record_lookup(context.runtime, &session, context.tool_use, &mut event);
@@ -332,13 +341,16 @@ pub(in crate::gateway::execution) async fn resolve(
             transport.request_payload = None;
         }
         let before = context.budget.dispatches();
+        if let Some(approval) = catalog_approval {
+            approval.approve();
+        }
         response = match dispatch_continuation(
             context.runtime,
             context.lease,
             context.route,
             context.budget,
             &expected_owner,
-            &event,
+            DispatchUsage::observed(&event).with_siwc_catalog(session.siwc_catalog()),
             &upstream,
         )
         .await
@@ -361,7 +373,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
     route: &ExecutorRoute,
     budget: &SharedRequestBudget,
     owner: &crate::runtime::AuthorizationIncarnation,
-    event: &UsageEvent,
+    usage: DispatchUsage<'_>,
     upstream: &Value,
 ) -> Result<AuthorizedResponse, crate::runtime::AuthorizedRequestError> {
     let basis_points =
@@ -395,8 +407,7 @@ pub(in crate::gateway) async fn dispatch_continuation(
                 // The discovery loop settles this attempt. Keep the chat lane
                 // and wire diagnostics without installing another usage tracker.
                 usage_event: Some(
-                    DispatchUsage::observed(event)
-                        .with_siwc_socket_context(route.siwc_socket_context.as_deref()),
+                    usage.with_siwc_socket_context(route.siwc_socket_context.as_deref()),
                 ),
             },
             owner,

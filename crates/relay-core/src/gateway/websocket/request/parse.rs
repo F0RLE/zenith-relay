@@ -72,7 +72,7 @@ impl super::ClientRequest {
         }
         let mut request_body: Value = serde_json::from_slice(request_bytes)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        let mut tool_policy = RequestToolPolicy::new(runtime, &request_body);
+        let mut tool_policy = RequestToolPolicy::for_responses(runtime, &request_body);
         let request_object = request_body
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;

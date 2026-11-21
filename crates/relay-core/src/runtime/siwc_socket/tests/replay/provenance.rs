@@ -151,6 +151,7 @@ fn reasoning_created_by_omission_is_observed_only_on_a_proven_delta() {
         mismatch.unknown_fields.unwrap(),
         crate::usage::SocketUnknownFieldChanges {
             removed: 1,
+            single_removed_type: Some(crate::usage::SocketReplayValueKind::Object),
             ..Default::default()
         }
     );
@@ -261,6 +262,7 @@ fn unknown_non_null_omission_does_not_borrow_the_provenance_exception() {
             mismatch.unknown_fields.unwrap(),
             crate::usage::SocketUnknownFieldChanges {
                 removed: 1,
+                single_removed_type: Some(crate::usage::SocketReplayValueKind::String),
                 ..Default::default()
             }
         );

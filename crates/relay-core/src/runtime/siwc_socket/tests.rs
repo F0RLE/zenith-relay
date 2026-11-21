@@ -16,7 +16,7 @@ fn request(input: Value) -> Value {
 fn plan(body: &Value, checkpoint: Option<&planner::Checkpoint>) -> planner::Plan {
     planner::parse(&serde_json::to_vec(body).unwrap())
         .unwrap()
-        .with_diagnostics(true)
+        .with_diagnostics(true, None)
         .plan(checkpoint)
 }
 

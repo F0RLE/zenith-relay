@@ -8,6 +8,7 @@ pub(in crate::gateway) const NATIVE_LOOKUP: &str = "relay_catalog";
 pub(super) struct NativeSettings {
     parallel: bool,
     namespaces: BTreeMap<String, serde_json::Map<String, Value>>,
+    pub(super) replay: CatalogReplay,
 }
 
 pub(in crate::gateway::execution) fn eligible(request: &Value) -> bool {
@@ -119,6 +120,7 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
     let mut settings = NativeSettings {
         parallel: original.get("parallel_tool_calls") != Some(&Value::Bool(false)),
         namespaces: BTreeMap::new(),
+        replay: CatalogReplay::new(&original["tools"]),
     };
     for value in original["input"]
         .as_array()
@@ -177,6 +179,8 @@ pub(in crate::gateway::execution) fn prepare_dispatch(
             if !loaded.contains(&name)
                 && let Some(tool) = tools.iter().find(|tool| tool.matches_key(&name))
             {
+                // The eager declaration is prepended at slot zero below.
+                settings.replay.generated_declaration(1 + input.len());
                 input.push(additional(declarations(vec![tool], &settings)));
                 historical.insert(name.clone(), tool.serialized_spec.to_string());
                 loaded.insert(name);
@@ -277,6 +281,13 @@ pub(super) fn is_lookup(item: &Value) -> bool {
     item["type"] == "function_call"
         && item["name"] == NATIVE_LOOKUP
         && item.get("namespace").is_none_or(Value::is_null)
+}
+
+fn visible_lookup_item(item: &Value) -> bool {
+    matches!(
+        item["type"].as_str(),
+        Some("message" | "reasoning" | "web_search_call")
+    )
 }
 
 /// A done item may be published before terminal only when later calls cannot
@@ -423,7 +434,9 @@ pub(super) fn advance(
         continuation
             .push(json!({"type":"function_call_output","call_id":id,"output":result.to_string()}));
     }
-    if !newly_loaded.is_empty() {
+    let declared = if newly_loaded.is_empty() {
+        Vec::new()
+    } else {
         let namespaces = session
             .tools
             .iter()
@@ -442,10 +455,25 @@ pub(super) fn advance(
                             .is_some_and(|name| namespaces.contains(name)))
             })
             .collect();
-        continuation.push(additional(declarations(
-            definitions,
-            session.native.as_ref().unwrap(),
-        )));
+        declarations(definitions, session.native.as_ref().unwrap())
+    };
+    let input = upstream["input"]
+        .as_array_mut()
+        .ok_or_else(|| invalid_tool_output("input"))?;
+    session
+        .native
+        .as_mut()
+        .expect("native lookup")
+        .replay
+        .record_lookup(
+            input.len(),
+            &declared,
+            items
+                .iter()
+                .all(|item| visible_lookup_item(item) || is_lookup(item)),
+        );
+    if !declared.is_empty() {
+        continuation.push(additional(declared));
     }
     let bytes = session.continuation_bytes.saturating_add(
         crate::gateway::request_body::retained_request_bytes(&json!(continuation)),
@@ -453,19 +481,11 @@ pub(super) fn advance(
     if bytes > MAX_CONTINUATION_BYTES {
         return Err(invalid_tool_output("output.relay.catalog.bytes"));
     }
-    upstream["input"]
-        .as_array_mut()
-        .ok_or_else(|| invalid_tool_output("input"))?
-        .extend(continuation);
+    input.extend(continuation);
     session.prior_messages.extend(
         items
             .iter()
-            .filter(|item| {
-                matches!(
-                    item["type"].as_str(),
-                    Some("message" | "reasoning" | "web_search_call")
-                )
-            })
+            .filter(|item| visible_lookup_item(item))
             .cloned(),
     );
     session.rounds += 1;

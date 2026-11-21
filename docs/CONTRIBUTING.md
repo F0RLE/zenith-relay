@@ -841,6 +841,16 @@ dirty work. Report results in chat or review, not this guide. Local CPU, bytes a
 mock timings do not establish installed-app memory, provider TTFT, cache hits or
 billing savings. Keep ordinary correctness/continuation tests passing.
 
+#### Inspect a SIWC replay omission locally
+
+Start a debug Relay in a terminal with request diagnostics enabled. Set
+`ZENITH_RELAY_SIWC_PROBE_SESSION` in that process to the ID of one synthetic
+root chat (for a manual client, use a fresh UUID as `x-session-id` on both turns).
+Keep the same SIWC account; leave `prompt_cache_key` unchanged. If the only
+difference at output index `0` is one missing object, the terminal prints
+`SIWC omitted output field: <name>` once. Only short ASCII identifiers are shown.
+Other chats, redirected output and release builds do not collect names; exports show `other`.
+
 #### SIWC live cache comparison
 
 `bun scripts/maintenance/siwc-cache-probe.mjs --help` describes a separate live

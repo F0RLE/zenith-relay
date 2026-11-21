@@ -50,9 +50,9 @@ pub use transport::{
     AttachmentPreparationDiagnostics, CodexServerTiming, ConnectionResetReason, FullRequestReason,
     RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
     RequestPreparationDiagnostics, SocketOutputMismatch, SocketOutputReconciliation,
-    SocketReplayField, SocketReplayItemKind, SocketUnknownFieldChanges, StreamResponseDiagnostics,
-    TransportDiagnostics, TransportFailureKind, TransportFallbackReason, TransportMode,
-    TransportResponseFormat,
+    SocketReplayField, SocketReplayItemKind, SocketReplayValueKind, SocketUnknownFieldChanges,
+    StreamResponseDiagnostics, TransportDiagnostics, TransportFailureKind, TransportFallbackReason,
+    TransportMode, TransportResponseFormat,
 };
 pub use upstream_error::UpstreamErrorDetails;
 

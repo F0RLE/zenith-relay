@@ -1,7 +1,13 @@
 use crate::usage::{FullRequestReason, SocketOutputMismatch, SocketOutputReconciliation};
 use serde_json::{Value, json};
 
+mod catalog;
+pub(crate) use catalog::CatalogReplay;
+#[cfg(debug_assertions)]
+mod local_probe;
 mod output_proof;
+mod replay_item;
+use replay_item::{CompletedItem, ItemFingerprint, ReplayItem};
 
 const MAX_ITEMS: usize = 16_384;
 
@@ -11,113 +17,22 @@ pub(super) fn fingerprint(value: &Value) -> Fingerprint {
     crate::json_fingerprint::canonical_sha256(value).expect("JSON serializes")
 }
 
-fn item_fingerprint(value: &Value) -> Fingerprint {
-    fingerprint(&replay_item(value))
-}
-
-fn replay_item(value: &Value) -> std::borrow::Cow<'_, Value> {
-    let Some(item) = value.as_object() else {
-        return std::borrow::Cow::Borrowed(value);
-    };
-    let kind = item.get("type").and_then(Value::as_str);
-    let mut replay = std::borrow::Cow::Borrowed(value);
-    for (field, field_value) in item {
-        // Codex omits completed reasoning status and empty reasoning content;
-        // absent reasoning content serializes as null. Optional Codex input
-        // fields omit None on replay. Normalize only the comparison proof.
-        let completed_reasoning_status =
-            kind == Some("reasoning") && field == "status" && field_value == "completed";
-        let absent = field_value.is_null()
-            && (crate::protocol::response_snapshots::is_nullable_item_field(kind, field)
-                || matches!(
-                    (kind, field.as_str()),
-                    (Some("reasoning"), "content")
-                        | (
-                            Some("message" | "function_call" | "custom_tool_call"),
-                            "encrypted_content"
-                        )
-                        | (
-                            Some("function_call" | "custom_tool_call"),
-                            "namespace" | "async"
-                        )
-                        | (Some("function_call"), "encrypted_function_args")
-                ));
-        let empty_reasoning_content = kind == Some("reasoning")
-            && field == "content"
-            && field_value.as_array().is_some_and(Vec::is_empty);
-        // OpenAI's toResponseInputItems omits output-only provenance. Keep
-        // unknown item kinds and malformed values in the comparison proof.
-        let output_provenance = field == "created_by"
-            && field_value.is_string()
-            && (matches!(
-                kind,
-                Some("reasoning" | "function_call" | "custom_tool_call" | "web_search_call")
-            ) || (kind == Some("message")
-                && item.get("role").and_then(Value::as_str) == Some("assistant")));
-        if completed_reasoning_status || absent || empty_reasoning_content || output_provenance {
-            replay
-                .to_mut()
-                .as_object_mut()
-                .expect("replay object")
-                .remove(field);
-        }
-        if field == "internal_chat_message_metadata_passthrough"
-            && matches!(
-                kind,
-                Some(
-                    "message"
-                        | "reasoning"
-                        | "function_call"
-                        | "custom_tool_call"
-                        | "web_search_call"
-                )
-            )
-        {
-            // Codex compares continuation without client-only attribution and
-            // telemetry. Preserve tool-result records and unknown extensions.
-            let known = |field: &str| {
-                matches!(
-                    field,
-                    "turn_id"
-                        | "create_time"
-                        | "content_token_count"
-                        | "content_item_kinds"
-                        | "content_item_metadata"
-                )
-            };
-            let metadata = if field_value.is_null() {
-                None
-            } else if let Some(metadata) = field_value.as_object() {
-                let mut metadata = metadata.clone();
-                metadata.retain(|field, _| !known(field));
-                (!metadata.is_empty()).then_some(Value::Object(metadata))
-            } else {
-                continue;
-            };
-            if metadata.as_ref() != Some(field_value) {
-                let item = replay.to_mut().as_object_mut().expect("replay object");
-                if let Some(metadata) = metadata {
-                    item.insert(field.clone(), metadata);
-                } else {
-                    item.remove(field);
-                }
-            }
-        }
-    }
-    replay
-}
-
 /// Content-free proof of the complete native history, after all adapters.
 pub(super) struct RequestState {
     settings: Fingerprint,
-    input: Vec<Fingerprint>,
+    private_catalog: Option<Fingerprint>,
+    receipt: Option<catalog::Receipt>,
+    input: Vec<ItemFingerprint>,
     prewarm: bool,
     diagnostics: bool,
+    #[cfg(debug_assertions)]
+    field_probe: Option<local_probe::FieldProbe>,
 }
 
 pub(super) struct Checkpoint {
+    pub(super) catalog_approval: Option<super::CatalogCheckpointApproval>,
     request: RequestState,
-    output: Vec<Fingerprint>,
+    output: Vec<CompletedItem>,
     function_projections: Vec<(usize, Fingerprint, SocketOutputReconciliation)>,
     output_proofs: Vec<output_proof::OutputProof>,
     response_id: String,
@@ -125,6 +40,7 @@ pub(super) struct Checkpoint {
 
 pub(super) struct Plan {
     pub(super) payload: String,
+    pub(super) web_search_declared: Option<bool>,
     pub(super) source_model: Option<String>,
     pub(super) state: RequestState,
     pub(super) full_request_reason: Option<FullRequestReason>,
@@ -212,9 +128,16 @@ pub(super) fn parse(bytes: &[u8]) -> Option<PreparedRequest> {
     }
     let state = RequestState {
         settings: fingerprint(&settings),
-        input: items.iter().map(item_fingerprint).collect(),
+        private_catalog: None,
+        receipt: None,
+        input: items
+            .iter()
+            .map(|item| ReplayItem::new(item).proof())
+            .collect(),
         prewarm,
         diagnostics: false,
+        #[cfg(debug_assertions)]
+        field_probe: None,
     };
     object.insert("input".into(), input);
     if prewarm {
@@ -246,76 +169,148 @@ impl PreparedRequest {
         ])))
     }
 
-    pub(super) fn with_diagnostics(mut self, enabled: bool) -> Self {
+    pub(super) fn with_diagnostics(mut self, enabled: bool, _client_context: Option<&str>) -> Self {
         self.state.diagnostics = enabled;
+        #[cfg(debug_assertions)]
+        {
+            self.state.field_probe = _client_context
+                .filter(|_| enabled)
+                .and_then(local_probe::FieldProbe::for_context);
+        }
         self
     }
 
+    #[cfg(test)]
     pub(super) fn plan(self, previous: Option<&Checkpoint>) -> Plan {
-        let Self { mut request, state } = self;
+        self.plan_catalog(previous, None)
+    }
+
+    pub(super) fn plan_catalog(
+        self,
+        previous: Option<&Checkpoint>,
+        catalog: Option<&CatalogReplay>,
+    ) -> Plan {
+        let Self {
+            mut request,
+            mut state,
+        } = self;
+        let contract = catalog.map(|catalog| catalog.contract);
+        state.receipt = catalog.and_then(CatalogReplay::receipt);
+        state.private_catalog = state.receipt.as_ref().and(contract);
         let object = request.as_object_mut().expect("parsed request object");
         let replayed = object["input"].as_array().expect("parsed input array");
+        let previous = previous.filter(|checkpoint| {
+            checkpoint
+                .catalog_approval
+                .as_ref()
+                .is_none_or(super::CatalogCheckpointApproval::is_approved)
+        });
         let mut mismatch_index = None;
         let continuation = previous
             .ok_or(FullRequestReason::SocketCheckpointUnavailable)
             .and_then(|previous| {
-                let offset = previous.request.input.len() + previous.output.len();
-                if state.settings != previous.request.settings {
+                if state.settings != previous.request.settings
+                    || previous
+                        .request
+                        .private_catalog
+                        .is_some_and(|required| Some(required) != contract)
+                {
                     return Err(FullRequestReason::SocketSettingsChanged);
                 }
-                if !state.input.starts_with(&previous.request.input) {
-                    return Err(FullRequestReason::SocketHistoryChanged);
-                }
+                let mut public = if state.input.starts_with(&previous.request.input) {
+                    None
+                } else {
+                    Some(
+                        catalog
+                            .and_then(|catalog| catalog.cursor(previous, &state.input, replayed))
+                            .ok_or(FullRequestReason::SocketHistoryChanged)?,
+                    )
+                };
                 let mut reconciled = None;
-                let start = previous.request.input.len();
+                let mut offset = public
+                    .as_ref()
+                    .map_or(previous.request.input.len(), |p| p.index);
                 for (index, expected) in previous.output.iter().enumerate() {
-                    let replay = state.input.get(start + index);
-                    if replay != Some(expected) {
+                    if let Some(cursor) = &mut public {
+                        offset = cursor
+                            .before_output(offset, replayed)
+                            .ok_or(FullRequestReason::SocketHistoryChanged)?;
+                    }
+                    let at = offset;
+                    offset += 1;
+                    let Some((replay, omitted_turn)) = state.input.get(at).and_then(|replay| {
+                        Some((replay, expected.match_metadata(replay, &replayed[at])?))
+                    }) else {
+                        mismatch_index = Some((index, at));
+                        return Err(FullRequestReason::SocketOutputChanged);
+                    };
+                    if replay.content != expected.proof.content {
                         let Some((_, _, reason)) = previous
                             .function_projections
                             .iter()
-                            .find(|(i, proof, _)| *i == index && replay == Some(proof))
+                            .find(|(i, proof, _)| *i == index && replay.content == *proof)
                         else {
-                            mismatch_index = Some(index);
+                            mismatch_index = Some((index, at));
                             return Err(FullRequestReason::SocketOutputChanged);
                         };
                         reconciled = Some(merge_reconciliation(reconciled, *reason));
                     }
+                    if state.diagnostics && omitted_turn {
+                        reconciled = Some(merge_reconciliation(
+                            reconciled,
+                            SocketOutputReconciliation::OmittedDuplicateTurnMetadata,
+                        ));
+                    }
                     if state.diagnostics
-                        && let Some(omission) = previous
-                            .output_proofs
-                            .get(index)
-                            .and_then(|proof| proof.recognized_omission(&replayed[start + index]))
+                        && let Some(omission) = expected.proof.markers.omission(replay.markers)
                     {
                         reconciled = Some(merge_reconciliation(reconciled, omission));
                     }
+                    if state.diagnostics
+                        && let Some(omission) =
+                            previous.output_proofs.get(index).and_then(|proof| {
+                                proof.recognized_omission(&replayed[at], omitted_turn)
+                            })
+                    {
+                        reconciled = Some(merge_reconciliation(reconciled, omission));
+                    }
+                }
+                if public.is_some_and(|cursor| !cursor.complete()) {
+                    return Err(FullRequestReason::SocketHistoryChanged);
                 }
                 let prewarmed =
                     previous.request.prewarm && previous.output.is_empty() && !state.prewarm;
                 if state.input.len() <= offset && !(prewarmed && state.input.len() == offset) {
                     return Err(FullRequestReason::SocketNoNewInput);
                 }
-                Ok((offset, previous.response_id.as_str(), reconciled))
+                Ok((offset, previous, reconciled))
             });
         let full_request_reason = continuation.as_ref().err().copied();
         let output_mismatch = (state.diagnostics
             && full_request_reason == Some(FullRequestReason::SocketOutputChanged))
         .then(|| {
             let previous = previous?;
-            let start = previous.request.input.len();
-            let index = mismatch_index?;
-            previous
-                .output_proofs
-                .get(index)
-                .map(|proof| proof.mismatch(index, replayed.get(start + index)))
+            let (index, at) = mismatch_index?;
+            let replay = replayed.get(at);
+            let mismatch = previous.output_proofs.get(index)?.mismatch(index, replay);
+            #[cfg(debug_assertions)]
+            if state.field_probe.is_some()
+                && let Some(probe) = &previous.request.field_probe
+                && let Some(name) = probe.removed_name(&mismatch, replay)
+            {
+                local_probe::show_once(name);
+            }
+            Some(mismatch)
         })
         .flatten();
         let mut output_reconciled = None;
-        if let Ok((offset, id, reconciled)) = continuation {
+        if let Ok((offset, previous, reconciled)) = continuation {
+            // A delta keeps that socket's private catalog even on subsequent public turns.
+            state.private_catalog = state.private_catalog.or(previous.request.private_catalog);
             if state.diagnostics {
                 output_reconciled = reconciled;
             }
-            object.insert("previous_response_id".into(), json!(id));
+            object.insert("previous_response_id".into(), json!(previous.response_id));
             object
                 .get_mut("input")
                 .and_then(Value::as_array_mut)
@@ -328,6 +323,9 @@ impl PreparedRequest {
                 .get("model")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            web_search_declared: state
+                .diagnostics
+                .then(|| crate::tool_policy::responses_web_search_declared(&request)),
             payload: serde_json::to_string(&request).expect("JSON serializes"),
             state,
             full_request_reason,
@@ -345,11 +343,21 @@ fn merge_reconciliation(
     match (previous, next) {
         (None, _) => next,
         (Some(prior), _) if prior == next => prior,
-        (Some(OmittedReasoningCreatedBy | OmittedAllowlistedOutputFields), _)
-        | (_, OmittedReasoningCreatedBy | OmittedAllowlistedOutputFields) => {
-            OmittedAllowlistedOutputFields
+        (Some(prior), _) => {
+            let function_only = |reason| {
+                matches!(
+                    reason,
+                    OmittedCompletedFunctionStatus
+                        | OmittedParsedFunctionArguments
+                        | OmittedOptionalFunctionFields
+                )
+            };
+            if function_only(prior) && function_only(next) {
+                OmittedOptionalFunctionFields
+            } else {
+                OmittedAllowlistedOutputFields
+            }
         }
-        _ => OmittedOptionalFunctionFields,
     }
 }
 
@@ -371,28 +379,37 @@ impl RequestState {
         {
             return None;
         }
-        Some(Checkpoint {
-            output_proofs: if self.diagnostics {
-                output
-                    .iter()
-                    .take(output_proof::MAX_ITEMS)
-                    .map(output_proof::OutputProof::new)
-                    .collect()
-            } else {
-                Vec::new()
-            },
+        let mut checkpoint = Checkpoint {
+            catalog_approval: None,
             request: self,
-            output: output.iter().map(item_fingerprint).collect(),
-            function_projections: output
-                .iter()
-                .enumerate()
-                .flat_map(|(index, item)| {
-                    output_proof::function_projections(item)
-                        .map(move |(proof, reason)| (index, proof, reason))
-                })
-                .take(3 * output_proof::MAX_ITEMS)
-                .collect(),
+            output: Vec::with_capacity(output.len()),
+            function_projections: Vec::new(),
+            output_proofs: Vec::new(),
             response_id: id.to_owned(),
-        })
+        };
+        #[cfg(debug_assertions)]
+        if let Some(probe) = &mut checkpoint.request.field_probe
+            && let Some(first) = output.first()
+        {
+            probe.capture(first);
+        }
+        for (index, item) in output.iter().enumerate() {
+            let replay = ReplayItem::new(item);
+            checkpoint.output.push(replay.completed());
+            if checkpoint.request.diagnostics && index < output_proof::MAX_ITEMS {
+                checkpoint
+                    .output_proofs
+                    .push(output_proof::OutputProof::new(&replay));
+            }
+            let remaining = 3 * output_proof::MAX_ITEMS - checkpoint.function_projections.len();
+            if remaining != 0 {
+                checkpoint.function_projections.extend(
+                    output_proof::function_projections(&replay)
+                        .take(remaining)
+                        .map(|(proof, reason)| (index, proof, reason)),
+                );
+            }
+        }
+        Some(checkpoint)
     }
 }

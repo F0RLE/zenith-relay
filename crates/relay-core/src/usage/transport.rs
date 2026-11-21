@@ -9,7 +9,7 @@ mod stream;
 pub use payload::{
     FullRequestReason, RequestContentEncoding, RequestPayloadDiagnostics, RequestPayloadMode,
     SocketOutputMismatch, SocketOutputReconciliation, SocketReplayField, SocketReplayItemKind,
-    SocketUnknownFieldChanges,
+    SocketReplayValueKind, SocketUnknownFieldChanges,
 };
 pub use server_timing::CodexServerTiming;
 pub use stream::StreamResponseDiagnostics;

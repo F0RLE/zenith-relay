@@ -6,7 +6,7 @@ use super::super::continuation::{
 use super::super::errors::api_error;
 use super::super::now_ms;
 use super::super::request::{
-    CODEX_RESPONSES_LITE_HEADER, ServiceTierPolicy, candidate_protocols,
+    CODEX_RESPONSES_LITE_HEADER, RequestToolPolicy, ServiceTierPolicy, candidate_protocols,
     chat_request_has_supported_content, client_request_identity, codex_background_request_kind,
     forwarded_codex_headers, forwarded_messages_headers, is_managed_codex_client,
     normalize_codex_reasoning_placeholder, request_id,
@@ -155,9 +155,15 @@ async fn execute_client_request_inner(
     }
     let mut tool_policy = parts
         .extensions
-        .get::<super::super::request::RequestToolPolicy>()
+        .get::<RequestToolPolicy>()
         .cloned()
-        .unwrap_or_else(|| super::super::request::RequestToolPolicy::new(&runtime, &request_json));
+        .unwrap_or_else(|| {
+            if client_wire_api == WireApi::Responses {
+                RequestToolPolicy::for_responses(&runtime, &request_json)
+            } else {
+                RequestToolPolicy::new(&runtime, &request_json)
+            }
+        });
     let managed_codex_client = is_managed_codex_client(&headers);
     if client_wire_api == WireApi::Responses {
         normalize_codex_reasoning_placeholder(&runtime, &key, &headers, &mut request_json);

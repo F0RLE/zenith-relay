@@ -110,7 +110,11 @@ async fn execute_account_endpoint_inner(
     if let Some(origin) = request_origin {
         runtime.mark_request_origin(&request_id, origin);
     }
-    let mut tool_policy = RequestToolPolicy::new(&runtime, &request);
+    let mut tool_policy = if endpoint == AccountEndpoint::Compact {
+        RequestToolPolicy::for_responses(&runtime, &request)
+    } else {
+        RequestToolPolicy::new(&runtime, &request)
+    };
     let client_identity = client_request_identity(&client_headers, &request);
     let client_context_id = client_identity.context_id;
     let prompt_affinity_key = runtime.prompt_affinity_key(

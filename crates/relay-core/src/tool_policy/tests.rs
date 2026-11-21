@@ -72,6 +72,33 @@ fn tool_search_control_entry_is_not_counted_as_a_client_tool() {
 }
 
 #[test]
+fn web_search_evidence_only_recognizes_native_responses_declarations() {
+    use super::responses_web_search_declared as declared;
+    for kind in [
+        "web_search",
+        "web_search_2025_08_26",
+        "web_search_preview",
+        "web_search_preview_2025_03_11",
+    ] {
+        assert!(declared(&json!({"tools":[{"type":kind}]})));
+    }
+    for kind in ["additional_tools", "tool_search_output"] {
+        assert!(declared(&json!({"tools":[], "input":[
+            {"type":kind,"tools":[{"type":"web_search"}]}
+        ]})));
+    }
+    let not_declarations = json!({
+        "tools":[{"type":"function","name":"web_search"},{"type":"tool_search"},
+            {"type":"web_search_preview_custom"},{"type":"custom","name":"web_search"}],
+        "tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"}]},
+        "input":[{"type":"web_search_call","action":{"type":"search"}},
+            {"type":"function_call","name":"web_search","arguments":"{}"},
+            {"role":"user","content":"web_search","tools":[{"type":"web_search"}]}]
+    });
+    assert!(!declared(&not_declarations));
+}
+
+#[test]
 fn deferred_search_evidence_requires_both_control_and_deferred_definitions() {
     let function = json!({"type":"function","name":"fixture","defer_loading":true,"parameters":{"type":"object"}});
     let request = json!({"tools":[{"type":"tool_search"}, function]});
