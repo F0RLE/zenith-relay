@@ -1,7 +1,7 @@
 use super::*;
 use crate::qualification::valid_model;
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
-use zenith_relay_core::model_metadata::ModelMetadataCatalog;
+use zenith_relay_core::model_metadata::{MAX_MODELS_DEV_JSON_BYTES, ModelMetadataCatalog};
 
 fn publisher_pairs(source: &str) -> Result<BTreeMap<String, String>, &'static str> {
     let metadata = ModelMetadataCatalog::from_models_dev_json(source)
@@ -29,7 +29,7 @@ pub async fn import_catalog_publishers(
     origin: &str,
     path: &Path,
 ) -> Result<usize, &'static str> {
-    const LIMIT: u64 = 64 * 1024 * 1024;
+    const LIMIT: u64 = MAX_MODELS_DEV_JSON_BYTES as u64;
     const FAILED: &str =
         "cannot import publishers; use the migration role for the unfenced installation";
     if !path

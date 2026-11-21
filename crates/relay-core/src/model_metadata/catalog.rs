@@ -1,6 +1,6 @@
 use super::{
-    ModelCapabilities, ModelMetadata, ModelMetadataCatalog, ModelMetadataError, order, parsing,
-    reference,
+    MAX_MODELS_DEV_JSON_BYTES, ModelCapabilities, ModelMetadata, ModelMetadataCatalog,
+    ModelMetadataError, order, parsing, reference,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,8 +91,10 @@ impl ModelMetadataCatalog {
     }
 
     pub fn from_models_dev_json(models_dev_json: &str) -> Result<Self, ModelMetadataError> {
-        let catalog_payload = serde_json::from_str(models_dev_json)
-            .map_err(|_| ModelMetadataError::InvalidCatalog)?;
+        let input = models_dev_json.as_bytes();
+        let catalog_payload =
+            crate::bounded_json::from_slice_with_limit::<_, MAX_MODELS_DEV_JSON_BYTES>(input)
+                .map_err(|_| ModelMetadataError::InvalidCatalog)?;
         Self::from_metadata_payload(&catalog_payload, None, None, false)
     }
 

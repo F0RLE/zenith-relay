@@ -32,6 +32,7 @@ pub const MODELS_DEV_DETAILS_SOURCE_URL: &str = "https://models.dev/api.json";
 pub const OPENROUTER_MODELS_SOURCE_URL: &str = "https://openrouter.ai/api/v1/models";
 pub const LITELLM_MODELS_SOURCE_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+pub const MAX_MODELS_DEV_JSON_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORDS: usize = 100_000;
 const MAX_STRING_LENGTH: usize = 1_024;
 
